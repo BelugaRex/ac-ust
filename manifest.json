@@ -1,0 +1,46 @@
+{
+  "manifest_version": 3,
+  "name": "AC-UST",
+  "version": "1.0",
+  "description": "定时开关 HKUST Smart Power Meter 冷气 - 自动在设定时间开关空调",
+  "permissions": [
+    "alarms",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://w5.ab.ust.hk/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://w5.ab.ust.hk/njggt/app/*"],
+      "js": ["page-confirm.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": true
+    },
+    {
+      "matches": ["https://w5.ab.ust.hk/njggt/app/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "冷气定时控制",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

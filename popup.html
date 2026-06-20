@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    width: 320px;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #f8fafc;
+    color: #1e293b;
+  }
+  .header {
+    background: linear-gradient(135deg, #075185, #003d6b);
+    color: white;
+    padding: 16px 20px;
+  }
+  .header h1 { font-size: 16px; font-weight: 600; }
+  .header p { font-size: 11px; opacity: 0.85; margin-top: 2px; }
+  .content { padding: 16px 20px; }
+  
+  .toggle-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: white;
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .toggle-row span { font-weight: 500; font-size: 14px; }
+  
+  /* 自定义开关 */
+  .switch { position: relative; width: 48px; height: 28px; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: #cbd5e1; border-radius: 28px;
+    transition: 0.3s;
+  }
+  .slider::before {
+    content: ""; position: absolute;
+    height: 22px; width: 22px; left: 3px; bottom: 3px;
+    background: white; border-radius: 50%;
+    transition: 0.3s;
+  }
+  input:checked + .slider { background: #075185; }
+  input:checked + .slider::before { transform: translateX(20px); }
+
+  .time-section {
+    background: white;
+    border-radius: 10px;
+    padding: 16px;
+    margin-bottom: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .time-section h3 { font-size: 12px; color: #64748b; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .time-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 8px;
+  }
+  .time-row:last-child { margin-bottom: 0; }
+  .time-row label { font-size: 14px; font-weight: 500; }
+  .time-row input[type="number"] {
+    border: 1px solid #e2e8f0;
+    border-radius: 6px;
+    padding: 6px 10px;
+    font-size: 14px;
+    width: 120px;
+    background: #f8fafc;
+  }
+  .hint {
+    color: #64748b;
+    font-size: 11px;
+    line-height: 1.4;
+    margin-top: 10px;
+  }
+
+  .btn-row {
+    display: flex;
+    gap: 8px;
+    margin-bottom: 12px;
+  }
+  .btn {
+    flex: 1;
+    padding: 10px;
+    border: none;
+    border-radius: 8px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: 0.2s;
+  }
+  .btn-on { background: #22c55e; color: white; }
+  .btn-on:hover { background: #16a34a; }
+  .btn-off { background: #ef4444; color: white; }
+  .btn-off:hover { background: #dc2626; }
+  .btn-save {
+    width: 100%;
+    padding: 12px;
+    background: #075185;
+    color: white;
+    border: none;
+    border-radius: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: 0.2s;
+  }
+  .btn-save:hover { background: #003d6b; }
+
+  .status {
+    text-align: center;
+    font-size: 12px;
+    color: #64748b;
+    margin-top: 8px;
+    min-height: 16px;
+  }
+  .status.success { color: #16a34a; }
+  .status.error { color: #dc2626; }
+</style>
+</head>
+<body>
+<div class="header">
+  <h1>❄️ 冷气定时控制</h1>
+  <p>HKUST Smart Power Meter</p>
+</div>
+<div class="content">
+  <div class="toggle-row">
+    <span>⏰ 启用定时</span>
+    <label class="switch">
+      <input type="checkbox" id="enableToggle">
+      <span class="slider"></span>
+    </label>
+  </div>
+  
+  <div class="time-section">
+    <h3>📋 PWM 循环设置</h3>
+    <div class="time-row">
+      <label>🟢 开启分钟</label>
+      <input type="number" id="onMinutes" value="30" min="1" step="1">
+    </div>
+    <div class="time-row">
+      <label>🔴 关闭分钟</label>
+      <input type="number" id="offMinutes" value="30" min="1" step="1">
+    </div>
+    <div class="hint">启用后会先开启冷气，然后按"开启分钟 / 关闭分钟"持续循环。</div>
+  </div>
+
+  <div class="btn-row">
+    <button class="btn btn-on" id="btnOn">🟢 立即开启</button>
+    <button class="btn btn-off" id="btnOff">🔴 立即关闭</button>
+  </div>
+  
+  <button class="btn-save" id="btnSave">💾 保存设置</button>
+  <div class="status" id="status"></div>
+</div>
+<script src="popup.js"></script>
+</body>
+</html>

@@ -1,0 +1,230 @@
+// ============================================================
+// Content Script - 注入到 w5.ab.ust.hk/njggt/app/* 页面
+// 负责与页面交互：读取状态、点击开关
+// ============================================================
+
+console.log('[AC扩展] Content script 已加载');
+
+// ----- 监听来自 background 的消息 -----
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.action === 'on' || msg.action === 'off') {
+    toggleACSwitch(msg.action).then(result => sendResponse(result));
+    return true; // 异步响应
+  }
+  if (msg.action === 'status') {
+    sendResponse(getACStatus());
+  }
+  return true;
+});
+
+// ----- 获取当前 AC 状态 -----
+function getACStatus() {
+  const antSwitch = findAntACSwitch();
+  if (antSwitch) {
+    const checked = antSwitch.getAttribute('aria-checked');
+    if (checked === 'true' || checked === 'false') {
+      return { isOn: checked === 'true', source: 'ant-switch' };
+    }
+
+    const text = (antSwitch.textContent || '').trim().toUpperCase();
+    if (text.includes('ON')) return { isOn: true, source: 'ant-switch-text' };
+    if (text.includes('OFF')) return { isOn: false, source: 'ant-switch-text' };
+  }
+
+  // 旧版页面: 通过 DOM 判断 Semantic UI toggle 状态
+  const checkboxes = document.querySelectorAll('.ui.toggle.checkbox input[type="checkbox"]');
+  for (const cb of checkboxes) {
+    // 确认是 AC 开关（附近有 "Air Conditioning" 文本）
+    const parent = cb.closest('.row') || cb.closest('[class*="column"]');
+    if (parent) {
+      const text = parent.textContent || '';
+      if (text.includes('Air Conditioning') || text.includes('ON') || text.includes('OFF')) {
+        return { isOn: cb.checked };
+      }
+    }
+    // 也检查最近的包含 ON/OFF 文本的元素
+    const nearby = cb.parentElement?.parentElement?.parentElement;
+    if (nearby) {
+      const text = nearby.textContent || '';
+      if (text.includes('Air Conditioning')) {
+        return { isOn: cb.checked };
+      }
+    }
+  }
+  
+  // 方法2: 查找所有 toggle checkbox
+  if (checkboxes.length > 0) {
+    return { isOn: checkboxes[0].checked, note: '最佳匹配' };
+  }
+  
+  return { isOn: null, error: '未找到 AC 开关元素' };
+}
+
+// ----- 切换 AC 开关 -----
+async function toggleACSwitch(targetAction) {
+  console.log(`[AC扩展] 准备切换 AC: ${targetAction}`);
+  
+  // 等待开关元素出现 (React 可能需要时间渲染)
+  const switchEl = await waitForSwitch(10000);
+  if (!switchEl) {
+    return { success: false, error: '等待超时，未找到 AC 开关。请确保页面已完全加载' };
+  }
+  
+  // 先检查当前状态
+  const currentStatus = getACStatus();
+  console.log('[AC扩展] 当前状态:', currentStatus);
+  
+  // 判断是否需要切换
+  const needOn = (targetAction === 'on');
+  if (currentStatus.isOn === needOn) {
+    console.log(`[AC扩展] AC 已处于目标状态 (${targetAction})，无需操作`);
+    return { success: true, alreadyDone: true, action: targetAction };
+  }
+  
+  // 关键: 覆盖 window.confirm 自动确认
+  const originalConfirm = window.confirm;
+  window.confirm = function(msg) {
+    console.log('[AC扩展] 自动确认弹窗:', msg);
+    window.confirm = originalConfirm;
+    return true;
+  };
+  
+  // 点击开关。Ant Design 的开关本身就是 button；旧版页面点 label 或容器。
+  const clickTarget = switchEl.matches?.('button.ant-switch')
+    ? switchEl
+    : (switchEl.querySelector('label') || switchEl);
+  clickTarget.click();
+  console.log('[AC扩展] 已点击开关');
+
+  const confirmed = await clickConfirmDialog(5000);
+  if (confirmed) {
+    console.log('[AC扩展] 已自动确认页面弹窗');
+  }
+  
+  // 等2秒后恢复 confirm
+  setTimeout(() => {
+    if (window.confirm !== originalConfirm) {
+      window.confirm = originalConfirm;
+    }
+  }, 2000);
+  
+  return { success: true, action: targetAction, confirmed };
+}
+
+// ----- 自动点击 Ant Design / 页面内确认弹窗 -----
+async function clickConfirmDialog(timeoutMs) {
+  const startTime = Date.now();
+  const confirmTexts = ['确定', '确认', 'OK', 'Ok', 'ok', 'Yes', 'YES'];
+
+  while (Date.now() - startTime <= timeoutMs) {
+    const buttons = Array.from(document.querySelectorAll(
+      '.ant-modal-confirm-btns button, .ant-modal button, .ant-popconfirm-buttons button, [role="dialog"] button'
+    ));
+
+    const confirmButton = buttons.find((button) => {
+      const text = (button.textContent || '').trim();
+      const className = button.className || '';
+      return confirmTexts.includes(text)
+        || button.matches('.ant-btn-primary')
+        || String(className).includes('ant-btn-primary');
+    });
+
+    if (confirmButton) {
+      confirmButton.click();
+      return true;
+    }
+
+    await sleep(200);
+  }
+
+  return false;
+}
+
+// ----- 等待开关元素出现 (带超时) -----
+function waitForSwitch(timeoutMs) {
+  return new Promise((resolve) => {
+    const startTime = Date.now();
+    
+    function tryFind() {
+      const el = findACSwitch();
+      if (el) {
+        resolve(el);
+        return;
+      }
+      if (Date.now() - startTime > timeoutMs) {
+        resolve(null);
+        return;
+      }
+      setTimeout(tryFind, 500);
+    }
+    
+    tryFind();
+  });
+}
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// ----- 查找 AC 开关 DOM 元素 -----
+function findACSwitch() {
+  const antSwitch = findAntACSwitch();
+  if (antSwitch) return antSwitch;
+
+  // 查找包含 "Air Conditioning" 文本的区域，然后找其中的 toggle checkbox
+  const allElements = document.querySelectorAll('*');
+  for (const el of allElements) {
+    if (el.children.length === 0 && el.textContent?.trim() === 'Air Conditioning Status') {
+      // 向上找包含 toggle checkbox 的父容器
+      let container = el.parentElement;
+      for (let i = 0; i < 10 && container; i++) {
+        const toggle = container.querySelector('.ui.toggle.checkbox');
+        if (toggle) return toggle;
+        container = container.parentElement;
+      }
+    }
+  }
+  
+  // 备用: 直接找页面上唯一的 toggle checkbox
+  const toggles = document.querySelectorAll('.ui.toggle.checkbox');
+  if (toggles.length === 1) return toggles[0];
+  
+  // 如果有多个，找包含 ON/OFF 文本的那个
+  for (const toggle of toggles) {
+    const text = toggle.textContent || '';
+    if ((text.includes('ON') || text.includes('OFF')) && toggle.querySelector('input[type="checkbox"]')) {
+      return toggle;
+    }
+  }
+  
+  return toggles.length > 0 ? toggles[0] : null;
+}
+
+function findAntACSwitch() {
+  const statusLabels = Array.from(document.querySelectorAll('small'));
+  for (const small of statusLabels) {
+    const text = (small.textContent || '').trim();
+    if (text === 'Air Conditioning Status' || text === 'AirConditioning Status') {
+      let container = small.closest('[class*="row"]') || small.closest('div[style*="flex"]') || small.parentElement?.parentElement;
+      for (let i = 0; i < 8 && container; i++) {
+        const antSwitch = container.querySelector('button.ant-switch[role="switch"]');
+        if (antSwitch) return antSwitch;
+        container = container.parentElement;
+      }
+    }
+  }
+
+  const antSwitches = document.querySelectorAll('button.ant-switch[role="switch"]');
+  if (antSwitches.length === 1) return antSwitches[0];
+  if (antSwitches.length > 1) {
+    for (const sw of antSwitches) {
+      const parentText = (sw.closest('[class*="row"]') || sw.parentElement?.parentElement || sw.parentElement || sw)?.textContent || '';
+      if (parentText.includes('Air Conditioning') || parentText.includes('AC')) {
+        return sw;
+      }
+    }
+    return antSwitches[0];
+  }
+
+  return null;
+}
