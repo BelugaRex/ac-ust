@@ -13,7 +13,7 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气开关，支持 PWM
 
 1. 克隆仓库：
    ```bash
-   git clone https://github.com/BelugaRex/ac-extension.git
+   git clone https://github.com/BelugaRex/ac-ust.git
    ```
 2. 打开 Chrome/Edge，进入 `chrome://extensions` 或 `edge://extensions`
 3. 开启 **开发者模式**
@@ -33,7 +33,7 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气开关，支持 PWM
 ## 项目结构
 
 ```
-ac-extension/
+ac-ust/
 ├── manifest.json      # 扩展配置
 ├── background.js      # Service Worker — 定时调度
 ├── content.js         # Content Script — 页面开关交互
