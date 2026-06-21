@@ -10,14 +10,7 @@
     background: #f8fafc;
     color: #1e293b;
   }
-  .header {
-    background: linear-gradient(135deg, #075185, #003d6b);
-    color: white;
-    padding: 16px 20px;
-  }
-  .header h1 { font-size: 16px; font-weight: 600; }
-  .header p { font-size: 11px; opacity: 0.85; margin-top: 2px; }
-  .content { padding: 16px 20px; }
+  .content { padding: 12px 14px 14px; }
   
   .toggle-row {
     display: flex;
@@ -99,19 +92,6 @@
   .btn-on:hover { background: #16a34a; }
   .btn-off { background: #ef4444; color: white; }
   .btn-off:hover { background: #dc2626; }
-  .btn-save {
-    width: 100%;
-    padding: 12px;
-    background: #075185;
-    color: white;
-    border: none;
-    border-radius: 8px;
-    font-size: 14px;
-    font-weight: 600;
-    cursor: pointer;
-    transition: 0.2s;
-  }
-  .btn-save:hover { background: #003d6b; }
 
   .status {
     text-align: center;
@@ -122,14 +102,96 @@
   }
   .status.success { color: #16a34a; }
   .status.error { color: #dc2626; }
+
+  /* 状态卡片 */
+  .status-card {
+    background: white;
+    border-radius: 10px;
+    padding: 14px 16px;
+    margin-bottom: 12px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .ac-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 8px;
+  }
+  .ac-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  .ac-dot.on { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,0.5); }
+  .ac-dot.off { background: #94a3b8; }
+  .ac-dot.unknown { background: #fbbf24; animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.4 } }
+  .countdown-display {
+    display: flex;
+    align-items: baseline;
+    gap: 6px;
+    font-size: 12px;
+    color: #64748b;
+  }
+  .countdown-display strong {
+    font-size: 20px;
+    font-weight: 700;
+    color: #1e293b;
+    font-variant-numeric: tabular-nums;
+  }
+  .countdown-display .countdown-unit {
+    font-size: 12px;
+    color: #64748b;
+    font-weight: 400;
+  }
+
+  .safetynet-hint {
+    margin-top: 8px;
+    padding: 6px 10px;
+    background: #f0fdf4;
+    border: 1px solid #bbf7d0;
+    border-radius: 6px;
+    color: #166534;
+    font-size: 11px;
+    line-height: 1.4;
+    text-align: center;
+  }
+  .safetynet-warning {
+    margin-top: 8px;
+    padding: 6px 10px;
+    background: #fff7ed;
+    border: 1px solid #fed7aa;
+    border-radius: 6px;
+    color: #9a3412;
+    font-size: 11px;
+    line-height: 1.4;
+    text-align: center;
+  }
 </style>
 </head>
 <body>
-<div class="header">
-  <h1>❄️ 冷气定时控制</h1>
-  <p>HKUST Smart Power Meter</p>
-</div>
 <div class="content">
+
+  <div class="status-card" id="statusCard">
+    <div class="ac-indicator">
+      <span class="ac-dot unknown" id="acDot"></span>
+      <span id="acStateText">加载中...</span>
+    </div>
+    <div class="countdown-display" id="countdownDisplay" style="display:none">
+      距离自动<span id="countdownLabel">--</span>还有&nbsp;<strong id="countdownTime">--</strong>&nbsp;分钟
+    </div>
+    <div class="countdown-display" id="idleDisplay" style="display:none">
+      <span style="color:#94a3b8">定时未启用</span>
+    </div>
+    <div class="safetynet-hint" id="safetynetHint" style="display:none">
+      🔒 页面关机保险已设置；核心 PWM 仍由扩展控制
+    </div>
+    <div class="safetynet-warning" id="safetynetWarning" style="display:none"></div>
+  </div>
+
   <div class="toggle-row">
     <span>⏰ 启用定时</span>
     <label class="switch">
@@ -156,7 +218,6 @@
     <button class="btn btn-off" id="btnOff">🔴 立即关闭</button>
   </div>
   
-  <button class="btn-save" id="btnSave">💾 保存设置</button>
   <div class="status" id="status"></div>
 </div>
 <script src="popup.js"></script>

@@ -9,16 +9,28 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气开关，支持 PWM
 - **自动确认弹窗**：自动处理浏览器原生 `confirm` 和 Ant Design 确认框
 - **后台运行**：即使关闭弹窗，定时任务仍在 Service Worker 中执行
 
+## 📦 计划
+
+目前仅通过开发者模式安装。如果觉得好用，欢迎 **⭐ Star** 这个项目 — 等星星够多了我就去注册 Chrome Web Store / Edge Add-ons，打包成正式扩展方便大家一键安装 😄
+
 ## 安装
 
-1. 克隆仓库：
-   ```bash
-   git clone https://github.com/BelugaRex/ac-ust.git
-   ```
-2. 打开 Chrome/Edge，进入 `chrome://extensions` 或 `edge://extensions`
-3. 开启 **开发者模式**
-4. 点击 **加载已解压的扩展**，选择项目文件夹
-5. 登录 [HKUST Power Meter](https://w5.ab.ust.hk/njggt/app/home) 即可使用
+> 💡 **推荐：先用脚本打包到 `dist/`，再加载 dist 文件夹**，这样开发修改不会影响正在使用的扩展。
+
+```bash
+# 1. 克隆仓库
+git clone https://github.com/BelugaRex/ac-ust.git
+cd ac-ust
+
+# 2. 打包到 dist/ 目录（PowerShell）
+.\build.ps1
+
+# 3. 打开 Chrome/Edge
+#    地址栏输入 chrome://extensions 或 edge://extensions
+#    开启「开发者模式」→「加载已解压的扩展」→ 选择 dist 文件夹
+```
+
+> 登录 [HKUST Power Meter](https://w5.ab.ust.hk/njggt/app/home) 即可使用。更新代码后重新运行 `.\build.ps1`，再到扩展管理页点刷新图标即可。
 
 ## 使用说明
 
@@ -34,6 +46,7 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气开关，支持 PWM
 
 ```
 ac-ust/
+├── build.ps1          # 打包脚本 — 生成稳定版到 dist/
 ├── manifest.json      # 扩展配置
 ├── background.js      # Service Worker — 定时调度
 ├── content.js         # Content Script — 页面开关交互
