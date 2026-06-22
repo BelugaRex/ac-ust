@@ -220,7 +220,11 @@ function dispatchUserClick(element) {
       // 某些浏览器上下文没有 PointerEvent；继续走 MouseEvent / click。
     }
   }
-  element.click?.();
+  // Ant Design 开关（button.ant-switch[role="switch"]）通过 mouseup 已触发 React handler，
+  // 再调 .click() 会双切。仅对非 AntD 元素补 .click() 兜底。
+  if (!element.matches?.('button.ant-switch[role="switch"]')) {
+    element.click?.();
+  }
 
   if (element.matches?.('input[type="checkbox"]')) {
     element.dispatchEvent(new Event('input', { bubbles: true }));

@@ -208,3 +208,11 @@ function showStatus(msg, type) {
 loadSettings();
 refreshStatus();
 setInterval(refreshStatus, 1000);
+
+// 从 manifest 读取版本号
+const versionInfo = document.getElementById('versionInfo');
+if (versionInfo) {
+  const manifest = chrome.runtime.getManifest();
+  versionInfo.textContent = `AC-UST v${manifest.version} · dist`;
+  document.title = `AC-UST v${manifest.version}`;
+}
