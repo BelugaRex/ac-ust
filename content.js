@@ -70,52 +70,162 @@ function getACStatus() {
 // ----- 切换 AC 开关 -----
 async function toggleACSwitch(targetAction) {
   console.log(`[AC扩展] 准备切换 AC: ${targetAction}`);
-  
-  // 等待开关元素出现 (React 可能需要时间渲染)
-  const switchEl = await waitForSwitch(10000);
-  if (!switchEl) {
-    return { success: false, error: '等待超时，未找到 AC 开关。请确保页面已完全加载' };
-  }
-  
-  // 先检查当前状态
-  const currentStatus = getACStatus();
-  console.log('[AC扩展] 当前状态:', currentStatus);
-  
-  // 判断是否需要切换
   const needOn = (targetAction === 'on');
-  if (currentStatus.isOn === needOn) {
-    console.log(`[AC扩展] AC 已处于目标状态 (${targetAction})，无需操作`);
-    return { success: true, alreadyDone: true, action: targetAction };
-  }
-  
-  // 关键: 覆盖 window.confirm 自动确认
-  const originalConfirm = window.confirm;
-  window.confirm = function(msg) {
-    console.log('[AC扩展] 自动确认弹窗:', msg);
-    window.confirm = originalConfirm;
-    return true;
-  };
-  
-  // 点击开关。Ant Design 的开关本身就是 button；旧版页面点 label 或容器。
-  const clickTarget = switchEl.matches?.('button.ant-switch')
-    ? switchEl
-    : (switchEl.querySelector('label') || switchEl);
-  clickTarget.click();
-  console.log('[AC扩展] 已点击开关');
 
-  const confirmed = await clickConfirmDialog(5000);
-  if (confirmed) {
-    console.log('[AC扩展] 已自动确认页面弹窗');
-  }
-  
-  // 等2秒后恢复 confirm
-  setTimeout(() => {
-    if (window.confirm !== originalConfirm) {
-      window.confirm = originalConfirm;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    // 等待开关元素出现 (React 可能需要时间渲染)
+    const switchEl = await waitForSwitch(10000);
+    if (!switchEl) {
+      return { success: false, error: '等待超时，未找到 AC 开关。请确保页面已完全加载' };
     }
-  }, 2000);
-  
-  return { success: true, action: targetAction, confirmed };
+    
+    // 先检查当前状态
+    const currentStatus = getACStatus();
+    console.log(`[AC扩展] 当前状态(尝试 ${attempt}/3):`, currentStatus);
+    
+    // 判断是否需要切换
+    if (currentStatus.isOn === needOn) {
+      console.log(`[AC扩展] AC 已处于目标状态 (${targetAction})，无需操作`);
+      return { success: true, alreadyDone: true, action: targetAction, verified: true, status: currentStatus };
+    }
+
+    if (typeof currentStatus.isOn !== 'boolean') {
+      console.warn('[AC扩展] 当前 AC 状态未知，仍尝试点击开关');
+    }
+    
+    // 关键: 覆盖 window.confirm 自动确认
+    const originalConfirm = window.confirm;
+    window.confirm = function(msg) {
+      console.log('[AC扩展] 自动确认弹窗:', msg);
+      window.confirm = originalConfirm;
+      return true;
+    };
+    
+    const mainWorldResult = await requestMainWorldToggle(targetAction, 25000);
+    if (mainWorldResult?.success) {
+      console.log('[AC扩展] 主世界切换成功:', mainWorldResult);
+      return mainWorldResult;
+    }
+    if (mainWorldResult) {
+      console.warn('[AC扩展] 主世界切换未成功，回退到隔离世界点击:', mainWorldResult);
+    }
+
+    // 回退：点击开关。Ant Design 的开关本身就是 button；旧版页面点 input/label 或容器。
+    const clickTarget = getSwitchClickTarget(switchEl);
+    dispatchUserClick(clickTarget);
+    console.log('[AC扩展] 已模拟用户点击开关');
+
+    const confirmed = await clickConfirmDialog(5000);
+    if (confirmed) {
+      console.log('[AC扩展] 已自动确认页面弹窗');
+    }
+    
+    // 等2秒后恢复 confirm
+    setTimeout(() => {
+      if (window.confirm !== originalConfirm) {
+        window.confirm = originalConfirm;
+      }
+    }, 2000);
+
+    const verifiedStatus = await waitForTargetACStatus(needOn, 8000);
+    if (verifiedStatus.success) {
+      return {
+        success: true,
+        action: targetAction,
+        confirmed,
+        verified: true,
+        attempts: attempt,
+        status: verifiedStatus.status
+      };
+    }
+
+    console.warn(`[AC扩展] 点击后状态未变成 ${targetAction}，准备重试`, verifiedStatus.status);
+    await sleep(1000);
+  }
+
+  const finalStatus = getACStatus();
+  return {
+    success: false,
+    action: targetAction,
+    verified: false,
+    status: finalStatus,
+    error: `已尝试 3 次，但 AC 未变成 ${targetAction}`
+  };
+}
+
+async function requestMainWorldToggle(targetAction, timeoutMs) {
+  return new Promise((resolve) => {
+    const requestId = `ac-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let done = false;
+
+    const cleanup = () => {
+      window.removeEventListener('__AC_EXTENSION_TOGGLE_AC_RESULT__', onResult);
+    };
+
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(result);
+    };
+
+    const onResult = (event) => {
+      const detail = event.detail || {};
+      if (detail.requestId !== requestId) return;
+      const { requestId: _requestId, ...result } = detail;
+      finish(result);
+    };
+
+    window.addEventListener('__AC_EXTENSION_TOGGLE_AC_RESULT__', onResult);
+    window.dispatchEvent(new CustomEvent('__AC_EXTENSION_TOGGLE_AC__', {
+      detail: { requestId, action: targetAction }
+    }));
+
+    setTimeout(() => finish(null), timeoutMs);
+  });
+}
+
+async function waitForTargetACStatus(needOn, timeoutMs) {
+  const startTime = Date.now();
+  while (Date.now() - startTime <= timeoutMs) {
+    const status = getACStatus();
+    if (status.isOn === needOn) {
+      return { success: true, status };
+    }
+    await sleep(300);
+  }
+  return { success: false, status: getACStatus() };
+}
+
+function getSwitchClickTarget(switchEl) {
+  if (switchEl.matches?.('button.ant-switch')) return switchEl;
+  const input = switchEl.querySelector?.('input[type="checkbox"]');
+  if (input) return input;
+  return switchEl.querySelector?.('label') || switchEl;
+}
+
+function dispatchUserClick(element) {
+  if (!element) return;
+  element.scrollIntoView?.({ block: 'center', inline: 'center' });
+  element.focus?.();
+
+  const options = { bubbles: true, cancelable: true, view: window };
+  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+    try {
+      const event = type.startsWith('pointer')
+        ? new PointerEvent(type, options)
+        : new MouseEvent(type, options);
+      element.dispatchEvent(event);
+    } catch (_) {
+      // 某些浏览器上下文没有 PointerEvent；继续走 MouseEvent / click。
+    }
+  }
+  element.click?.();
+
+  if (element.matches?.('input[type="checkbox"]')) {
+    element.dispatchEvent(new Event('input', { bubbles: true }));
+    element.dispatchEvent(new Event('change', { bubbles: true }));
+  }
 }
 
 // ----- 自动点击 Ant Design / 页面内确认弹窗 -----
@@ -137,7 +247,7 @@ async function clickConfirmDialog(timeoutMs) {
     });
 
     if (confirmButton) {
-      confirmButton.click();
+      dispatchUserClick(confirmButton);
       return true;
     }
 
