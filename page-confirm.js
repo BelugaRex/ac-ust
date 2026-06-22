@@ -131,7 +131,12 @@
         element.dispatchEvent(event);
       } catch (_) {}
     }
-    element.click?.();
+    // Ant Design 开关（button.ant-switch[role="switch"]）走 React 合成事件，
+    // mouseup 已触发 React click handler；再调 .click() 会导致双切（ON→OFF→ON）。
+    // 仅对非 AntD 元素补 .click() 兜底。
+    if (!element.matches?.('button.ant-switch[role="switch"]')) {
+      element.click?.();
+    }
   }
 
   async function clickConfirmDialogInPageWorld(timeoutMs) {
