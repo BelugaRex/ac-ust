@@ -2,7 +2,6 @@
 // Popup 脚本 - 设置界面逻辑 + 实时倒计时
 // ============================================================
 
-const enableToggle = document.getElementById('enableToggle');
 const onMinutesInput = document.getElementById('onMinutes');
 const offMinutesInput = document.getElementById('offMinutes');
 const btnOn = document.getElementById('btnOn');
@@ -17,11 +16,25 @@ const countdownLabel = document.getElementById('countdownLabel');
 const safetynetHint = document.getElementById('safetynetHint');
 const safetynetWarning = document.getElementById('safetynetWarning');
 
+// popup 打开期间保持与 Service Worker 的长连接。
+// 这样用户盯着弹窗时，后台不会只靠一次性 sendMessage 存活。
+let keepalivePort = null;
+try {
+  keepalivePort = chrome.runtime.connect({ name: 'popup-keepalive' });
+  keepalivePort.onDisconnect.addListener(() => {
+    keepalivePort = null;
+  });
+} catch (_) {
+  // 忽略：不影响 alarm 兜底逻辑
+}
+
 // ----- 加载已保存的设置 -----
+let currentScheduleEnabled = false;
+
 async function loadSettings() {
   const result = await chrome.storage.local.get('ac_schedule');
   const schedule = result.ac_schedule || {};
-  enableToggle.checked = schedule.enabled || false;
+  currentScheduleEnabled = !!schedule.enabled;
   onMinutesInput.value = schedule.onMinutes || 30;
   offMinutesInput.value = schedule.offMinutes || 30;
 }
@@ -29,18 +42,42 @@ async function loadSettings() {
 // ----- 从后台拉取当前状态 + 直接读真实 PWM 闹钟 -----
 async function refreshStatus() {
   try {
-    const [schedule, alarm] = await Promise.all([
+    const [response, alarm, stored] = await Promise.all([
       chrome.runtime.sendMessage({ type: 'getSchedule' }),
-      chrome.alarms.get('ac-pwm')
+      chrome.alarms.get('ac-pwm'),
+      chrome.storage.local.get('ac_schedule')
     ]);
+
+    // getSchedule 正常返回 snapshot；异常时后台可能返回 { success:false, schedule }。
+    const schedule = response?.success === false && response?.schedule
+      ? response.schedule
+      : response;
+
+    // storage 是定时开关的最终真相源：只要已保存 enabled=true，就不要显示“定时已关闭”。
+    if (!schedule?.enabled && stored.ac_schedule?.enabled) {
+      updateCountdownDisplay(stored.ac_schedule, alarm);
+      const repaired = await chrome.runtime.sendMessage({ type: 'repairSchedule' });
+      if (repaired?.success) {
+        const fixedAlarm = await chrome.alarms.get('ac-pwm');
+        updateCountdownDisplay(repaired.schedule, fixedAlarm);
+      }
+      return;
+    }
+
     updateCountdownDisplay(schedule, alarm);
   } catch (e) {
-    // background 可能未就绪
+    // background 可能未就绪：优先用 storage 显示已启用状态；固定 1 秒轮询会继续同步。
+    const stored = await chrome.storage.local.get('ac_schedule');
+    if (stored.ac_schedule?.enabled) {
+      const alarm = await chrome.alarms.get('ac-pwm');
+      updateCountdownDisplay(stored.ac_schedule, alarm);
+    }
   }
 }
 
 function updateCountdownDisplay(schedule, alarm) {
   if (!schedule || !schedule.enabled) {
+    currentScheduleEnabled = false;
     // 定时未启用
     acDot.className = 'ac-dot off';
     acStateText.textContent = '定时已关闭';
@@ -51,6 +88,7 @@ function updateCountdownDisplay(schedule, alarm) {
     return;
   }
 
+  currentScheduleEnabled = true;
   idleDisplay.style.display = 'none';
   countdownDisplay.style.display = 'flex';
 
@@ -114,9 +152,9 @@ function readPositiveMinutes(input, fallback) {
 }
 
 // ----- 更新定时设置 -----
-async function updateSchedule(restart = false) {
+async function updateSchedule(enabled, restart = false) {
   const data = {
-    enabled: enableToggle.checked,
+    enabled,
     mode: 'pwm',
     onMinutes: readPositiveMinutes(onMinutesInput, 30),
     offMinutes: readPositiveMinutes(offMinutesInput, 30),
@@ -132,7 +170,12 @@ async function updateSchedule(restart = false) {
   });
   
   if (response && response.success) {
-    showStatus(data.enabled ? '✅ 定时已启动' : '✅ 定时已关闭', 'success');
+    currentScheduleEnabled = data.enabled;
+    if (!data.enabled && response.offResult && !response.offResult.success) {
+      showStatus('⚠️ 定时已关闭，但关机命令未确认', 'error');
+    } else {
+      showStatus(data.enabled ? '✅ 定时已开启' : '✅ 定时已关闭，已发送关机', 'success');
+    }
     const alarm = await chrome.alarms.get('ac-pwm');
     updateCountdownDisplay(response.schedule, alarm);
   } else {
@@ -140,38 +183,16 @@ async function updateSchedule(restart = false) {
   }
 }
 
-// ----- 切换启用状态 -----
-enableToggle.addEventListener('change', () => {
-  updateSchedule(true);
-});
+// ----- 定时开 / 定时关 -----
+btnOn.addEventListener('click', () => updateSchedule(true, true));
+btnOff.addEventListener('click', () => updateSchedule(false, true));
 
 // ----- 已启用时修改分钟数自动重启 -----
 for (const input of [onMinutesInput, offMinutesInput]) {
   input.addEventListener('change', () => {
-    if (enableToggle.checked) updateSchedule(true);
+    if (currentScheduleEnabled) updateSchedule(true, true);
   });
 }
-
-// ----- 立即操作 -----
-async function toggleNow(action) {
-  showStatus('⏳ 正在操作...', '');
-  chrome.runtime.sendMessage({ type: 'toggleNow', action: action }, async (response) => {
-    if (chrome.runtime.lastError) {
-      showStatus('❌ 操作失败: ' + chrome.runtime.lastError.message, 'error');
-      return;
-    }
-    if (response && response.success) {
-      showStatus(`✅ 冷气已${action === 'on' ? '开启' : '关闭'}`, 'success');
-      const alarm = await chrome.alarms.get('ac-pwm');
-      updateCountdownDisplay(response.schedule || response, alarm);
-    } else {
-      showStatus('❌ 操作失败，请确认 HKUST Power Meter 页面已打开并登录', 'error');
-    }
-  });
-}
-
-btnOn.addEventListener('click', () => toggleNow('on'));
-btnOff.addEventListener('click', () => toggleNow('off'));
 
 // ----- 状态显示 -----
 function showStatus(msg, type) {
@@ -186,3 +207,4 @@ function showStatus(msg, type) {
 // ----- 启动 -----
 loadSettings();
 refreshStatus();
+setInterval(refreshStatus, 1000);

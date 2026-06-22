@@ -21,3 +21,5 @@ build/
 # Env
 .env
 .env.local
+
+.vscode/

@@ -6,7 +6,8 @@
   "permissions": [
     "alarms",
     "storage",
-    "tabs"
+    "tabs",
+    "offscreen"
   ],
   "host_permissions": [
     "https://w5.ab.ust.hk/*"

@@ -11,36 +11,6 @@
     color: #1e293b;
   }
   .content { padding: 12px 14px 14px; }
-  
-  .toggle-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    background: white;
-    border-radius: 10px;
-    padding: 12px 16px;
-    margin-bottom: 12px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
-  }
-  .toggle-row span { font-weight: 500; font-size: 14px; }
-  
-  /* 自定义开关 */
-  .switch { position: relative; width: 48px; height: 28px; }
-  .switch input { opacity: 0; width: 0; height: 0; }
-  .slider {
-    position: absolute; cursor: pointer;
-    top: 0; left: 0; right: 0; bottom: 0;
-    background: #cbd5e1; border-radius: 28px;
-    transition: 0.3s;
-  }
-  .slider::before {
-    content: ""; position: absolute;
-    height: 22px; width: 22px; left: 3px; bottom: 3px;
-    background: white; border-radius: 50%;
-    transition: 0.3s;
-  }
-  input:checked + .slider { background: #075185; }
-  input:checked + .slider::before { transform: translateX(20px); }
 
   .time-section {
     background: white;
@@ -192,14 +162,6 @@
     <div class="safetynet-warning" id="safetynetWarning" style="display:none"></div>
   </div>
 
-  <div class="toggle-row">
-    <span>⏰ 启用定时</span>
-    <label class="switch">
-      <input type="checkbox" id="enableToggle">
-      <span class="slider"></span>
-    </label>
-  </div>
-  
   <div class="time-section">
     <h3>📋 PWM 循环设置</h3>
     <div class="time-row">
@@ -210,12 +172,12 @@
       <label>🔴 关闭分钟</label>
       <input type="number" id="offMinutes" value="30" min="1" step="1">
     </div>
-    <div class="hint">启用后会先开启冷气，然后按"开启分钟 / 关闭分钟"持续循环。</div>
+    <div class="hint">点“定时开”会先开启冷气，然后按“开启分钟 / 关闭分钟”持续循环；点“定时关”会停止循环并默认关闭冷气。</div>
   </div>
 
   <div class="btn-row">
-    <button class="btn btn-on" id="btnOn">🟢 立即开启</button>
-    <button class="btn btn-off" id="btnOff">🔴 立即关闭</button>
+    <button class="btn btn-on" id="btnOn">⏰ 定时开</button>
+    <button class="btn btn-off" id="btnOff">⏹️ 定时关</button>
   </div>
   
   <div class="status" id="status"></div>
