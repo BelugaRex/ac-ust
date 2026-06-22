@@ -209,6 +209,12 @@ function dispatchUserClick(element) {
   element.scrollIntoView?.({ block: 'center', inline: 'center' });
   element.focus?.();
 
+  // Ant Design switch 是 React button，必须触发 click；只触发一次，避免双切。
+  if (element.matches?.('button.ant-switch[role="switch"]')) {
+    element.click?.();
+    return;
+  }
+
   const options = { bubbles: true, cancelable: true, view: window };
   for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
     try {
@@ -220,11 +226,7 @@ function dispatchUserClick(element) {
       // 某些浏览器上下文没有 PointerEvent；继续走 MouseEvent / click。
     }
   }
-  // Ant Design 开关（button.ant-switch[role="switch"]）通过 mouseup 已触发 React handler，
-  // 再调 .click() 会双切。仅对非 AntD 元素补 .click() 兜底。
-  if (!element.matches?.('button.ant-switch[role="switch"]')) {
-    element.click?.();
-  }
+  element.click?.();
 
   if (element.matches?.('input[type="checkbox"]')) {
     element.dispatchEvent(new Event('input', { bubbles: true }));
