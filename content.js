@@ -83,8 +83,11 @@ async function toggleACSwitch(targetAction) {
     const currentStatus = getACStatus();
     console.log(`[AC扩展] 当前状态(尝试 ${attempt}/3):`, currentStatus);
     
-    // 判断是否需要切换
-    if (currentStatus.isOn === needOn) {
+    // 判断是否需要切换。
+    // 重要：关机请求不能完全信任隔离世界的状态判断。
+    // 页面实际是 ON 时，隔离世界偶发会读成 OFF，导致直接 alreadyDone 而不点击。
+    // 因此 off 必须交给主世界再次判断/执行；on 保留快速跳过。
+    if (targetAction === 'on' && currentStatus.isOn === needOn) {
       console.log(`[AC扩展] AC 已处于目标状态 (${targetAction})，无需操作`);
       return { success: true, alreadyDone: true, action: targetAction, verified: true, status: currentStatus };
     }
