@@ -122,6 +122,14 @@
   function dispatchUserClickInPageWorld(element) {
     element.scrollIntoView?.({ block: 'center', inline: 'center' });
     element.focus?.();
+
+    // Ant Design 的 switch 是 React button，真正切换在 click handler 上。
+    // 只调用一次 .click()，避免“事件序列 + .click()”造成双切。
+    if (element.matches?.('button.ant-switch[role="switch"]')) {
+      element.click?.();
+      return;
+    }
+
     const options = { bubbles: true, cancelable: true, view: window, composed: true };
     for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
       try {
@@ -131,12 +139,7 @@
         element.dispatchEvent(event);
       } catch (_) {}
     }
-    // Ant Design 开关（button.ant-switch[role="switch"]）走 React 合成事件，
-    // mouseup 已触发 React click handler；再调 .click() 会导致双切（ON→OFF→ON）。
-    // 仅对非 AntD 元素补 .click() 兜底。
-    if (!element.matches?.('button.ant-switch[role="switch"]')) {
-      element.click?.();
-    }
+    element.click?.();
   }
 
   async function clickConfirmDialogInPageWorld(timeoutMs) {
