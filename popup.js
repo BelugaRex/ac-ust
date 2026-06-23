@@ -283,3 +283,68 @@ if (versionInfo) {
   versionInfo.textContent = `AC-UST v${displayVersion}`;
   document.title = `AC-UST v${displayVersion}`;
 }
+
+// ----- 自诊断：检查 PWM 链路各环节状态 -----
+const btnDiagnose = document.getElementById('btnDiagnose');
+const diagnoseResult = document.getElementById('diagnoseResult');
+
+btnDiagnose.addEventListener('click', async () => {
+  diagnoseResult.style.display = 'block';
+  diagnoseResult.innerHTML = '🔍 诊断中...';
+  
+  const lines = [];
+  function add(ok, msg) { lines.push((ok ? '✅' : '❌') + ' ' + msg); }
+  
+  try {
+    // 1. 检查 storage
+    const stored = await chrome.storage.local.get('ac_schedule');
+    const s = stored.ac_schedule || {};
+    add(!!s, 'storage 可读写');
+    add(s.enabled === true, 'schedule.enabled=true (定时已启用)');
+    add(!!s.mode, 'mode=' + (s.mode || '?'));
+    add(s.clockMode !== undefined, 'clockMode=' + (s.clockMode ? '时钟' : '间隔'));
+    
+    // 2. 检查闹钟
+    const alarms = await chrome.alarms.getAll();
+    const pwmAlarm = alarms.find(a => a.name === 'ac-pwm');
+    const pulseAlarm = alarms.find(a => a.name === 'ac-pwm-pulse');
+    const hbAlarm = alarms.find(a => a.name === 'ac-heartbeat');
+    add(!!pwmAlarm, 'ac-pwm 闹钟存在' + (pwmAlarm ? ' (触发: ' + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
+    add(!!pulseAlarm, 'ac-pwm-pulse 30s心跳存在');
+    add(!!hbAlarm, 'ac-heartbeat 20s保活存在');
+    
+    if (pwmAlarm && s.alarmCreatedAt && s.alarmDelayMinutes) {
+      const dueAt = s.alarmCreatedAt + s.alarmDelayMinutes * 60000;
+      const overdue = dueAt <= Date.now();
+      add(!overdue, '闹钟未过期 (到期: ' + new Date(dueAt).toLocaleTimeString() + ')');
+    }
+    
+    // 3. 检查 AC 页面
+    const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
+    add(tabs.length > 0, 'AC页面已打开 (' + tabs.length + '个标签页)');
+    if (tabs.length > 0) {
+      add(!tabs[0].discarded, '标签页未被浏览器丢弃');
+      try {
+        const status = await chrome.tabs.sendMessage(tabs[0].id, { action: 'status' });
+        add(!!status, 'content script 响应正常');
+        add(typeof status.isOn === 'boolean', 'AC状态可读: ' + (status.isOn ? 'ON' : 'OFF'));
+      } catch (e) {
+        add(false, 'content script 无响应: ' + (e.message||'').slice(0,60));
+      }
+    }
+    
+    // 4. 后台状态
+    try {
+      const bg = await chrome.runtime.sendMessage({ type: 'getSchedule' });
+      add(!!bg, '后台 SW 响应正常');
+      add(bg.clockMode !== undefined, 'clockMode 同步: ' + (bg.clockMode ? '时钟' : '间隔'));
+    } catch (e) {
+      add(false, '后台 SW 无响应');
+    }
+  } catch (e) {
+    lines.push('❌ 诊断异常: ' + (e.message||'').slice(0,80));
+  }
+  
+  diagnoseResult.innerHTML = lines.join('<br>');
+});
+
