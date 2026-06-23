@@ -55,11 +55,9 @@ async function loadScheduleFromStorage() {
 }
 
 async function ensurePulseAlarm() {
-  // delayInMinutes: 0.5 在部分 Edge 版本中仍不支持，兜底用 1 分钟
-  const existing = await chrome.alarms.get('ac-pwm-pulse');
-  if (!existing) {
-    await createAlarm('ac-pwm-pulse', { delayInMinutes: 1 });
-  }
+  // delayInMinutes 是一次性的(SW被杀就丢)，periodInMinutes 是持续的。
+  // ac-badge-tick 已验证 periodInMinutes: 1 可用。
+  await createAlarm('ac-pwm-pulse', { periodInMinutes: 1 });
 }
 
 // ----- 官方推荐：setInterval heartbeat — 每 20s 写 storage 重置 SW 空闲计时器 -----
@@ -506,8 +504,6 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   if (alarm.name === 'ac-pwm-pulse') {
     await pwmPulseCheck();
-    // delayInMinutes 不支持 periodInMinutes，每次触发后重新创建
-    await createAlarm('ac-pwm-pulse', { delayInMinutes: 1 });
     return;
   }
   
