@@ -62,7 +62,27 @@ async function ensurePulseAlarm() {
 let initResolve;
 const initReady = new Promise(resolve => { initResolve = resolve; });
 
-// ----- 保活：创建 Offscreen Document 维持 SW 不休眠 -----
+// ----- 保活：官方 storage heartbeat (每20s) + Offscreen Document 双重保险 -----
+let heartbeatInterval = null;
+
+async function runHeartbeat() {
+  try {
+    await chrome.storage.local.set({ '__heartbeat': Date.now() });
+  } catch (_) { /* ignore */ }
+}
+
+function startHeartbeat() {
+  if (heartbeatInterval) return;
+  runHeartbeat();
+  heartbeatInterval = setInterval(runHeartbeat, 20 * 1000);
+}
+
+function stopHeartbeat() {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
+  }
+}
 async function ensureOffscreen() {
   try {
     const hasDoc = await chrome.offscreen.hasDocument();
@@ -140,11 +160,11 @@ async function init() {
   try {
     await loadScheduleFromStorage();
     await ensureOffscreen();
+    startHeartbeat();
     await setupAlarms();
     await updateBadge();
     await ensurePulseAlarm();
     if (schedule.enabled) {
-      // 看门狗闹钟：每 5 分钟检查 PWM 闹钟是否还在
       await createAlarm('ac-watchdog', { periodInMinutes: 5 });
     }
     if (schedule.enabled && schedule.pageTimerRetryAt && schedule.pageTimerRetryAt > Date.now()) {
@@ -152,7 +172,6 @@ async function init() {
     }
     console.log('[AC扩展] 初始化完成', schedule);
   } catch (e) {
-    // 不能让初始化异常卡死 initReady，否则 popup 会一直拿不到真实 storage 状态。
     console.error('[AC扩展] 初始化失败，但仍允许消息处理:', e);
   } finally {
     initResolve();
@@ -500,44 +519,93 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 });
 
+// ----- 官方推荐：长时间操作保活，防止 SW 在异步等待期间被杀死 -----
+async function waitUntil(promise) {
+  const keepAlive = setInterval(() => {
+    chrome.runtime.getPlatformInfo(() => {});
+  }, 25 * 1000);
+  try {
+    return await promise;
+  } finally {
+    clearInterval(keepAlive);
+  }
+}
+
+// ----- 官方推荐：scripting.executeScript 兜底，当 content script 未加载时强制注入 -----
+async function ensureContentScriptLoaded(tabId) {
+  try {
+    // 尝试发一个轻量消息探测 content script 是否就绪
+    await chrome.tabs.sendMessage(tabId, { action: 'status' });
+    return true;
+  } catch (_) {
+    // content script 未加载，用 scripting API 强制注入
+    try {
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ['content.js', 'page-confirm.js'],
+        injectImmediately: true
+      });
+      console.log('[AC扩展] scripting.executeScript 兜底注入完成');
+      // 注入后给一点时间初始化
+      await sleep(2000);
+      return true;
+    } catch (e2) {
+      console.error('[AC扩展] scripting.executeScript 兜底注入失败:', e2?.message);
+      return false;
+    }
+  }
+}
+
 // ----- 切换 AC 状态 -----
 async function toggleAC(action) {
-  // 查找已打开的页面
   const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
   
   if (tabs.length > 0) {
-    // 在已有页面上执行
     const tab = tabs[0];
-    try {
-      const result = await chrome.tabs.sendMessage(tab.id, { action: action });
-      console.log(`[AC扩展] ${action} 命令返回:`, result);
-      if (!result?.success) {
-        console.warn('[AC扩展] 页面返回未确认，刷新页面后重试:', result);
-        return retryExistingTabToggle(tab.id, action, result?.error || `${action} 命令未确认`);
-      }
-      return { success: true, tabId: tab.id, result };
-    } catch (e) {
-      console.error('[AC扩展] 发送消息失败，可能是页面未注入 content script，刷新页面后重试', e);
-      return retryExistingTabToggle(tab.id, action, e?.message || String(e));
-    }
+    return waitUntil(_toggleOnExistingTab(tab, action));
   }
 
-  // 没有打开的页面，打开新标签并等待 content script 就绪后执行。
-  // PWM 触发时不能依赖 popup 长连接；必须用 tabs.onUpdated 事件驱动等待页面完成加载。
   console.log('[AC扩展] 没有打开页面，创建新标签...');
   const created = await chrome.tabs.create({ url: AC_PAGE, active: false });
-  return retryToggle(action, 4, created?.id, true);
+  return waitUntil(_toggleOnNewTab(created?.id, action));
+}
+
+async function _toggleOnExistingTab(tab, action) {
+  // 先探测 content script 是否就绪，未就绪则用 scripting 兜底注入
+  const ready = await ensureContentScriptLoaded(tab.id);
+  if (!ready) {
+    return retryExistingTabToggle(tab.id, action, 'content script 注入失败');
+  }
+
+  try {
+    const result = await chrome.tabs.sendMessage(tab.id, { action });
+    console.log(`[AC扩展] ${action} 命令返回:`, result);
+    if (!result?.success) {
+      console.warn('[AC扩展] 页面返回未确认，重试:', result);
+      return retryExistingTabToggle(tab.id, action, result?.error || `${action} 命令未确认`);
+    }
+    return { success: true, tabId: tab.id, result };
+  } catch (e) {
+    console.error('[AC扩展] 发送消息失败，重试:', e?.message);
+    return retryExistingTabToggle(tab.id, action, e?.message || String(e));
+  }
+}
+
+async function _toggleOnNewTab(tabId, action) {
+  return retryToggle(action, 4, tabId, true);
 }
 
 async function retryExistingTabToggle(tabId, action, originalError = '') {
   try {
     await chrome.tabs.reload(tabId);
     await waitForTabReady(tabId, 30000);
+    await ensureContentScriptLoaded(tabId);
   } catch (e) {
-    console.warn('[AC扩展] 刷新页面失败，仍尝试直接重试:', e?.message);
+    console.warn('[AC扩展] 刷新页面失败，尝试 scripting 兜底:', e?.message);
+    await ensureContentScriptLoaded(tabId);
   }
 
-  const result = await retryToggle(action, 4, tabId, false);
+  const result = await waitUntil(retryToggle(action, 4, tabId, false));
   if (!result?.success && originalError) {
     return { ...result, error: `${originalError}; 刷新重试后仍失败：${result?.error || '未知错误'}` };
   }
@@ -551,6 +619,9 @@ async function retryToggle(action, retries, preferredTabId = null, closeAfterSuc
       console.log(`[AC扩展] 重试 ${i + 1} 未找到可用 AC 页面`);
       continue;
     }
+
+    // 官方推荐：每次重试前确保 content script 已注入
+    await ensureContentScriptLoaded(tab.id);
 
     try {
       const result = await chrome.tabs.sendMessage(tab.id, { action });
