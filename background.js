@@ -496,7 +496,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   console.log(`[AC扩展] 闹钟触发: ${alarm.name}`);
 
   if (alarm.name === 'ac-badge-tick') {
-    await pwmPulseCheck();
+    // badge-tick: 仅更新角标（PWM 补检已合并到 ac-pwm）
     await updateBadge();
     return;
   }
