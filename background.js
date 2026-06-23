@@ -55,8 +55,12 @@ async function loadScheduleFromStorage() {
 }
 
 async function ensurePulseAlarm() {
-  // Chrome API: periodInMinutes 最小值为 1（Edge 不支持 0.5）
-  await createAlarm('ac-pwm-pulse', { periodInMinutes: 1 });
+  // delayInMinutes 支持 0.5（30 秒），periodInMinutes 不支持。
+  // 每次触发后在 onAlarm 中重新创建，实现 30 秒循环。
+  const existing = await chrome.alarms.get('ac-pwm-pulse');
+  if (!existing) {
+    await createAlarm('ac-pwm-pulse', { delayInMinutes: 0.5 });
+  }
 }
 
 // ----- 初始化就绪信号（防止消息处理器在 init 完成前执行）-----
@@ -72,7 +76,10 @@ async function runHeartbeat() {
 }
 
 async function ensureHeartbeatAlarm() {
-  await createAlarm('ac-heartbeat', { periodInMinutes: 1 });
+  const existing = await chrome.alarms.get('ac-heartbeat');
+  if (!existing) {
+    await createAlarm('ac-heartbeat', { delayInMinutes: 0.5 });
+  }
 }
 async function ensureOffscreen() {
   try {
@@ -489,11 +496,14 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   if (alarm.name === 'ac-pwm-pulse') {
     await pwmPulseCheck();
+    // delayInMinutes 不支持 periodInMinutes，每次触发后重新创建 30s alarm
+    await createAlarm('ac-pwm-pulse', { delayInMinutes: 0.5 });
     return;
   }
 
   if (alarm.name === 'ac-heartbeat') {
     await runHeartbeat();
+    await createAlarm('ac-heartbeat', { delayInMinutes: 0.5 });
     return;
   }
   
