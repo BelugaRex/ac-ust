@@ -321,6 +321,13 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       await setPageTimer(schedule.onMinutes);
     }
   }
+
+  if (alarm.name.startsWith('ac-close-tab-')) {
+    const tabId = Number.parseInt(alarm.name.slice('ac-close-tab-'.length), 10);
+    if (Number.isFinite(tabId)) {
+      try { await chrome.tabs.remove(tabId); } catch (_) { /* tab may already be closed */ }
+    }
+  }
 });
 
 // ----- 切换 AC 状态 -----
@@ -346,15 +353,16 @@ async function toggleAC(action) {
   }
 
   // 没有打开的页面，打开新标签并等待 content script 就绪后执行。
-  // 关闭“启用定时”时也必须尽力关机，不能只异步排队后立刻返回成功。
+  // PWM 触发时不能依赖 popup 长连接；必须用 tabs.onUpdated 事件驱动等待页面完成加载。
   console.log('[AC扩展] 没有打开页面，创建新标签...');
   const created = await chrome.tabs.create({ url: AC_PAGE, active: false });
-  return retryToggle(action, 3, created?.id, true);
+  return retryToggle(action, 4, created?.id, true);
 }
 
 async function retryExistingTabToggle(tabId, action, originalError = '') {
   try {
     await chrome.tabs.reload(tabId);
+    await waitForTabReady(tabId, 30000);
   } catch (e) {
     console.warn('[AC扩展] 刷新页面失败，仍尝试直接重试:', e?.message);
   }
@@ -368,29 +376,81 @@ async function retryExistingTabToggle(tabId, action, originalError = '') {
 
 async function retryToggle(action, retries, preferredTabId = null, closeAfterSuccess = false) {
   for (let i = 0; i < retries; i++) {
-    await sleep(5000); // 等5秒让页面加载
-    const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-    if (tabs.length > 0) {
-      const tab = preferredTabId
-        ? (tabs.find(t => t.id === preferredTabId) || tabs[0])
-        : tabs[0];
-      try {
-        const result = await chrome.tabs.sendMessage(tab.id, { action: action });
-        if (!result?.success) {
-          console.log(`[AC扩展] 重试 ${i + 1} 未确认:`, result);
-          continue;
-        }
-        console.log(`[AC扩展] 重试成功 (${i + 1}/${retries})`);
-        // 只关闭扩展自动创建的标签，不能关闭用户原本打开的 HKUST 页面。
-        if (closeAfterSuccess && preferredTabId) setTimeout(() => chrome.tabs.remove(preferredTabId), 60000);
-        return { success: true, tabId: tab.id, result };
-      } catch (e) {
-        console.log(`[AC扩展] 重试 ${i + 1} 失败`);
+    const tab = await getReadyACTab(preferredTabId, 30000);
+    if (!tab?.id) {
+      console.log(`[AC扩展] 重试 ${i + 1} 未找到可用 AC 页面`);
+      continue;
+    }
+
+    try {
+      const result = await chrome.tabs.sendMessage(tab.id, { action });
+      if (!result?.success) {
+        console.log(`[AC扩展] 重试 ${i + 1} 未确认:`, result);
+        continue;
       }
+      console.log(`[AC扩展] 重试成功 (${i + 1}/${retries})`);
+      // 只关闭扩展自动创建的标签，不能关闭用户原本打开的 HKUST 页面。
+      if (closeAfterSuccess && preferredTabId) {
+        chrome.alarms.create(`ac-close-tab-${preferredTabId}`, { delayInMinutes: 1 });
+      }
+      return { success: true, tabId: tab.id, result };
+    } catch (e) {
+      console.log(`[AC扩展] 重试 ${i + 1} 失败:`, e?.message || String(e));
+      await sleep(750);
     }
   }
   console.error('[AC扩展] 所有重试失败');
   return { success: false, error: 'AC 页面未就绪，无法完成开关操作' };
+}
+
+async function getReadyACTab(preferredTabId = null, timeoutMs = 30000) {
+  if (preferredTabId) {
+    try {
+      const tab = await chrome.tabs.get(preferredTabId);
+      if (isACTab(tab)) {
+        await waitForTabReady(tab.id, timeoutMs);
+        return tab;
+      }
+    } catch (_) {
+      // preferred tab 已关闭，回退到查询现有页面
+    }
+  }
+
+  const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
+  const tab = tabs[0];
+  if (!tab?.id) return null;
+  await waitForTabReady(tab.id, timeoutMs);
+  return tab;
+}
+
+async function waitForTabReady(tabId, timeoutMs = 30000) {
+  const tab = await chrome.tabs.get(tabId).catch(() => null);
+  if (tab?.status === 'complete' && isACTab(tab)) return true;
+
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      clearTimeout(timer);
+      resolve(ok);
+    };
+
+    const onUpdated = (updatedTabId, changeInfo, updatedTab) => {
+      if (updatedTabId !== tabId) return;
+      if (changeInfo.status === 'complete' && isACTab(updatedTab)) {
+        finish(true);
+      }
+    };
+
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    chrome.tabs.onUpdated.addListener(onUpdated);
+  });
+}
+
+function isACTab(tab) {
+  return !!tab?.url && tab.url.startsWith('https://w5.ab.ust.hk/njggt/app/');
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
@@ -635,6 +695,24 @@ async function getBalanceFromPage() {
     return { error: '无法读取余额，请刷新页面后重试' };
   }
 }
+
+// ----- 启动/恢复兜底 -----
+chrome.runtime.onStartup.addListener(() => {
+  console.log('[AC扩展] 浏览器启动，恢复 PWM 闹钟');
+  initReady.then(() => setupAlarms()).catch(e => console.error('[AC扩展] onStartup 恢复失败:', e));
+});
+
+chrome.runtime.onInstalled.addListener(() => {
+  console.log('[AC扩展] 扩展安装/更新，恢复 PWM 闹钟');
+  initReady.then(() => setupAlarms()).catch(e => console.error('[AC扩展] onInstalled 恢复失败:', e));
+});
+
+chrome.storage.onChanged.addListener((changes, areaName) => {
+  if (areaName !== 'local' || !changes[STORAGE_KEY]?.newValue) return;
+  // 只同步内存状态。不要在每次 storage 写入后 setupAlarms，
+  // 否则 runPwmStep 写入下一阶段倒计时时会反复重建闹钟，影响无弹窗后台执行。
+  schedule = { ...schedule, ...changes[STORAGE_KEY].newValue };
+});
 
 // ----- 启动 -----
 init();
