@@ -876,6 +876,16 @@ async function getScheduleSnapshot() {
   }
 
   const status = await getCurrentACStatus();
+  // 自动纠偏：如果实际 AC 状态与 pwmState 推断不符，修正 pwmState
+  if (typeof status?.isOn === 'boolean' && schedule.enabled) {
+    const inferredOn = schedule.pwmState !== 'on'; // 下个动作是 on 说明当前是 off
+    if (status.isOn !== inferredOn) {
+      console.warn(`[AC扩展] 状态纠偏：推断=${inferredOn?'ON':'OFF'} 实际=${status.isOn?'ON':'OFF'}，修正 pwmState`);
+      schedule.pwmState = status.isOn ? 'off' : 'on';
+      snapshot.pwmState = schedule.pwmState;
+      await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
+    }
+  }
   return { ...snapshot, actualStatus: status };
 }
 
