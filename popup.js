@@ -51,7 +51,7 @@ function updateClockModeUI() {
     intervalInputs.style.display = 'none';
     onMinutesInput.value = 60;
     offMinutesInput.value = 60;
-    scheduleHint.textContent = '🕐 时钟模式：单数整点(1/3/5...23)开冷气，双数整点(0/2/4...22)关冷气。点“定时开”立即开始循环。';
+    scheduleHint.textContent = '单数整点(1/3/5...23)开 · 双数整点(0/2/4...22)关。点"定时开"立即开始。';
   } else {
     intervalInputs.style.display = '';
     scheduleHint.textContent = '点“定时开”会先开启冷气，然后按“开启分钟 / 关闭分钟”持续循环；点“定时关”会停止循环并默认关闭冷气。';
@@ -154,30 +154,38 @@ function updateCountdownDisplay(schedule, alarm) {
   }
 
   // 计算倒计时
+  // 判断是否为时钟模式（schedule.clockMode 或弹窗本地 currentClockMode）
+  const isClock = schedule.clockMode !== false; // 默认 true
+
   let remainingMs = 0;
-  if (alarm?.scheduledTime) {
+  let nextBoundary = 0;
+  if (isClock) {
+    // 时钟模式：本地计算下一个整点边界，不依赖后台传 _nextBoundary
+    const now = new Date();
+    now.setMinutes(0, 0, 0);
+    now.setHours(now.getHours() + 1);
+    nextBoundary = now.getTime();
+    remainingMs = nextBoundary - Date.now();
+  } else if (alarm?.scheduledTime) {
     remainingMs = alarm.scheduledTime - Date.now();
   } else if (schedule._nextBoundary) {
-    // 时钟模式
     remainingMs = schedule._nextBoundary - Date.now();
   } else if (schedule.alarmCreatedAt && schedule.alarmDelayMinutes) {
     remainingMs = schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000 - Date.now();
   }
 
   if (remainingMs > 0) {
-    const minutes = Math.ceil(remainingMs / 60000);
-
-    // 时钟模式：显示下次整点时间
-    if (schedule._nextBoundary) {
-      const nextTime = new Date(schedule._nextBoundary);
-      const hh = String(nextTime.getHours()).padStart(2, '0');
+    if (isClock && nextBoundary) {
+      // 时钟模式：显示下次整点时间
+      const hh = String(new Date(nextBoundary).getHours()).padStart(2, '0');
       countdownTime.textContent = `${hh}:00`;
       countdownLabel.textContent = nextAction === 'on' ? '开启' : '关闭';
     } else {
+      const minutes = Math.ceil(remainingMs / 60000);
       countdownTime.textContent = minutes;
       countdownLabel.textContent = nextAction === 'on' ? '开启' : '关闭';
     }
-  } else if (alarm?.scheduledTime || schedule._nextBoundary || (schedule.alarmCreatedAt && schedule.alarmDelayMinutes)) {
+  } else if (alarm?.scheduledTime || nextBoundary || schedule._nextBoundary || (schedule.alarmCreatedAt && schedule.alarmDelayMinutes)) {
     countdownTime.textContent = '不到 1';
     countdownLabel.textContent = nextAction === 'on' ? '开启' : '关闭';
   } else {
