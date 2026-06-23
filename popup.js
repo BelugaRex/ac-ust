@@ -80,27 +80,16 @@ async function refreshStatus() {
       ? response.schedule
       : response;
 
-    // storage 是定时开关的最终真相源：只要已保存 enabled=true，就不要显示“定时已关闭”。
-    if (!schedule?.enabled && stored.ac_schedule?.enabled) {
-      updateCountdownDisplay(stored.ac_schedule, alarm);
-      const repaired = await chrome.runtime.sendMessage({ type: 'repairSchedule' });
-      if (repaired?.success) {
-        const fixedAlarm = await chrome.alarms.get('ac-pwm');
-        updateCountdownDisplay(repaired.schedule, fixedAlarm);
-      }
-      return;
-    }
 
     updateCountdownDisplay(schedule, alarm);
   } catch (e) {
-    // background 可能未就绪：优先用 storage 显示已启用状态；固定 1 秒轮询会继续同步。
-    const stored = await chrome.storage.local.get('ac_schedule');
-    if (stored.ac_schedule?.enabled) {
-      const alarm = await chrome.alarms.get('ac-pwm');
+    const stored = await chrome.storage.local.get("ac_schedule");
+    if (stored.ac_schedule) {
+      const alarm = await chrome.alarms.get("ac-pwm");
       updateCountdownDisplay(stored.ac_schedule, alarm);
     }
   }
-}
+  }
 
 function updateCountdownDisplay(schedule, alarm) {
   if (!schedule || !schedule.enabled) {
