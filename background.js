@@ -55,33 +55,25 @@ async function loadScheduleFromStorage() {
 }
 
 async function ensurePulseAlarm() {
-  await createAlarm('ac-pwm-pulse', { periodInMinutes: 1 });
+  // Chrome 120+: alarm 最短 30 秒。SW 空闲 30 秒后终止，
+  // 必须 ≤30 秒触发一次事件防止 SW 在闹钟到来前被杀死。
+  await createAlarm('ac-pwm-pulse', { periodInMinutes: 0.5 });
 }
 
 // ----- 初始化就绪信号（防止消息处理器在 init 完成前执行）-----
 let initResolve;
 const initReady = new Promise(resolve => { initResolve = resolve; });
 
-// ----- 保活：官方 storage heartbeat (每20s) + Offscreen Document 双重保险 -----
-let heartbeatInterval = null;
-
+// ----- 保活：官方 alarm 驱动 heartbeat (每20s) + Offscreen Document 双重保险 -----
+// 注意：MV3 Service Worker 中 setInterval 不可靠，必须用 chrome.alarms 代替。
 async function runHeartbeat() {
   try {
     await chrome.storage.local.set({ '__heartbeat': Date.now() });
   } catch (_) { /* ignore */ }
 }
 
-function startHeartbeat() {
-  if (heartbeatInterval) return;
-  runHeartbeat();
-  heartbeatInterval = setInterval(runHeartbeat, 20 * 1000);
-}
-
-function stopHeartbeat() {
-  if (heartbeatInterval) {
-    clearInterval(heartbeatInterval);
-    heartbeatInterval = null;
-  }
+async function ensureHeartbeatAlarm() {
+  await createAlarm('ac-heartbeat', { periodInMinutes: 20 / 60 });
 }
 async function ensureOffscreen() {
   try {
@@ -160,7 +152,7 @@ async function init() {
   try {
     await loadScheduleFromStorage();
     await ensureOffscreen();
-    startHeartbeat();
+    await ensureHeartbeatAlarm();
     await setupAlarms();
     await updateBadge();
     await ensurePulseAlarm();
@@ -470,6 +462,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   if (alarm.name === 'ac-pwm-pulse') {
     await pwmPulseCheck();
+    return;
+  }
+
+  if (alarm.name === 'ac-heartbeat') {
+    await runHeartbeat();
     return;
   }
   
