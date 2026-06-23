@@ -1011,11 +1011,36 @@ chrome.runtime.onStartup.addListener(() => {
   initReady.then(() => setupAlarms()).catch(e => console.error('[AC扩展] onStartup 恢复失败:', e));
 });
 
-chrome.runtime.onInstalled.addListener(() => {
-  console.log('[AC扩展] 扩展安装/更新，恢复 PWM 闹钟');
-  initReady.then(() => setupAlarms()).catch(e => console.error('[AC扩展] onInstalled 恢复失败:', e));
+// ----- 官方推荐：首次安装/更新时初始化 -----
+chrome.runtime.onInstalled.addListener(async (details) => {
+  await initReady;
+  if (details.reason === 'install') {
+    // 首次安装：写默认设置
+    await chrome.storage.local.set({
+      [STORAGE_KEY]: {
+        enabled: false,
+        mode: 'pwm',
+        clockMode: true,
+        onMinutes: 60,
+        offMinutes: 60,
+        pwmState: 'off',
+        alarmCreatedAt: 0,
+        alarmDelayMinutes: 0
+      }
+    });
+    console.log('[AC扩展] 首次安装，已设置默认值（时钟模式）');
+  } else if (details.reason === 'update') {
+    console.log(`[AC扩展] 已更新（${details.previousVersion} → ${chrome.runtime.getManifest().version}）`);
+  }
 });
 
+// ----- 官方推荐：检测到新版本自动热更新 -----
+chrome.runtime.onUpdateAvailable.addListener(() => {
+  console.log('[AC扩展] 检测到新版本，自动重新加载...');
+  chrome.runtime.reload();
+});
+
+// ----- storage 变动监听：只同步内存状态 -----
 chrome.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local' || !changes[STORAGE_KEY]?.newValue) return;
   // 只同步内存状态。不要在每次 storage 写入后 setupAlarms，
