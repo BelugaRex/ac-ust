@@ -565,7 +565,16 @@ async function toggleAC(action) {
   const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
   
   if (tabs.length > 0) {
-    const tab = tabs[0];
+    let tab = tabs[0];
+    // Edge/Chrome 可能丢弃后台标签页以节省内存，content script 会被卸载。
+    // 检测到 discarded 时先 reload 恢复，再执行操作。
+    if (tab.discarded) {
+      console.log('[AC扩展] 标签页已被浏览器丢弃，正在恢复...');
+      await chrome.tabs.reload(tab.id);
+      await waitForTabReady(tab.id, 30000);
+      // reload 后 tab 对象可能过期，重新获取
+      try { tab = await chrome.tabs.get(tab.id); } catch (_) { /* tab might be gone */ }
+    }
     return waitUntil(_toggleOnExistingTab(tab, action));
   }
 
