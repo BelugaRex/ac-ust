@@ -55,9 +55,8 @@ async function loadScheduleFromStorage() {
 }
 
 async function ensurePulseAlarm() {
-  // Chrome 120+: alarm 最短 30 秒。SW 空闲 30 秒后终止，
-  // 必须 ≤30 秒触发一次事件防止 SW 在闹钟到来前被杀死。
-  await createAlarm('ac-pwm-pulse', { periodInMinutes: 0.5 });
+  // Chrome API: periodInMinutes 最小值为 1（Edge 不支持 0.5）
+  await createAlarm('ac-pwm-pulse', { periodInMinutes: 1 });
 }
 
 // ----- 初始化就绪信号（防止消息处理器在 init 完成前执行）-----
@@ -73,7 +72,7 @@ async function runHeartbeat() {
 }
 
 async function ensureHeartbeatAlarm() {
-  await createAlarm('ac-heartbeat', { periodInMinutes: 20 / 60 });
+  await createAlarm('ac-heartbeat', { periodInMinutes: 1 });
 }
 async function ensureOffscreen() {
   try {
