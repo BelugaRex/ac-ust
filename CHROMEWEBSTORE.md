@@ -2,7 +2,7 @@
 
 ## Extension Overview
 - **Name**: AC-UST
-- **Version**: 0.5.0
+- **Version**: 0.4.3
 - **Manifest**: MV3
 - **Category**: Productivity / Utilities
 

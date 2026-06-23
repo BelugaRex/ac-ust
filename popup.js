@@ -265,7 +265,7 @@ refreshStatus();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.5.0';
+const APP_VERSION = '0.4.3';
 const versionInfo = document.getElementById('versionInfo');
 if (versionInfo) {
   let displayVersion;
