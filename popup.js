@@ -173,13 +173,22 @@ async function updateSchedule(enabled, restart = false) {
     currentScheduleEnabled = data.enabled;
     let finalResponse = response;
 
-    if (!data.enabled && response.offResult && !response.offResult.success) {
-      showStatus('⚠️ 正在补发关机命令...', 'error');
-      const retryOff = await chrome.runtime.sendMessage({ type: 'toggleNow', action: 'off' });
-      finalResponse = retryOff?.schedule ? { ...response, schedule: retryOff.schedule, offResult: retryOff } : response;
-      showStatus(retryOff?.success ? '✅ 定时已关闭，已补发关机' : '⚠️ 定时已关闭，但关机命令未确认', retryOff?.success ? 'success' : 'error');
+    if (!data.enabled) {
+      // 定时关：无论 updateSchedule 返回的 offResult 如何，都独立再发一次即时关机。
+      // 防止主世界 toggle 返回虚假成功（alreadyDone 或验证误判）。
+      showStatus('⏳ 正在关闭 AC...', 'error');
+      const toggleOff = await chrome.runtime.sendMessage({ type: 'toggleNow', action: 'off' });
+      finalResponse = toggleOff?.schedule ? { ...response, schedule: toggleOff.schedule, offResult: toggleOff } : response;
+      if (toggleOff?.success) {
+        showStatus('✅ 定时已关闭，AC 已关机', 'success');
+      } else if (response.offResult?.success) {
+        // 首次关机声称成功但二次确认失败 → 以二次确认为准
+        showStatus('⚠️ 定时已关闭，但关机未确认 — 请手动关闭', 'error');
+      } else {
+        showStatus('⚠️ 定时已关闭，但关机命令未确认', 'error');
+      }
     } else {
-      showStatus(data.enabled ? '✅ 定时已开启' : '✅ 定时已关闭，已发送关机', 'success');
+      showStatus('✅ 定时已开启', 'success');
     }
 
     const alarm = await chrome.alarms.get('ac-pwm');

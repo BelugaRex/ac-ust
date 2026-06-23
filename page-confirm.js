@@ -74,7 +74,8 @@
 
       const before = getACStatusInPageWorld();
       console.log(`[AC扩展] 主世界 AC 状态(尝试 ${attempt}/3):`, before);
-      if (before.isOn === needOn) {
+      // 仅 on 可快速跳过；off 必须实际点击，防止 aria-checked 假阴性导致虚假成功
+      if (action === 'on' && before.isOn === needOn) {
         return { success: true, alreadyDone: true, verified: true, action, status: before, via: 'main-world' };
       }
 
@@ -84,10 +85,17 @@
       const confirmed = await clickConfirmDialogInPageWorld(5000);
       const verified = await waitForTargetStatusInPageWorld(needOn, 9000);
       if (verified.success) {
-        return { success: true, verified: true, confirmed, action, attempts: attempt, status: verified.status, via: 'main-world' };
+        // 稳定化二次验证：AntD 可能在 API 失败后回滚状态。
+        // 等 2 秒后复检，若已回滚则当作本次尝试失败，继续下一轮。
+        await sleepInPageWorld(2500);
+        const stable = getACStatusInPageWorld();
+        if (stable.isOn === needOn) {
+          return { success: true, verified: true, stable, confirmed, action, attempts: attempt, status: stable, via: 'main-world' };
+        }
+        console.warn('[AC扩展] 主世界状态回滚检测：点击后短暂=' + needOn + '，稳定后=' + stable.isOn);
+      } else {
+        console.warn('[AC扩展] 主世界点击后状态未改变，准备重试:', verified.status);
       }
-
-      console.warn('[AC扩展] 主世界点击后状态未改变，准备重试:', verified.status);
       await sleepInPageWorld(1000);
     }
 
