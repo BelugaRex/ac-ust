@@ -55,9 +55,13 @@ async function loadScheduleFromStorage() {
 }
 
 async function ensurePulseAlarm() {
-  // delayInMinutes 是一次性的(SW被杀就丢)，periodInMinutes 是持续的。
-  // ac-badge-tick 已验证 periodInMinutes: 1 可用。
-  await createAlarm('ac-pwm-pulse', { periodInMinutes: 1 });
+  try {
+    await createAlarm('ac-pwm-pulse', { periodInMinutes: 1 });
+    const verify = await chrome.alarms.get('ac-pwm-pulse');
+    if (!verify) console.error('[AC扩展] pulse alarm 创建后验证失败！');
+  } catch (e) {
+    console.error('[AC扩展] pulse alarm 创建异常:', e?.message);
+  }
 }
 
 // ----- 官方推荐：setInterval heartbeat — 每 20s 写 storage 重置 SW 空闲计时器 -----
