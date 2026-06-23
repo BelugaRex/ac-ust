@@ -215,10 +215,22 @@ loadSettings();
 refreshStatus();
 setInterval(refreshStatus, 1000);
 
-// 从 manifest 读取版本号
+// 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
+const APP_VERSION = '0.3.1';
 const versionInfo = document.getElementById('versionInfo');
 if (versionInfo) {
-  const manifest = chrome.runtime.getManifest();
-  versionInfo.textContent = `AC-UST v${manifest.version}`;
-  document.title = `AC-UST v${manifest.version}`;
+  let displayVersion;
+  try {
+    const manifest = chrome.runtime.getManifest();
+    displayVersion = manifest.version;
+    // 交叉校验：如果 manifest 版本与硬编码不一致，说明浏览器加载了旧版扩展
+    if (displayVersion !== APP_VERSION) {
+      console.warn(`[AC-UST] 版本不一致：manifest=${displayVersion}, 源码=${APP_VERSION}。请重载扩展。`);
+      displayVersion = APP_VERSION;
+    }
+  } catch (_) {
+    displayVersion = APP_VERSION;
+  }
+  versionInfo.textContent = `AC-UST v${displayVersion}`;
+  document.title = `AC-UST v${displayVersion}`;
 }

@@ -50,6 +50,17 @@ foreach ($file in $FilesToCopy) {
   }
 }
 
+# Inject version from manifest.json into popup.js
+$manifest = Get-Content (Join-Path $Root "manifest.json") -Raw | ConvertFrom-Json
+$ver = $manifest.version
+if ($ver) {
+  $popupPath = Join-Path $OutputDir "popup.js"
+  $popupContent = Get-Content $popupPath -Raw
+  $popupContent = $popupContent -replace "const APP_VERSION = '[^']*'", "const APP_VERSION = '$ver'"
+  Set-Content $popupPath -Value $popupContent -NoNewline
+  Write-Host "  OK  popup.js (version injected: $ver)"
+}
+
 Write-Host ""
 Write-Host "============================================"
 Write-Host "Build complete! Directory: $(Resolve-Path $OutputDir)"
