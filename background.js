@@ -508,8 +508,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   console.log(`[AC扩展] 闹钟触发: ${alarm.name}`);
 
-  if (alarm.name === 'ac-pwm-pulse') {
+  if (alarm.name === 'ac-badge-tick') {
     await pwmPulseCheck();
+    await updateBadge();
     return;
   }
   
@@ -539,10 +540,6 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   if (alarm.name === 'ac-watchdog') {
     await watchdogCheck();
-  }
-
-  if (alarm.name === 'ac-badge-tick') {
-    await updateBadge();
   }
 
   if (alarm.name === 'ac-page-timer-retry') {

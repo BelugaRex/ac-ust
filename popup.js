@@ -254,7 +254,7 @@ refreshStatus();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.6';
+const APP_VERSION = '0.4.7';
 const versionInfo = document.getElementById('versionInfo');
 if (versionInfo) {
   let displayVersion;
@@ -296,10 +296,10 @@ btnDiagnose.addEventListener('click', async () => {
     // 2. 检查闹钟
     const alarms = await chrome.alarms.getAll();
     const pwmAlarm = alarms.find(a => a.name === 'ac-pwm');
-    const pulseAlarm = alarms.find(a => a.name === 'ac-pwm-pulse');
     add(!!pwmAlarm, 'ac-pwm 闹钟存在' + (pwmAlarm ? ' (触发: ' + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
-    add(!!pulseAlarm, 'ac-pwm-pulse 心跳存在（1分钟）');
-    // heartbeat 已改用官方 setInterval + storage.set，不显示为 alarm
+    // pulse 检查已合并到 ac-badge-tick（每分钟触发）
+    const badgeAlarm = alarms.find(a => a.name === 'ac-badge-tick');
+    add(!!badgeAlarm, 'ac-badge-tick 心跳（PWM 补检 + 角标刷新）');
     add(true, 'setInterval heartbeat（storage 每 20s）');
     
     if (pwmAlarm && s.alarmCreatedAt && s.alarmDelayMinutes) {
