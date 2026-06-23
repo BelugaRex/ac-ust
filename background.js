@@ -54,16 +54,6 @@ async function loadScheduleFromStorage() {
   return schedule;
 }
 
-async function ensurePulseAlarm() {
-  try {
-    await createAlarm('ac-pwm-pulse', { periodInMinutes: 1 });
-    const verify = await chrome.alarms.get('ac-pwm-pulse');
-    if (!verify) console.error('[AC扩展] pulse alarm 创建后验证失败！');
-  } catch (e) {
-    console.error('[AC扩展] pulse alarm 创建异常:', e?.message);
-  }
-}
-
 // ----- 官方推荐：setInterval heartbeat — 每 20s 写 storage 重置 SW 空闲计时器 -----
 // Chrome 官方文档明确使用 setInterval + chrome.storage.local.set 作为保活心跳。
 // chrome.storage.local.set 是扩展 API 调用，每次调用都会重置 SW 的 30 秒空闲超时。
@@ -112,9 +102,7 @@ async function ensureOffscreen() {
 // ----- 看门狗：定期检查 PWM 闹钟完整性 -----
 async function watchdogCheck() {
   await loadScheduleFromStorage();
-  if (!schedule.enabled) return;
-  await ensurePulseAlarm();
-  const alarm = await chrome.alarms.get('ac-pwm');
+  if (!schedule.enabled) return;  const alarm = await chrome.alarms.get('ac-pwm');
   if (!alarm) {
     console.warn('[AC扩展] 看门狗：PWM 闹钟缺失，补执行当前整点动作');
     try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
@@ -126,10 +114,7 @@ async function watchdogCheck() {
 
 async function pwmPulseCheck() {
   await loadScheduleFromStorage();
-  if (!schedule.enabled) return;
-
-  await ensurePulseAlarm();
-  await updateBadge();
+  if (!schedule.enabled) return;  await updateBadge();
 
   // 时钟模式：检查闹钟是否还在，若已过期则补执行被跳过的动作
   if (isClockMode()) {
@@ -168,14 +153,13 @@ async function pwmPulseCheck() {
 // ----- 启动时加载设置并创建闹钟 -----
 async function init() {
   try {
-    // 最先创建 pulse alarm，确保 SW 不会因空闲被杀
-    await ensurePulseAlarm();
+    // 最先确保 badge-tick alarm 存在（PWM 补检 + 角标 + SW 保活）
+    await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
     await loadScheduleFromStorage();
     await ensureOffscreen();
     startHeartbeat();
     await setupAlarms();
     await updateBadge();
-    await ensurePulseAlarm();
     if (schedule.enabled) {
       await createAlarm('ac-watchdog', { periodInMinutes: 5 });
     }
@@ -199,10 +183,7 @@ async function setupAlarms(startImmediately = false) {
     await updateBadge();
     console.log('[AC扩展] PWM 定时未启用');
     return;
-  }
-
-  await ensurePulseAlarm();
-  schedule.onMinutes = sanitizeMinutes(schedule.onMinutes, 30);
+  }  schedule.onMinutes = sanitizeMinutes(schedule.onMinutes, 30);
   schedule.offMinutes = sanitizeMinutes(schedule.offMinutes, 30);
 
   if (startImmediately) {
@@ -354,9 +335,7 @@ async function runPwmStep() {
       schedule.alarmDelayMinutes = 0;
 
       await chrome.alarms.clear('ac-pwm');
-      await createAlarm('ac-pwm', { when: nextBoundary });
-      await ensurePulseAlarm();
-      await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+      await createAlarm('ac-pwm', { when: nextBoundary });      await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
       await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
       await updateBadge();
 
@@ -409,9 +388,7 @@ async function runPwmStep() {
     if (!verify) {
       console.error('[AC扩展] PWM 闹钟创建失败，重试...');
       await createAlarm('ac-pwm', { delayInMinutes: delay });
-    }
-    await ensurePulseAlarm();
-    await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+    }    await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
     await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
     await updateBadge();
 
@@ -770,11 +747,7 @@ async function getCurrentACStatus() {
 
 async function ensureScheduleClock() {
   await loadScheduleFromStorage();
-  if (!schedule.enabled) return;
-
-  await ensurePulseAlarm();
-
-  // 时钟模式：检查是否已有有效的未来闹钟
+  if (!schedule.enabled) return;  // 时钟模式：检查是否已有有效的未来闹钟
   if (isClockMode()) {
     const existingAlarm = await chrome.alarms.get('ac-pwm');
     if (existingAlarm?.scheduledTime && existingAlarm.scheduledTime > Date.now()) {
@@ -997,9 +970,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       await setupAlarms(schedule.enabled && (!wasEnabled || restart));
       // 管理看门狗和每分钟 PWM 心跳闹钟
       if (schedule.enabled) {
-        await createAlarm('ac-watchdog', { periodInMinutes: 5 });
-        await ensurePulseAlarm();
-      }
+        await createAlarm('ac-watchdog', { periodInMinutes: 5 });      }
       sendResponse({ success: true, schedule, offResult });
       return;
     }
