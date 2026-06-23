@@ -343,16 +343,27 @@ async function runPwmStep() {
       const nextHour = new Date(nextBoundary).getHours();
       console.log(`[AC扩展] 时钟模式：当前 ${new Date(now).getHours()}:${String(new Date(now).getMinutes()).padStart(2,'0')} → ${targetAction}，下个整点 ${nextHour}:00 → ${schedule.pwmState}`);
 
-      try {
-        const toggleResult = await toggleAC(targetAction);
-        if (!toggleResult?.success) {
-          schedule.pageTimerError = `自动${targetAction === 'on' ? '开启' : '关闭'}未确认：${toggleResult?.error || '未知错误'}`;
-          await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
+      // 执行开关并独立验证
+      const needOnClock = targetAction === 'on';
+      let toggleOkClock = false;
+      for (let retry = 0; retry < 3 && !toggleOkClock; retry++) {
+        try {
+          const tr = await toggleAC(targetAction);
+          if (!tr?.success) schedule.pageTimerError = `自动${needOnClock?'开启':'关闭'}未确认`;
+        } catch (e) {
+          schedule.pageTimerError = `自动${needOnClock?'开启':'关闭'}异常：${e?.message||String(e)}`;
         }
-      } catch (e) {
-        schedule.pageTimerError = `自动${targetAction === 'on' ? '开启' : '关闭'}异常：${e?.message || String(e)}`;
-        await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
+        await sleep(3000);
+        const actual = await getCurrentACStatus();
+        if (typeof actual?.isOn === 'boolean' && actual.isOn === needOnClock) {
+          toggleOkClock = true;
+          schedule.pageTimerError = '';
+        } else if (retry < 2) {
+          console.warn(`[AC扩展] 时钟模式独立验证失败(重试${retry+1}/2)`);
+        }
       }
+      if (!toggleOkClock) schedule.pageTimerError = schedule.pageTimerError || '验证失败';
+      await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
 
       if (targetAction === 'on') {
         await setPageTimer(60);
@@ -386,16 +397,33 @@ async function runPwmStep() {
 
     console.log(`[AC扩展] PWM 执行: ${targetAction}，持续 ${currentDuration} 分钟`);
     
-    try {
-      const toggleResult = await toggleAC(targetAction);
-      if (!toggleResult?.success) {
-        schedule.pageTimerError = `自动${targetAction === 'on' ? '开启' : '关闭'}未确认：${toggleResult?.error || '未知错误'}`;
-        await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
+    // 执行开关并独立验证（最多重试 2 次，防 AntD 回滚假成功）
+    const needOn = targetAction === 'on';
+    let toggleOk = false;
+    for (let retry = 0; retry < 3 && !toggleOk; retry++) {
+      try {
+        const toggleResult = await toggleAC(targetAction);
+        if (!toggleResult?.success) {
+          schedule.pageTimerError = `自动${needOn ? '开启' : '关闭'}未确认：${toggleResult?.error || '未知错误'}`;
+        }
+      } catch (e) {
+        schedule.pageTimerError = `自动${needOn ? '开启' : '关闭'}异常：${e?.message || String(e)}`;
       }
-    } catch (e) {
-      schedule.pageTimerError = `自动${targetAction === 'on' ? '开启' : '关闭'}异常：${e?.message || String(e)}`;
-      await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
+      // 独立验证：等页面稳定后检查 AC 实际状态
+      await sleep(3000);
+      const actual = await getCurrentACStatus();
+      if (typeof actual?.isOn === 'boolean' && actual.isOn === needOn) {
+        toggleOk = true;
+        schedule.pageTimerError = '';
+        console.log(`[AC扩展] PWM 独立验证通过：AC=${needOn ? 'ON' : 'OFF'}`);
+      } else if (retry < 2) {
+        console.warn(`[AC扩展] PWM 独立验证失败(重试${retry+1}/2)：期望=${needOn?'ON':'OFF'} 实际=${actual?.isOn}`);
+      }
     }
+    if (!toggleOk) {
+      schedule.pageTimerError = schedule.pageTimerError || `自动${needOn ? '开启' : '关闭'}验证失败`;
+    }
+    await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
 
     if (targetAction === 'on') {
       await setPageTimer(schedule.onMinutes);
