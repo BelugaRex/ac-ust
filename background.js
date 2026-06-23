@@ -168,6 +168,8 @@ async function pwmPulseCheck() {
 // ----- 启动时加载设置并创建闹钟 -----
 async function init() {
   try {
+    // 最先创建 pulse alarm，确保 SW 不会因空闲被杀
+    await ensurePulseAlarm();
     await loadScheduleFromStorage();
     await ensureOffscreen();
     startHeartbeat();

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
-  "name": "AC-UST v0.4.5",
-  "version": "0.4.5",
+  "name": "AC-UST v0.4.6",
+  "version": "0.4.6",
   "description": "定时开关 HKUST Smart Power Meter 冷气 - 自动在设定时间开关空调",
   "permissions": [
     "alarms",
