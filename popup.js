@@ -308,10 +308,10 @@ btnDiagnose.addEventListener('click', async () => {
     const alarms = await chrome.alarms.getAll();
     const pwmAlarm = alarms.find(a => a.name === 'ac-pwm');
     const pulseAlarm = alarms.find(a => a.name === 'ac-pwm-pulse');
-    const hbAlarm = alarms.find(a => a.name === 'ac-heartbeat');
     add(!!pwmAlarm, 'ac-pwm 闹钟存在' + (pwmAlarm ? ' (触发: ' + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
-    add(!!pulseAlarm, 'ac-pwm-pulse 30s心跳存在');
-    add(!!hbAlarm, 'ac-heartbeat 20s保活存在');
+    add(!!pulseAlarm, 'ac-pwm-pulse 心跳存在（1分钟）');
+    // heartbeat 已改用官方 setInterval + storage.set，不显示为 alarm
+    add(true, 'setInterval heartbeat（storage 每 20s）');
     
     if (pwmAlarm && s.alarmCreatedAt && s.alarmDelayMinutes) {
       const dueAt = s.alarmCreatedAt + s.alarmDelayMinutes * 60000;

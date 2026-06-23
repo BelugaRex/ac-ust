@@ -55,11 +55,10 @@ async function loadScheduleFromStorage() {
 }
 
 async function ensurePulseAlarm() {
-  // delayInMinutes 支持 0.5（30 秒），periodInMinutes 不支持。
-  // 每次触发后在 onAlarm 中重新创建，实现 30 秒循环。
+  // delayInMinutes: 0.5 在部分 Edge 版本中仍不支持，兜底用 1 分钟
   const existing = await chrome.alarms.get('ac-pwm-pulse');
   if (!existing) {
-    await createAlarm('ac-pwm-pulse', { delayInMinutes: 0.5 });
+    await createAlarm('ac-pwm-pulse', { delayInMinutes: 1 });
   }
 }
 
@@ -507,8 +506,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   if (alarm.name === 'ac-pwm-pulse') {
     await pwmPulseCheck();
-    // delayInMinutes 不支持 periodInMinutes，每次触发后重新创建 30s alarm
-    await createAlarm('ac-pwm-pulse', { delayInMinutes: 0.5 });
+    // delayInMinutes 不支持 periodInMinutes，每次触发后重新创建
+    await createAlarm('ac-pwm-pulse', { delayInMinutes: 1 });
     return;
   }
   
