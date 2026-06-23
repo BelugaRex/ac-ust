@@ -40,10 +40,15 @@ function isClockMode() {
 }
 
 async function createAlarm(name, info) {
-  // Edge/Chrome MV3 的 chrome.alarms.create 不支持 persistAcrossSessions。
-  // 闹钟本身会由浏览器保存；重启后再由 init()/watchdog 从 storage 恢复。
-  const { persistAcrossSessions, ...safeInfo } = info || {};
-  await chrome.alarms.create(name, safeInfo);
+  try {
+    const { persistAcrossSessions, ...safeInfo } = info || {};
+    await chrome.alarms.create(name, safeInfo);
+    // 验证创建成功
+    const verify = await chrome.alarms.get(name);
+    if (!verify) console.error('[AC扩展] createAlarm 失败: ' + name + ' ' + JSON.stringify(safeInfo));
+  } catch (e) {
+    console.error('[AC扩展] createAlarm 异常: ' + name, e?.message);
+  }
 }
 
 async function loadScheduleFromStorage() {
@@ -102,7 +107,8 @@ async function ensureOffscreen() {
 // ----- 看门狗：定期检查 PWM 闹钟完整性 -----
 async function watchdogCheck() {
   await loadScheduleFromStorage();
-  if (!schedule.enabled) return;  const alarm = await chrome.alarms.get('ac-pwm');
+  if (!schedule.enabled) return;
+  const alarm = await chrome.alarms.get('ac-pwm');
   if (!alarm) {
     console.warn('[AC扩展] 看门狗：PWM 闹钟缺失，补执行当前整点动作');
     try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
@@ -114,7 +120,8 @@ async function watchdogCheck() {
 
 async function pwmPulseCheck() {
   await loadScheduleFromStorage();
-  if (!schedule.enabled) return;  await updateBadge();
+  if (!schedule.enabled) return;
+  await updateBadge();
 
   // 时钟模式：检查闹钟是否还在，若已过期则补执行被跳过的动作
   if (isClockMode()) {
@@ -183,7 +190,8 @@ async function setupAlarms(startImmediately = false) {
     await updateBadge();
     console.log('[AC扩展] PWM 定时未启用');
     return;
-  }  schedule.onMinutes = sanitizeMinutes(schedule.onMinutes, 30);
+  }
+  schedule.onMinutes = sanitizeMinutes(schedule.onMinutes, 30);
   schedule.offMinutes = sanitizeMinutes(schedule.offMinutes, 30);
 
   if (startImmediately) {
@@ -335,7 +343,8 @@ async function runPwmStep() {
       schedule.alarmDelayMinutes = 0;
 
       await chrome.alarms.clear('ac-pwm');
-      await createAlarm('ac-pwm', { when: nextBoundary });      await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+      await createAlarm('ac-pwm', { when: nextBoundary });
+      await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
       await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
       await updateBadge();
 
@@ -388,7 +397,8 @@ async function runPwmStep() {
     if (!verify) {
       console.error('[AC扩展] PWM 闹钟创建失败，重试...');
       await createAlarm('ac-pwm', { delayInMinutes: delay });
-    }    await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+    }
+    await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
     await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
     await updateBadge();
 
@@ -747,7 +757,8 @@ async function getCurrentACStatus() {
 
 async function ensureScheduleClock() {
   await loadScheduleFromStorage();
-  if (!schedule.enabled) return;  // 时钟模式：检查是否已有有效的未来闹钟
+  if (!schedule.enabled) return;
+  // 时钟模式：检查是否已有有效的未来闹钟
   if (isClockMode()) {
     const existingAlarm = await chrome.alarms.get('ac-pwm');
     if (existingAlarm?.scheduledTime && existingAlarm.scheduledTime > Date.now()) {
@@ -970,7 +981,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       await setupAlarms(schedule.enabled && (!wasEnabled || restart));
       // 管理看门狗和每分钟 PWM 心跳闹钟
       if (schedule.enabled) {
-        await createAlarm('ac-watchdog', { periodInMinutes: 5 });      }
+        await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+      }
       sendResponse({ success: true, schedule, offResult });
       return;
     }
