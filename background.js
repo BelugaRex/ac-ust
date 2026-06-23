@@ -482,10 +482,20 @@ async function getScheduleSnapshot() {
 }
 
 async function toggleNowAndSync(action) {
-  await toggleAC(action);
+  const toggleResult = await toggleAC(action);
+
+  if (!toggleResult?.success) {
+    return {
+      success: false,
+      error: toggleResult?.error || `${action} 命令未确认`,
+      result: toggleResult,
+      schedule
+    };
+  }
 
   if (!schedule.enabled) {
-    return { success: true, schedule };
+    const status = await getCurrentACStatus();
+    return { success: true, schedule: { ...schedule, actualStatus: status }, result: toggleResult };
   }
 
   const currentOn = action === 'on';

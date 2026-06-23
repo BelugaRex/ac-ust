@@ -171,13 +171,19 @@ async function updateSchedule(enabled, restart = false) {
   
   if (response && response.success) {
     currentScheduleEnabled = data.enabled;
+    let finalResponse = response;
+
     if (!data.enabled && response.offResult && !response.offResult.success) {
-      showStatus('⚠️ 定时已关闭，但关机命令未确认', 'error');
+      showStatus('⚠️ 正在补发关机命令...', 'error');
+      const retryOff = await chrome.runtime.sendMessage({ type: 'toggleNow', action: 'off' });
+      finalResponse = retryOff?.schedule ? { ...response, schedule: retryOff.schedule, offResult: retryOff } : response;
+      showStatus(retryOff?.success ? '✅ 定时已关闭，已补发关机' : '⚠️ 定时已关闭，但关机命令未确认', retryOff?.success ? 'success' : 'error');
     } else {
       showStatus(data.enabled ? '✅ 定时已开启' : '✅ 定时已关闭，已发送关机', 'success');
     }
+
     const alarm = await chrome.alarms.get('ac-pwm');
-    updateCountdownDisplay(response.schedule, alarm);
+    updateCountdownDisplay(finalResponse.schedule, alarm);
   } else {
     showStatus('❌ 更新失败', 'error');
   }
@@ -213,6 +219,6 @@ setInterval(refreshStatus, 1000);
 const versionInfo = document.getElementById('versionInfo');
 if (versionInfo) {
   const manifest = chrome.runtime.getManifest();
-  versionInfo.textContent = `AC-UST v${manifest.version} · dist`;
+  versionInfo.textContent = `AC-UST v${manifest.version}`;
   document.title = `AC-UST v${manifest.version}`;
 }
