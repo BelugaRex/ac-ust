@@ -536,13 +536,20 @@ async function ensureContentScriptLoaded(tabId) {
     return true;
   } catch (_) {
     // content script 未加载，用 scripting API 强制注入
+    // 关键：content.js 注入 ISOLATED world，page-confirm.js 必须注入 MAIN world
     try {
       await chrome.scripting.executeScript({
         target: { tabId },
-        files: ['content.js', 'page-confirm.js'],
+        files: ['content.js'],
         injectImmediately: true
       });
-      console.log('[AC扩展] scripting.executeScript 兜底注入完成');
+      await chrome.scripting.executeScript({
+        target: { tabId },
+        files: ['page-confirm.js'],
+        world: 'MAIN',
+        injectImmediately: true
+      });
+      console.log('[AC扩展] scripting.executeScript 兜底注入完成 (ISOLATED + MAIN)');
       // 注入后给一点时间初始化
       await sleep(2000);
       return true;

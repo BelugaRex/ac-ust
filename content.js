@@ -132,14 +132,21 @@ async function toggleACSwitch(targetAction) {
 
     const verifiedStatus = await waitForTargetACStatus(needOn, 8000);
     if (verifiedStatus.success) {
-      return {
-        success: true,
-        action: targetAction,
-        confirmed,
-        verified: true,
-        attempts: attempt,
-        status: verifiedStatus.status
-      };
+      // 稳定化二次验证：和主世界一致，等 2.5s 复检防 AntD API 回滚
+      await sleep(2500);
+      const stable = getACStatus();
+      if (stable.isOn === needOn) {
+        return {
+          success: true,
+          action: targetAction,
+          confirmed,
+          verified: true,
+          stable: true,
+          attempts: attempt,
+          status: stable
+        };
+      }
+      console.warn('[AC扩展] 隔离世界状态回滚检测：点击后短暂=' + needOn + '，稳定后=' + stable.isOn);
     }
 
     console.warn(`[AC扩展] 点击后状态未变成 ${targetAction}，准备重试`, verifiedStatus.status);
