@@ -164,6 +164,13 @@
 
   <div class="time-section">
     <h3>📋 PWM 循环设置</h3>
+    <div class="time-row" style="margin-bottom:10px">
+      <label style="cursor:pointer">
+        <input type="checkbox" id="clockModeToggle" style="margin-right:6px">
+        🕐 时钟模式（单数整点开 / 双数整点关）
+      </label>
+    </div>
+    <div id="intervalInputs">
     <div class="time-row">
       <label>🟢 开启分钟</label>
       <input type="number" id="onMinutes" value="30" min="1" step="1">
@@ -172,7 +179,8 @@
       <label>🔴 关闭分钟</label>
       <input type="number" id="offMinutes" value="30" min="1" step="1">
     </div>
-    <div class="hint">点“定时开”会先开启冷气，然后按“开启分钟 / 关闭分钟”持续循环；点“定时关”会停止循环并默认关闭冷气。</div>
+    </div>
+    <div class="hint" id="scheduleHint">点“定时开”会先开启冷气，然后按“开启分钟 / 关闭分钟”持续循环；点“定时关”会停止循环并默认关闭冷气。</div>
   </div>
 
   <div class="btn-row">

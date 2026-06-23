@@ -4,6 +4,9 @@
 
 const onMinutesInput = document.getElementById('onMinutes');
 const offMinutesInput = document.getElementById('offMinutes');
+const clockModeToggle = document.getElementById('clockModeToggle');
+const intervalInputs = document.getElementById('intervalInputs');
+const scheduleHint = document.getElementById('scheduleHint');
 const btnOn = document.getElementById('btnOn');
 const btnOff = document.getElementById('btnOff');
 const statusDiv = document.getElementById('status');
@@ -30,14 +33,39 @@ try {
 
 // ----- 加载已保存的设置 -----
 let currentScheduleEnabled = false;
+let currentClockMode = true;
 
 async function loadSettings() {
   const result = await chrome.storage.local.get('ac_schedule');
   const schedule = result.ac_schedule || {};
   currentScheduleEnabled = !!schedule.enabled;
-  onMinutesInput.value = schedule.onMinutes || 30;
-  offMinutesInput.value = schedule.offMinutes || 30;
+  currentClockMode = schedule.clockMode !== false; // 默认 true（时钟模式）
+  onMinutesInput.value = schedule.onMinutes || 60;
+  offMinutesInput.value = schedule.offMinutes || 60;
+  updateClockModeUI();
 }
+
+function updateClockModeUI() {
+  clockModeToggle.checked = currentClockMode;
+  if (currentClockMode) {
+    intervalInputs.style.display = 'none';
+    onMinutesInput.value = 60;
+    offMinutesInput.value = 60;
+    scheduleHint.textContent = '🕐 时钟模式：单数整点(1/3/5...23)开冷气，双数整点(0/2/4...22)关冷气。点“定时开”立即开始循环。';
+  } else {
+    intervalInputs.style.display = '';
+    scheduleHint.textContent = '点“定时开”会先开启冷气，然后按“开启分钟 / 关闭分钟”持续循环；点“定时关”会停止循环并默认关闭冷气。';
+  }
+}
+
+clockModeToggle.addEventListener('change', () => {
+  currentClockMode = clockModeToggle.checked;
+  updateClockModeUI();
+  if (currentScheduleEnabled) {
+    // 模式切换后如果定时已启用，立即重启
+    updateSchedule(true, true);
+  }
+});
 
 // ----- 从后台拉取当前状态 + 直接读真实 PWM 闹钟 -----
 async function refreshStatus() {
@@ -125,19 +153,31 @@ function updateCountdownDisplay(schedule, alarm) {
     safetynetWarning.style.display = 'none';
   }
 
-  // 计算倒计时 —— 优先用浏览器真实 alarm 的 scheduledTime
+  // 计算倒计时
   let remainingMs = 0;
   if (alarm?.scheduledTime) {
     remainingMs = alarm.scheduledTime - Date.now();
+  } else if (schedule._nextBoundary) {
+    // 时钟模式
+    remainingMs = schedule._nextBoundary - Date.now();
   } else if (schedule.alarmCreatedAt && schedule.alarmDelayMinutes) {
     remainingMs = schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000 - Date.now();
   }
 
   if (remainingMs > 0) {
     const minutes = Math.ceil(remainingMs / 60000);
-    countdownTime.textContent = minutes;
-    countdownLabel.textContent = nextAction === 'on' ? '开启' : '关闭';
-  } else if (alarm?.scheduledTime || (schedule.alarmCreatedAt && schedule.alarmDelayMinutes)) {
+
+    // 时钟模式：显示下次整点时间
+    if (schedule._nextBoundary) {
+      const nextTime = new Date(schedule._nextBoundary);
+      const hh = String(nextTime.getHours()).padStart(2, '0');
+      countdownTime.textContent = `${hh}:00`;
+      countdownLabel.textContent = nextAction === 'on' ? '开启' : '关闭';
+    } else {
+      countdownTime.textContent = minutes;
+      countdownLabel.textContent = nextAction === 'on' ? '开启' : '关闭';
+    }
+  } else if (alarm?.scheduledTime || schedule._nextBoundary || (schedule.alarmCreatedAt && schedule.alarmDelayMinutes)) {
     countdownTime.textContent = '不到 1';
     countdownLabel.textContent = nextAction === 'on' ? '开启' : '关闭';
   } else {
@@ -156,8 +196,9 @@ async function updateSchedule(enabled, restart = false) {
   const data = {
     enabled,
     mode: 'pwm',
-    onMinutes: readPositiveMinutes(onMinutesInput, 30),
-    offMinutes: readPositiveMinutes(offMinutesInput, 30),
+    clockMode: currentClockMode,
+    onMinutes: currentClockMode ? 60 : readPositiveMinutes(onMinutesInput, 30),
+    offMinutes: currentClockMode ? 60 : readPositiveMinutes(offMinutesInput, 30),
     restart
   };
 
@@ -225,7 +266,7 @@ refreshStatus();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.1';
+const APP_VERSION = '0.4.2';
 const versionInfo = document.getElementById('versionInfo');
 if (versionInfo) {
   let displayVersion;
