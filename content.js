@@ -104,7 +104,7 @@ async function toggleACSwitch(targetAction) {
       return true;
     };
     
-    const mainWorldResult = await requestMainWorldToggle(targetAction, 25000);
+    const mainWorldResult = await requestMainWorldToggle(targetAction, 45000);
     if (mainWorldResult?.success) {
       console.log('[AC扩展] 主世界切换成功:', mainWorldResult);
       return mainWorldResult;

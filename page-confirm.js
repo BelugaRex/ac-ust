@@ -69,7 +69,7 @@
 
   async function toggleACInPageWorld(needOn, action) {
     for (let attempt = 1; attempt <= 3; attempt++) {
-      const sw = await waitForACSwitchInPageWorld(10000);
+      const sw = await waitForACSwitchInPageWorld(5000);
       if (!sw) return { success: false, error: '主世界等待 AC 开关超时' };
 
       const before = getACStatusInPageWorld();
@@ -83,7 +83,7 @@
       console.log('[AC扩展] 主世界已点击 AC 开关');
 
       const confirmed = await clickConfirmDialogInPageWorld(5000);
-      const verified = await waitForTargetStatusInPageWorld(needOn, 9000);
+      const verified = await waitForTargetStatusInPageWorld(needOn, 6000);
       if (verified.success) {
         // 稳定化二次验证：AntD 可能在 API 失败后回滚状态。
         // 等 2 秒后复检，若已回滚则当作本次尝试失败，继续下一轮。
