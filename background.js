@@ -86,8 +86,8 @@ async function watchdogCheck() {
   await ensurePulseAlarm();
   const alarm = await chrome.alarms.get('ac-pwm');
   if (!alarm) {
-    console.warn('[AC扩展] 看门狗：PWM 闹钟缺失，正在重建...');
-    await repairScheduleClock();
+    console.warn('[AC扩展] 看门狗：PWM 闹钟缺失，补执行当前整点动作');
+    try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
   } else if (alarm.scheduledTime <= Date.now() - 60000) {
     console.warn('[AC扩展] 看门狗：PWM 闹钟已过期，触发执行...');
     try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
@@ -101,12 +101,12 @@ async function pwmPulseCheck() {
   await ensurePulseAlarm();
   await updateBadge();
 
-  // 时钟模式：检查闹钟是否还在
+  // 时钟模式：检查闹钟是否还在，若已过期则补执行被跳过的动作
   if (isClockMode()) {
     const alarm = await chrome.alarms.get('ac-pwm');
     if (!alarm || alarm.scheduledTime <= Date.now() - 60000) {
-      console.warn('[AC扩展] PWM 心跳：时钟模式闹钟缺失/过期，重建');
-      await repairScheduleClock();
+      console.warn('[AC扩展] PWM 心跳：时钟模式闹钟缺失/过期，补执行当前整点动作');
+      await runPwmStep();
     }
     return;
   }
@@ -656,8 +656,8 @@ async function ensureScheduleClock() {
     if (existingAlarm?.scheduledTime && existingAlarm.scheduledTime > Date.now()) {
       return;
     }
-    // 闹钟缺失或已过期 → 重建
-    await repairScheduleClock();
+    // 闹钟缺失或已过期 → 补执行当前整点动作
+    await runPwmStep();
     return;
   }
 
