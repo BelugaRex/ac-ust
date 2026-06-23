@@ -63,24 +63,35 @@ async function ensurePulseAlarm() {
   }
 }
 
-// ----- 初始化就绪信号（防止消息处理器在 init 完成前执行）-----
-let initResolve;
-const initReady = new Promise(resolve => { initResolve = resolve; });
+// ----- 官方推荐：setInterval heartbeat — 每 20s 写 storage 重置 SW 空闲计时器 -----
+// Chrome 官方文档明确使用 setInterval + chrome.storage.local.set 作为保活心跳。
+// chrome.storage.local.set 是扩展 API 调用，每次调用都会重置 SW 的 30 秒空闲超时。
+// setInterval 在 SW 存活期间可靠；SW 被杀死后由 alarms 唤醒并重建。
+let heartbeatInterval = null;
 
-// ----- 保活：官方 alarm 驱动 heartbeat (每20s) + Offscreen Document 双重保险 -----
-// 注意：MV3 Service Worker 中 setInterval 不可靠，必须用 chrome.alarms 代替。
 async function runHeartbeat() {
   try {
     await chrome.storage.local.set({ '__heartbeat': Date.now() });
   } catch (_) { /* ignore */ }
 }
 
-async function ensureHeartbeatAlarm() {
-  const existing = await chrome.alarms.get('ac-heartbeat');
-  if (!existing) {
-    await createAlarm('ac-heartbeat', { delayInMinutes: 0.5 });
+function startHeartbeat() {
+  if (heartbeatInterval) return;
+  runHeartbeat();
+  heartbeatInterval = setInterval(runHeartbeat, 20 * 1000);
+}
+
+function stopHeartbeat() {
+  if (heartbeatInterval) {
+    clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
   }
 }
+
+// ----- 初始化就绪信号（防止消息处理器在 init 完成前执行）-----
+let initResolve;
+const initReady = new Promise(resolve => { initResolve = resolve; });
+
 async function ensureOffscreen() {
   try {
     const hasDoc = await chrome.offscreen.hasDocument();
@@ -158,7 +169,7 @@ async function init() {
   try {
     await loadScheduleFromStorage();
     await ensureOffscreen();
-    await ensureHeartbeatAlarm();
+    startHeartbeat();
     await setupAlarms();
     await updateBadge();
     await ensurePulseAlarm();
@@ -498,12 +509,6 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await pwmPulseCheck();
     // delayInMinutes 不支持 periodInMinutes，每次触发后重新创建 30s alarm
     await createAlarm('ac-pwm-pulse', { delayInMinutes: 0.5 });
-    return;
-  }
-
-  if (alarm.name === 'ac-heartbeat') {
-    await runHeartbeat();
-    await createAlarm('ac-heartbeat', { delayInMinutes: 0.5 });
     return;
   }
   
