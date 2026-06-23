@@ -14,8 +14,7 @@ const acDot = document.getElementById('acDot');
 const acStateText = document.getElementById('acStateText');
 const countdownDisplay = document.getElementById('countdownDisplay');
 const idleDisplay = document.getElementById('idleDisplay');
-const countdownTime = document.getElementById('countdownTime');
-const countdownLabel = document.getElementById('countdownLabel');
+const countdownText = document.getElementById('countdownText');
 const safetynetHint = document.getElementById('safetynetHint');
 const safetynetWarning = document.getElementById('safetynetWarning');
 
@@ -154,13 +153,11 @@ function updateCountdownDisplay(schedule, alarm) {
   }
 
   // 计算倒计时
-  // 判断是否为时钟模式（schedule.clockMode 或弹窗本地 currentClockMode）
-  const isClock = schedule.clockMode !== false; // 默认 true
+  const isClock = schedule.clockMode !== false;
 
   let remainingMs = 0;
   let nextBoundary = 0;
   if (isClock) {
-    // 时钟模式：本地计算下一个整点边界，不依赖后台传 _nextBoundary
     const now = new Date();
     now.setMinutes(0, 0, 0);
     now.setHours(now.getHours() + 1);
@@ -176,21 +173,15 @@ function updateCountdownDisplay(schedule, alarm) {
 
   if (remainingMs > 0) {
     if (isClock && nextBoundary) {
-      // 时钟模式：显示下次整点时间
       const hh = String(new Date(nextBoundary).getHours()).padStart(2, '0');
-      countdownTime.textContent = `${hh}:00`;
-      countdownLabel.textContent = nextAction === 'on' ? '开启' : '关闭';
+      const actionText = nextAction === 'on' ? '开启' : '关闭';
+      countdownText.innerHTML = `下次 <strong>${hh}:00</strong> → ${actionText}`;
     } else {
       const minutes = Math.ceil(remainingMs / 60000);
-      countdownTime.textContent = minutes;
-      countdownLabel.textContent = nextAction === 'on' ? '开启' : '关闭';
+      countdownText.innerHTML = `距离自动<span style="color:#64748b">${nextAction === 'on' ? '开启' : '关闭'}</span>还有&nbsp;<strong>${minutes}</strong>&nbsp;分钟`;
     }
-  } else if (alarm?.scheduledTime || nextBoundary || schedule._nextBoundary || (schedule.alarmCreatedAt && schedule.alarmDelayMinutes)) {
-    countdownTime.textContent = '不到 1';
-    countdownLabel.textContent = nextAction === 'on' ? '开启' : '关闭';
   } else {
-    countdownTime.textContent = '--';
-    countdownLabel.textContent = nextAction === 'on' ? '开启' : '关闭';
+    countdownText.innerHTML = `即将自动${nextAction === 'on' ? '开启' : '关闭'}...`;
   }
 }
 
