@@ -161,7 +161,7 @@ async function pwmPulseCheck() {
 async function init() {
   try {
     // 最先确保 badge-tick alarm 存在（PWM 补检 + 角标 + SW 保活）
-    await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await loadScheduleFromStorage();
     await ensureOffscreen();
     startHeartbeat();
@@ -211,7 +211,7 @@ async function setupAlarms(startImmediately = false) {
     schedule.pwmState = getHourAction(nextBoundary);
     schedule.alarmCreatedAt = 0;
     schedule.alarmDelayMinutes = 0;
-    await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
     await updateBadge();
     const nextHour = new Date(nextBoundary).getHours();
@@ -230,7 +230,7 @@ async function setupAlarms(startImmediately = false) {
 
   if (remainingMinutes) {
     await createAlarm('ac-pwm', { delayInMinutes: remainingMinutes });
-    await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
     await updateBadge();
     console.log(`[AC扩展] PWM 闹钟已恢复 - 剩余:${remainingMinutes.toFixed(2)}分钟`);
@@ -245,7 +245,7 @@ async function setupAlarms(startImmediately = false) {
 
   const existingAlarm = await chrome.alarms.get('ac-pwm');
   if (existingAlarm?.scheduledTime && existingAlarm.scheduledTime > now) {
-    await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await updateBadge();
     console.log('[AC扩展] 沿用浏览器中已有的 PWM 闹钟');
     return;
@@ -344,7 +344,7 @@ async function runPwmStep() {
 
       await chrome.alarms.clear('ac-pwm');
       await createAlarm('ac-pwm', { when: nextBoundary });
-      await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+      await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
       await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
       await updateBadge();
 
@@ -398,7 +398,7 @@ async function runPwmStep() {
       console.error('[AC扩展] PWM 闹钟创建失败，重试...');
       await createAlarm('ac-pwm', { delayInMinutes: delay });
     }
-    await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
     await updateBadge();
 
@@ -496,8 +496,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   console.log(`[AC扩展] 闹钟触发: ${alarm.name}`);
 
   if (alarm.name === 'ac-badge-tick') {
-    // badge-tick: 仅更新角标（PWM 补检已合并到 ac-pwm）
     await updateBadge();
+    // delayInMinutes 是一次性的，触发后重新创建
+    if (schedule.enabled) await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     return;
   }
   
@@ -801,7 +802,7 @@ async function repairScheduleClock() {
     schedule.alarmDelayMinutes = 0;
     await chrome.alarms.clear('ac-pwm');
     await createAlarm('ac-pwm', { when: nextBoundary });
-    await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
     await updateBadge();
     const status = await getCurrentACStatus();
@@ -825,7 +826,7 @@ async function repairScheduleClock() {
     console.error('[AC扩展] repair: PWM 闹钟创建失败，重试...');
     await createAlarm('ac-pwm', { delayInMinutes: delay });
   }
-  await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+  await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
   await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
   await updateBadge();
 
@@ -900,7 +901,7 @@ async function toggleNowAndSync(action) {
     schedule.pageTimerRetryAt = 0;
     await chrome.alarms.clear('ac-pwm');
     await createAlarm('ac-pwm', { when: nextBoundary });
-    await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
     await updateBadge();
     if (action === 'on') {
@@ -926,7 +927,7 @@ async function toggleNowAndSync(action) {
     console.error('[AC扩展] toggle: PWM 闹钟创建失败，重试...');
     await createAlarm('ac-pwm', { delayInMinutes: delay });
   }
-  await createAlarm('ac-badge-tick', { periodInMinutes: 1 });
+  await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
   await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
   await updateBadge();
 
