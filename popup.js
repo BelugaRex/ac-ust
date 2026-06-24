@@ -258,7 +258,7 @@ startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.18';
+const APP_VERSION = '0.4.19';
 const versionInfo = document.getElementById('versionInfo');
 if (versionInfo) {
   let displayVersion;
@@ -298,7 +298,9 @@ btnDiagnose.addEventListener('click', async () => {
     add(s.enabled === true, 'schedule.enabled=true (定时已启用)');
     add(!!s.mode, 'mode=' + (s.mode || '?'));
     add(s.clockMode !== undefined, 'clockMode=' + (s.clockMode ? '时钟' : '间隔'));
-    if (s.nextTriggerAt) {
+    if (s.clockMode === false && s.enabled && !s.nextTriggerAt) {
+      add(false, 'storage 绝对触发时间缺失');
+    } else if (s.nextTriggerAt) {
       add(true, 'storage 绝对触发时间: ' + new Date(s.nextTriggerAt).toLocaleTimeString());
     }
     
@@ -306,7 +308,9 @@ btnDiagnose.addEventListener('click', async () => {
     let alarms = await chrome.alarms.getAll();
     const pwmAlarm = ensured?.alarms?.pwm || alarms.find(a => a.name === 'ac-pwm');
     add(!!pwmAlarm, 'ac-pwm 闹钟存在' + (pwmAlarm ? ' (触发: ' + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
-    if (pwmAlarm && s.nextTriggerAt) {
+    if (pwmAlarm && s.clockMode === false && !s.nextTriggerAt) {
+      add(false, 'ac-pwm 与 storage 触发时间同步');
+    } else if (pwmAlarm && s.nextTriggerAt) {
       add(Math.abs(pwmAlarm.scheduledTime - s.nextTriggerAt) < 1500, 'ac-pwm 与 storage 触发时间同步');
     }
 

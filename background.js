@@ -54,6 +54,27 @@ function setNextTriggerAt(nextTriggerAt) {
   schedule.nextTriggerAt = nextTriggerAt > 0 ? nextTriggerAt : 0;
 }
 
+async function syncStoredTriggerFromAlarm(alarm, reason = '从现有 PWM 闹钟同步绝对触发时间') {
+  if (!schedule.enabled || isClockMode()) return false;
+
+  const scheduledTime = alarm?.scheduledTime;
+  if (!scheduledTime || scheduledTime <= Date.now()) return false;
+
+  const legacyEnd = getLegacyAlarmEndMs();
+  const needsNextTriggerSync = schedule.nextTriggerAt !== scheduledTime;
+  const needsLegacySync = !legacyEnd || Math.abs(legacyEnd - scheduledTime) > 1500;
+
+  if (!needsNextTriggerSync && !needsLegacySync) return false;
+
+  const remainingMinutes = Math.max(1, (scheduledTime - Date.now()) / 60000);
+  setNextTriggerAt(scheduledTime);
+  schedule.alarmCreatedAt = Date.now();
+  schedule.alarmDelayMinutes = remainingMinutes;
+  await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
+  console.log(`[AC扩展] ${reason}: ${new Date(scheduledTime).toLocaleTimeString()}`);
+  return true;
+}
+
 async function backfillNextTriggerAt(persist = false) {
   if (schedule.nextTriggerAt) return schedule.nextTriggerAt;
 
@@ -209,8 +230,8 @@ async function pwmPulseCheck() {
   }
 
   // 传统间隔模式
-  const hasClock = schedule.alarmCreatedAt && schedule.alarmDelayMinutes;
-  const dueAt = hasClock ? schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000 : 0;
+  const dueAt = getStoredAlarmEndMs();
+  const hasClock = dueAt > Date.now();
 
   if (!hasClock) {
     console.warn('[AC扩展] PWM 心跳：storage 中无倒计时，重建闹钟');
@@ -316,6 +337,7 @@ async function setupAlarms(startImmediately = false) {
 
   const existingAlarm = await chrome.alarms.get('ac-pwm');
   if (existingAlarm?.scheduledTime && existingAlarm.scheduledTime > now) {
+    await syncStoredTriggerFromAlarm(existingAlarm, '沿用浏览器中已有的 PWM 闹钟');
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await updateBadge();
     console.log('[AC扩展] 沿用浏览器中已有的 PWM 闹钟');
