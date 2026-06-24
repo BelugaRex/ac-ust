@@ -39,8 +39,8 @@ async function loadSettings() {
   const schedule = result.ac_schedule || {};
   currentScheduleEnabled = !!schedule.enabled;
   currentClockMode = schedule.clockMode !== false; // 默认 true（时钟模式）
-  onMinutesInput.value = schedule.onMinutes || 60;
-  offMinutesInput.value = schedule.offMinutes || 60;
+  onMinutesInput.value = schedule.onMinutes ?? 60;
+  offMinutesInput.value = schedule.offMinutes ?? 60;
   updateClockModeUI();
 }
 
@@ -48,8 +48,6 @@ function updateClockModeUI() {
   clockModeToggle.checked = currentClockMode;
   if (currentClockMode) {
     intervalInputs.style.display = 'none';
-    onMinutesInput.value = 60;
-    offMinutesInput.value = 60;
     scheduleHint.textContent = '单数整点(1/3/5...23)开 · 双数整点(0/2/4...22)关。点"定时开"立即开始。';
   } else {
     intervalInputs.style.display = '';
@@ -89,7 +87,7 @@ async function refreshStatus() {
       updateCountdownDisplay(stored.ac_schedule, alarm);
     }
   }
-  }
+}
 
 function updateCountdownDisplay(schedule, alarm) {
   if (!schedule || !schedule.enabled) {
@@ -147,15 +145,18 @@ function updateCountdownDisplay(schedule, alarm) {
   let remainingMs = 0;
   let nextBoundary = 0;
   if (isClock) {
-    const now = new Date();
-    now.setMinutes(0, 0, 0);
-    now.setHours(now.getHours() + 1);
-    nextBoundary = now.getTime();
+    nextBoundary = schedule._nextBoundary || alarm?.scheduledTime || 0;
+    if (!nextBoundary) {
+      const now = new Date();
+      now.setMinutes(0, 0, 0);
+      now.setHours(now.getHours() + 1);
+      nextBoundary = now.getTime();
+    }
     remainingMs = nextBoundary - Date.now();
-  } else if (alarm?.scheduledTime) {
-    remainingMs = alarm.scheduledTime - Date.now();
   } else if (schedule._nextBoundary) {
     remainingMs = schedule._nextBoundary - Date.now();
+  } else if (alarm?.scheduledTime) {
+    remainingMs = alarm.scheduledTime - Date.now();
   } else if (schedule.alarmCreatedAt && schedule.alarmDelayMinutes) {
     remainingMs = schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000 - Date.now();
   }
@@ -248,13 +249,16 @@ function showStatus(msg, type) {
   }, 3000);
 }
 
-// ----- 启动 -----
-loadSettings();
-refreshStatus();
+async function startup() {
+  await loadSettings();
+  await refreshStatus();
+}
+
+startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.12';
+const APP_VERSION = '0.4.15';
 const versionInfo = document.getElementById('versionInfo');
 if (versionInfo) {
   let displayVersion;
@@ -285,6 +289,8 @@ btnDiagnose.addEventListener('click', async () => {
   function add(ok, msg) { lines.push((ok ? '✅' : '❌') + ' ' + msg); }
   
   try {
+    const ensured = await chrome.runtime.sendMessage({ type: 'ensureDiagnostics' });
+
     // 1. 检查 storage
     const stored = await chrome.storage.local.get('ac_schedule');
     const s = stored.ac_schedule || {};
@@ -293,12 +299,30 @@ btnDiagnose.addEventListener('click', async () => {
     add(!!s.mode, 'mode=' + (s.mode || '?'));
     add(s.clockMode !== undefined, 'clockMode=' + (s.clockMode ? '时钟' : '间隔'));
     
-    // 2. 检查闹钟
-    const alarms = await chrome.alarms.getAll();
-    const pwmAlarm = alarms.find(a => a.name === 'ac-pwm');
+    // 2. 检查闹钟 — 优先用后台自愈结果，若仍缺失则弹窗直接补建
+    let alarms = await chrome.alarms.getAll();
+    const pwmAlarm = ensured?.alarms?.pwm || alarms.find(a => a.name === 'ac-pwm');
     add(!!pwmAlarm, 'ac-pwm 闹钟存在' + (pwmAlarm ? ' (触发: ' + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
-    const badgeAlarm = await chrome.alarms.get('ac-badge-tick');
-    add(!!badgeAlarm, 'ac-badge-tick 角标刷新（每分钟）');
+
+    let badgeAlarm = ensured?.alarms?.badge || alarms.find(a => a.name === 'ac-badge-tick') || await chrome.alarms.get('ac-badge-tick');
+    // 兜底：弹窗直接补建（不依赖后台往返）
+    if (!badgeAlarm && s.enabled) {
+      try { await chrome.alarms.clear('ac-badge-tick'); } catch (_) {}
+      await chrome.alarms.create('ac-badge-tick', { delayInMinutes: 1 });
+      await new Promise(r => setTimeout(r, 150)); // 等待 alarm 写入
+      badgeAlarm = await chrome.alarms.get('ac-badge-tick');
+    }
+    add(!!badgeAlarm, 'ac-badge-tick 角标刷新（每分钟）' + (badgeAlarm ? ' (已补建: ' + new Date(badgeAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
+
+    let watchdogAlarm = ensured?.alarms?.watchdog || alarms.find(a => a.name === 'ac-watchdog');
+    if (!watchdogAlarm && s.enabled) {
+      try { await chrome.alarms.clear('ac-watchdog'); } catch (_) {}
+      await chrome.alarms.create('ac-watchdog', { periodInMinutes: 5 });
+      await new Promise(r => setTimeout(r, 150));
+      watchdogAlarm = await chrome.alarms.get('ac-watchdog');
+    }
+    add(!!watchdogAlarm, 'ac-watchdog 看门狗（每5分钟）' + (watchdogAlarm ? ' ✅' : ''));
+
     add(true, 'setInterval heartbeat（storage 每 20s）');
     
     if (pwmAlarm && s.alarmCreatedAt && s.alarmDelayMinutes) {
