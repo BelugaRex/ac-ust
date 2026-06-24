@@ -258,7 +258,7 @@ startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.17';
+const APP_VERSION = '0.4.18';
 const versionInfo = document.getElementById('versionInfo');
 if (versionInfo) {
   let displayVersion;
@@ -298,11 +298,17 @@ btnDiagnose.addEventListener('click', async () => {
     add(s.enabled === true, 'schedule.enabled=true (定时已启用)');
     add(!!s.mode, 'mode=' + (s.mode || '?'));
     add(s.clockMode !== undefined, 'clockMode=' + (s.clockMode ? '时钟' : '间隔'));
+    if (s.nextTriggerAt) {
+      add(true, 'storage 绝对触发时间: ' + new Date(s.nextTriggerAt).toLocaleTimeString());
+    }
     
     // 2. 检查闹钟 — 优先用后台自愈结果，若仍缺失则弹窗直接补建
     let alarms = await chrome.alarms.getAll();
     const pwmAlarm = ensured?.alarms?.pwm || alarms.find(a => a.name === 'ac-pwm');
     add(!!pwmAlarm, 'ac-pwm 闹钟存在' + (pwmAlarm ? ' (触发: ' + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
+    if (pwmAlarm && s.nextTriggerAt) {
+      add(Math.abs(pwmAlarm.scheduledTime - s.nextTriggerAt) < 1500, 'ac-pwm 与 storage 触发时间同步');
+    }
 
     let badgeAlarm = ensured?.alarms?.badge || alarms.find(a => a.name === 'ac-badge-tick') || await chrome.alarms.get('ac-badge-tick');
     // 兜底：弹窗直接补建（不依赖后台往返）
