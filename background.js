@@ -878,8 +878,7 @@ async function repairScheduleClock() {
 }
 
 async function getScheduleSnapshot() {
-  await ensureScheduleClock();
-  await ensureDiagnosticAlarms();
+  await loadScheduleFromStorage();
 
   const alarm = await chrome.alarms.get('ac-pwm');
   let snapshot = { ...schedule };
@@ -900,7 +899,10 @@ async function getScheduleSnapshot() {
   }
 
   // 传统间隔模式
-  const nextBoundary = alarm?.scheduledTime || (storedAlarmEnd > Date.now() ? storedAlarmEnd : 0);
+  const liveAlarmEnd = alarm?.scheduledTime && alarm.scheduledTime > Date.now()
+    ? alarm.scheduledTime
+    : 0;
+  const nextBoundary = liveAlarmEnd || (storedAlarmEnd > Date.now() ? storedAlarmEnd : 0);
   if (schedule.enabled && nextBoundary) {
     const remainingMs = nextBoundary - Date.now();
     if (remainingMs > 0) {
@@ -911,15 +913,9 @@ async function getScheduleSnapshot() {
   }
 
   const status = await getCurrentACStatus();
-  // 自动纠偏：如果实际 AC 状态与 pwmState 推断不符，修正 pwmState
+  // 弹窗轮询只读展示，不在这里改写 storage 或重建闹钟，避免重新打开弹窗时漂移触发时间。
   if (typeof status?.isOn === 'boolean' && schedule.enabled) {
-    const inferredOn = schedule.pwmState !== 'on'; // 下个动作是 on 说明当前是 off
-    if (status.isOn !== inferredOn) {
-      console.warn(`[AC扩展] 状态纠偏：推断=${inferredOn?'ON':'OFF'} 实际=${status.isOn?'ON':'OFF'}，修正 pwmState`);
-      schedule.pwmState = status.isOn ? 'off' : 'on';
-      snapshot.pwmState = schedule.pwmState;
-      await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
-    }
+    snapshot._effectivePwmState = status.isOn ? 'off' : 'on';
   }
   return { ...snapshot, actualStatus: status };
 }

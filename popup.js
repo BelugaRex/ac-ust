@@ -106,12 +106,12 @@ function updateCountdownDisplay(schedule, alarm) {
   idleDisplay.style.display = 'none';
   countdownDisplay.style.display = 'flex';
 
+  const nextAction = schedule._effectivePwmState || schedule._nextAction || schedule.pwmState;
   // pwmState 是下一次闹钟要执行的动作；优先使用页面读取到的真实状态。
-  const inferredACOn = schedule.pwmState !== 'on';
+  const inferredACOn = nextAction !== 'on';
   const currentACOn = typeof schedule.actualStatus?.isOn === 'boolean'
     ? schedule.actualStatus.isOn
     : inferredACOn;
-  const nextAction = schedule.pwmState;             // 'on' 或 'off'
 
   // 更新 AC 状态指示灯
   if (currentACOn) {
@@ -258,7 +258,7 @@ startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.16';
+const APP_VERSION = '0.4.17';
 const versionInfo = document.getElementById('versionInfo');
 if (versionInfo) {
   let displayVersion;
