@@ -39,6 +39,33 @@ function isClockMode() {
   return !!(schedule.clockMode && schedule.mode === 'pwm');
 }
 
+function getStoredAlarmEndMs() {
+  if (!schedule.alarmCreatedAt || !schedule.alarmDelayMinutes) return 0;
+  return schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000;
+}
+
+async function restoreIntervalAlarmFromStorage(reason = '按 storage 剩余时间恢复 PWM 闹钟') {
+  if (!schedule.enabled || isClockMode()) return false;
+
+  const dueAt = getStoredAlarmEndMs();
+  if (!dueAt || dueAt <= Date.now()) return false;
+
+  const remainingMinutes = Math.max(1, (dueAt - Date.now()) / 60000);
+  await chrome.alarms.clear('ac-pwm');
+  await createAlarm('ac-pwm', { delayInMinutes: remainingMinutes });
+  await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+
+  const restoredAlarm = await chrome.alarms.get('ac-pwm');
+  if (!restoredAlarm?.scheduledTime) {
+    console.error('[AC扩展] restoreIntervalAlarmFromStorage 失败：ac-pwm 未成功恢复');
+    return false;
+  }
+
+  await updateBadge();
+  console.log(`[AC扩展] ${reason}，剩余 ${remainingMinutes.toFixed(2)} 分钟`);
+  return true;
+}
+
 async function createAlarm(name, info) {
   try {
     const { persistAcrossSessions, ...safeInfo } = info || {};
@@ -110,9 +137,13 @@ async function watchdogCheck() {
   if (!schedule.enabled) return;
   const alarm = await chrome.alarms.get('ac-pwm');
   if (!alarm) {
-    console.warn('[AC扩展] 看门狗：PWM 闹钟缺失，补执行当前整点动作');
+    const restored = await restoreIntervalAlarmFromStorage('看门狗：PWM 闹钟缺失，已按剩余时间补恢复');
+    if (restored) return;
+    console.warn('[AC扩展] 看门狗：PWM 闹钟缺失，补执行当前阶段动作');
     try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
   } else if (alarm.scheduledTime <= Date.now() - 60000) {
+    const restored = await restoreIntervalAlarmFromStorage('看门狗：PWM 闹钟过期，已按剩余时间补恢复');
+    if (restored) return;
     console.warn('[AC扩展] 看门狗：PWM 闹钟已过期，触发执行...');
     try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
   }
@@ -229,12 +260,8 @@ async function setupAlarms(startImmediately = false) {
     : null;
 
   if (remainingMinutes) {
-    await createAlarm('ac-pwm', { delayInMinutes: remainingMinutes });
-    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-    await chrome.storage.local.set({ [STORAGE_KEY]: schedule });
-    await updateBadge();
-    console.log(`[AC扩展] PWM 闹钟已恢复 - 剩余:${remainingMinutes.toFixed(2)}分钟`);
-    return;
+    const restored = await restoreIntervalAlarmFromStorage('PWM 闹钟已恢复');
+    if (restored) return;
   }
 
   if (existingEnd && existingEnd <= now) {
@@ -790,8 +817,11 @@ async function ensureScheduleClock() {
     return;
   }
 
-  const hasClock = schedule.alarmCreatedAt && schedule.alarmDelayMinutes;
-  const alarmEnd = hasClock ? schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000 : 0;
+  const restored = await restoreIntervalAlarmFromStorage('PWM 主闹钟缺失，已按剩余时间补建');
+  if (restored) return;
+
+  const alarmEnd = getStoredAlarmEndMs();
+  const hasClock = !!alarmEnd;
 
   if (alarmEnd > Date.now()) return;
 
@@ -853,6 +883,7 @@ async function getScheduleSnapshot() {
 
   const alarm = await chrome.alarms.get('ac-pwm');
   let snapshot = { ...schedule };
+  const storedAlarmEnd = getStoredAlarmEndMs();
 
   // 时钟模式：用整点边界时间
   if (isClockMode()) {
@@ -869,10 +900,11 @@ async function getScheduleSnapshot() {
   }
 
   // 传统间隔模式
-  if (schedule.enabled && alarm?.scheduledTime) {
-    const remainingMs = alarm.scheduledTime - Date.now();
+  const nextBoundary = alarm?.scheduledTime || (storedAlarmEnd > Date.now() ? storedAlarmEnd : 0);
+  if (schedule.enabled && nextBoundary) {
+    const remainingMs = nextBoundary - Date.now();
     if (remainingMs > 0) {
-      snapshot._nextBoundary = alarm.scheduledTime;
+      snapshot._nextBoundary = nextBoundary;
       snapshot.alarmCreatedAt = Date.now();
       snapshot.alarmDelayMinutes = remainingMs / 60000;
     }
