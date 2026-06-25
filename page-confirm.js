@@ -48,6 +48,16 @@
     }));
   });
 
+  window.addEventListener('__AC_EXTENSION_GET_STATUS__', (event) => {
+    const { requestId } = event.detail || {};
+    if (!requestId) return;
+
+    const result = getACStatusInPageWorld();
+    window.dispatchEvent(new CustomEvent('__AC_EXTENSION_GET_STATUS_RESULT__', {
+      detail: { requestId, ...result }
+    }));
+  });
+
   function getACStatusInPageWorld() {
     const sw = findACSwitchInPageWorld();
     if (!sw) return { isOn: null, error: '主世界未找到 AC 开关' };

@@ -12,7 +12,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true; // 异步响应
   }
   if (msg.action === 'status') {
-    sendResponse(getACStatus());
+    getAuthoritativeACStatus().then(result => sendResponse(result));
+    return true;
   }
   if (msg.action === 'balance') {
     sendResponse(getBalanceInfo());
@@ -65,6 +66,24 @@ function getACStatus() {
   }
   
   return { isOn: null, error: '未找到 AC 开关元素' };
+}
+
+async function getAuthoritativeACStatus() {
+  const mainWorldStatus = await requestMainWorldStatus(3000);
+  if (typeof mainWorldStatus?.isOn === 'boolean') {
+    return { ...mainWorldStatus, via: 'main-world' };
+  }
+
+  const isolatedStatus = getACStatus();
+  if (typeof isolatedStatus?.isOn === 'boolean') {
+    return mainWorldStatus?.error
+      ? { ...isolatedStatus, fallbackError: mainWorldStatus.error, via: 'isolated-fallback' }
+      : isolatedStatus;
+  }
+
+  return mainWorldStatus?.error
+    ? { ...isolatedStatus, fallbackError: mainWorldStatus.error }
+    : isolatedStatus;
 }
 
 // ----- 切换 AC 开关 -----
@@ -192,6 +211,38 @@ async function requestMainWorldToggle(targetAction, timeoutMs) {
     }));
 
     setTimeout(() => finish(null), timeoutMs);
+  });
+}
+
+async function requestMainWorldStatus(timeoutMs) {
+  return new Promise((resolve) => {
+    const requestId = `ac-status-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    let done = false;
+
+    const cleanup = () => {
+      window.removeEventListener('__AC_EXTENSION_GET_STATUS_RESULT__', onResult);
+    };
+
+    const finish = (result) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      resolve(result);
+    };
+
+    const onResult = (event) => {
+      const detail = event.detail || {};
+      if (detail.requestId !== requestId) return;
+      const { requestId: _requestId, ...result } = detail;
+      finish(result);
+    };
+
+    window.addEventListener('__AC_EXTENSION_GET_STATUS_RESULT__', onResult);
+    window.dispatchEvent(new CustomEvent('__AC_EXTENSION_GET_STATUS__', {
+      detail: { requestId }
+    }));
+
+    setTimeout(() => finish({ isOn: null, error: '主世界状态读取超时' }), timeoutMs);
   });
 }
 

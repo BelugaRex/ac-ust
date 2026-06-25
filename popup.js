@@ -258,7 +258,7 @@ startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.19';
+const APP_VERSION = '0.4.26';
 const versionInfo = document.getElementById('versionInfo');
 if (versionInfo) {
   let displayVersion;
@@ -290,28 +290,36 @@ btnDiagnose.addEventListener('click', async () => {
   
   try {
     const ensured = await chrome.runtime.sendMessage({ type: 'ensureDiagnostics' });
+    const bg = await chrome.runtime.sendMessage({ type: 'getSchedule' });
 
-    // 1. 检查 storage
+    // 1. 检查 storage / 后台权威快照
     const stored = await chrome.storage.local.get('ac_schedule');
-    const s = stored.ac_schedule || {};
-    add(!!s, 'storage 可读写');
+    const storedSchedule = stored.ac_schedule || {};
+    const bgSchedule = bg?.success === false && bg?.schedule
+      ? bg.schedule
+      : (bg || {});
+    const s = { ...storedSchedule, ...(ensured?.schedule || {}), ...bgSchedule };
+    const effectiveNextTriggerAt = s.nextTriggerAt || 0;
+
+    add(!!storedSchedule, 'storage 可读写');
     add(s.enabled === true, 'schedule.enabled=true (定时已启用)');
     add(!!s.mode, 'mode=' + (s.mode || '?'));
     add(s.clockMode !== undefined, 'clockMode=' + (s.clockMode ? '时钟' : '间隔'));
-    if (s.clockMode === false && s.enabled && !s.nextTriggerAt) {
+    if (s.clockMode === false && s.enabled && !effectiveNextTriggerAt) {
       add(false, 'storage 绝对触发时间缺失');
-    } else if (s.nextTriggerAt) {
-      add(true, 'storage 绝对触发时间: ' + new Date(s.nextTriggerAt).toLocaleTimeString());
+    } else if (effectiveNextTriggerAt) {
+      const repairedLabel = storedSchedule.nextTriggerAt === effectiveNextTriggerAt ? '' : ' (后台已回写)';
+      add(true, 'storage 绝对触发时间: ' + new Date(effectiveNextTriggerAt).toLocaleTimeString() + repairedLabel);
     }
-    
+
     // 2. 检查闹钟 — 优先用后台自愈结果，若仍缺失则弹窗直接补建
     let alarms = await chrome.alarms.getAll();
     const pwmAlarm = ensured?.alarms?.pwm || alarms.find(a => a.name === 'ac-pwm');
     add(!!pwmAlarm, 'ac-pwm 闹钟存在' + (pwmAlarm ? ' (触发: ' + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
-    if (pwmAlarm && s.clockMode === false && !s.nextTriggerAt) {
+    if (pwmAlarm && s.clockMode === false && !effectiveNextTriggerAt) {
       add(false, 'ac-pwm 与 storage 触发时间同步');
-    } else if (pwmAlarm && s.nextTriggerAt) {
-      add(Math.abs(pwmAlarm.scheduledTime - s.nextTriggerAt) < 1500, 'ac-pwm 与 storage 触发时间同步');
+    } else if (pwmAlarm && effectiveNextTriggerAt) {
+      add(Math.abs(pwmAlarm.scheduledTime - effectiveNextTriggerAt) < 1500, 'ac-pwm 与 storage 触发时间同步');
     }
 
     let badgeAlarm = ensured?.alarms?.badge || alarms.find(a => a.name === 'ac-badge-tick') || await chrome.alarms.get('ac-badge-tick');
@@ -334,13 +342,13 @@ btnDiagnose.addEventListener('click', async () => {
     add(!!watchdogAlarm, 'ac-watchdog 看门狗（每5分钟）' + (watchdogAlarm ? ' ✅' : ''));
 
     add(true, 'setInterval heartbeat（storage 每 20s）');
-    
+
     if (pwmAlarm && s.alarmCreatedAt && s.alarmDelayMinutes) {
       const dueAt = s.alarmCreatedAt + s.alarmDelayMinutes * 60000;
       const overdue = dueAt <= Date.now();
       add(!overdue, '闹钟未过期 (到期: ' + new Date(dueAt).toLocaleTimeString() + ')');
     }
-    
+
     // 3. 检查 AC 页面
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
     add(tabs.length > 0, 'AC页面已打开 (' + tabs.length + '个标签页)');
@@ -354,10 +362,9 @@ btnDiagnose.addEventListener('click', async () => {
         add(false, 'content script 无响应: ' + (e.message||'').slice(0,60));
       }
     }
-    
+
     // 4. 后台状态
     try {
-      const bg = await chrome.runtime.sendMessage({ type: 'getSchedule' });
       add(!!bg, '后台 SW 响应正常');
       add(bg.clockMode !== undefined, 'clockMode 同步: ' + (bg.clockMode ? '时钟' : '间隔'));
     } catch (e) {
