@@ -83,14 +83,33 @@ function getLiveAlarmEndMs(alarm) {
 async function backfillNextTriggerAt(persist = false) {
   if (schedule.nextTriggerAt) return schedule.nextTriggerAt;
 
+  // 第一层：用已保存的阶段时间重算
   const legacyEnd = getLegacyAlarmEndMs();
-  if (!legacyEnd) return 0;
-
-  schedule.nextTriggerAt = legacyEnd;
-  if (persist) {
-    await persistSchedule('backfillNextTriggerAt', { syncFromLiveAlarm: false });
+  if (legacyEnd) {
+    schedule.nextTriggerAt = legacyEnd;
+    if (persist) {
+      await persistSchedule('backfillNextTriggerAt', { syncFromLiveAlarm: false });
+    }
+    return legacyEnd;
   }
-  return legacyEnd;
+
+  // 第二层：legacy 字段也丢了，但 live alarm 还在 → 从 alarm 恢复
+  if (schedule.enabled && !isClockMode()) {
+    const liveAlarm = await chrome.alarms.get('ac-pwm');
+    const liveDueAt = getLiveAlarmEndMs(liveAlarm);
+    if (liveDueAt) {
+      schedule.nextTriggerAt = liveDueAt;
+      schedule.alarmCreatedAt = Date.now();
+      schedule.alarmDelayMinutes = Math.max(1, (liveDueAt - Date.now()) / 60000);
+      if (persist) {
+        await persistSchedule('backfillNextTriggerAt-fromLiveAlarm', { syncFromLiveAlarm: false });
+      }
+      console.log(`[AC扩展] backfillNextTriggerAt: 从 live alarm 恢复 nextTriggerAt=${new Date(liveDueAt).toLocaleTimeString()}`);
+      return liveDueAt;
+    }
+  }
+
+  return 0;
 }
 
 // 从已过期的闹钟时间推进到下一个未来周期边界。
