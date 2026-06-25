@@ -166,6 +166,21 @@ async function runDiagnosticSelfHeal(chrome, opts = {}) {
     add(Math.abs(pwmAlarm.scheduledTime - effectiveNextTriggerAt) < 1500, 'ac-pwm 与 storage 触发时间同步' + (selfHealed ? ' (popup 已自愈)' : ''));
   }
 
+  // SW 状态查询(与 popup.js 同步:SW 不响应 + selfHealed 时显示绿灯)
+  let sw = null;
+  try {
+    sw = await chrome.runtime.sendMessage({ type: 'getSwStatus' });
+  } catch (_) {}
+  if (sw && sw.success === true) {
+    add(true, 'SW init 已完成 (getSwStatus 响应正常)');
+  } else if (selfHealed) {
+    add(true, 'popup 已接管 storage 自愈(SW 详细状态不可用,功能正常)');
+  } else if (!sw) {
+    add(false, 'getSwStatus 无响应且 popup 未自愈');
+  } else {
+    add(false, 'getSwStatus 后台失败');
+  }
+
   return { lines, selfHealed, storage_after: (await chrome.storage.local.get('ac_schedule')).ac_schedule };
 }
 
@@ -249,6 +264,33 @@ async function runTests() {
   for (const line of result3.lines) console.log(line);
   console.log('');
   assertPass(result3.selfHealed === false, '时钟模式不触发自愈');
+
+  // 用例 4:SW 不响应 getSwStatus(模拟跑旧代码)+ popup 自愈成功 → getSwStatus 那行应显示绿灯
+  console.log('\n\n=== 用例 4:SW 不响应 getSwStatus + popup 自愈成功 ===\n');
+  const initialSchedule4 = { ...initialSchedule, nextTriggerAt: staleTime };
+  const mock4 = createMockChrome(initialSchedule4, pwmTime);
+  // 让 SW 不响应 getSwStatus(模拟旧代码无此 handler)
+  mock4.chrome.runtime.sendMessage = async (msg) => {
+    if (msg.type === 'getSwStatus') return undefined;
+    if (msg.type === 'ensureDiagnostics') {
+      return mock4.chrome.runtime['_ensureDiagnosticsResult']?.() || {
+        success: true, enabled: true, repaired: false,
+        schedule: { ...mock4._storage.ac_schedule },
+        alarms: { badge: null, watchdog: null, pwm: { scheduledTime: pwmTime } }
+      };
+    }
+    if (msg.type === 'getSchedule') return { ...mock4._storage.ac_schedule };
+    return undefined;
+  };
+  const result4 = await runDiagnosticSelfHeal(mock4.chrome);
+  for (const line of result4.lines) console.log(line);
+  console.log('');
+  // 自愈应触发,getSwStatus 那行应该是绿灯(popup 已接管)
+  assertPass(result4.selfHealed === true, '用例 4 自愈触发');
+  assertPass(!result4.lines.some(l => l.startsWith('❌')),
+    '用例 4 无任何红灯(SW 不响应但 popup 自愈,功能不受影响)');
+  assertPass(result4.lines.some(l => l.includes('popup 已接管 storage 自愈')),
+    '用例 4 显示 "popup 已接管 storage 自愈" 绿灯');
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;

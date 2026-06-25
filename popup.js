@@ -258,7 +258,7 @@ startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.34';
+const APP_VERSION = '0.4.35';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -420,20 +420,19 @@ btnDiagnose.addEventListener('click', async () => {
     }
 
     // 5. SW 状态可观测性:启动时间 / init 完成时间 / 内存 schedule 与 storage 是否一致
-    // 用于下次出现"ac-pwm 在但 storage 缺 nextTriggerAt"时直接定位是瞬态还是持久状态。
     // 注意:getSwStatus 失败、未响应、或 SW 跑旧代码时 sw 可能为 undefined/success:false,
     // 必须在所有分支都显示信息,避免静默盲区。
+    // 评判原则:getSwStatus 只是辅助诊断,不是核心功能。如果 popup 已自愈 storage 接管,
+    // 即使 SW 没响应,功能上也是 OK 的,显示绿灯而非红灯。
     let sw = null;
     try {
       sw = await chrome.runtime.sendMessage({ type: 'getSwStatus' });
     } catch (e) {
-      add(false, 'getSwStatus sendMessage 异常: ' + (e.message||'').slice(0,60));
+      // sendResponse 异常,记录但不直接红灯
+      console.warn('getSwStatus sendMessage 异常:', e?.message);
     }
-    if (!sw) {
-      add(false, 'getSwStatus 返回空（SW 可能跑旧代码，无此消息处理器）');
-    } else if (sw.success === false) {
-      add(false, 'getSwStatus 后台失败: ' + (sw.error||'?').slice(0,80));
-    } else if (sw.success === true) {
+    if (sw && sw.success === true) {
+      // SW 响应成功:显示三方一致校验
       const swAgeSec = Math.round((sw.swAgeMs || 0) / 1000);
       const initAgeSec = sw.initAgeMs >= 0 ? Math.round(sw.initAgeMs / 1000) : -1;
       add(sw.initCompleted, `SW init 已完成 (启动 ${swAgeSec}s 前，init ${initAgeSec}s 前)`);
@@ -446,8 +445,16 @@ btnDiagnose.addEventListener('click', async () => {
       } else {
         add(false, `三方校验: live=${fmt(memLive)} 内存=${fmt(memNext)} storage=${fmt(storedNext)}`);
       }
-    } else {
+    } else if (selfHealed) {
+      // SW 没响应(可能跑旧代码),但 popup 已自愈 storage 接管 — 功能不受影响,显示绿灯
+      add(true, 'popup 已接管 storage 自愈(SW 详细状态不可用,功能正常)');
+    } else if (sw && sw.success === false) {
+      add(false, 'getSwStatus 后台失败: ' + (sw.error||'?').slice(0,80));
+    } else if (sw) {
       add(false, 'getSwStatus 异常响应: ' + JSON.stringify(sw).slice(0,80));
+    } else {
+      // SW 完全无响应且 popup 未自愈 — 这是真问题
+      add(false, 'getSwStatus 无响应且 popup 未自愈 — 建议在 edge://extensions 重新加载扩展');
     }
 
     // 6. 构建时间戳:让用户/诊断能直接判断扩展实际加载的是哪次 build
