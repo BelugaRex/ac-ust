@@ -252,6 +252,10 @@ function stopHeartbeat() {
 let initResolve;
 const initReady = new Promise(resolve => { initResolve = resolve; });
 
+// SW 状态可观测性:记录启动与 init 完成时间,供诊断面板使用
+let swStartupTime = Date.now();
+let initCompletedAt = 0;
+
 async function ensureOffscreen() {
   try {
     const hasDoc = await chrome.offscreen.hasDocument();
@@ -362,6 +366,23 @@ async function init() {
     if (schedule.enabled && schedule.pageTimerRetryAt && schedule.pageTimerRetryAt > Date.now()) {
       await createAlarm('ac-page-timer-retry', { when: schedule.pageTimerRetryAt });
     }
+    // 终极防线：init 完成时，间隔模式下强制从 live ac-pwm 同步 nextTriggerAt 到 storage。
+    // 防止 SW 跑早期版本代码、setupAlarms 走重建路径、或某条 persist 漏 sync 时出现
+    // "活闹钟在但 storage 缺绝对触发时间" 的红灯。init 末尾是端到端最后一道闭环。
+    if (schedule.enabled && !isClockMode()) {
+      const finalLiveAlarm = await chrome.alarms.get('ac-pwm');
+      const finalLiveDueAt = getLiveAlarmEndMs(finalLiveAlarm);
+      if (finalLiveDueAt && (!schedule.nextTriggerAt || Math.abs(schedule.nextTriggerAt - finalLiveDueAt) > 1500)) {
+        setNextTriggerAt(finalLiveDueAt);
+        schedule.alarmCreatedAt = Date.now();
+        schedule.alarmDelayMinutes = Math.max(1, (finalLiveDueAt - Date.now()) / 60000);
+        await persistSchedule('init-finalSync', { syncFromLiveAlarm: false });
+        console.log(`[AC扩展] init 末尾: 已从 live alarm 强制同步 nextTriggerAt=${new Date(finalLiveDueAt).toLocaleTimeString()}`);
+      }
+    }
+    // init 完成:打开 SW 启动时间跟踪
+    swStartupTime = Date.now();
+    initCompletedAt = swStartupTime;
     console.log('[AC扩展] 初始化完成', schedule);
   } catch (e) {
     console.error('[AC扩展] 初始化失败，但仍允许消息处理:', e);
@@ -1341,6 +1362,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'ensureDiagnostics') {
       const result = await ensureDiagnosticAlarms();
       sendResponse(result);
+      return;
+    }
+    if (msg.type === 'getSwStatus') {
+      const now = Date.now();
+      const liveAlarm = await chrome.alarms.get('ac-pwm');
+      sendResponse({
+        success: true,
+        swStartupTime,
+        initCompletedAt,
+        swAgeMs: now - swStartupTime,
+        initCompleted: !!initCompletedAt,
+        initAgeMs: initCompletedAt ? (now - initCompletedAt) : -1,
+        memorySchedule: { ...schedule },
+        liveAlarmScheduledTime: liveAlarm?.scheduledTime || 0
+      });
       return;
     }
     if (msg.type === 'getBalance') {
