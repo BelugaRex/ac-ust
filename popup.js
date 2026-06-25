@@ -258,7 +258,7 @@ startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.30';
+const APP_VERSION = '0.4.31';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -325,10 +325,10 @@ btnDiagnose.addEventListener('click', async () => {
         await chrome.storage.local.set({ ac_schedule: repairedSchedule });
         // 等待 storage 写入完成
         await new Promise(r => setTimeout(r, 200));
-        // 重新读 storage 与后台快照,基于修复后的状态做后续判断
-        const reStored = await chrome.storage.local.get('ac_schedule');
-        const reEnsured = await chrome.runtime.sendMessage({ type: 'ensureDiagnostics' }).catch(() => ensured);
-        s = { ...(reStored.ac_schedule || {}), ...(reEnsured?.schedule || s), ...bgSchedule };
+        // 自愈成功后,直接使用 repairedSchedule 作为 s。
+        // 不能再合并旧的 ensured/bgSchedule——它们携带诊断开始时的快照(nextTriggerAt=0),
+        // 在合并时会把刚修复的值覆盖回 0(合并顺序 bug,Node 测试 verify-fix.mjs 发现)。
+        s = { ...repairedSchedule };
         effectiveNextTriggerAt = s.nextTriggerAt || 0;
         selfHealed = true;
       } catch (e) {
