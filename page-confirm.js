@@ -141,10 +141,26 @@
     element.scrollIntoView?.({ block: 'center', inline: 'center' });
     element.focus?.();
 
-    // Ant Design 的 switch 是 React button，真正切换在 click handler 上。
-    // 只调用一次 .click()，避免“事件序列 + .click()”造成双切。
+    // Ant Design 的 switch 是 React button,真正切换在 click handler 上。
+    // 先 .click();某些场景下 .click() 不被 React 识别为 trusted,补一轮 pointer/mouse 序列。
+    // 用户报告"到时间不关空调"的根因之一:.click() 在某些 React 状态下静默失败,
+    // 补 dispatchEvent + keyboard Enter/Space 三重兜底。
     if (element.matches?.('button.ant-switch[role="switch"]')) {
-      element.click?.();
+      try { element.click?.(); } catch (_) {}
+      const options = { bubbles: true, cancelable: true, view: window, composed: true, button: 0 };
+      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+        try {
+          const event = type.startsWith('pointer')
+            ? new PointerEvent(type, options)
+            : new MouseEvent(type, options);
+          element.dispatchEvent(event);
+        } catch (_) {}
+      }
+      // keyboard 兜底:React 通常监听 keydown Space/Enter 切换 switch
+      try {
+        element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: ' ', code: 'Space', keyCode: 32 }));
+        element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13 }));
+      } catch (_) {}
       return;
     }
 

@@ -640,6 +640,22 @@ async function runPwmStep() {
 
     // 执行开关并独立验证（最多重试 3 次，防 AntD 回滚假成功）
     for (let retry = 0; retry < 3 && !toggleOk; retry++) {
+      // 第 2 次起强制 reload AC tab:toggleAC 内部 reload 只在 sendMessage 异常时触发,
+      // 若 content.js 返回假成功(点击了但 React 状态没变),永远不会 reload,陷入软重试死循环。
+      // 用户报告"到时间不关空调"的根因之一就是这个 — reload 后 React 状态会重置。
+      if (retry > 0) {
+        try {
+          const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
+          if (tabs[0]?.id) {
+            console.warn(`[AC扩展] PWM 重试 ${retry}/2: 强制 reload AC tab 清空 React 卡住状态`);
+            await chrome.tabs.reload(tabs[0].id);
+            await waitForTabReady(tabs[0].id, 30000);
+            await ensureContentScriptLoaded(tabs[0].id);
+          }
+        } catch (e) {
+          console.warn('[AC扩展] PWM 重试 reload 失败,继续 toggleAC:', e?.message);
+        }
+      }
       try {
         const toggleResult = await toggleAC(targetAction);
         if (!toggleResult?.success) {
