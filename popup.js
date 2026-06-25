@@ -258,7 +258,7 @@ startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.31';
+const APP_VERSION = '0.4.32';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -404,6 +404,13 @@ btnDiagnose.addEventListener('click', async () => {
     try {
       add(!!bg, '后台 SW 响应正常');
       add(bg.clockMode !== undefined, 'clockMode 同步: ' + (bg.clockMode ? '时钟' : '间隔'));
+      // PWM 失败提示:runPwmStep 验证失败时会写 pageTimerError。
+      // 主动展示在诊断面板,方便定位"到时间没关/没开"的根因。
+      if (s.pageTimerError) {
+        add(false, 'PWM 上次失败: ' + String(s.pageTimerError).slice(0, 120));
+      } else {
+        add(true, 'PWM 无错误状态(pageTimerError 空)');
+      }
     } catch (e) {
       add(false, '后台 SW 无响应');
     }

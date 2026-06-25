@@ -750,7 +750,25 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   console.log(`[AC扩展] 闹钟触发: ${alarm.name}`);
 
   if (alarm.name === 'ac-badge-tick') {
+    // 每分钟刷新角标
     await updateBadge();
+    // 间隔模式下的 storage 一致性校准:PWM 步骤漏写 storage 时,1 分钟内会被这里纠正。
+    // 这样诊断面板看到的 storage.nextTriggerAt 永远不会落后 live ac-pwm 超过 1 分钟。
+    if (schedule.enabled && !isClockMode()) {
+      try {
+        const liveAlarm = await chrome.alarms.get('ac-pwm');
+        const liveDueAt = getLiveAlarmEndMs(liveAlarm);
+        if (liveDueAt && (!schedule.nextTriggerAt || Math.abs(schedule.nextTriggerAt - liveDueAt) > 1500)) {
+          setNextTriggerAt(liveDueAt);
+          schedule.alarmCreatedAt = Date.now();
+          schedule.alarmDelayMinutes = Math.max(1, (liveDueAt - Date.now()) / 60000);
+          await persistSchedule('badge-tick-sync', { syncFromLiveAlarm: false });
+          console.log(`[AC扩展] badge-tick: 已同步 nextTriggerAt ← live alarm (${new Date(liveDueAt).toLocaleTimeString()})`);
+        }
+      } catch (e) {
+        console.warn('[AC扩展] badge-tick 同步失败:', e?.message);
+      }
+    }
     // delayInMinutes 是一次性的，触发后重新创建
     if (schedule.enabled) await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     return;
@@ -1294,6 +1312,27 @@ async function ensureDiagnosticAlarms() {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  // getSwStatus 是纯只读诊断接口(swStartupTime / initCompletedAt / schedule / live alarm),
+  // 不依赖 init 完成。放在 await initReady 之前响应,防止 init 卡住时诊断面板拿不到 SW 状态。
+  if (msg.type === 'getSwStatus') {
+    const now = Date.now();
+    chrome.alarms.get('ac-pwm').then((liveAlarm) => {
+      sendResponse({
+        success: true,
+        swStartupTime,
+        initCompletedAt,
+        swAgeMs: now - swStartupTime,
+        initCompleted: !!initCompletedAt,
+        initAgeMs: initCompletedAt ? (now - initCompletedAt) : -1,
+        memorySchedule: { ...schedule },
+        liveAlarmScheduledTime: liveAlarm?.scheduledTime || 0
+      });
+    }).catch((e) => {
+      sendResponse({ success: false, error: e?.message || String(e), swStartupTime, initCompletedAt });
+    });
+    return true;
+  }
+
   (async () => {
     // 等待 init() 完成，防止使用尚未从 storage 加载的默认 schedule
     await initReady;
@@ -1362,21 +1401,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'ensureDiagnostics') {
       const result = await ensureDiagnosticAlarms();
       sendResponse(result);
-      return;
-    }
-    if (msg.type === 'getSwStatus') {
-      const now = Date.now();
-      const liveAlarm = await chrome.alarms.get('ac-pwm');
-      sendResponse({
-        success: true,
-        swStartupTime,
-        initCompletedAt,
-        swAgeMs: now - swStartupTime,
-        initCompleted: !!initCompletedAt,
-        initAgeMs: initCompletedAt ? (now - initCompletedAt) : -1,
-        memorySchedule: { ...schedule },
-        liveAlarmScheduledTime: liveAlarm?.scheduledTime || 0
-      });
       return;
     }
     if (msg.type === 'getBalance') {
