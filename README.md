@@ -63,6 +63,14 @@ ac-ust/
 - Chrome Alarms API
 - Ant Design 开关兼容
 
+## 故障排查
+
+- `onMinutes` / `offMinutes` 是**静态配置**，会像表单值一样持久化保存。
+- `nextTriggerAt` 是**运行时派生值**，表示当前 PWM 阶段的未来切换时刻；它会随着每一轮开/关切换而变化。
+- 如果诊断里出现“`ac-pwm` 闹钟存在，但 storage 绝对触发时间缺失”，通常表示后台在创建/恢复闹钟后，`nextTriggerAt` 没有及时回写到 storage。
+- 当前实现会优先以 live `ac-pwm` 的 `scheduledTime` 纠偏 `nextTriggerAt`，并在读取 AC 状态时优先询问主世界脚本，避免隔离世界把 `ON` 误读成 `OFF`。
+- 如果后续仍复现“alarm 还在但时间丢失”，下一步应把阶段检查点（例如 `alarmCreatedAt`、`alarmDelayMinutes`、`pwmState`）进一步提升为正式真相源，由它们重算 `nextTriggerAt`。
+
 ## License
 
 MIT
