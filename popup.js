@@ -258,7 +258,7 @@ startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.29';
+const APP_VERSION = '0.4.30';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -301,8 +301,40 @@ btnDiagnose.addEventListener('click', async () => {
     const bgSchedule = bg?.success === false && bg?.schedule
       ? bg.schedule
       : (bg || {});
-    const s = { ...storedSchedule, ...(ensured?.schedule || {}), ...bgSchedule };
-    const effectiveNextTriggerAt = s.nextTriggerAt || 0;
+    let s = { ...storedSchedule, ...(ensured?.schedule || {}), ...bgSchedule };
+    let effectiveNextTriggerAt = s.nextTriggerAt || 0;
+
+    // 1.5 自愈:如果 storage.nextTriggerAt=0 但 live ac-pwm 存在(间隔模式 + enabled),
+    // 直接在 popup 侧补写 storage。不依赖 background 是否跑最新代码——这是 popup 主动
+    // 修复路径,确保诊断面板能从根上消除"ac-pwm 在但 storage 缺绝对触发时间"的红灯。
+    let pwmAlarmEarly = await chrome.alarms.get('ac-pwm');
+    let selfHealed = false;
+    if (s.enabled === true
+        && s.clockMode === false
+        && !effectiveNextTriggerAt
+        && pwmAlarmEarly?.scheduledTime
+        && pwmAlarmEarly.scheduledTime > Date.now()) {
+      try {
+        const repairedSchedule = {
+          ...storedSchedule,
+          ...s,
+          nextTriggerAt: pwmAlarmEarly.scheduledTime,
+          alarmCreatedAt: Date.now(),
+          alarmDelayMinutes: Math.max(1, (pwmAlarmEarly.scheduledTime - Date.now()) / 60000)
+        };
+        await chrome.storage.local.set({ ac_schedule: repairedSchedule });
+        // 等待 storage 写入完成
+        await new Promise(r => setTimeout(r, 200));
+        // 重新读 storage 与后台快照,基于修复后的状态做后续判断
+        const reStored = await chrome.storage.local.get('ac_schedule');
+        const reEnsured = await chrome.runtime.sendMessage({ type: 'ensureDiagnostics' }).catch(() => ensured);
+        s = { ...(reStored.ac_schedule || {}), ...(reEnsured?.schedule || s), ...bgSchedule };
+        effectiveNextTriggerAt = s.nextTriggerAt || 0;
+        selfHealed = true;
+      } catch (e) {
+        add(false, 'popup 侧 storage 自愈失败: ' + (e.message||'').slice(0,60));
+      }
+    }
 
     add(!!storedSchedule, 'storage 可读写');
     add(s.enabled === true, 'schedule.enabled=true (定时已启用)');
@@ -311,7 +343,9 @@ btnDiagnose.addEventListener('click', async () => {
     if (s.clockMode === false && s.enabled && !effectiveNextTriggerAt) {
       add(false, 'storage 绝对触发时间缺失');
     } else if (effectiveNextTriggerAt) {
-      const repairedLabel = storedSchedule.nextTriggerAt === effectiveNextTriggerAt ? '' : ' (后台已回写)';
+      const repairedLabel = selfHealed
+        ? ' (popup 已自愈)'
+        : (storedSchedule.nextTriggerAt === effectiveNextTriggerAt ? '' : ' (后台已回写)');
       add(true, 'storage 绝对触发时间: ' + new Date(effectiveNextTriggerAt).toLocaleTimeString() + repairedLabel);
     }
 
@@ -322,7 +356,7 @@ btnDiagnose.addEventListener('click', async () => {
     if (pwmAlarm && s.clockMode === false && !effectiveNextTriggerAt) {
       add(false, 'ac-pwm 与 storage 触发时间同步');
     } else if (pwmAlarm && effectiveNextTriggerAt) {
-      add(Math.abs(pwmAlarm.scheduledTime - effectiveNextTriggerAt) < 1500, 'ac-pwm 与 storage 触发时间同步');
+      add(Math.abs(pwmAlarm.scheduledTime - effectiveNextTriggerAt) < 1500, 'ac-pwm 与 storage 触发时间同步' + (selfHealed ? ' (popup 已自愈)' : ''));
     }
 
     let badgeAlarm = ensured?.alarms?.badge || alarms.find(a => a.name === 'ac-badge-tick') || await chrome.alarms.get('ac-badge-tick');
