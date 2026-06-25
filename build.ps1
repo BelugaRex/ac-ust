@@ -53,12 +53,16 @@ foreach ($file in $FilesToCopy) {
 # Inject version from manifest.json into popup.js
 $manifest = Get-Content (Join-Path $Root "manifest.json") -Raw | ConvertFrom-Json
 $ver = $manifest.version
+# 构建时间戳:精确到秒,用于诊断"扩展实际加载的是哪次 build"
+# 版本号相同(如 0.4.28)无法区分 SW 是否跑最新代码,构建时间戳可以。
+$buildTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 if ($ver) {
   $popupPath = Join-Path $OutputDir "popup.js"
   $popupContent = Get-Content $popupPath -Raw
   $popupContent = $popupContent -replace "const APP_VERSION = '[^']*'", "const APP_VERSION = '$ver'"
+  $popupContent = $popupContent -replace "const BUILD_TIME = '[^']*'", "const BUILD_TIME = '$buildTime'"
   Set-Content $popupPath -Value $popupContent -NoNewline
-  Write-Host "  OK  popup.js (version injected: $ver)"
+  Write-Host "  OK  popup.js (version injected: $ver, build: $buildTime)"
 }
 
 Write-Host ""

@@ -258,7 +258,10 @@ startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.28';
+const APP_VERSION = '0.4.29';
+// BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
+// (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
+const BUILD_TIME = 'dev';
 const versionInfo = document.getElementById('versionInfo');
 if (versionInfo) {
   let displayVersion;
@@ -273,7 +276,7 @@ if (versionInfo) {
   } catch (_) {
     displayVersion = APP_VERSION;
   }
-  versionInfo.textContent = `AC-UST v${displayVersion}`;
+  versionInfo.textContent = `AC-UST v${displayVersion} · ${BUILD_TIME}`;
   document.title = `AC-UST v${displayVersion}`;
 }
 
@@ -373,25 +376,38 @@ btnDiagnose.addEventListener('click', async () => {
 
     // 5. SW 状态可观测性:启动时间 / init 完成时间 / 内存 schedule 与 storage 是否一致
     // 用于下次出现"ac-pwm 在但 storage 缺 nextTriggerAt"时直接定位是瞬态还是持久状态。
+    // 注意:getSwStatus 失败、未响应、或 SW 跑旧代码时 sw 可能为 undefined/success:false,
+    // 必须在所有分支都显示信息,避免静默盲区。
+    let sw = null;
     try {
-      const sw = await chrome.runtime.sendMessage({ type: 'getSwStatus' });
-      if (sw?.success) {
-        const swAgeSec = Math.round((sw.swAgeMs || 0) / 1000);
-        const initAgeSec = sw.initAgeMs >= 0 ? Math.round(sw.initAgeMs / 1000) : -1;
-        add(sw.initCompleted, `SW init 已完成 (启动 ${swAgeSec}s 前，init ${initAgeSec}s 前)`);
-        // 内存 schedule 与 storage 比较
-        const memNext = sw.memorySchedule?.nextTriggerAt || 0;
-        const storedNext = storedSchedule.nextTriggerAt || 0;
-        const memLive = sw.liveAlarmScheduledTime || 0;
-        if (memLive && memNext === memLive && storedNext === memLive) {
-          add(true, '三方一致: live ac-pwm = 内存 = storage = ' + new Date(memLive).toLocaleTimeString());
-        } else {
-          add(false, `三方校验: live=${memLive ? new Date(memLive).toLocaleTimeString() : '∅'} 内存=${memNext ? new Date(memNext).toLocaleTimeString() : '∅'} storage=${storedNext ? new Date(storedNext).toLocaleTimeString() : '∅'}`);
-        }
-      }
+      sw = await chrome.runtime.sendMessage({ type: 'getSwStatus' });
     } catch (e) {
-      add(false, 'SW 状态查询失败: ' + (e.message||'').slice(0,60));
+      add(false, 'getSwStatus sendMessage 异常: ' + (e.message||'').slice(0,60));
     }
+    if (!sw) {
+      add(false, 'getSwStatus 返回空（SW 可能跑旧代码，无此消息处理器）');
+    } else if (sw.success === false) {
+      add(false, 'getSwStatus 后台失败: ' + (sw.error||'?').slice(0,80));
+    } else if (sw.success === true) {
+      const swAgeSec = Math.round((sw.swAgeMs || 0) / 1000);
+      const initAgeSec = sw.initAgeMs >= 0 ? Math.round(sw.initAgeMs / 1000) : -1;
+      add(sw.initCompleted, `SW init 已完成 (启动 ${swAgeSec}s 前，init ${initAgeSec}s 前)`);
+      const memNext = sw.memorySchedule?.nextTriggerAt || 0;
+      const storedNext = storedSchedule.nextTriggerAt || 0;
+      const memLive = sw.liveAlarmScheduledTime || 0;
+      const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';
+      if (memLive && memNext === memLive && storedNext === memLive) {
+        add(true, '三方一致: live ac-pwm = 内存 = storage = ' + fmt(memLive));
+      } else {
+        add(false, `三方校验: live=${fmt(memLive)} 内存=${fmt(memNext)} storage=${fmt(storedNext)}`);
+      }
+    } else {
+      add(false, 'getSwStatus 异常响应: ' + JSON.stringify(sw).slice(0,80));
+    }
+
+    // 6. 构建时间戳:让用户/诊断能直接判断扩展实际加载的是哪次 build
+    //    (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
+    add(true, `BUILD_TIME: ${BUILD_TIME}`);
   } catch (e) {
     lines.push('❌ 诊断异常: ' + (e.message||'').slice(0,80));
   }
