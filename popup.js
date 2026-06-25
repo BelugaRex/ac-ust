@@ -258,7 +258,7 @@ startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.33';
+const APP_VERSION = '0.4.34';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -304,16 +304,20 @@ btnDiagnose.addEventListener('click', async () => {
     let s = { ...storedSchedule, ...(ensured?.schedule || {}), ...bgSchedule };
     let effectiveNextTriggerAt = s.nextTriggerAt || 0;
 
-    // 1.5 自愈:如果 storage.nextTriggerAt=0 但 live ac-pwm 存在(间隔模式 + enabled),
+    // 1.5 自愈:storage.nextTriggerAt 缺失或已过期,但 live ac-pwm 在未来(间隔模式 + enabled),
     // 直接在 popup 侧补写 storage。不依赖 background 是否跑最新代码——这是 popup 主动
-    // 修复路径,确保诊断面板能从根上消除"ac-pwm 在但 storage 缺绝对触发时间"的红灯。
+    // 修复路径,确保诊断面板能从根上消除"ac-pwm 在但 storage 缺/过期"的红灯。
+    // 触发条件扩展:不只 nextTriggerAt=0,nextTriggerAt < now(已过期)也触发。
+    // 这覆盖"SW 跑旧代码,storage 没跟上闹钟推进"的场景。
+    const nowMs = Date.now();
+    const storedIsStale = !effectiveNextTriggerAt || effectiveNextTriggerAt < nowMs;
     let pwmAlarmEarly = await chrome.alarms.get('ac-pwm');
     let selfHealed = false;
     if (s.enabled === true
         && s.clockMode === false
-        && !effectiveNextTriggerAt
+        && storedIsStale
         && pwmAlarmEarly?.scheduledTime
-        && pwmAlarmEarly.scheduledTime > Date.now()) {
+        && pwmAlarmEarly.scheduledTime > nowMs) {
       try {
         const repairedSchedule = {
           ...storedSchedule,

@@ -114,14 +114,16 @@ async function runDiagnosticSelfHeal(chrome, opts = {}) {
   let s = { ...storedSchedule, ...(ensured?.schedule || {}), ...bgSchedule };
   let effectiveNextTriggerAt = s.nextTriggerAt || 0;
 
-  // 1.5 自愈逻辑(v0.4.30 新增) - 直接从 popup.js 复制
+  // 1.5 自愈逻辑(v0.4.34: 过期也触发) - 直接从 popup.js 复制
+  const nowMs = Date.now();
+  const storedIsStale = !effectiveNextTriggerAt || effectiveNextTriggerAt < nowMs;
   let pwmAlarmEarly = await chrome.alarms.get('ac-pwm');
   let selfHealed = false;
   if (s.enabled === true
       && s.clockMode === false
-      && !effectiveNextTriggerAt
+      && storedIsStale
       && pwmAlarmEarly?.scheduledTime
-      && pwmAlarmEarly.scheduledTime > Date.now()) {
+      && pwmAlarmEarly.scheduledTime > nowMs) {
     try {
       const repairedSchedule = {
         ...storedSchedule,
@@ -132,7 +134,7 @@ async function runDiagnosticSelfHeal(chrome, opts = {}) {
       };
       await chrome.storage.local.set({ ac_schedule: repairedSchedule });
       await new Promise(r => setTimeout(r, 200));
-      // 自愈成功后直接用 repairedSchedule,不合并旧 ensured/bgSchedule(它们携带 nextTriggerAt=0 会覆盖回 0)
+      // 自愈成功后直接用 repairedSchedule,不合并旧 ensured/bgSchedule(它们携带 nextTriggerAt=0/过期 会覆盖)
       s = { ...repairedSchedule };
       effectiveNextTriggerAt = s.nextTriggerAt || 0;
       selfHealed = true;
@@ -171,8 +173,10 @@ async function runDiagnosticSelfHeal(chrome, opts = {}) {
 async function runTests() {
   const results = [];
 
-  // 用例 1:用户实际报告的场景(storage.nextTriggerAt=0 + ac-pwm 在 + 间隔 + enabled)
-  const pwmTime = Date.now() + 5 * 60 * 1000; // 5 分钟后,模拟 00:48:13
+  // 用例 1:用户实际报告的场景(storage.nextTriggerAt 过期 + ac-pwm 在未来 + 间隔 + enabled)
+  // 这模拟 SW 跑旧代码、storage 没跟上闹钟推进的情况(v0.4.34 新触发条件:不只 0,过期也触发)
+  const pwmTime = Date.now() + 5 * 60 * 1000; // 5 分钟后,模拟 01:57:55
+  const staleTime = Date.now() - 24 * 60 * 1000; // 24 分钟前已过期,模拟 01:29:41
   const initialSchedule = {
     enabled: true,
     mode: 'pwm',
@@ -180,14 +184,14 @@ async function runTests() {
     onMinutes: 60,
     offMinutes: 60,
     pwmState: 'off',
-    nextTriggerAt: 0,           // ← 缺失,这是红灯根因
+    nextTriggerAt: staleTime,   // ← 已过期(v0.4.34 新触发条件),这是红灯根因
     alarmCreatedAt: 0,
     alarmDelayMinutes: 0
   };
   const { chrome, _storage } = createMockChrome(initialSchedule, pwmTime);
 
-  console.log('\n=== 用例 1:用户报告场景(storage.nextTriggerAt=0 + ac-pwm 存在 + 间隔模式) ===\n');
-  console.log('初始 storage.nextTriggerAt =', initialSchedule.nextTriggerAt);
+  console.log('\n=== 用例 1:用户报告场景(storage.nextTriggerAt 已过期 + ac-pwm 在未来 + 间隔模式) ===\n');
+  console.log('初始 storage.nextTriggerAt =', initialSchedule.nextTriggerAt, '(已过期 24 分钟)');
   console.log('live ac-pwm.scheduledTime =', new Date(pwmTime).toLocaleTimeString(), '(timestamp:', pwmTime + ')');
   console.log('');
 
