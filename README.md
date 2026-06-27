@@ -11,7 +11,7 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气开关，支持 PWM
 
 ## 📦 计划
 
-目前仅通过开发者模式安装。如果觉得好用，欢迎 **⭐ Star** 这个项目 — 等星星够多了我就去注册 Chrome Web Store / Edge Add-ons，打包成正式扩展方便大家一键安装 😄
+目前支持开发者模式安装。如果觉得好用，欢迎 **⭐ Star** 这个项目 — 星星够多了我就去注册 Chrome Web Store / Edge Add-ons，打包成正式扩展方便大家一键安装 😄
 
 ## 安装
 
@@ -62,7 +62,7 @@ ac-ust/
 
 ### 方式一：通过 Crowdin（推荐）
 
-1. 访问 [Crowdin 项目页面](https://crowdin.com)（待创建）
+1. 访问 [Crowdin 项目页面](https://crowdin.com/project/ac-ust) — 已连接 GitHub，修改会自动开 PR
 2. 选择你的语言，在网页上对照源文本填写翻译
 3. 提交后 Crowdin 会自动向 GitHub 开 PR，合并即生效
 
@@ -74,6 +74,50 @@ ac-ust/
 4. 提交 PR 到本仓库
 
 语言代码参见 [Chrome 支持的语言](https://developer.chrome.com/docs/webstore/i18n?hl=zh-cn#localeTable)。
+
+## 贡献指南
+
+> ⚠️ **不要直接向 `main` 分支提交代码。** `main` 是稳定发布分支，只接受经过充分测试的变更。
+
+### 分支策略
+
+| 分支 | 用途 | 说明 |
+|------|------|------|
+| `main` | 稳定发布版 | ❌ 禁止直接推送，仅接受来自 `beta-rex` 的合并 |
+| `beta-rex` | 项目作者的开发主线 | ❌ 请勿推送，这是作者的个人开发分支 |
+
+> 外部贡献者请 **Fork 仓库** → 在自己的 Fork 上创建分支 → 向 `beta-rex` 提 PR。
+
+### 提交流程
+
+```bash
+# 1. Fork 本仓库（在 GitHub 页面点右上角 Fork）
+
+# 2. Clone 你的 Fork
+git clone https://github.com/你的用户名/ac-ust.git
+cd ac-ust
+
+# 3. 创建你自己的开发分支（不要用 beta-rex）
+git checkout -b my-cool-feature
+
+# 4. 开发、测试
+#    （修完代码必须跑 node test/verify-fix.mjs）
+
+# 5. 提交并推送
+git add .
+git commit -m "feat: 描述你的改动"
+git push origin my-cool-feature
+
+# 6. 在 GitHub 上创建 PR → 目标仓库选 BelugaRex/ac-ust，目标分支选 beta-rex
+```
+
+### 规则
+
+- **不要直接推送到 `beta-rex` 或 `main`** — 这是作者的分支，请通过 PR 贡献
+- **一个 PR 做一件事**，方便 review
+- **先跑测试再 commit**：`node test/verify-fix.mjs`
+- **翻译贡献**：通过 [Crowdin](https://crowdin.com/project/ac-ust) 或直接编辑 `_locales/` 下的 JSON 文件
+- **Crowdin 自动 PR**：如果内容全是源语言（未翻译），直接关闭即可；有真正翻译时再合并
 
 ## 技术栈
 
