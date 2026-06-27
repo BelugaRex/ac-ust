@@ -53,17 +53,22 @@ foreach ($file in $FilesToCopy) {
 }
 
 # Inject version from manifest.json into popup.js
-$manifest = Get-Content (Join-Path $Root "manifest.json") -Raw | ConvertFrom-Json
+# CRITICAL: 必须用 [System.IO.File]::ReadAllText/WriteAllText 而非 Get-Content/Set-Content。
+# PowerShell 的 Get-Content/Set-Content 默认用系统代码页 (中文 Windows 是 GBK)，
+# 会把 UTF-8 中文字符损坏为乱码。.NET 方法默认 UTF-8 无 BOM，不破坏编码。
+$manifest = Get-Content (Join-Path $Root "manifest.json") -Raw -Encoding UTF8 | ConvertFrom-Json
 $ver = $manifest.version
 # 构建时间戳:精确到秒,用于诊断"扩展实际加载的是哪次 build"
 # 版本号相同(如 0.4.28)无法区分 SW 是否跑最新代码,构建时间戳可以。
 $buildTime = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
 if ($ver) {
   $popupPath = Join-Path $OutputDir "popup.js"
-  $popupContent = Get-Content $popupPath -Raw
+  # 用 .NET 方法读写,保证 UTF-8 编码不被损坏
+  $popupContent = [System.IO.File]::ReadAllText($popupPath)
   $popupContent = $popupContent -replace "const APP_VERSION = '[^']*'", "const APP_VERSION = '$ver'"
   $popupContent = $popupContent -replace "const BUILD_TIME = '[^']*'", "const BUILD_TIME = '$buildTime'"
-  Set-Content $popupPath -Value $popupContent -NoNewline
+  $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+  [System.IO.File]::WriteAllText($popupPath, $popupContent, $utf8NoBom)
   Write-Host "  OK  popup.js (version injected: $ver, build: $buildTime)"
 }
 

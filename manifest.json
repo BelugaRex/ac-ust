@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "AC-UST",
-  "version": "0.4.38",
+  "version": "0.4.39",
   "description": "Auto-control HKUST Smart Power Meter AC with PWM scheduling",
   "permissions": [
     "alarms",
