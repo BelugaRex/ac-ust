@@ -23,6 +23,7 @@ $FilesToCopy = @(
   "popup.js",
   "offscreen.html",
   "offscreen.js",
+  "_locales",
   "icons"
 )
 

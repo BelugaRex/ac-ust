@@ -2,6 +2,9 @@
 // Background Service Worker - 管理定时任务
 // ============================================================
 
+// i18n 辅助函数
+const t = (key, ...subs) => chrome.i18n.getMessage(key, subs.length ? subs : undefined) || key;
+
 const AC_PAGE = 'https://w5.ab.ust.hk/njggt/app/home';
 const STORAGE_KEY = 'ac_schedule';
 
@@ -480,7 +483,7 @@ function sanitizeMinutes(value, fallback) {
 async function updateBadge() {
   if (!schedule.enabled) {
     await chrome.action.setBadgeText({ text: '' });
-    await chrome.action.setTitle({ title: '冷气定时控制' });
+    await chrome.action.setTitle({ title: t('badgeDefault') });
     return;
   }
 
@@ -491,7 +494,7 @@ async function updateBadge() {
     if (remainingMs <= 0) {
       await chrome.action.setBadgeText({ text: 'now' });
       await chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' });
-      await chrome.action.setTitle({ title: '即将切换冷气状态' });
+      await chrome.action.setTitle({ title: t('badgeClockSoon') });
       return;
     }
     const remainingMin = Math.max(1, Math.ceil(remainingMs / 60000));
@@ -501,7 +504,7 @@ async function updateBadge() {
     await chrome.action.setBadgeText({ text: badgeText });
     await chrome.action.setBadgeBackgroundColor({ color: nextAction === 'on' ? '#16a34a' : '#64748b' });
     await chrome.action.setTitle({
-      title: `${nextHour}:00 ${nextAction === 'on' ? '开启' : '关闭'}冷气，约 ${remainingMin} 分钟后`
+      title: t('badgeClockCountdown', String(nextHour), t(nextAction === 'on' ? 'actionOn' : 'actionOff'), String(remainingMin))
     });
     return;
   }
@@ -513,7 +516,7 @@ async function updateBadge() {
   const nextBoundary = liveAlarmEnd || (storedAlarmEnd > Date.now() ? storedAlarmEnd : 0);
   if (!nextBoundary) {
     await chrome.action.setBadgeText({ text: '' });
-    await chrome.action.setTitle({ title: '冷气定时控制' });
+    await chrome.action.setTitle({ title: t('badgeDefault') });
     return;
   }
 
@@ -523,7 +526,7 @@ async function updateBadge() {
   if (remainingMs <= 0) {
     await chrome.action.setBadgeText({ text: 'now' });
     await chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' });
-    await chrome.action.setTitle({ title: `即将${nextAction === 'on' ? '开启' : '关闭'}冷气` });
+    await chrome.action.setTitle({ title: t('badgeIntervalSoon', t(nextAction === 'on' ? 'actionOn' : 'actionOff')) });
     return;
   }
 
@@ -534,7 +537,7 @@ async function updateBadge() {
   await chrome.action.setBadgeText({ text: badgeText });
   await chrome.action.setBadgeBackgroundColor({ color: currentOn ? '#16a34a' : '#64748b' });
   await chrome.action.setTitle({
-    title: `${currentOn ? '冷气运行中' : '冷气已关闭'}，约 ${remainingMinutes} 分钟后自动${nextAction === 'on' ? '开启' : '关闭'}`
+    title: t('badgeIntervalCountdown', t(currentOn ? 'acRunning' : 'acStopped'), String(remainingMinutes), t(nextAction === 'on' ? 'actionOn' : 'actionOff'))
   });
 }
 
@@ -717,7 +720,7 @@ async function setPageTimer(minutes) {
   const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
   if (tabs.length === 0) {
     schedule.pageTimerMinutes = null;
-    schedule.pageTimerError = 'AC 页面未打开，无法设置页面关机保险';
+    schedule.pageTimerError = t('bgPageTimerNoTab');
     await persistSchedule('setPageTimer-no-tab');
     return;
   }
@@ -735,14 +738,14 @@ async function setPageTimer(minutes) {
       console.log(`[AC扩展] 页面定时器已设置为 ${result.value || minutes} (安全网)`);
     } else if (result?.crossesMidnight) {
       schedule.pageTimerMinutes = null;
-      schedule.pageTimerError = '跨日 PWM 已启用；页面关机保险将在午夜后自动补设';
+      schedule.pageTimerError = t('bgPageTimerCrossDay');
       schedule.pageTimerRetryAt = result.retryAt || getNextPageTimerRetryAt();
       await createAlarm('ac-page-timer-retry', { when: schedule.pageTimerRetryAt });
       await persistSchedule('setPageTimer-cross-midnight');
       console.log('[AC扩展] 页面定时器跨日，已安排午夜后补设');
     } else {
       schedule.pageTimerMinutes = null;
-      schedule.pageTimerError = result?.error || '页面定时器设置失败';
+      schedule.pageTimerError = result?.error || t('bgPageTimerFailed');
       schedule.pageTimerRetryAt = 0;
       await persistSchedule('setPageTimer-failed');
       console.warn('[AC扩展] 页面定时器设置失败:', schedule.pageTimerError);

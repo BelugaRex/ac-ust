@@ -3,6 +3,9 @@
 // 负责与页面交互：读取状态、点击开关
 // ============================================================
 
+// i18n 辅助函数
+const t = (key, ...subs) => chrome.i18n.getMessage(key, subs.length ? subs : undefined) || key;
+
 console.log('[AC扩展] Content script 已加载');
 
 // ----- 监听来自 background 的消息 -----
@@ -95,7 +98,7 @@ async function toggleACSwitch(targetAction) {
     // 等待开关元素出现 (React 可能需要时间渲染)
     const switchEl = await waitForSwitch(10000);
     if (!switchEl) {
-      return { success: false, error: '等待超时，未找到 AC 开关。请确保页面已完全加载' };
+      return { success: false, error: t('contentTimeout') };
     }
     
     // 先检查当前状态
@@ -178,7 +181,7 @@ async function toggleACSwitch(targetAction) {
     action: targetAction,
     verified: false,
     status: finalStatus,
-    error: `已尝试 3 次，但 AC 未变成 ${targetAction}`
+    error: t('contentRetryExhausted', targetAction)
   };
 }
 
@@ -485,13 +488,13 @@ async function setPagePowerOffTimer(totalMinutes) {
         success: false,
         crossesMidnight: true,
         retryAt: getNextMidnightTimestamp(),
-        error: '页面定时器只能选择当天时间，跨日 PWM 将由扩展闹钟继续执行'
+        error: t('contentCrossDayLimit')
       };
     }
 
     const pickerInput = findPowerOffTimerInput();
     if (!pickerInput) {
-      return { success: false, error: '未找到页面定时器输入框' };
+      return { success: false, error: t('contentNoInput') };
     }
 
     const hours = target.getHours();
@@ -502,7 +505,7 @@ async function setPagePowerOffTimer(totalMinutes) {
 
     const typed = await typeTimeIntoPickerInput(pickerInput, value);
     if (!typed) {
-      return { success: false, error: `输入框未接受时间 ${value}` };
+      return { success: false, error: t('contentInputRejected', String(value)) };
     }
 
     return {

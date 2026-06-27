@@ -1,6 +1,9 @@
-// ============================================================
+﻿// ============================================================
 // Popup 脚本 - 设置界面逻辑 + 实时倒计时
 // ============================================================
+
+// i18n 辅助函数
+const t = (key, ...subs) => chrome.i18n.getMessage(key, subs.length ? subs : undefined) || key;
 
 const onMinutesInput = document.getElementById('onMinutes');
 const offMinutesInput = document.getElementById('offMinutes');
@@ -48,10 +51,10 @@ function updateClockModeUI() {
   clockModeToggle.checked = currentClockMode;
   if (currentClockMode) {
     intervalInputs.style.display = 'none';
-    scheduleHint.textContent = '单数整点(1/3/5...23)开 · 双数整点(0/2/4...22)关。点"定时开"立即开始。';
+    scheduleHint.textContent = t('scheduleHintClock');
   } else {
     intervalInputs.style.display = '';
-    scheduleHint.textContent = '点“定时开”会先开启冷气，然后按“开启分钟 / 关闭分钟”持续循环；点“定时关”会停止循环并默认关闭冷气。';
+    scheduleHint.textContent = t('scheduleHintDefault');
   }
 }
 
@@ -94,7 +97,7 @@ function updateCountdownDisplay(schedule, alarm) {
     currentScheduleEnabled = false;
     // 定时未启用
     acDot.className = 'ac-dot off';
-    acStateText.textContent = '定时已关闭';
+    acStateText.textContent = t('acOff');
     countdownDisplay.style.display = 'none';
     idleDisplay.style.display = 'flex';
     safetynetHint.style.display = 'none';
@@ -116,25 +119,25 @@ function updateCountdownDisplay(schedule, alarm) {
   // 更新 AC 状态指示灯
   if (currentACOn) {
     acDot.className = 'ac-dot on';
-    acStateText.textContent = '冷气运行中';
+    acStateText.textContent = t('acRunning');
     if (schedule.pageTimerMinutes) {
       safetynetHint.style.display = 'block';
-      safetynetHint.textContent = '🔒 页面关机保险已设置；核心 PWM 仍由扩展控制';
+      safetynetHint.textContent = t('safetynetSet');
       safetynetWarning.style.display = schedule.pageTimerError ? 'block' : 'none';
       if (schedule.pageTimerError) {
-        safetynetWarning.textContent = `ℹ️ ${schedule.pageTimerError}`;
+        safetynetWarning.textContent = t('safetynetError', schedule.pageTimerError);
       }
     } else if (schedule.pageTimerError) {
       safetynetHint.style.display = 'none';
       safetynetWarning.style.display = 'block';
-      safetynetWarning.textContent = `ℹ️ 页面关机保险暂未设置：${schedule.pageTimerError}；PWM 循环仍会继续`;
+      safetynetWarning.textContent = t('safetynetNotSet', schedule.pageTimerError);
     } else {
       safetynetHint.style.display = 'none';
       safetynetWarning.style.display = 'none';
     }
   } else {
     acDot.className = 'ac-dot off';
-    acStateText.textContent = '冷气已关闭';
+    acStateText.textContent = t('acStopped');
     safetynetHint.style.display = 'none';
     safetynetWarning.style.display = 'none';
   }
@@ -164,14 +167,14 @@ function updateCountdownDisplay(schedule, alarm) {
   if (remainingMs > 0) {
     if (isClock && nextBoundary) {
       const hh = String(new Date(nextBoundary).getHours()).padStart(2, '0');
-      const actionText = nextAction === 'on' ? '开启' : '关闭';
-      countdownText.innerHTML = `下次 <strong>${hh}:00</strong> → ${actionText}`;
+      const actionText = t(nextAction === 'on' ? 'actionOn' : 'actionOff');
+      countdownText.innerHTML = t('countdownClock', hh, actionText);
     } else {
       const minutes = Math.ceil(remainingMs / 60000);
-      countdownText.innerHTML = `距离自动<span style="color:#64748b">${nextAction === 'on' ? '开启' : '关闭'}</span>还有&nbsp;<strong>${minutes}</strong>&nbsp;分钟`;
+      countdownText.innerHTML = t('countdownInterval', t(nextAction === 'on' ? 'actionOn' : 'actionOff'), String(minutes));
     }
   } else {
-    countdownText.innerHTML = `即将自动${nextAction === 'on' ? '开启' : '关闭'}...`;
+    countdownText.innerHTML = t('countdownSoon', t(nextAction === 'on' ? 'actionOn' : 'actionOff'));
   }
 }
 
@@ -206,25 +209,25 @@ async function updateSchedule(enabled, restart = false) {
     if (!data.enabled) {
       // 定时关：无论 updateSchedule 返回的 offResult 如何，都独立再发一次即时关机。
       // 防止主世界 toggle 返回虚假成功（alreadyDone 或验证误判）。
-      showStatus('⏳ 正在关闭 AC...', 'error');
+      showStatus(t('statusClosing'), 'error');
       const toggleOff = await chrome.runtime.sendMessage({ type: 'toggleNow', action: 'off' });
       finalResponse = toggleOff?.schedule ? { ...response, schedule: toggleOff.schedule, offResult: toggleOff } : response;
       if (toggleOff?.success) {
-        showStatus('✅ 定时已关闭，AC 已关机', 'success');
+        showStatus(t('statusClosedOK'), 'success');
       } else if (response.offResult?.success) {
         // 首次关机声称成功但二次确认失败 → 以二次确认为准
-        showStatus('⚠️ 定时已关闭，但关机未确认 — 请手动关闭', 'error');
+        showStatus(t('statusClosedNoConfirm'), 'error');
       } else {
-        showStatus('⚠️ 定时已关闭，但关机命令未确认', 'error');
+        showStatus(t('statusClosedNoResponse'), 'error');
       }
     } else {
-      showStatus('✅ 定时已开启', 'success');
+      showStatus(t('statusOnOK'), 'success');
     }
 
     const alarm = await chrome.alarms.get('ac-pwm');
     updateCountdownDisplay(finalResponse.schedule, alarm);
   } else {
-    showStatus('❌ 更新失败', 'error');
+    showStatus(t('statusError'), 'error');
   }
 }
 
@@ -258,7 +261,7 @@ startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.4.35';
+const APP_VERSION = '0.4.36';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -270,7 +273,7 @@ if (versionInfo) {
     displayVersion = manifest.version;
     // 交叉校验：如果 manifest 版本与硬编码不一致，说明浏览器加载了旧版扩展
     if (displayVersion !== APP_VERSION) {
-      console.warn(`[AC-UST] 版本不一致：manifest=${displayVersion}, 源码=${APP_VERSION}。请重载扩展。`);
+      console.warn(t('versionMismatch', displayVersion, APP_VERSION));
       displayVersion = APP_VERSION;
     }
   } catch (_) {
