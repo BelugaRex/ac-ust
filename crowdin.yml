@@ -1,11 +1,14 @@
 # AC-UST Crowdin 本地化配置
 # 注册 Crowdin 并连接 GitHub 后，Crowdin 会自动：
 # 1. 检测 _locales/zh_CN/messages.json 为源文件
-# 2. 将翻译输出到 _locales/{locale}/messages.json
+# 2. 将翻译输出到 _locales/<chrome_locale>/messages.json
 # 3. 翻译完成后自动向 GitHub 开 PR
 #
-# %locale% 保留完整语言代码（zh_CN, en, ja...），
-# 不能用 %two_letters_code%（会截断为 zh, en），Chrome 扩展需要完整代码。
+# 重要：Chrome 扩展 i18n 目录必须用下划线（zh_CN、en_GB），
+# 不能用连字符（zh-CN、en-US）。
+# 所以 translation 必须用 %locale_with_underscore% 而非 %locale%。
+# languages_mapping 把 Crowdin 内部码映射为 Chrome 实际期望的目录名
+# （Chrome 对大部分语言用二字母码 en/ja/ko，仅少数需要 region 后缀）。
 
 project_id_env: CROWDIN_PROJECT_ID
 api_token_env: CROWDIN_PERSONAL_TOKEN
@@ -13,6 +16,21 @@ preserve_hierarchy: true
 
 files:
   - source: /_locales/zh_CN/messages.json
-    translation: /_locales/%locale%/messages.json
+    translation: /_locales/%locale_with_underscore%/messages.json
     type: chrome
     update_option: update_as_unapproved
+    languages_mapping:
+      locale_with_underscore:
+        # Chrome 对大部分语言用二字母码，不带 region
+        'en-US': 'en'
+        'ja-JP': 'ja'
+        'ko-KR': 'ko'
+        'fr-FR': 'fr'
+        'de-DE': 'de'
+        'es-ES': 'es'
+        'ru-RU': 'ru'
+        'it-IT': 'it'
+        'pt-PT': 'pt'
+        # 中文变体需要 region 后缀
+        'zh-CN': 'zh_CN'
+        'zh-TW': 'zh_TW'
