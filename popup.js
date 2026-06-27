@@ -463,6 +463,16 @@ btnDiagnose.addEventListener('click', async () => {
     // 6. 构建时间戳:让用户/诊断能直接判断扩展实际加载的是哪次 build
     //    (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
     add(true, `BUILD_TIME: ${BUILD_TIME}`);
+
+    // 7. i18n 系统状态诊断 — 如果 __MSG_*__ 占位符没被替换或 t() 返回 key name,
+    //    这里能一眼看出 chrome.i18n 是否加载了 messages.json
+    const uiLang = chrome.i18n.getUILanguage();
+    const testMsg = chrome.i18n.getMessage('pwmSettings');
+    if (testMsg && !testMsg.startsWith('pwmSettings')) {
+      add(true, `i18n OK (ui=${uiLang}, default=zh_CN, "pwmSettings"→"${testMsg.slice(0,20)}")`);
+    } else {
+      add(false, `i18n BROKEN — chrome.i18n.getMessage 返回空或 key name (ui=${uiLang}, result="${testMsg}")。修复:edge://extensions 移除扩展 → 重新"加载已解压"`);
+    }
   } catch (e) {
     lines.push('❌ 诊断异常: ' + (e.message||'').slice(0,80));
   }
