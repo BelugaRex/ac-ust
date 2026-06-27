@@ -292,6 +292,74 @@ async function runTests() {
   assertPass(result4.lines.some(l => l.includes('popup 已接管 storage 自愈')),
     '用例 4 显示 "popup 已接管 storage 自愈" 绿灯');
 
+  // ===== 用例 5: i18n fetch-based 加载器 — 验证用户报告的三个坏键 =====
+  console.log('\n\n=== 用例 5:i18n 翻译加载 (用户报告 acStopped/countdownInterval/scheduleHintDefault 显示为 key name) ===\n');
+
+  // 加载真实的 messages.json
+  const zhCN = JSON.parse(fs.readFileSync(path.join(ROOT, '_locales', 'zh_CN', 'messages.json'), 'utf8'));
+  const en = JSON.parse(fs.readFileSync(path.join(ROOT, '_locales', 'en', 'messages.json'), 'utf8'));
+
+  // 复刻 i18n.js 的 substitute() 逻辑
+  function substitute(msg, subs) {
+    if (!subs || !subs.length) return msg;
+    let out = msg;
+    subs.forEach((s, i) => { out = out.split(`$${i + 1}`).join(String(s)); });
+    return out;
+  }
+  // 复刻 i18n.js 的 t() 逻辑
+  function t(messages, key, ...subs) {
+    const entry = messages[key];
+    if (!entry || typeof entry.message !== 'string') return key; // fallback
+    return substitute(entry.message, subs);
+  }
+
+  // 5a: acStopped 必须返回中文，不能是 "acStopped"
+  const acStopped_zh = t(zhCN, 'acStopped');
+  console.log('  zh_CN acStopped →', JSON.stringify(acStopped_zh));
+  assertPass(acStopped_zh !== 'acStopped',
+    'acStopped 不再返回 key name (zh_CN)');
+  assertPass(acStopped_zh.includes('冷气') || acStopped_zh.includes('关闭'),
+    `acStopped 返回中文翻译: "${acStopped_zh}"`);
+
+  // 5b: scheduleHintDefault 必须返回完整中文说明
+  const hint_zh = t(zhCN, 'scheduleHintDefault');
+  console.log('  zh_CN scheduleHintDefault →', JSON.stringify(hint_zh.slice(0, 30)) + '...');
+  assertPass(hint_zh !== 'scheduleHintDefault',
+    'scheduleHintDefault 不再返回 key name (zh_CN)');
+  assertPass(hint_zh.includes('定时') && hint_zh.length > 20,
+    `scheduleHintDefault 返回完整中文句子 (长度 ${hint_zh.length})`);
+
+  // 5c: countdownInterval 带占位符替换
+  const cd_zh = t(zhCN, 'countdownInterval', '关闭', '30');
+  console.log('  zh_CN countdownInterval(关闭,30) →', JSON.stringify(cd_zh));
+  assertPass(cd_zh !== 'countdownInterval',
+    'countdownInterval 不再返回 key name (zh_CN)');
+  assertPass(cd_zh.includes('关闭') && cd_zh.includes('30'),
+    `countdownInterval 占位符替换正确: "${cd_zh}"`);
+  assertPass(!cd_zh.includes('$1') && !cd_zh.includes('$2'),
+    'countdownInterval 无残留 $1/$2 占位符');
+
+  // 5d: 英文翻译也覆盖同样的 key（Crowdin 双向对齐）
+  const acStopped_en = t(en, 'acStopped');
+  console.log('  en acStopped →', JSON.stringify(acStopped_en));
+  assertPass(acStopped_en !== 'acStopped',
+    'acStopped 英文翻译存在 (非 key name)');
+  assertPass(acStopped_en !== acStopped_zh,
+    '中英翻译确实不同 (zh ≠ en)');
+
+  // 5e: popup.html 中 data-i18n 属性与 messages.json key 完全对齐
+  const popupHtml = fs.readFileSync(path.join(ROOT, 'popup.html'), 'utf8');
+  const dataI18nKeys = [...popupHtml.matchAll(/data-i18n="([^"]+)"/g)].map(m => m[1]);
+  console.log('  popup.html data-i18n keys:', dataI18nKeys.join(', '));
+  for (const key of dataI18nKeys) {
+    assertPass(!!zhCN[key],
+      `popup.html data-i18n="${key}" 在 zh_CN messages.json 中存在`);
+  }
+
+  // 5f: popup.html 不应残留 __MSG_*__ 占位符
+  assertPass(!popupHtml.includes('__MSG_'),
+    'popup.html 不残留 __MSG_*__ 占位符 (改用 data-i18n)');
+
   // 汇总
   const passCount = results.filter(r => r.pass).length;
   const totalCount = results.length;
