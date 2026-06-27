@@ -3,12 +3,37 @@
 // 负责与页面交互：读取状态、点击开关
 // ============================================================
 
-// i18n 辅助函数
-const t = (key, ...subs) => chrome.i18n.getMessage(key, subs.length ? subs : undefined) || key;
+// i18n — content script 运行在隔离世界，不能 importScripts，用内联 fetch loader
+const _i18nCache = {};
+let _i18nReady = false;
+async function _i18nLoad() {
+  if (_i18nReady) return;
+  try {
+    const ui = (chrome.i18n?.getUILanguage?.() || 'zh_CN').replace('-', '_');
+    const tryLoad = async (lang) => {
+      const res = await fetch(chrome.runtime.getURL(`_locales/${lang}/messages.json`));
+      return res.ok ? res.json() : null;
+    };
+    _i18nCache[ui] = await tryLoad(ui);
+    _i18nCache.zh_CN = _i18nCache.zh_CN || await tryLoad('zh_CN');
+    _i18nReady = true;
+  } catch (_) { /* 翻译加载失败不阻塞核心功能 */ }
+}
+function _i18nPick() {
+  return (_i18nCache[Object.keys(_i18nCache).find(k => k !== 'zh_CN' && _i18nCache[k])]) || _i18nCache.zh_CN || {};
+}
+const t = (key, ...subs) => {
+  const msgs = _i18nPick();
+  let msg = msgs[key]?.message || key;
+  subs.forEach((s, i) => { msg = msg.split(`$${i+1}`).join(String(s)); });
+  return msg;
+};
 
 console.log('[AC扩展] Content script 已加载');
 
 // ----- 监听来自 background 的消息 -----
+// 触发 i18n 加载（不阻塞，翻译加载失败不影响核心功能）
+_i18nLoad();
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'on' || msg.action === 'off') {
     toggleACSwitch(msg.action).then(result => sendResponse(result));

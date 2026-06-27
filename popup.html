@@ -148,53 +148,53 @@
   <div class="status-card" id="statusCard">
     <div class="ac-indicator">
       <span class="ac-dot unknown" id="acDot"></span>
-      <span id="acStateText">__MSG_acLoading__</span>
+      <span id="acStateText" data-i18n="acLoading"></span>
     </div>
     <div class="countdown-display" id="countdownDisplay" style="display:none">
       <span id="countdownText">--</span>
     </div>
     <div class="countdown-display" id="idleDisplay" style="display:none">
-      <span style="color:#94a3b8">__MSG_acIdle__</span>
+      <span style="color:#94a3b8" data-i18n="acIdle"></span>
     </div>
-    <div class="safetynet-hint" id="safetynetHint" style="display:none">
-      __MSG_safetynetSet__
+    <div class="safetynet-hint" id="safetynetHint" style="display:none" data-i18n="safetynetSet">
     </div>
     <div class="safetynet-warning" id="safetynetWarning" style="display:none"></div>
   </div>
 
   <div class="time-section">
-    <h3>__MSG_pwmSettings__</h3>
+    <h3 data-i18n="pwmSettings"></h3>
     <div class="time-row" style="margin-bottom:10px">
       <label style="cursor:pointer">
         <input type="checkbox" id="clockModeToggle" style="margin-right:6px">
-        __MSG_clockModeLabel__
+        <span data-i18n="clockModeLabel"></span>
       </label>
     </div>
     <div id="intervalInputs">
     <div class="time-row">
-      <label>__MSG_onMinutesLabel__</label>
+      <label data-i18n="onMinutesLabel"></label>
       <input type="number" id="onMinutes" value="30" min="1" step="1">
     </div>
     <div class="time-row">
-      <label>__MSG_offMinutesLabel__</label>
+      <label data-i18n="offMinutesLabel"></label>
       <input type="number" id="offMinutes" value="30" min="1" step="1">
     </div>
     </div>
-    <div class="hint" id="scheduleHint">__MSG_scheduleHintDefault__</div>
+    <div class="hint" id="scheduleHint" data-i18n="scheduleHintDefault"></div>
   </div>
 
   <div class="btn-row">
-    <button class="btn btn-on" id="btnOn">__MSG_btnTimedOn__</button>
-    <button class="btn btn-off" id="btnOff">__MSG_btnTimedOff__</button>
+    <button class="btn btn-on" id="btnOn" data-i18n="btnTimedOn"></button>
+    <button class="btn btn-off" id="btnOff" data-i18n="btnTimedOff"></button>
   </div>
   
   <div class="status" id="status"></div>
   <div style="text-align:center;margin-top:6px">
-    <button style="font-size:10px;color:#94a3b8;background:none;border:1px solid #e2e8f0;border-radius:4px;padding:2px 8px;cursor:pointer" id="btnDiagnose">__MSG_btnDiagnose__</button>
+    <button style="font-size:10px;color:#94a3b8;background:none;border:1px solid #e2e8f0;border-radius:4px;padding:2px 8px;cursor:pointer" id="btnDiagnose" data-i18n="btnDiagnose"></button>
   </div>
   <div style="font-size:10px;color:#94a3b8;margin-top:4px;text-align:left;line-height:1.5;display:none" id="diagnoseResult"></div>
   <div style="text-align:center;color:#94a3b8;font-size:10px;margin-top:6px" id="versionInfo">v--</div>
 </div>
+<script src="i18n.js"></script>
 <script src="popup.js"></script>
 </body>
 </html>

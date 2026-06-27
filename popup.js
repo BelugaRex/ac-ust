@@ -2,8 +2,8 @@
 // Popup 脚本 - 设置界面逻辑 + 实时倒计时
 // ============================================================
 
-// i18n 辅助函数
-const t = (key, ...subs) => chrome.i18n.getMessage(key, subs.length ? subs : undefined) || key;
+// i18n 辅助函数 — 委托给 I18n 模块（fetch-based，绕过 chrome.i18n 不可靠性）
+const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const onMinutesInput = document.getElementById('onMinutes');
 const offMinutesInput = document.getElementById('offMinutes');
@@ -253,6 +253,9 @@ function showStatus(msg, type) {
 }
 
 async function startup() {
+  // 先加载 i18n 翻译，再填充 DOM 静态文本，最后拉取状态
+  await I18n.load();
+  I18n.applyToDOM();
   await loadSettings();
   await refreshStatus();
 }
@@ -464,14 +467,13 @@ btnDiagnose.addEventListener('click', async () => {
     //    (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
     add(true, `BUILD_TIME: ${BUILD_TIME}`);
 
-    // 7. i18n 系统状态诊断 — 如果 __MSG_*__ 占位符没被替换或 t() 返回 key name,
-    //    这里能一眼看出 chrome.i18n 是否加载了 messages.json
-    const uiLang = chrome.i18n.getUILanguage();
-    const testMsg = chrome.i18n.getMessage('pwmSettings');
+    // 7. i18n 系统状态诊断 — 显示 I18n 模块实际加载的语言和翻译测试结果
+    const i18nLang = I18n.getLang();
+    const testMsg = I18n.t('pwmSettings');
     if (testMsg && !testMsg.startsWith('pwmSettings')) {
-      add(true, `i18n OK (ui=${uiLang}, default=zh_CN, "pwmSettings"→"${testMsg.slice(0,20)}")`);
+      add(true, `i18n OK (lang=${i18nLang}, "pwmSettings"→"${testMsg.slice(0,20)}")`);
     } else {
-      add(false, `i18n BROKEN — chrome.i18n.getMessage 返回空或 key name (ui=${uiLang}, result="${testMsg}")。修复:edge://extensions 移除扩展 → 重新"加载已解压"`);
+      add(false, `i18n 未加载翻译 (lang=${i18nLang}, result="${testMsg}")`);
     }
   } catch (e) {
     lines.push('❌ 诊断异常: ' + (e.message||'').slice(0,80));

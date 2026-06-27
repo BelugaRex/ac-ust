@@ -1,9 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "__MSG_extName__",
-  "version": "0.4.37",
-  "default_locale": "zh_CN",
-  "description": "__MSG_extDesc__",
+  "name": "AC-UST",
+  "version": "0.4.38",
+  "description": "Auto-control HKUST Smart Power Meter AC with PWM scheduling",
   "permissions": [
     "alarms",
     "storage",
@@ -34,7 +33,7 @@
   ],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "__MSG_extActionTitle__",
+    "default_title": "AC-UST",
     "default_icon": {
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",

@@ -2,8 +2,9 @@
 // Background Service Worker - 管理定时任务
 // ============================================================
 
-// i18n 辅助函数
-const t = (key, ...subs) => chrome.i18n.getMessage(key, subs.length ? subs : undefined) || key;
+// i18n 辅助函数 — 使用 fetch-based I18n 模块（绕过 chrome.i18n 不可靠性）
+importScripts('i18n.js');
+const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const AC_PAGE = 'https://w5.ab.ust.hk/njggt/app/home';
 const STORAGE_KEY = 'ac_schedule';
@@ -355,6 +356,8 @@ async function pwmPulseCheck() {
 // ----- 启动时加载设置并创建闹钟 -----
 async function init() {
   try {
+    // 加载 i18n 翻译（SW 上下文也需用 t() 做角标/标题）
+    await I18n.load();
     // 最先确保 badge-tick alarm 存在（PWM 补检 + 角标 + SW 保活）
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await loadScheduleFromStorage();

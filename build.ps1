@@ -21,6 +21,7 @@ $FilesToCopy = @(
   "page-confirm.js",
   "popup.html",
   "popup.js",
+  "i18n.js",
   "offscreen.html",
   "offscreen.js",
   "_locales",
