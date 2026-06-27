@@ -1,101 +1,346 @@
 {
-  "extName": { "message": "AC-UST" },
-  "extShortName": { "message": "AC-UST" },
-  "extDesc": { "message": "Auto-control HKUST Smart Power Meter AC — schedule AC on/off automatically" },
-  "extActionTitle": { "message": "AC Timer Control" },
-
-  "acLoading": { "message": "Loading..." },
-  "acIdle": { "message": "Timer disabled" },
-  "acRunning": { "message": "AC Running" },
-  "acStopped": { "message": "AC Stopped" },
-  "acOff": { "message": "Timer disabled" },
-
-  "pwmSettings": { "message": "📋 PWM Cycle Settings" },
-  "clockModeLabel": { "message": "🕐 Clock Mode (ON at odd hours / OFF at even hours)" },
-  "onMinutesLabel": { "message": "🟢 ON Minutes" },
-  "offMinutesLabel": { "message": "🔴 OFF Minutes" },
-
-  "scheduleHintDefault": { "message": "Click \"Timed On\" to start the AC and cycle by ON/OFF minutes. Click \"Timed Off\" to stop the cycle and turn off the AC." },
-  "scheduleHintClock": { "message": "ON at odd hours (1/3/5...23) · OFF at even hours (0/2/4...22). Click \"Timed On\" to start immediately." },
-
-  "btnTimedOn": { "message": "⏰ Timed On" },
-  "btnTimedOff": { "message": "⏹️ Timed Off" },
-  "btnDiagnose": { "message": "🔍 Diagnose" },
-
-  "safetynetSet": { "message": "🔒 Page safety timer set; core PWM still managed by extension" },
-  "safetynetNotSet": { "message": "ℹ️ Page safety timer not set: $1; PWM cycle will continue" },
-  "safetynetError": { "message": "ℹ️ $1" },
-
-  "actionOn": { "message": "ON" },
-  "actionOff": { "message": "OFF" },
-
-  "countdownClock": { "message": "Next <strong>$1:00</strong> → $2" },
-  "countdownInterval": { "message": "<span style='color:#64748b'>$1</span> in&nbsp;<strong>$2</strong>&nbsp;min" },
-  "countdownSoon": { "message": "$1 soon..." },
-
-  "statusClosing": { "message": "⏳ Turning off AC..." },
-  "statusClosedOK": { "message": "✅ Timer stopped, AC turned off" },
-  "statusClosedNoConfirm": { "message": "⚠️ Timer stopped, but shutdown not confirmed — please turn off manually" },
-  "statusClosedNoResponse": { "message": "⚠️ Timer stopped, but shutdown command not confirmed" },
-  "statusOnOK": { "message": "✅ Timer started" },
-  "statusError": { "message": "❌ Update failed" },
-
-  "diagnoseInProgress": { "message": "🔍 Diagnosing..." },
-  "diagnoseStorageRW": { "message": "storage read/write OK" },
-  "diagnoseEnabled": { "message": "schedule.enabled=true (timer active)" },
-  "diagnoseMode": { "message": "mode=" },
-  "diagnoseClockMode": { "message": "clockMode=" },
-  "diagnoseClock": { "message": "clock" },
-  "diagnoseInterval": { "message": "interval" },
-  "diagnoseMissingTrigger": { "message": "storage missing absolute trigger time" },
-  "diagnoseTriggerTime": { "message": "storage trigger time: " },
-  "diagnosePopHealed": { "message": " (popup self-healed)" },
-  "diagnoseBgWriteback": { "message": " (BG writeback)" },
-  "diagnosePwmExists": { "message": "ac-pwm alarm exists" },
-  "diagnosePwmTrigger": { "message": " (fires: " },
-  "diagnosePwmSync": { "message": "ac-pwm synced with storage trigger time" },
-  "diagnoseBadgeAlarm": { "message": "ac-badge-tick badge refresh (every minute)" },
-  "diagnoseBadgeRebuilt": { "message": " (rebuilt: " },
-  "diagnoseWatchdog": { "message": "ac-watchdog (every 5 min)" },
-  "diagnoseHeartbeat": { "message": "setInterval heartbeat (storage every 20s)" },
-  "diagnoseAlarmNotExpired": { "message": "alarm not expired (due: " },
-  "diagnoseTabOpen": { "message": "AC page open (" },
-  "diagnoseTabCount": { "message": " tab(s))" },
-  "diagnoseTabNotDiscarded": { "message": "tab not discarded" },
-  "diagnoseContentOK": { "message": "content script responding" },
-  "diagnoseAcReadable": { "message": "AC status readable: " },
-  "diagnoseContentNoResponse": { "message": "content script no response: " },
-  "diagnoseSWOK": { "message": "background SW responding" },
-  "diagnoseClockSync": { "message": "clockMode sync: " },
-  "diagnosePwmError": { "message": "PWM last failure: " },
-  "diagnosePwmErrorEmpty": { "message": "PWM no errors (pageTimerError empty)" },
-  "diagnoseSWNoResponse": { "message": "background SW no response" },
-  "diagnoseSWInitDone": { "message": "SW init done (started $1s ago, init $2s ago)" },
-  "diagnoseTriMatch": { "message": "Tri-match: live ac-pwm = memory = storage = " },
-  "diagnoseTriMismatch": { "message": "Tri-check: live=" },
-  "diagnosePopHealedSw": { "message": "popup self-healed storage (SW details unavailable, functions OK)" },
-  "diagnoseGetSwFailed": { "message": "getSwStatus backend failed: " },
-  "diagnoseGetSwAbnormal": { "message": "getSwStatus abnormal response: " },
-  "diagnoseGetSwNone": { "message": "getSwStatus no response & popup not self-healed — please reload extension at edge://extensions" },
-  "diagnoseBuildTime": { "message": "BUILD_TIME: $1" },
-  "diagnoseException": { "message": "Diagnose exception: " },
-
-  "badgeDefault": { "message": "AC Timer Control" },
-  "badgeClockSoon": { "message": "AC switching soon" },
-  "badgeClockCountdown": { "message": "$1:00 $2 AC, ~$3 min" },
-  "badgeIntervalSoon": { "message": "$1 AC soon" },
-  "badgeIntervalCountdown": { "message": "$1, ~$2 min until $3" },
-
-  "contentTimeout": { "message": "Timeout waiting for AC switch. Ensure page is fully loaded" },
-  "contentRetryExhausted": { "message": "Tried 3 times, AC did not become $1" },
-  "contentCrossDayLimit": { "message": "Page timer only supports same-day; cross-day PWM will use extension alarms" },
-  "contentNoInput": { "message": "Could not find page timer input" },
-  "contentInputRejected": { "message": "Input rejected time value $1" },
-
-  "bgPageTimerNoTab": { "message": "AC page not open, cannot set page safety timer" },
-  "bgPageTimerCrossDay": { "message": "Cross-day PWM active; page safety timer will be set after midnight" },
-  "bgPageTimerFailed": { "message": "Failed to set page timer" },
-
-  "versionMismatch": { "message": "[AC-UST] Version mismatch: manifest=$1, source=$2. Please reload extension." },
-  "popupSelfHealFail": { "message": "popup self-heal storage failed: " }
+  "extName": {
+    "message": "AC-UST",
+    "description": "扩展名称"
+  },
+  "extShortName": {
+    "message": "AC-UST",
+    "description": "扩展短名称"
+  },
+  "extDesc": {
+    "message": "定时开关 HKUST Smart Power Meter 冷气 - 自动在设定时间开关空调",
+    "description": "扩展描述，Chrome Web Store 显示"
+  },
+  "extActionTitle": {
+    "message": "冷气定时控制",
+    "description": "工具栏图标悬停提示文字"
+  },
+  "acLoading": {
+    "message": "加载中...",
+    "description": "弹窗初始加载状态文字"
+  },
+  "acIdle": {
+    "message": "定时未启用",
+    "description": "定时未启用时的状态文字"
+  },
+  "acRunning": {
+    "message": "冷气运行中",
+    "description": "冷气当前正在运行的状态文字"
+  },
+  "acStopped": {
+    "message": "冷气已关闭",
+    "description": "冷气当前已关闭的状态文字"
+  },
+  "acOff": {
+    "message": "定时已关闭",
+    "description": "定时功能已关闭的状态文字"
+  },
+  "pwmSettings": {
+    "message": "📋 PWM 循环设置",
+    "description": "弹窗 PWM 设置区段标题"
+  },
+  "clockModeLabel": {
+    "message": "🕐 时钟模式（单数整点开 / 双数整点关）",
+    "description": "时钟模式复选框标签"
+  },
+  "onMinutesLabel": {
+    "message": "🟢 开启分钟",
+    "description": "开启分钟数输入框标签"
+  },
+  "offMinutesLabel": {
+    "message": "🔴 关闭分钟",
+    "description": "关闭分钟数输入框标签"
+  },
+  "scheduleHintDefault": {
+    "message": "点“定时开”会先开启冷气，然后按“开启分钟 / 关闭分钟”持续循环；点“定时关”会停止循环并默认关闭冷气。",
+    "description": "间隔模式下的说明文字"
+  },
+  "scheduleHintClock": {
+    "message": "单数整点(1/3/5...23)开 · 双数整点(0/2/4...22)关。点“定时开”立即开始。",
+    "description": "时钟模式下的说明文字"
+  },
+  "btnTimedOn": {
+    "message": "⏰ 定时开",
+    "description": "定时开按钮文字"
+  },
+  "btnTimedOff": {
+    "message": "⏹️ 定时关",
+    "description": "定时关按钮文字"
+  },
+  "btnDiagnose": {
+    "message": "🔍 诊断",
+    "description": "诊断按钮文字"
+  },
+  "safetynetSet": {
+    "message": "🔒 页面关机保险已设置；核心 PWM 仍由扩展控制",
+    "description": "页面定时器已设置的安全提示"
+  },
+  "safetynetNotSet": {
+    "message": "ℹ️ 页面关机保险暂未设置：$1；PWM 循环仍会继续",
+    "description": "页面定时器未设置但有错误的提示。$1=错误原因"
+  },
+  "safetynetError": {
+    "message": "ℹ️ $1",
+    "description": "页面定时器错误信息。$1=具体错误"
+  },
+  "actionOn": {
+    "message": "开启",
+    "description": "开启冷气的动作名称"
+  },
+  "actionOff": {
+    "message": "关闭",
+    "description": "关闭冷气的动作名称"
+  },
+  "countdownClock": {
+    "message": "下次 <strong>$1:00</strong> → $2",
+    "description": "时钟模式倒计时显示。HTML格式。$1=小时数(两位数)，$2=动作(开启/关闭)"
+  },
+  "countdownInterval": {
+    "message": "距离自动<span style='color:#64748b'>$1</span>还有&nbsp;<strong>$2</strong>&nbsp;分钟",
+    "description": "间隔模式倒计时显示。HTML格式。$1=动作(开启/关闭)，$2=剩余分钟数"
+  },
+  "countdownSoon": {
+    "message": "即将自动$1...",
+    "description": "倒计时即将到时的显示。$1=动作(开启/关闭)"
+  },
+  "statusClosing": {
+    "message": "⏳ 正在关闭 AC...",
+    "description": "定时关操作中状态提示"
+  },
+  "statusClosedOK": {
+    "message": "✅ 定时已关闭，AC 已关机",
+    "description": "定时关成功且关机确认成功的状态提示"
+  },
+  "statusClosedNoConfirm": {
+    "message": "⚠️ 定时已关闭，但关机未确认 — 请手动关闭",
+    "description": "定时关成功但二次确认失败的状态提示"
+  },
+  "statusClosedNoResponse": {
+    "message": "⚠️ 定时已关闭，但关机命令未确认",
+    "description": "定时关但无确认结果的状态提示"
+  },
+  "statusOnOK": {
+    "message": "✅ 定时已开启",
+    "description": "定时开成功的状态提示"
+  },
+  "statusError": {
+    "message": "❌ 更新失败",
+    "description": "更新设置失败的状态提示"
+  },
+  "diagnoseInProgress": {
+    "message": "🔍 诊断中...",
+    "description": "诊断面板加载中文字"
+  },
+  "diagnoseStorageRW": {
+    "message": "storage 可读写",
+    "description": "诊断：storage 读写检查通过"
+  },
+  "diagnoseEnabled": {
+    "message": "schedule.enabled=true (定时已启用)",
+    "description": "诊断：定时已启用"
+  },
+  "diagnoseMode": {
+    "message": "mode=",
+    "description": "诊断：模式显示前缀"
+  },
+  "diagnoseClockMode": {
+    "message": "clockMode=",
+    "description": "诊断：时钟模式显示前缀"
+  },
+  "diagnoseClock": {
+    "message": "时钟",
+    "description": "时钟模式名称"
+  },
+  "diagnoseInterval": {
+    "message": "间隔",
+    "description": "间隔模式名称"
+  },
+  "diagnoseMissingTrigger": {
+    "message": "storage 绝对触发时间缺失",
+    "description": "诊断：nextTriggerAt 缺失"
+  },
+  "diagnoseTriggerTime": {
+    "message": "storage 绝对触发时间: ",
+    "description": "诊断：显示触发时间前缀"
+  },
+  "diagnosePopHealed": {
+    "message": " (popup 已自愈)",
+    "description": "诊断：popup 自愈标签"
+  },
+  "diagnoseBgWriteback": {
+    "message": " (后台已回写)",
+    "description": "诊断：后台回写标签"
+  },
+  "diagnosePwmExists": {
+    "message": "ac-pwm 闹钟存在",
+    "description": "诊断：ac-pwm 闹钟存在"
+  },
+  "diagnosePwmTrigger": {
+    "message": " (触发: ",
+    "description": "诊断：闹钟触发时间前缀"
+  },
+  "diagnosePwmSync": {
+    "message": "ac-pwm 与 storage 触发时间同步",
+    "description": "诊断：PWM 与 storage 同步检查"
+  },
+  "diagnoseBadgeAlarm": {
+    "message": "ac-badge-tick 角标刷新（每分钟）",
+    "description": "诊断：角标闹钟"
+  },
+  "diagnoseBadgeRebuilt": {
+    "message": " (已补建: ",
+    "description": "诊断：角标闹钟补建前缀"
+  },
+  "diagnoseWatchdog": {
+    "message": "ac-watchdog 看门狗（每5分钟）",
+    "description": "诊断：看门狗闹钟"
+  },
+  "diagnoseHeartbeat": {
+    "message": "setInterval heartbeat（storage 每 20s）",
+    "description": "诊断：心跳"
+  },
+  "diagnoseAlarmNotExpired": {
+    "message": "闹钟未过期 (到期: ",
+    "description": "诊断：闹钟未过期前缀"
+  },
+  "diagnoseTabOpen": {
+    "message": "AC页面已打开 (",
+    "description": "诊断：AC 页面已打开前缀"
+  },
+  "diagnoseTabCount": {
+    "message": "个标签页)",
+    "description": "诊断：标签页数量后缀"
+  },
+  "diagnoseTabNotDiscarded": {
+    "message": "标签页未被浏览器丢弃",
+    "description": "诊断：标签页未被丢弃"
+  },
+  "diagnoseContentOK": {
+    "message": "content script 响应正常",
+    "description": "诊断：content script 正常"
+  },
+  "diagnoseAcReadable": {
+    "message": "AC状态可读: ",
+    "description": "诊断：AC 状态可读前缀"
+  },
+  "diagnoseContentNoResponse": {
+    "message": "content script 无响应: ",
+    "description": "诊断：content script 无响应前缀"
+  },
+  "diagnoseSWOK": {
+    "message": "后台 SW 响应正常",
+    "description": "诊断：SW 响应正常"
+  },
+  "diagnoseClockSync": {
+    "message": "clockMode 同步: ",
+    "description": "诊断：时钟模式同步前缀"
+  },
+  "diagnosePwmError": {
+    "message": "PWM 上次失败: ",
+    "description": "诊断：PWM 错误前缀"
+  },
+  "diagnosePwmErrorEmpty": {
+    "message": "PWM 无错误状态(pageTimerError 空)",
+    "description": "诊断：PWM 无错误"
+  },
+  "diagnoseSWNoResponse": {
+    "message": "后台 SW 无响应",
+    "description": "诊断：SW 无响应"
+  },
+  "diagnoseSWInitDone": {
+    "message": "SW init 已完成 (启动 $1s 前，init $2s 前)",
+    "description": "诊断：SW init 完成。$1=启动秒数，$2=init秒数"
+  },
+  "diagnoseTriMatch": {
+    "message": "三方一致: live ac-pwm = 内存 = storage = ",
+    "description": "诊断：三方一致前缀"
+  },
+  "diagnoseTriMismatch": {
+    "message": "三方校验: live=",
+    "description": "诊断：三方校验前缀"
+  },
+  "diagnosePopHealedSw": {
+    "message": "popup 已接管 storage 自愈(SW 详细状态不可用,功能正常)",
+    "description": "诊断：popup 已自愈接管提示"
+  },
+  "diagnoseGetSwFailed": {
+    "message": "getSwStatus 后台失败: ",
+    "description": "诊断：getSwStatus 失败前缀"
+  },
+  "diagnoseGetSwAbnormal": {
+    "message": "getSwStatus 异常响应: ",
+    "description": "诊断：getSwStatus 异常前缀"
+  },
+  "diagnoseGetSwNone": {
+    "message": "getSwStatus 无响应且 popup 未自愈 — 建议在 edge://extensions 重新加载扩展",
+    "description": "诊断：SW 完全无响应且未自愈"
+  },
+  "diagnoseBuildTime": {
+    "message": "BUILD_TIME: $1",
+    "description": "诊断：构建时间戳。$1=时间字符串"
+  },
+  "diagnoseException": {
+    "message": "诊断异常: ",
+    "description": "诊断：异常前缀"
+  },
+  "badgeDefault": {
+    "message": "冷气定时控制",
+    "description": "扩展图标默认标题"
+  },
+  "badgeClockSoon": {
+    "message": "即将切换冷气状态",
+    "description": "时钟模式：即将切换状态时图标标题"
+  },
+  "badgeClockCountdown": {
+    "message": "$1:00 $2冷气，约 $3 分钟后",
+    "description": "时钟模式：倒计时图标标题。$1=小时，$2=开启/关闭，$3=分钟"
+  },
+  "badgeIntervalSoon": {
+    "message": "即将$1冷气",
+    "description": "间隔模式：即将切换时图标标题。$1=开启/关闭"
+  },
+  "badgeIntervalCountdown": {
+    "message": "$1，约 $2 分钟后自动$3",
+    "description": "间隔模式：倒计时图标标题。$1=冷气运行中/冷气已关闭，$2=分钟，$3=开启/关闭"
+  },
+  "contentTimeout": {
+    "message": "等待超时，未找到 AC 开关。请确保页面已完全加载",
+    "description": "content.js: 等待开关超时错误"
+  },
+  "contentRetryExhausted": {
+    "message": "已尝试 3 次，但 AC 未变成 $1",
+    "description": "content.js: 重试耗尽错误。$1=目标状态"
+  },
+  "contentCrossDayLimit": {
+    "message": "页面定时器只能选择当天时间，跨日 PWM 将由扩展闹钟继续执行",
+    "description": "content.js: 跨日限制提示"
+  },
+  "contentNoInput": {
+    "message": "未找到页面定时器输入框",
+    "description": "content.js: 找不到输入框错误"
+  },
+  "contentInputRejected": {
+    "message": "输入框未接受时间 $1",
+    "description": "content.js: 输入验证失败。$1=时间值"
+  },
+  "bgPageTimerNoTab": {
+    "message": "AC 页面未打开，无法设置页面关机保险",
+    "description": "background.js: 无页面时设置定时器失败"
+  },
+  "bgPageTimerCrossDay": {
+    "message": "跨日 PWM 已启用；页面关机保险将在午夜后自动补设",
+    "description": "background.js: 跨日提示"
+  },
+  "bgPageTimerFailed": {
+    "message": "页面定时器设置失败",
+    "description": "background.js: 定时器设置失败"
+  },
+  "versionMismatch": {
+    "message": "[AC-UST] 版本不一致：manifest=$1, 源码=$2。请重载扩展。",
+    "description": "版本不一致的 console 警告"
+  },
+  "popupSelfHealFail": {
+    "message": "popup 侧 storage 自愈失败: ",
+    "description": "popup 自愈失败日志前缀"
+  }
 }
