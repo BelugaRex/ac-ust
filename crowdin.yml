@@ -1,8 +1,11 @@
 # AC-UST Crowdin 本地化配置
 # 注册 Crowdin 并连接 GitHub 后，Crowdin 会自动：
 # 1. 检测 _locales/zh_CN/messages.json 为源文件
-# 2. 将翻译输出到 _locales/{language_code}/messages.json
+# 2. 将翻译输出到 _locales/{locale}/messages.json
 # 3. 翻译完成后自动向 GitHub 开 PR
+#
+# %locale% 保留完整语言代码（zh_CN, en, ja...），
+# 不能用 %two_letters_code%（会截断为 zh, en），Chrome 扩展需要完整代码。
 
 project_id_env: CROWDIN_PROJECT_ID
 api_token_env: CROWDIN_PERSONAL_TOKEN
@@ -10,6 +13,6 @@ preserve_hierarchy: true
 
 files:
   - source: /_locales/zh_CN/messages.json
-    translation: /_locales/%two_letters_code%/messages.json
+    translation: /_locales/%locale%/messages.json
     type: chrome
     update_option: update_as_unapproved
