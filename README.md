@@ -56,6 +56,25 @@ ac-ust/
 └── icons/             # 扩展图标
 ```
 
+## 🌐 本地化 / Localization
+
+想让 AC-UST 支持你的语言？**不需要懂代码**，只需两步：
+
+### 方式一：通过 Crowdin（推荐）
+
+1. 访问 [Crowdin 项目页面](https://crowdin.com)（待创建）
+2. 选择你的语言，在网页上对照源文本填写翻译
+3. 提交后 Crowdin 会自动向 GitHub 开 PR，合并即生效
+
+### 方式二：直接编辑 JSON 文件
+
+1. 复制 `_locales/en/messages.json` → 改名为你的语言代码（如 `ja/`、`ko/`、`fr/`）
+2. 把每个 `"message"` 的值翻译成你的语言
+3. 注意：`$1`、`$2` 等是占位符，**保留不动**
+4. 提交 PR 到本仓库
+
+语言代码参见 [Chrome 支持的语言](https://developer.chrome.com/docs/webstore/i18n?hl=zh-cn#localeTable)。
+
 ## 技术栈
 
 - Chrome Extension Manifest V3
