@@ -1,0 +1,60 @@
+name: Release on Tag
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find CRX file
+        id: crx
+        run: |
+          CRX=$(ls releases/ac-ust-*.crx 2>/dev/null | head -1)
+          if [ -z "$CRX" ]; then
+            echo "No CRX found in releases/"
+            echo "crx_found=false" >> $GITHUB_OUTPUT
+          else
+            echo "crx_path=$CRX" >> $GITHUB_OUTPUT
+            echo "crx_name=$(basename $CRX)" >> $GITHUB_OUTPUT
+            echo "crx_found=true" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build ZIP for store
+        run: |
+          mkdir -p dist
+          cp manifest.json background.js content.js page-confirm.js popup.html popup.js i18n.js offscreen.html offscreen.js dist/
+          cp -r _locales icons dist/
+          VER=$(node -p "require('./manifest.json').version")
+          BUILD_TIME=$(date -u '+%Y-%m-%d %H:%M:%S')
+          sed -i "s/const APP_VERSION = '[^']*'/const APP_VERSION = '$VER'/" dist/popup.js
+          sed -i "s/const BUILD_TIME = '[^']*'/const BUILD_TIME = '$BUILD_TIME'/" dist/popup.js
+          cd dist && zip -r ../ac-ust-v$VER.zip . && cd ..
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "${{ github.ref_name }}"
+          body: |
+            ## AC-UST ${{ github.ref_name }}
+
+            公测版本。
+            
+            ### 安装方法
+
+            **CRX 安装（推荐）**：下载 `.crx` 文件，拖入 `chrome://extensions` 页面。
+
+            **手动安装**：下载 `.zip` 解压后，在 `chrome://extensions` → 开发者模式 → 加载已解压的扩展程序。
+
+            详见 [releases/README.md](https://github.com/BelugaRex/ac-ust/blob/beta-rex/releases/README.md)。
+          files: |
+            ac-ust-v*.zip
+            releases/ac-ust-*.crx
+          generate_release_notes: false
