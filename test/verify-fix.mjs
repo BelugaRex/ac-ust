@@ -360,6 +360,14 @@ async function runTests() {
   assertPass(!popupHtml.includes('__MSG_'),
     'popup.html 不残留 __MSG_*__ 占位符 (改用 data-i18n)');
 
+  // 5g: manifest 必须声明 default_locale,以满足 /_locales 目录的清单要求
+  const manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'manifest.json'), 'utf8'));
+  const distManifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'dist', 'manifest.json'), 'utf8'));
+  assertPass(manifest.default_locale === 'zh_CN',
+    'manifest.json 声明 default_locale=zh_CN');
+  assertPass(distManifest.default_locale === 'zh_CN',
+    'dist/manifest.json 也同步 default_locale=zh_CN');
+
   // 汇总
   const passCount = results.filter(r => r.pass).length;
   const totalCount = results.length;
