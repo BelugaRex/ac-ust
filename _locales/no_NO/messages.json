@@ -61,15 +61,31 @@
   },
   "btnTimedOn": {
     "message": "⏰ 定时开",
-    "description": "定时开按钮文字"
+    "description": "定时开按钮文字（v0.5.0 后已弃用，保留兼容）"
   },
   "btnTimedOff": {
     "message": "⏹️ 定时关",
-    "description": "定时关按钮文字"
+    "description": "定时关按钮文字（v0.5.0 后已弃用，保留兼容）"
   },
   "btnDiagnose": {
     "message": "🔍 诊断",
     "description": "诊断按钮文字"
+  },
+  "timerEnabled": {
+    "message": "定时已开启 · 点击关闭",
+    "description": "定时 toggle 打开时的标签"
+  },
+  "timerDisabled": {
+    "message": "定时已关闭 · 点击开启",
+    "description": "定时 toggle 关闭时的标签"
+  },
+  "timerEnabling": {
+    "message": "正在开启...",
+    "description": "定时 toggle 开启中过渡文字"
+  },
+  "timerDisabling": {
+    "message": "正在关闭...",
+    "description": "定时 toggle 关闭中过渡文字"
   },
   "safetynetSet": {
     "message": "🔒 页面关机保险已设置；核心 PWM 仍由扩展控制",
