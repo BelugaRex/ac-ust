@@ -10,8 +10,8 @@ const offMinutesInput = document.getElementById('offMinutes');
 const clockModeToggle = document.getElementById('clockModeToggle');
 const intervalInputs = document.getElementById('intervalInputs');
 const scheduleHint = document.getElementById('scheduleHint');
-const btnOn = document.getElementById('btnOn');
-const btnOff = document.getElementById('btnOff');
+const timerToggle = document.getElementById('timerToggle');
+const timerToggleLabel = document.getElementById('timerToggleLabel');
 const statusDiv = document.getElementById('status');
 const acDot = document.getElementById('acDot');
 const acStateText = document.getElementById('acStateText');
@@ -95,6 +95,8 @@ async function refreshStatus() {
 function updateCountdownDisplay(schedule, alarm) {
   if (!schedule || !schedule.enabled) {
     currentScheduleEnabled = false;
+    timerToggle.checked = false;
+    timerToggleLabel.textContent = t('timerDisabled');
     // 定时未启用
     acDot.className = 'ac-dot off';
     acStateText.textContent = t('acOff');
@@ -106,6 +108,8 @@ function updateCountdownDisplay(schedule, alarm) {
   }
 
   currentScheduleEnabled = true;
+  timerToggle.checked = true;
+  timerToggleLabel.textContent = t('timerEnabled');
   idleDisplay.style.display = 'none';
   countdownDisplay.style.display = 'flex';
 
@@ -206,20 +210,11 @@ async function updateSchedule(enabled, restart = false) {
     currentScheduleEnabled = data.enabled;
     let finalResponse = response;
 
+    // 手动开关冷气（定时已关时会自动关机）
     if (!data.enabled) {
-      // 定时关：无论 updateSchedule 返回的 offResult 如何，都独立再发一次即时关机。
-      // 防止主世界 toggle 返回虚假成功（alreadyDone 或验证误判）。
-      showStatus(t('statusClosing'), 'error');
-      const toggleOff = await chrome.runtime.sendMessage({ type: 'toggleNow', action: 'off' });
-      finalResponse = toggleOff?.schedule ? { ...response, schedule: toggleOff.schedule, offResult: toggleOff } : response;
-      if (toggleOff?.success) {
-        showStatus(t('statusClosedOK'), 'success');
-      } else if (response.offResult?.success) {
-        // 首次关机声称成功但二次确认失败 → 以二次确认为准
-        showStatus(t('statusClosedNoConfirm'), 'error');
-      } else {
-        showStatus(t('statusClosedNoResponse'), 'error');
-      }
+      // B1: background 的 updateSchedule handler 已经负责关机，
+      // popup 不再发第二次 toggleNow（避免双击噪音）
+      showStatus(t('statusClosedOK'), 'success');
     } else {
       showStatus(t('statusOnOK'), 'success');
     }
@@ -231,9 +226,28 @@ async function updateSchedule(enabled, restart = false) {
   }
 }
 
-// ----- 定时开 / 定时关 -----
-btnOn.addEventListener('click', () => updateSchedule(true, true));
-btnOff.addEventListener('click', () => updateSchedule(false, true));
+// ----- 定时拨动开关（双向同步 toggle） -----
+let _toggleProgrammatic = false; // 防止程序同步时触发 onChange 循环
+
+timerToggle.addEventListener('change', async () => {
+  if (_toggleProgrammatic) return; // 程序同步，不触发 updateSchedule
+  const enabled = timerToggle.checked;
+  timerToggle.disabled = true; // 防止双击
+  timerToggleLabel.textContent = enabled ? t('timerEnabling') : t('timerDisabling');
+  try {
+    await updateSchedule(enabled, true);
+  } finally {
+    timerToggle.disabled = false;
+  }
+});
+
+// 供外部（refreshStatus）同步 toggle 状态时不触发 onChange
+function syncToggleState(enabled) {
+  _toggleProgrammatic = true;
+  timerToggle.checked = enabled;
+  timerToggleLabel.textContent = enabled ? t('timerEnabled') : t('timerDisabled');
+  _toggleProgrammatic = false;
+}
 
 // ----- 已启用时修改分钟数自动重启 -----
 for (const input of [onMinutesInput, offMinutesInput]) {

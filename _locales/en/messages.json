@@ -22,6 +22,11 @@
   "btnTimedOff": { "message": "⏹️ Timed Off" },
   "btnDiagnose": { "message": "🔍 Diagnose" },
 
+  "timerEnabled": { "message": "Timer ON · Tap to disable" },
+  "timerDisabled": { "message": "Timer OFF · Tap to enable" },
+  "timerEnabling": { "message": "Enabling..." },
+  "timerDisabling": { "message": "Disabling..." },
+
   "safetynetSet": { "message": "🔒 Page safety timer set; core PWM still managed by extension" },
   "safetynetNotSet": { "message": "ℹ️ Page safety timer not set: $1; PWM cycle will continue" },
   "safetynetError": { "message": "ℹ️ $1" },

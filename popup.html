@@ -45,8 +45,57 @@
 
   .btn-row {
     display: flex;
-    gap: 8px;
+    align-items: center;
+    justify-content: center;
+    gap: 10px;
     margin-bottom: 12px;
+    padding: 10px 14px;
+    background: white;
+    border-radius: 10px;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+  }
+  .toggle-label {
+    font-size: 14px;
+    font-weight: 500;
+    color: #1e293b;
+    cursor: pointer;
+    user-select: none;
+  }
+  /* Toggle Switch */
+  .toggle-switch {
+    position: relative;
+    display: inline-block;
+    width: 48px;
+    height: 26px;
+    flex-shrink: 0;
+  }
+  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-slider {
+    position: absolute;
+    cursor: pointer;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background-color: #cbd5e1;
+    transition: 0.25s;
+    border-radius: 26px;
+  }
+  .toggle-slider:before {
+    position: absolute;
+    content: "";
+    height: 20px; width: 20px;
+    left: 3px; bottom: 3px;
+    background-color: white;
+    transition: 0.25s;
+    border-radius: 50%;
+  }
+  .toggle-switch input:checked + .toggle-slider {
+    background-color: #22c55e;
+  }
+  .toggle-switch input:checked + .toggle-slider:before {
+    transform: translateX(22px);
+  }
+  .toggle-switch input:disabled + .toggle-slider {
+    opacity: 0.5;
+    cursor: not-allowed;
   }
   .btn {
     flex: 1;
@@ -183,8 +232,11 @@
   </div>
 
   <div class="btn-row">
-    <button class="btn btn-on" id="btnOn" data-i18n="btnTimedOn"></button>
-    <button class="btn btn-off" id="btnOff" data-i18n="btnTimedOff"></button>
+    <span class="toggle-label" id="timerToggleLabel" data-i18n="timerDisabled"></span>
+    <label class="toggle-switch">
+      <input type="checkbox" id="timerToggle">
+      <span class="toggle-slider"></span>
+    </label>
   </div>
   
   <div class="status" id="status"></div>
