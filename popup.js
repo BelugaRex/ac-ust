@@ -95,8 +95,7 @@ async function refreshStatus() {
 function updateCountdownDisplay(schedule, alarm) {
   if (!schedule || !schedule.enabled) {
     currentScheduleEnabled = false;
-    timerToggle.checked = false;
-    timerToggleLabel.textContent = t('timerDisabled');
+    syncToggleState(false);
     // 定时未启用
     acDot.className = 'ac-dot off';
     acStateText.textContent = t('acOff');
@@ -108,8 +107,7 @@ function updateCountdownDisplay(schedule, alarm) {
   }
 
   currentScheduleEnabled = true;
-  timerToggle.checked = true;
-  timerToggleLabel.textContent = t('timerEnabled');
+  syncToggleState(true);
   idleDisplay.style.display = 'none';
   countdownDisplay.style.display = 'flex';
 
