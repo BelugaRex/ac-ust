@@ -9,9 +9,13 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气开关，支持 PWM
 - **自动确认弹窗**：自动处理浏览器原生 `confirm` 和 Ant Design 确认框
 - **后台运行**：即使关闭弹窗，定时任务仍在 Service Worker 中执行
 
-## 📦 计划
+## 📦 获取
 
-目前支持开发者模式安装。如果觉得好用，欢迎 **⭐ Star** 这个项目 — 星星够多了我就去注册 Chrome Web Store / Edge Add-ons，打包成正式扩展方便大家一键安装 😄
+| 方式 | 说明 |
+|------|------|
+| **[Chrome Web Store](https://chromewebstore.google.com)** | 即将上架，一键安装自动更新 |
+| **开发者模式** | `git clone` → `./build.ps1` → Load Unpacked `dist/` |
+| **GitHub Releases** | 下载源码 ZIP，解压后 Load Unpacked |
 
 ## 安装
 
