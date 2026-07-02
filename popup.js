@@ -310,6 +310,14 @@ btnDiagnose.addEventListener('click', async () => {
   
   const lines = [];
   function add(ok, msg) { lines.push((ok ? '✅' : '❌') + ' ' + msg); }
+
+  // B3: 浏览器版本信息 — 方便跨浏览器排障
+  const ua = navigator.userAgent;
+  const isEdge = /Edg\//i.test(ua);
+  const isChrome = /Chrome\//i.test(ua) && !isEdge;
+  const browserName = isEdge ? 'Edge' : isChrome ? 'Chrome' : 'Unknown';
+  const browserVer = ua.match(isEdge ? /Edg\/([\d.]+)/ : /Chrome\/([\d.]+)/)?.[1] || '?';
+  lines.push('ℹ️ 浏览器: ' + browserName + ' ' + browserVer);
   
   try {
     const ensured = await chrome.runtime.sendMessage({ type: 'ensureDiagnostics' });

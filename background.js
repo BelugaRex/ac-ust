@@ -25,6 +25,7 @@ let schedule = {
 };
 
 let pwmStepRunning = false;
+let lastPwmStepAt = 0;  // A4: 看门狗 cooldown 追踪
 
 // ----- 时钟模式辅助函数 -----
 function getNextHourBoundary(fromMs = Date.now()) {
@@ -550,6 +551,11 @@ async function runPwmStep() {
     console.warn('[AC扩展] PWM 步骤已在执行，跳过重复触发');
     return;
   }
+  // A4: 看门狗 5s cooldown — 防止看门狗与闹钟竞态导致重复触发
+  if (Date.now() - lastPwmStepAt < 5000) {
+    console.warn('[AC扩展] PWM 步骤距上次执行不足 5s，跳过（看门狗 cooldown）');
+    return;
+  }
   pwmStepRunning = true;
 
   return waitUntil((async () => {
@@ -657,6 +663,13 @@ async function runPwmStep() {
             await chrome.tabs.reload(tabs[0].id);
             await waitForTabReady(tabs[0].id, 30000);
             await ensureContentScriptLoaded(tabs[0].id);
+            // A3: reload 后先读 AC 真实状态，若已是目标状态则跳过 toggle
+            const postReload = await getCurrentACStatus();
+            if (typeof postReload?.isOn === 'boolean' && postReload.isOn === needOn) {
+              toggleOk = true;
+              console.log('[AC扩展] 重试预检：reload 后 AC 已在目标状态，跳过切换');
+              break;
+            }
           }
         } catch (e) {
           console.warn('[AC扩展] PWM 重试 reload 失败,继续 toggleAC:', e?.message);
@@ -713,6 +726,7 @@ async function runPwmStep() {
       await setPageTimer(schedule.onMinutes);
     }
   } finally {
+    lastPwmStepAt = Date.now();  // A4: 记录最后执行时间
     pwmStepRunning = false;
   }
   })());
@@ -851,14 +865,20 @@ async function waitUntil(promise) {
 }
 
 // ----- 官方推荐：scripting.executeScript 兜底，当 content script 未加载时强制注入 -----
-async function ensureContentScriptLoaded(tabId) {
-  try {
-    // 尝试发一个轻量消息探测 content script 是否就绪
-    await chrome.tabs.sendMessage(tabId, { action: 'status' });
-    return true;
-  } catch (_) {
+async function ensureContentScriptLoaded(tabId, maxRetries = 2) {
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      // 尝试发一个轻量消息探测 content script 是否就绪
+      await chrome.tabs.sendMessage(tabId, { action: 'status' });
+      return true;
+    } catch (_) {
+      if (attempt < maxRetries) {
+        console.log(`[AC扩展] content script 探测失败 (${attempt+1}/${maxRetries+1})，重试注入...`);
+        await sleep(1500);
+        continue;
+      }
+    }
     // content script 未加载，用 scripting API 强制注入
-    // 关键：content.js 注入 ISOLATED world，page-confirm.js 必须注入 MAIN world
     try {
       await chrome.scripting.executeScript({
         target: { tabId },
@@ -872,7 +892,6 @@ async function ensureContentScriptLoaded(tabId) {
         injectImmediately: true
       });
       console.log('[AC扩展] scripting.executeScript 兜底注入完成 (ISOLATED + MAIN)');
-      // 注入后给一点时间初始化
       await sleep(2000);
       return true;
     } catch (e2) {
@@ -880,10 +899,21 @@ async function ensureContentScriptLoaded(tabId) {
       return false;
     }
   }
+  return false;
 }
 
 // ----- 切换 AC 状态 -----
 async function toggleAC(action) {
+  // A1: 顶层幂等预检 — 先查当前 AC 真实状态，已是目标则跳过，避免多余开关噪音
+  const needOn = action === 'on';
+  try {
+    const preStatus = await getCurrentACStatus();
+    if (typeof preStatus?.isOn === 'boolean' && preStatus.isOn === needOn) {
+      console.log(`[AC扩展] 幂等预检：AC 已在目标状态 (${action})，跳过切换`);
+      return { success: true, alreadyDone: true, action };
+    }
+  } catch (_) { /* 预检失败不影响主流程 */ }
+
   const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
   
   if (tabs.length > 0) {
@@ -1386,6 +1416,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await chrome.alarms.clear('ac-badge-tick');
         await chrome.alarms.clear('ac-watchdog');
         await updateBadge();
+        // B1: 先持久化"已关闭"状态，再执行关机 — 确保即便 toggleAC 因 SW 终止而丢失，状态已写入 storage
+        await persistSchedule('updateSchedule');
         offResult = await toggleAC('off');
         if (!offResult?.success) {
           schedule.pageTimerError = `定时已关闭，但关机命令未确认：${offResult?.error || '未知错误'}`;
