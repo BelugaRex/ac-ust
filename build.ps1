@@ -6,6 +6,7 @@
 param(
   [string]$OutputDir = "dist",
   [switch]$Crx,
+  [switch]$Zip,
   [ValidateSet("Edge","Chrome")][string]$Browser = "Chrome",
   [string]$BrowserPath,
   [string]$KeyPath
@@ -187,4 +188,57 @@ if ($Crx) {
   Write-Host "   For enterprise deployment:"
   Write-Host "     - Use ExtensionInstallForcelist policy + update.xml"
   Write-Host "============================================"
+}
+
+# ============================================================
+# ZIP packaging (optional, -Zip switch)
+#   生成可直接上传 Chrome Web Store / Edge Add-ons 的 ZIP 包。
+#   注: Chrome Web Store 接受 ZIP 而非 CRX, 这是日常上架推荐格式。
+# ============================================================
+if ($Zip) {
+  $distAbs = (Resolve-Path $OutputDir).Path
+  $releasesDir = Join-Path $Root "releases"
+  if (-not (Test-Path $releasesDir)) { New-Item -ItemType Directory -Path $releasesDir | Out-Null }
+  $zipPath = Join-Path $releasesDir "ac-ust-v$ver.zip"
+
+  # 先删除旧 ZIP (Compress-Archive 在 -Force 模式下不会删自还会叠)
+  if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
+  # 清空同名旧 .crx 不会被影响
+
+  Write-Host ""
+  Write-Host "Packaging ZIP for Chrome Web Store / Edge Add-ons..."
+  # 关键: 必须进 dist 目录制包, 仓库根目录额外文件不应进 ZIP
+  # 用 -Path "$distAbs/*" 打包 dist 内内容(不含 dist 父目录)
+  Push-Location $distAbs
+  Compress-Archive -Path "./*" -DestinationPath $zipPath -CompressionLevel Optimal
+  Pop-Location
+
+  if (-not (Test-Path $zipPath)) {
+    Write-Error "ZIP packaging failed"
+    exit 1
+  }
+
+  $zipKb = [math]::Round((Get-Item $zipPath).Length / 1KB, 1)
+  Write-Host ""
+  Write-Host "============================================"
+  Write-Host "ZIP package created!"
+  Write-Host "  ZIP : $zipPath ($zipKb KB)"
+  Write-Host "============================================"
+  Write-Host ""
+  Write-Host "上传到 Chrome Web Store:"
+  Write-Host "  1. https://chrome.google.com/webstore/devconsole"
+  Write-Host "  2. 选 AC-UST 项目 -> 打包 -> 上传新的 ZIP"
+  Write-Host "  3. version 必须 > 上次发布版本(Chrome Web Store 严格递增)"
+  Write-Host "上传到 Edge Add-ons:"
+  Write-Host "  1. https://partner.microsoft.com/dashboard/microsoftedge"
+  Write-Host "  2. Update -> Upload package"
+  Write-Host "============================================"
+}
+
+# 提醒: 没打任何包时给出明确指引
+if (-not $Crx -and -not $Zip) {
+  Write-Host ""
+  Write-Host "(No package requested. dist/ is ready for Load Unpacked.)"
+  Write-Host "  -Crx  for CRX packaging"
+  Write-Host "  -Zip  for Chrome Web Store ZIP packaging"
 }
