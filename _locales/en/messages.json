@@ -104,6 +104,8 @@
   "bgPageTimerCrossDay": { "message": "Cross-day PWM active; page safety timer will be set after midnight" },
   "bgPageTimerFailed": { "message": "Failed to set page timer" },
 
+  "scheduleHintPinTab": { "message": "💡 Please pin the UST AC page tab and keep it open, or the timer cannot control the AC." },
+
   "versionMismatch": { "message": "[AC-UST] Version mismatch: manifest=$1, source=$2. Please reload extension." },
   "popupSelfHealFail": { "message": "popup self-heal storage failed: " }
 }
