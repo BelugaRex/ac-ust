@@ -11,16 +11,24 @@
   "acOff": { "message": "Timer disabled" },
 
   "pwmSettings": { "message": "📋 PWM Cycle Settings" },
-  "clockModeLabel": { "message": "🕐 Clock Mode (ON at odd hours / OFF at even hours)" },
+  "activeHoursLabel": { "message": "⏰ Active hours" },
+  "activeHoursWithin": { "message": "Running" },
+  "activeHoursOutside": { "message": "Idle" },
+  "helpTooltip": { "message": "Help / Feedback" },
   "onMinutesLabel": { "message": "🟢 ON Minutes" },
   "offMinutesLabel": { "message": "🔴 OFF Minutes" },
 
-  "scheduleHintDefault": { "message": "Click \"Timed On\" to start the AC and cycle by ON/OFF minutes. Click \"Timed Off\" to stop the cycle and turn off the AC." },
-  "scheduleHintClock": { "message": "ON at odd hours (1/3/5...23) · OFF at even hours (0/2/4...22). Click \"Timed On\" to start immediately." },
+  "scheduleHintDefault": { "message": "Turn on the timer toggle to start the AC and cycle by ON/OFF minutes. Turn off the toggle to stop the cycle and turn off the AC." },
+  "scheduleHintClock": { "message": "ON at odd hours (1/3/5...23) · OFF at even hours (0/2/4...22). Turn on the timer toggle to start immediately." },
 
   "btnTimedOn": { "message": "⏰ Timed On" },
   "btnTimedOff": { "message": "⏹️ Timed Off" },
   "btnDiagnose": { "message": "🔍 Diagnose" },
+
+  "timerEnabled": { "message": "Timer ON · Tap to disable" },
+  "timerDisabled": { "message": "Timer OFF · Tap to enable" },
+  "timerEnabling": { "message": "Enabling..." },
+  "timerDisabling": { "message": "Disabling..." },
 
   "safetynetSet": { "message": "🔒 Page safety timer set; core PWM still managed by extension" },
   "safetynetNotSet": { "message": "ℹ️ Page safety timer not set: $1; PWM cycle will continue" },
