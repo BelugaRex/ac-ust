@@ -310,50 +310,6 @@ async function watchdogCheck() {
   }
 }
 
-async function pwmPulseCheck() {
-  await loadScheduleFromStorage();
-  if (!schedule.enabled) return;
-  await updateBadge();
-
-  // 时钟模式：检查闹钟是否还在，若已过期则补执行被跳过的动作
-  if (isClockMode()) {
-    const alarm = await chrome.alarms.get('ac-pwm');
-    if (!alarm || alarm.scheduledTime <= Date.now() - 60000) {
-      console.warn('[AC扩展] PWM 心跳：时钟模式闹钟缺失/过期，补执行当前整点动作');
-      await runPwmStep();
-    }
-    return;
-  }
-
-  // 传统间隔模式
-  const liveAlarm = await chrome.alarms.get('ac-pwm');
-  const liveDueAt = getLiveAlarmEndMs(liveAlarm);
-  if (liveDueAt) {
-    await syncStoredTriggerFromAlarm(liveAlarm, 'PWM 心跳：同步现有 PWM 闹钟触发时间');
-    return;
-  }
-
-  const dueAt = getStoredAlarmEndMs();
-  const hasClock = dueAt > Date.now();
-
-  if (!hasClock) {
-    if (dueAt) {
-      console.warn('[AC扩展] PWM 心跳：检测到已到期，执行 PWM 步骤');
-      await runPwmStep();
-      return;
-    }
-    console.warn('[AC扩展] PWM 心跳：storage 中无倒计时，重建闹钟');
-    await repairScheduleClock();
-    return;
-  }
-
-  if (!liveAlarm || liveAlarm.scheduledTime <= Date.now() - 60000) {
-    const remainingMinutes = Math.max(1, (dueAt - Date.now()) / 60000);
-    await createAlarm('ac-pwm', { delayInMinutes: remainingMinutes });
-    console.warn(`[AC扩展] PWM 心跳：主闹钟缺失/过期，已恢复，剩余 ${remainingMinutes.toFixed(2)} 分钟`);
-  }
-}
-
 // ----- 启动时加载设置并创建闹钟 -----
 async function init() {
   try {
@@ -402,7 +358,6 @@ async function init() {
 async function setupAlarms(startImmediately = false) {
   if (!schedule.enabled) {
     await chrome.alarms.clear('ac-pwm');
-    await chrome.alarms.clear('ac-pwm-pulse');
     await chrome.alarms.clear('ac-badge-tick');
     await updateBadge();
     console.log('[AC扩展] PWM 定时未启用');
@@ -1411,7 +1366,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         schedule.pageTimerError = '';
         schedule.pageTimerRetryAt = 0;
         await chrome.alarms.clear('ac-pwm');
-        await chrome.alarms.clear('ac-pwm-pulse');
         await chrome.alarms.clear('ac-page-timer-retry');
         await chrome.alarms.clear('ac-badge-tick');
         await chrome.alarms.clear('ac-watchdog');
@@ -1457,11 +1411,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse(result);
       return;
     }
-    if (msg.type === 'getBalance') {
-      const balance = await getBalanceFromPage();
-      sendResponse(balance);
-      return;
-    }
   })().catch((e) => {
     console.error('[AC扩展] 消息处理失败:', msg?.type, e);
     sendResponse({ success: false, error: e?.message || String(e), schedule });
@@ -1492,20 +1441,6 @@ chrome.runtime.onConnect.addListener((port) => {
     });
   }
 });
-
-// ----- 从页面读取余额 -----
-async function getBalanceFromPage() {
-  const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-  if (tabs.length === 0) {
-    return { error: '请先打开 HKUST Power Meter 页面' };
-  }
-  try {
-    const balance = await chrome.tabs.sendMessage(tabs[0].id, { action: 'balance' });
-    return balance;
-  } catch (e) {
-    return { error: '无法读取余额，请刷新页面后重试' };
-  }
-}
 
 // ----- 启动/恢复兜底 -----
 chrome.runtime.onStartup.addListener(() => {

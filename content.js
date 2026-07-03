@@ -3,6 +3,13 @@
 // 负责与页面交互：读取状态、点击开关
 // ============================================================
 
+// 幂等守卫：scripting.executeScript 兜底可能与 manifest content_scripts
+// 在同一隔离世界重复执行本文件，导致 onMessage 监听器重复注册或顶层 const
+// 重声明抖动。包进 IIFE + 哨兵，对齐 page-confirm.js 的 __AC_EXTENSION_TOGGLE_PATCHED__ 范式。
+(() => {
+if (self.__AC_CONTENT_LOADED__) return;
+self.__AC_CONTENT_LOADED__ = true;
+
 // i18n — content script 运行在隔离世界，不能 importScripts，用内联 fetch loader
 const _i18nCache = {};
 let _i18nReady = false;
@@ -42,9 +49,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.action === 'status') {
     getAuthoritativeACStatus().then(result => sendResponse(result));
     return true;
-  }
-  if (msg.action === 'balance') {
-    sendResponse(getBalanceInfo());
   }
   if (msg.action === 'setTimer') {
     setPagePowerOffTimer(msg.minutes).then(result => sendResponse(result));
@@ -579,62 +583,4 @@ function findPowerOffTimerInput() {
   return pickerInputs.length > 0 ? pickerInputs[0] : null;
 }
 
-// 等待 Ant Design 下拉面板出现
-function waitForDropdown(timeoutMs) {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    function check() {
-      const panel = document.querySelector('.ant-picker-dropdown:not(.ant-picker-dropdown-hidden)');
-      if (panel) {
-        resolve(panel);
-        return;
-      }
-      if (Date.now() - start > timeoutMs) {
-        resolve(null);
-        return;
-      }
-      setTimeout(check, 200);
-    }
-    check();
-  });
-}
-
-// 在时间列中选中指定项
-async function selectTimeColumnItem(column, targetValue) {
-  const normalized = String(targetValue);
-  const padded = normalized.padStart(2, '0');
-
-  function findAndClick() {
-    const cells = column.querySelectorAll('.ant-picker-time-panel-cell');
-    for (const cell of cells) {
-      const text = (cell.textContent || '').trim();
-      const disabled = cell.classList.contains('ant-picker-time-panel-cell-disabled');
-      if (!disabled && (text === normalized || text === padded)) {
-        const inner = cell.querySelector('.ant-picker-time-panel-cell-inner') || cell;
-        inner.scrollIntoView?.({ block: 'center' });
-        inner.click();
-        return true;
-      }
-    }
-    return false;
-  }
-
-  if (findAndClick()) return true;
-
-  // Ant Design 时间列可能需要先滚动到目标项再点击
-  const scroller = column.matches('ul') ? column : (column.querySelector('ul') || column);
-  const firstCell = column.querySelector('.ant-picker-time-panel-cell');
-  const estimatedIndex = parseInt(normalized, 10);
-  const cellHeight = firstCell?.offsetHeight || 28;
-  if (scroller && Number.isFinite(estimatedIndex)) {
-    scroller.scrollTop = Math.max(0, estimatedIndex * cellHeight);
-    scroller.dispatchEvent(new Event('scroll', { bubbles: true }));
-    await sleep(250);
-  }
-
-  return findAndClick();
-}
-
-function getBalanceInfo() {
-  return { error: '余额读取已停用' };
-}
+})(); // end 幂等守卫 IIFE
