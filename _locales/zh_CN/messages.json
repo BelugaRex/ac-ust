@@ -15,8 +15,8 @@
   "onMinutesLabel": { "message": "🟢 开启分钟", "description": "开启分钟数输入框标签" },
   "offMinutesLabel": { "message": "🔴 关闭分钟", "description": "关闭分钟数输入框标签" },
 
-  "scheduleHintDefault": { "message": "点“定时开”会先开启冷气，然后按“开启分钟 / 关闭分钟”持续循环；点“定时关”会停止循环并默认关闭冷气。", "description": "间隔模式下的说明文字" },
-  "scheduleHintClock": { "message": "单数整点(1/3/5...23)开 · 双数整点(0/2/4...22)关。点“定时开”立即开始。", "description": "时钟模式下的说明文字" },
+  "scheduleHintDefault": { "message": "打开定时开关会先开启冷气，然后按\u201c开启分钟 / 关闭分钟\u201d持续循环；关闭开关会停止循环并默认关闭冷气。", "description": "间隔模式下的说明文字" },
+  "scheduleHintClock": { "message": "单数整点(1/3/5...23)开 · 双数整点(0/2/4...22)关。打开定时开关立即开始。", "description": "时钟模式下的说明文字" },
 
   "btnTimedOn": { "message": "⏰ 定时开", "description": "定时开按钮文字（v0.5.0 后已弃用，保留兼容）" },
   "btnTimedOff": { "message": "⏹️ 定时关", "description": "定时关按钮文字（v0.5.0 后已弃用，保留兼容）" },
