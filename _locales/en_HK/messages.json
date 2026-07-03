@@ -39,9 +39,21 @@
     "message": "📋 PWM Cycle Settings",
     "description": "弹窗 PWM 设置区段标题"
   },
-  "clockModeLabel": {
-    "message": "🕐 Clock Mode (ON at odd hours / OFF at even hours)",
-    "description": "时钟模式复选框标签"
+  "activeHoursLabel": {
+    "message": "⏰ 运行时段",
+    "description": "PWM 运行时段启用的复选框标签"
+  },
+  "activeHoursWithin": {
+    "message": "运行中",
+    "description": "当前处于运行时段内的状态微标"
+  },
+  "activeHoursOutside": {
+    "message": "休眠中",
+    "description": "当前处于运行时段外的状态微标"
+  },
+  "helpTooltip": {
+    "message": "帮助 / 反馈",
+    "description": "header 右侧问号图标悬停提示"
   },
   "onMinutesLabel": {
     "message": "🟢 ON Minutes",
