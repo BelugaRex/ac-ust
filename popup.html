@@ -3,63 +3,124 @@
 <head>
 <meta charset="utf-8">
 <style>
+  /*
+   * ===== Apple-inspired Design System =====
+   * 参考资料: APPLE-DESIGN.md
+   *
+   * 字体策略 (无 SF Pro 时的回退):
+   *  - macOS/iOS/Safari: -apple-system / BlinkMacSystemFont 直接走 SF Pro,效果与官方一致
+   *  - Windows: system-ui → Segoe UI Variable/Segoe UI (微软雅黑 / 微软雅黑 UI)
+   *  - Linux: system-ui → 默认无衬线字体 (Ubuntu/Droid Sans/Noto Sans)
+   *  - 开源替代: Inter (Google Fonts, variable) 与 SF Pro 最接近
+   *    若用户机器已安装 Inter,以下栈会自动优先使用它
+   *    (若需扩展内置 Inter 字体文件以彻底对齐 Apple 美学,需另开 issue 单独打包)
+   *
+   * 显示尺寸用负字距 (-0.12 → -0.374px) 重现 Apple 的"紧凑"标题节律
+   * 正文 17px / 行高 1.47 / 字距 -0.374px (用 system-ui 等价字体时收紧 0.03 行高)
+   */
+
   /* ===== Design Tokens ===== */
   :root {
-    --bg: #f1f5f9;
-    --surface: #ffffff;
-    --text: #0f172a;
-    --text-2: #475569;
-    --muted: #94a3b8;
-    --border: #e2e8f0;
-    --border-2: #f1f5f9;
-    --accent: #3b82f6;
-    --accent-ring: #dbeafe;
-    --green: #22c55e;
-    --green-bg: #f0fdf4;
-    --green-bd: #bbf7d0;
-    --green-dk: #166534;
-    --amber: #fbbf24;
-    --amber-bg: #fffbeb;
-    --amber-bd: #fde68a;
-    --amber-dk: #92400e;
-    --orange-bg: #fff7ed;
-    --orange-bd: #fed7aa;
-    --orange-dk: #9a3412;
-    --red: #ef4444;
-    --shadow: 0 1px 3px rgba(0,0,0,0.04), 0 4px 8px -2px rgba(0,0,0,0.03);
-    --r: 12px;
+    /* 颜色: 单一 Action Blue + 表面色 + 墨色文本 */
+    --c-accent: #0066cc;           /* Action Blue (主交互色) */
+    --c-accent-hover: #0071e3;     /* Focus Blue (键盘聚焦环) */
+    --c-accent-on-dark: #2997ff;   /* 深色面用蓝 (此处基本不用) */
+    --c-accent-ring: rgba(0, 102, 204, 0.16);
+    --c-accent-soft: rgba(0, 102, 204, 0.08);
+
+    --c-canvas: #ffffff;           /* 主画布白 */
+    --c-parchment: #f5f5f7;        /* Apple 标志性暖白 (页面背景) */
+    --c-pearl: #fafafc;            /* 次级 ghost button 比画布更浅 */
+
+    --c-ink: #1d1d1f;              /* 标题/正文近黑墨 */
+    --c-ink-80: #333333;           /* 次级文本 */
+    --c-muted: #7a7a7a;            /* 远端灰 */
+    --c-muted-2: #86868b;          /* 中性灰 (匄 ld 文字) */
+
+    --c-hairline: #e0e0e0;         /* 1px 发丝边框 */
+    --c-divider: #f0f0f0;          /* 软分隔线 */
+    --c-chip: #d2d2d7;             /* 半透明圆形控件基色 */
+
+    --c-success: #248a3d;
+    --c-success-bg: #f5fbf6;
+    --c-warning: #b25a00;
+    --c-warning-bg: #fff8ef;
+    --c-danger: #d70015;
+
+    /* 圆角: Apple 的系统化半径语法 (避免混用多种中等半径) */
+    --r-none: 0px;
+    --r-xs: 5px;
     --r-sm: 8px;
+    --r-md: 11px;
+    --r-lg: 18px;     /* 存储 utility card */
+    --r-pill: 9999px; /* 主 CTA / 配置器 chip / 搜索框 */
+
+    /* 间距: Apple 的 8px 基准节奏 */
+    --s-xxs: 4px;
+    --s-xs: 8px;
+    --s-sm: 12px;
+    --s-md: 17px;
+    --s-lg: 24px;
+    --s-xl: 32px;
+
+    /* 字体族: 显式优先级, 让 macOS 自动走 SF Pro */
+    --font-display: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-text: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+
+    /* 唯一允许的投影 (本扩展内仅状态圆点等极少数情况使用)
+       注意: Apple 系统对 UI chrome 不用阴影,仅用于"产品照片"。
+       这里 popup 无产品图,默认全部无阴影保持平面观感。 */
+    --shadow: none;
   }
 
   * { margin: 0; padding: 0; box-sizing: border-box; }
 
+  html { -webkit-text-size-adjust: 100%; }
+
   body {
     width: 320px;
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: var(--bg);
-    color: var(--text);
+    font-family: var(--font-text);
+    background: var(--c-parchment);
+    color: var(--c-ink);
+    /* 17px 是 Apple 的正文基准; popup 中降至 14px 以适应 320px 节奏
+       字距走 caption 档 (-0.224px) 避免小屏阅读过紧 */
+    font-size: 14px;
+    line-height: 1.43;
+    letter-spacing: -0.224px;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
   }
 
-  /* ===== Header Bar ===== */
+  /* ===== Header Bar (参考 sub-nav-frosted: 羊皮卷 80% + 模糊化) ===== */
   .header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 8px 14px;
-    background: var(--surface);
-    border-bottom: 1px solid var(--border);
+    height: 44px;            /* Apple nav-link 行高一致 (touch target) */
+    padding: 0 16px;
+    background: rgba(245, 245, 247, 0.86);
+    -webkit-backdrop-filter: saturate(180%) blur(20px);
+    backdrop-filter: saturate(180%) blur(20px);
+    border-bottom: 1px solid rgba(0, 0, 0, 0.06);
+    position: sticky;
+    top: 0;
+    z-index: 10;
   }
   .header-brand {
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 8px;
   }
-  .header-brand img { width: 16px; height: 16px; }
+  .header-brand img { width: 18px; height: 18px; }
   .header-name {
-    font-size: 13px;
-    font-weight: 700;
-    letter-spacing: 0.3px;
-    color: var(--text);
+    /* Apple tagline token: 21px/600 — 在 popup 中缩到 14px 保持比例感 */
+    font-family: var(--font-display);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 1.19;
+    letter-spacing: -0.12px;    /* nav-link 档字距 */
+    color: var(--c-ink);
   }
   .header-right {
     display: flex;
@@ -67,128 +128,146 @@
     gap: 8px;
   }
   .header-help {
+    /* Apple button-icon-circular: 半透明圆片控件 */
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 18px;
-    height: 18px;
-    border-radius: 50%;
-    background: var(--border-2);
-    color: var(--text-2);
+    width: 22px;
+    height: 22px;
+    border-radius: var(--r-pill);
+    background: var(--c-chip);
+    color: var(--c-ink);
     font-size: 11px;
     font-weight: 600;
     text-decoration: none;
-    transition: background 0.2s, color 0.2s;
+    line-height: 1;
+    transition: transform 0.16s ease, background 0.16s ease, color 0.16s ease;
   }
   .header-help:hover {
-    background: var(--accent-ring);
-    color: var(--accent);
+    background: #c7c7cc;
+    color: var(--c-accent);
   }
+  .header-help:active { transform: scale(0.95); } /* Apple 系统级按压微交互 */
   .header-version {
+    /* micro-legal token: 10px/400/-0.08px */
     font-size: 10px;
-    color: var(--muted);
+    color: var(--c-muted);
     font-variant-numeric: tabular-nums;
+    letter-spacing: -0.08px;
   }
 
-  .content { padding: 10px 12px 12px; }
+  .content { padding: var(--s-sm); } /* 12px 内容区外边距产生卡间距 */
 
-  /* ===== Status Hero Card ===== */
+  /* ===== Status Hero Card (参考 product-tile-light) ===== */
   .status-card {
-    background: var(--surface);
-    border-radius: var(--r);
-    padding: 13px 14px;
-    margin-bottom: 10px;
-    box-shadow: var(--shadow);
-    border-left: 3px solid var(--muted);
-    transition: border-color 0.3s, background 0.3s;
+    background: var(--c-canvas);
+    border-radius: var(--r-lg);
+    padding: 18px 18px 16px;
+    margin-bottom: var(--s-sm);
+    border: 1px solid var(--c-hairline);
+    transition: border-color 0.2s ease, background 0.2s ease;
   }
-  /* Dynamic border color via :has() — Chrome/Edge 105+ */
   .status-card:has(.ac-dot.on) {
-    border-left-color: var(--green);
-    background: linear-gradient(135deg, rgba(34,197,94,0.03) 0%, var(--surface) 50%);
+    border-color: rgba(0, 102, 204, 0.28);
   }
   .status-card:has(.ac-dot.unknown) {
-    border-left-color: var(--amber);
+    border-color: var(--c-hairline);
   }
 
   .ac-indicator {
+    /* body-strong token: 17px/600/1.24/-0.374px */
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 14px;
+    font-size: 17px;
     font-weight: 600;
+    line-height: 1.24;
+    letter-spacing: -0.374px;
     margin-bottom: 4px;
+    color: var(--c-ink);
   }
   .ac-dot {
-    width: 10px; height: 10px;
-    border-radius: 50%;
+    width: 9px; height: 9px;
+    border-radius: var(--r-pill);
     display: inline-block;
     flex-shrink: 0;
   }
-  .ac-dot.on { background: var(--green); box-shadow: 0 0 8px rgba(34,197,94,0.45); }
-  .ac-dot.off { background: var(--muted); }
-  .ac-dot.unknown { background: var(--amber); animation: pulse 1s infinite; }
+  .ac-dot.on { background: var(--c-accent); }
+  .ac-dot.off { background: var(--c-muted-2); }
+  .ac-dot.unknown { background: var(--c-chip); animation: pulse 1s infinite; }
   @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.4 } }
 
   .countdown-display {
     align-items: baseline;
     gap: 4px;
-    font-size: 12px;
-    color: var(--text-2);
-    line-height: 1.5;
+    font-size: 14px;
+    color: var(--c-muted);
+    line-height: 1.43;
+    letter-spacing: -0.224px;
   }
   .countdown-display strong {
-    font-size: 22px;
-    font-weight: 700;
-    color: var(--text);
+    /* lead token-like: 28px/600,这是 popup 内最大的数字字
+       略带正字距以呈现数字"主角"感 */
+    font-family: var(--font-display);
+    font-size: 28px;
+    font-weight: 600;
+    color: var(--c-ink);
     font-variant-numeric: tabular-nums;
+    letter-spacing: 0.196px;
+    line-height: 1.14;
   }
 
   .safetynet-hint {
-    margin-top: 8px;
-    padding: 5px 10px;
-    background: var(--green-bg);
-    border: 1px solid var(--green-bd);
-    border-radius: var(--r-sm);
-    color: var(--green-dk);
-    font-size: 11px;
-    line-height: 1.4;
+    margin-top: var(--s-xs);
+    padding: 8px 12px;
+    background: rgba(36, 138, 61, 0.06);
+    border: 1px solid rgba(36, 138, 61, 0.16);
+    border-radius: var(--r-md);
+    color: var(--c-ink-80);
+    font-size: 12px;
+    line-height: 1.35;
+    letter-spacing: -0.12px;
     text-align: center;
   }
   .safetynet-warning {
-    margin-top: 6px;
-    padding: 5px 10px;
-    background: var(--orange-bg);
-    border: 1px solid var(--orange-bd);
-    border-radius: var(--r-sm);
-    color: var(--orange-dk);
-    font-size: 11px;
-    line-height: 1.4;
+    margin-top: var(--s-xs);
+    padding: 8px 12px;
+    background: var(--c-warning-bg);
+    border: 1px solid rgba(178, 90, 0, 0.18);
+    border-radius: var(--r-md);
+    color: var(--c-warning);
+    font-size: 12px;
+    line-height: 1.35;
+    letter-spacing: -0.12px;
     text-align: center;
   }
 
-  /* ===== Settings Card (toggle integrated in header) ===== */
+  /* ===== Settings Card (utility card: 白底 + 发丝边 + lg 圆角) ===== */
   .settings-card {
-    background: var(--surface);
-    border-radius: var(--r);
-    margin-bottom: 10px;
-    box-shadow: var(--shadow);
+    background: var(--c-canvas);
+    border-radius: var(--r-lg);
+    margin-bottom: var(--s-sm);
+    border: 1px solid var(--c-hairline);
     overflow: hidden;
   }
   .settings-header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 10px 14px;
-    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
-    border-bottom: 1px solid var(--border);
+    padding: 14px 16px;
+    background: var(--c-canvas);
+    border-bottom: 1px solid var(--c-divider);
   }
   .settings-header h3 {
-    font-size: 11px;
-    color: var(--text-2);
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
+    /* caption-strong token: 14px/600/1.29 — popup 内做卡头 */
+    font-family: var(--font-display);
+    font-size: 14px;
+    color: var(--c-ink);
+    letter-spacing: -0.224px;
     font-weight: 600;
+    line-height: 1.29;
+    text-transform: none;
+    margin: 0;
   }
   .toggle-area {
     display: flex;
@@ -196,19 +275,20 @@
     gap: 8px;
   }
   .toggle-label {
-    font-size: 11px;
-    color: var(--text-2);
+    font-size: 12px;
+    color: var(--c-muted);
     cursor: pointer;
     user-select: none;
     white-space: nowrap;
+    letter-spacing: -0.12px;
   }
 
-  /* Toggle Switch */
+  /* Toggle Switch — Apple pill toggle 风格 */
   .toggle-switch {
     position: relative;
     display: inline-block;
-    width: 44px;
-    height: 24px;
+    width: 46px;
+    height: 26px;
     flex-shrink: 0;
   }
   .toggle-switch input { opacity: 0; width: 0; height: 0; }
@@ -216,22 +296,24 @@
     position: absolute;
     cursor: pointer;
     top: 0; left: 0; right: 0; bottom: 0;
-    background-color: #cbd5e1;
-    transition: 0.25s;
-    border-radius: 24px;
+    background-color: var(--c-chip);
+    transition: background-color 0.2s ease;
+    border-radius: var(--r-pill);
   }
   .toggle-slider:before {
     position: absolute;
     content: "";
-    height: 18px; width: 18px;
-    left: 3px; bottom: 3px;
+    height: 22px; width: 22px;
+    left: 2px; bottom: 2px;
     background-color: white;
-    transition: 0.25s;
-    border-radius: 50%;
-    box-shadow: 0 1px 2px rgba(0,0,0,0.15);
+    transition: transform 0.2s ease;
+    border-radius: var(--r-pill);
+    /* 圆形 knob 上保留必要阴影以保留可见度 (Apple 自家 toggle
+       在系统层级也有此阴影;UI chrome 模式仍保持平面观感) */
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
   }
   .toggle-switch input:checked + .toggle-slider {
-    background-color: var(--green);
+    background-color: var(--c-accent);
   }
   .toggle-switch input:checked + .toggle-slider:before {
     transform: translateX(20px);
@@ -240,157 +322,214 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+  .toggle-switch:has(input:checked) {
+    transform-origin: right center;
+  }
+  .toggle-switch input:checked + .toggle-slider:active {
+    /* 按下时与 Action Blue 同键触发的 微交互缩放 */
+    transform: scale(0.96);
+  }
 
-  .settings-body { padding: 10px 14px 12px; }
+  .settings-body { padding: 14px 16px 16px; }
 
-  /* Clock mode row 已删除 v0.5.x */
+  /* ===== PWM 运行时段行 (configurator-chip 风格的小药丸) ===== */
   .active-hours-row {
     display: flex;
     align-items: center;
-    padding-bottom: 8px;
-    margin-bottom: 8px;
-    border-bottom: 1px dashed var(--border);
+    padding-bottom: var(--s-sm);
+    margin-bottom: var(--s-sm);
+    border-bottom: 1px solid var(--c-divider);
     gap: 8px;
     flex-wrap: wrap;
   }
   .active-hours-row label.ah-label {
-    font-size: 13px;
-    font-weight: 500;
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.43;
+    letter-spacing: -0.224px;
     cursor: pointer;
     display: flex;
     align-items: center;
-    gap: 6px;
+    gap: 7px;
     flex-shrink: 0;
+    color: var(--c-ink-80);
   }
   .active-hours-row input[type="checkbox"] {
-    width: 15px; height: 15px;
+    width: 16px; height: 16px;
     cursor: pointer;
-    accent-color: var(--accent);
+    accent-color: var(--c-accent);
   }
   .active-hours-row input[type="time"] {
-    border: 1px solid var(--border);
-    border-radius: var(--r-sm);
-    padding: 3px 6px;
+    border: 1px solid var(--c-hairline);
+    border-radius: var(--r-pill);
+    padding: 6px 10px;
     font-size: 12px;
-    background: var(--border-2);
-    color: var(--text);
+    line-height: 1.43;
+    letter-spacing: -0.12px;
+    background: var(--c-pearl);
+    color: var(--c-ink);
     font-variant-numeric: tabular-nums;
-    width: 88px;
+    width: 92px;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
   }
   .active-hours-row input[type="time"]:disabled {
     opacity: 0.45;
     cursor: not-allowed;
   }
   .active-hours-row input[type="time"]:not(:disabled):hover:not(:focus) {
-    border-color: #cbd5e1;
+    border-color: #c7c7cc;
   }
   .active-hours-row input[type="time"]:not(:disabled):focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px var(--accent-ring);
+    border-color: var(--c-accent);
+    box-shadow: 0 0 0 3px var(--c-accent-ring);
     outline: none;
-    background: var(--surface);
+    background: var(--c-canvas);
   }
   .active-hours-row .ah-sep {
-    color: var(--muted);
-    font-size: 11px;
-  }
-  .active-hours-row .ah-status {
-    margin-left: auto;
-    font-size: 10px;
-    padding: 2px 7px;
-    border-radius: 10px;
-    background: var(--border-2);
-    color: var(--text-2);
-    white-space: nowrap;
-  }
-  .active-hours-row .ah-status.active {
-    background: var(--green-bg);
-    color: var(--green-dk);
-    border: 1px solid var(--green-bd);
-  }
-  .active-hours-row .ah-status.idle {
-    background: var(--amber-bg);
-    color: var(--amber-dk);
-    border: 1px solid var(--amber-bd);
+    color: var(--c-muted);
+    font-size: 12px;
+    letter-spacing: -0.12px;
   }
 
-  /* Time rows */
+  .active-hours-row .ah-status {
+    margin-left: auto;
+    font-size: 11px;
+    padding: 4px 9px;
+    border-radius: var(--r-pill);
+    background: var(--c-pearl);
+    color: var(--c-muted);
+    border: 1px solid var(--c-hairline);
+    white-space: nowrap;
+    line-height: 1.2;
+    letter-spacing: -0.12px;
+  }
+  .active-hours-row .ah-status.active {
+    background: var(--c-accent-soft);
+    color: var(--c-accent);
+    border: 1px solid rgba(0, 102, 204, 0.18);
+  }
+  .active-hours-row .ah-status.idle {
+    background: var(--c-pearl);
+    color: var(--c-muted);
+    border: 1px solid var(--c-hairline);
+  }
+
+  /* Time rows (-pills 输入) */
   .time-row {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 7px;
+    margin-bottom: var(--s-xs);
   }
   .time-row:last-of-type { margin-bottom: 0; }
-  .time-row label { font-size: 13px; font-weight: 500; }
+  .time-row label {
+    font-size: 14px;
+    font-weight: 400;
+    line-height: 1.43;
+    letter-spacing: -0.224px;
+    color: var(--c-ink-80);
+  }
   .time-row input[type="number"] {
-    border: 1px solid var(--border);
-    border-radius: var(--r-sm);
-    padding: 5px 10px;
-    font-size: 13px;
-    width: 90px;
-    background: var(--border-2);
-    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+    border: 1px solid var(--c-hairline);
+    border-radius: var(--r-pill);
+    padding: 7px 12px;
+    font-size: 14px;
+    line-height: 1.43;
+    letter-spacing: -0.224px;
+    width: 96px;
+    background: var(--c-pearl);
+    color: var(--c-ink);
+    transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
     text-align: right;
     font-variant-numeric: tabular-nums;
   }
   .time-row input[type="number"]:focus {
-    border-color: var(--accent);
-    box-shadow: 0 0 0 3px var(--accent-ring);
+    border-color: var(--c-accent);
+    box-shadow: 0 0 0 3px var(--c-accent-ring);
     outline: none;
-    background: var(--surface);
+    background: var(--c-canvas);
   }
   .time-row input[type="number"]:hover:not(:focus) {
-    border-color: #cbd5e1;
+    border-color: #c7c7cc;
+  }
+  /* 隐藏 number 输入框的 spinner 以保持 Apple 极简观感 */
+  .time-row input[type="number"]::-webkit-inner-spin-button,
+  .time-row input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  .time-row input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
   }
 
   .hint {
-    color: var(--muted);
-    font-size: 11px;
-    line-height: 1.45;
-    margin-top: 8px;
+    color: var(--c-muted);
+    font-size: 12px;
+    line-height: 1.43;
+    letter-spacing: -0.12px;
+    margin-top: var(--s-xs);
   }
 
-  /* ===== Footer ===== */
+  /* ===== Footer (Apple footer: 紧致法定信息 + 单行链) ===== */
   .footer {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 8px;
+    padding-top: var(--s-xxs);
   }
   .status {
-    font-size: 11px;
-    color: var(--muted);
+    font-size: 12px;
+    color: var(--c-muted);
     flex: 1;
     min-height: 16px;
+    line-height: 1.43;
+    letter-spacing: -0.12px;
   }
-  .status.success { color: var(--green); }
-  .status.error { color: #dc2626; }
+  .status.success { color: var(--c-accent); }
+  .status.error { color: var(--c-danger); }
 
   .btn-diagnose {
-    font-size: 11px;
-    color: var(--muted);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: var(--r-sm);
-    padding: 3px 10px;
+    /* button-secondary-pill token: 透明底 + Action Blue 描边 + pill */
+    font-family: var(--font-text);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 1.29;
+    letter-spacing: -0.12px;
+    color: var(--c-accent);
+    background: var(--c-canvas);
+    border: 1px solid var(--c-accent);
+    border-radius: var(--r-pill);
+    padding: 6px 14px;
     cursor: pointer;
-    transition: all 0.2s;
     white-space: nowrap;
+    transition: transform 0.16s ease, background 0.16s ease, color 0.16s ease;
   }
   .btn-diagnose:hover {
-    background: #f8fafc;
-    border-color: #cbd5e1;
-    color: var(--text-2);
+    background: var(--c-accent);
+    color: var(--c-canvas);
   }
+  .btn-diagnose:active { transform: scale(0.95); } /* Apple 系统级按压反馈 */
 
   .diagnose-result {
-    font-size: 10px;
-    color: var(--muted);
-    margin-top: 6px;
-    line-height: 1.5;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--c-muted);
+    margin-top: var(--s-xs);
+    line-height: 1.55;
     display: none;
     word-break: break-word;
+  }
+
+  /* 焦点环: Action Blue 2px outline (Apple 的 focus 信号) */
+  button:focus-visible,
+  a:focus-visible,
+  input:focus-visible,
+  .header-help:focus-visible {
+    outline: 2px solid var(--c-accent-hover);
+    outline-offset: 2px;
+    border-radius: var(--r-pill);
   }
 </style>
 </head>
@@ -420,7 +559,7 @@
         <span id="countdownText">--</span>
       </div>
       <div class="countdown-display" id="idleDisplay" style="display:none">
-        <span style="color:var(--muted)" data-i18n="acIdle"></span>
+        <span style="color:var(--c-muted)" data-i18n="acIdle"></span>
       </div>
       <div class="safetynet-hint" id="safetynetHint" style="display:none" data-i18n="safetynetSet">
       </div>
