@@ -276,7 +276,7 @@ startup();
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.5.2';
+const APP_VERSION = '0.5.3';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -367,7 +367,7 @@ btnDiagnose.addEventListener('click', async () => {
     }
 
     add(!!storedSchedule, 'storage 可读写');
-    add(s.enabled === true, 'schedule.enabled=true (定时已启用)');
+    add(s.enabled === true, 'schedule.enabled=' + s.enabled + ' (' + (s.enabled ? '定时已启用' : '定时未启用') + ')');
     add(!!s.mode, 'mode=' + (s.mode || '?'));
     add(s.clockMode !== undefined, 'clockMode=' + (s.clockMode ? '时钟' : '间隔'));
     if (s.clockMode === false && s.enabled && !effectiveNextTriggerAt) {
@@ -406,7 +406,7 @@ btnDiagnose.addEventListener('click', async () => {
       await new Promise(r => setTimeout(r, 150));
       watchdogAlarm = await chrome.alarms.get('ac-watchdog');
     }
-    add(!!watchdogAlarm, 'ac-watchdog 看门狗（每5分钟）' + (watchdogAlarm ? ' ✅' : ''));
+    add(!!watchdogAlarm, 'ac-watchdog 看门狗（每5分钟）' + (watchdogAlarm ? ' (已补建: ' + new Date(watchdogAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
 
     add(true, 'setInterval heartbeat（storage 每 20s）');
 
