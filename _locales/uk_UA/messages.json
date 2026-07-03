@@ -363,6 +363,10 @@
     "message": "页面定时器设置失败",
     "description": "background.js: 定时器设置失败"
   },
+  "scheduleHintPinTab": {
+    "message": "💡 请将 UST AC 页面在浏览器中固定标签页并保持开启，否则定时开关无法控制空调。",
+    "description": "提醒用户固定 AC 标签页"
+  },
   "versionMismatch": {
     "message": "[AC-UST] 版本不一致：manifest=$1, 源码=$2。请重载扩展。",
     "description": "版本不一致的 console 警告"
