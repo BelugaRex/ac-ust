@@ -11,7 +11,10 @@
   "acOff": { "message": "Timer disabled" },
 
   "pwmSettings": { "message": "📋 PWM Cycle Settings" },
-  "clockModeLabel": { "message": "🕐 Clock Mode (ON at odd hours / OFF at even hours)" },
+  "activeHoursLabel": { "message": "⏰ Active hours" },
+  "activeHoursWithin": { "message": "Running" },
+  "activeHoursOutside": { "message": "Idle" },
+  "helpTooltip": { "message": "Help / Feedback" },
   "onMinutesLabel": { "message": "🟢 ON Minutes" },
   "offMinutesLabel": { "message": "🔴 OFF Minutes" },
 

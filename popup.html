@@ -61,6 +61,29 @@
     letter-spacing: 0.3px;
     color: var(--text);
   }
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .header-help {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    background: var(--border-2);
+    color: var(--text-2);
+    font-size: 11px;
+    font-weight: 600;
+    text-decoration: none;
+    transition: background 0.2s, color 0.2s;
+  }
+  .header-help:hover {
+    background: var(--accent-ring);
+    color: var(--accent);
+  }
   .header-version {
     font-size: 10px;
     color: var(--muted);
@@ -220,26 +243,75 @@
 
   .settings-body { padding: 10px 14px 12px; }
 
-  /* Clock mode row */
-  .mode-row {
+  /* Clock mode row 已删除 v0.5.x */
+  .active-hours-row {
     display: flex;
     align-items: center;
     padding-bottom: 8px;
     margin-bottom: 8px;
     border-bottom: 1px dashed var(--border);
+    gap: 8px;
+    flex-wrap: wrap;
   }
-  .mode-row label {
+  .active-hours-row label.ah-label {
     font-size: 13px;
     font-weight: 500;
     cursor: pointer;
     display: flex;
     align-items: center;
     gap: 6px;
+    flex-shrink: 0;
   }
-  .mode-row input[type="checkbox"] {
+  .active-hours-row input[type="checkbox"] {
     width: 15px; height: 15px;
     cursor: pointer;
     accent-color: var(--accent);
+  }
+  .active-hours-row input[type="time"] {
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    padding: 3px 6px;
+    font-size: 12px;
+    background: var(--border-2);
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+    width: 88px;
+  }
+  .active-hours-row input[type="time"]:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .active-hours-row input[type="time"]:not(:disabled):hover:not(:focus) {
+    border-color: #cbd5e1;
+  }
+  .active-hours-row input[type="time"]:not(:disabled):focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+    outline: none;
+    background: var(--surface);
+  }
+  .active-hours-row .ah-sep {
+    color: var(--muted);
+    font-size: 11px;
+  }
+  .active-hours-row .ah-status {
+    margin-left: auto;
+    font-size: 10px;
+    padding: 2px 7px;
+    border-radius: 10px;
+    background: var(--border-2);
+    color: var(--text-2);
+    white-space: nowrap;
+  }
+  .active-hours-row .ah-status.active {
+    background: var(--green-bg);
+    color: var(--green-dk);
+    border: 1px solid var(--green-bd);
+  }
+  .active-hours-row .ah-status.idle {
+    background: var(--amber-bg);
+    color: var(--amber-dk);
+    border: 1px solid var(--amber-bd);
   }
 
   /* Time rows */
@@ -324,13 +396,16 @@
 </head>
 <body>
 
-  <!-- Compact header bar: icon + name | version -->
+  <!-- Compact header bar: icon + name | help | version -->
   <div class="header">
     <div class="header-brand">
       <img src="icons/icon16.png" alt="">
       <span class="header-name">AC-UST</span>
     </div>
-    <span class="header-version" id="versionInfo">v--</span>
+    <div class="header-right">
+      <a class="header-help" id="helpLink" href="https://github.com/RexYip/ac-ust#readme" target="_blank" rel="noopener" title="" data-i18n-title="helpTooltip">?</a>
+      <span class="header-version" id="versionInfo">v--</span>
+    </div>
   </div>
 
   <div class="content">
@@ -365,11 +440,15 @@
         </div>
       </div>
       <div class="settings-body">
-        <div class="mode-row">
-          <label>
-            <input type="checkbox" id="clockModeToggle">
-            <span data-i18n="clockModeLabel"></span>
+        <div class="active-hours-row" id="activeHoursRow">
+          <label class="ah-label">
+            <input type="checkbox" id="activeHoursToggle">
+            <span data-i18n="activeHoursLabel"></span>
           </label>
+          <input type="time" id="activeHoursStart" value="08:00" aria-label="start">
+          <span class="ah-sep">—</span>
+          <input type="time" id="activeHoursEnd" value="23:00" aria-label="end">
+          <span class="ah-status" id="activeHoursStatus"></span>
         </div>
         <div id="intervalInputs">
           <div class="time-row">

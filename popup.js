@@ -7,9 +7,11 @@ const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const onMinutesInput = document.getElementById('onMinutes');
 const offMinutesInput = document.getElementById('offMinutes');
-const clockModeToggle = document.getElementById('clockModeToggle');
-const intervalInputs = document.getElementById('intervalInputs');
 const scheduleHint = document.getElementById('scheduleHint');
+const activeHoursToggle = document.getElementById('activeHoursToggle');
+const activeHoursStart = document.getElementById('activeHoursStart');
+const activeHoursEnd = document.getElementById('activeHoursEnd');
+const activeHoursStatus = document.getElementById('activeHoursStatus');
 const timerToggle = document.getElementById('timerToggle');
 const timerToggleLabel = document.getElementById('timerToggleLabel');
 const statusDiv = document.getElementById('status');
@@ -35,37 +37,66 @@ try {
 
 // ----- 加载已保存的设置 -----
 let currentScheduleEnabled = false;
-let currentClockMode = true;
+let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
 
 async function loadSettings() {
   const result = await chrome.storage.local.get('ac_schedule');
   const schedule = result.ac_schedule || {};
   currentScheduleEnabled = !!schedule.enabled;
-  currentClockMode = schedule.clockMode !== false; // 默认 true（时钟模式）
   onMinutesInput.value = schedule.onMinutes ?? 60;
   offMinutesInput.value = schedule.offMinutes ?? 60;
-  updateClockModeUI();
+  // activeHours
+  const ah = schedule.activeHours || {};
+  currentActiveHours = {
+    enabled: !!ah.enabled,
+    start: typeof ah.start === 'string' ? ah.start : '08:00',
+    end: typeof ah.end === 'string' ? ah.end : '23:00'
+  };
+  syncActiveHoursUI();
 }
 
-function updateClockModeUI() {
-  clockModeToggle.checked = currentClockMode;
-  if (currentClockMode) {
-    intervalInputs.style.display = 'none';
-    scheduleHint.textContent = t('scheduleHintClock');
-  } else {
-    intervalInputs.style.display = '';
-    scheduleHint.textContent = t('scheduleHintDefault');
-  }
+function syncActiveHoursUI() {
+  activeHoursToggle.checked = currentActiveHours.enabled;
+  activeHoursStart.value = currentActiveHours.start;
+  activeHoursEnd.value = currentActiveHours.end;
+  activeHoursStart.disabled = !currentActiveHours.enabled;
+  activeHoursEnd.disabled = !currentActiveHours.enabled;
+  updateActiveHoursStatusBadge();
 }
 
-clockModeToggle.addEventListener('change', () => {
-  currentClockMode = clockModeToggle.checked;
-  updateClockModeUI();
-  if (currentScheduleEnabled) {
-    // 模式切换后如果定时已启用，立即重启
-    updateSchedule(true, true);
+function updateActiveHoursStatusBadge() {
+  if (!currentActiveHours.enabled) {
+    activeHoursStatus.style.display = 'none';
+    return;
   }
-});
+  activeHoursStatus.style.display = '';
+  const cur = new Date();
+  const curMin = cur.getHours() * 60 + cur.getMinutes();
+  const [sh, sm] = currentActiveHours.start.split(':').map(Number);
+  const [eh, em] = currentActiveHours.end.split(':').map(Number);
+  const start = sh * 60 + sm;
+  const end = eh * 60 + em;
+  const inside = start < end && curMin >= start && curMin < end;
+  activeHoursStatus.textContent = inside ? t('activeHoursWithin') : t('activeHoursOutside');
+  activeHoursStatus.className = 'ah-status ' + (inside ? 'active' : 'idle');
+}
+
+function commitActiveHours() {
+  // 读取 UI 值并提交到 background
+  const startVal = activeHoursStart.value || '08:00';
+  const endVal = activeHoursEnd.value || '23:00';
+  currentActiveHours = {
+    enabled: activeHoursToggle.checked,
+    start: startVal,
+    end: endVal
+  };
+  syncActiveHoursUI();
+  updateSchedule(currentScheduleEnabled, true);
+}
+
+activeHoursToggle.addEventListener('change', commitActiveHours);
+activeHoursStart.addEventListener('change', commitActiveHours);
+activeHoursEnd.addEventListener('change', commitActiveHours);
 
 // ----- 从后台拉取当前状态 + 直接读真实 PWM 闹钟 -----
 async function refreshStatus() {
@@ -144,21 +175,9 @@ function updateCountdownDisplay(schedule, alarm) {
     safetynetWarning.style.display = 'none';
   }
 
-  // 计算倒计时
-  const isClock = schedule.clockMode !== false;
-
+  // 计算倒计时（v0.5.x 起只保留间隔模式）
   let remainingMs = 0;
-  let nextBoundary = 0;
-  if (isClock) {
-    nextBoundary = schedule._nextBoundary || alarm?.scheduledTime || 0;
-    if (!nextBoundary) {
-      const now = new Date();
-      now.setMinutes(0, 0, 0);
-      now.setHours(now.getHours() + 1);
-      nextBoundary = now.getTime();
-    }
-    remainingMs = nextBoundary - Date.now();
-  } else if (schedule._nextBoundary) {
+  if (schedule._nextBoundary) {
     remainingMs = schedule._nextBoundary - Date.now();
   } else if (alarm?.scheduledTime) {
     remainingMs = alarm.scheduledTime - Date.now();
@@ -167,14 +186,8 @@ function updateCountdownDisplay(schedule, alarm) {
   }
 
   if (remainingMs > 0) {
-    if (isClock && nextBoundary) {
-      const hh = String(new Date(nextBoundary).getHours()).padStart(2, '0');
-      const actionText = t(nextAction === 'on' ? 'actionOn' : 'actionOff');
-      countdownText.innerHTML = t('countdownClock', hh, actionText);
-    } else {
-      const minutes = Math.ceil(remainingMs / 60000);
-      countdownText.innerHTML = t('countdownInterval', t(nextAction === 'on' ? 'actionOn' : 'actionOff'), String(minutes));
-    }
+    const minutes = Math.ceil(remainingMs / 60000);
+    countdownText.innerHTML = t('countdownInterval', t(nextAction === 'on' ? 'actionOn' : 'actionOff'), String(minutes));
   } else {
     countdownText.innerHTML = t('countdownSoon', t(nextAction === 'on' ? 'actionOn' : 'actionOff'));
   }
@@ -190,9 +203,10 @@ async function updateSchedule(enabled, restart = false) {
   const data = {
     enabled,
     mode: 'pwm',
-    clockMode: currentClockMode,
-    onMinutes: currentClockMode ? 60 : readPositiveMinutes(onMinutesInput, 30),
-    offMinutes: currentClockMode ? 60 : readPositiveMinutes(offMinutesInput, 30),
+    clockMode: false,  // v0.5.x 起固定间隔模式
+    onMinutes: readPositiveMinutes(onMinutesInput, 30),
+    offMinutes: readPositiveMinutes(offMinutesInput, 30),
+    activeHours: { ...currentActiveHours },  // v0.5.x: PWM 运行时段
     restart
   };
 
@@ -247,6 +261,11 @@ function syncToggleState(enabled) {
   _toggleProgrammatic = false;
 }
 
+// refreshStatus 每秒调用：刷新 active hours 状态徽章（时间会变）
+function tickActiveHoursBadge() {
+  if (currentActiveHours.enabled) updateActiveHoursStatusBadge();
+}
+
 // ----- 已启用时修改分钟数自动重启 -----
 for (const input of [onMinutesInput, offMinutesInput]) {
   input.addEventListener('change', () => {
@@ -274,6 +293,7 @@ async function startup() {
 
 startup();
 setInterval(refreshStatus, 1000);
+setInterval(tickActiveHoursBadge, 10000);  // 每 10 秒刷新 active hours 状态徽章
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
 const APP_VERSION = '0.5.3';
