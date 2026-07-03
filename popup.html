@@ -3,70 +3,189 @@
 <head>
 <meta charset="utf-8">
 <style>
+  /* ===== Design Tokens ===== */
+  :root {
+    --bg: #f1f5f9;
+    --surface: #ffffff;
+    --text: #0f172a;
+    --text-2: #475569;
+    --muted: #94a3b8;
+    --border: #e2e8f0;
+    --border-2: #f1f5f9;
+    --accent: #3b82f6;
+    --accent-ring: #dbeafe;
+    --green: #22c55e;
+    --green-bg: #f0fdf4;
+    --green-bd: #bbf7d0;
+    --green-dk: #166534;
+    --amber: #fbbf24;
+    --amber-bg: #fffbeb;
+    --amber-bd: #fde68a;
+    --amber-dk: #92400e;
+    --orange-bg: #fff7ed;
+    --orange-bd: #fed7aa;
+    --orange-dk: #9a3412;
+    --red: #ef4444;
+    --shadow: 0 1px 3px rgba(0,0,0,0.04), 0 4px 8px -2px rgba(0,0,0,0.03);
+    --r: 12px;
+    --r-sm: 8px;
+  }
+
   * { margin: 0; padding: 0; box-sizing: border-box; }
+
   body {
     width: 320px;
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    background: #f8fafc;
-    color: #1e293b;
+    background: var(--bg);
+    color: var(--text);
   }
-  .content { padding: 12px 14px 14px; }
 
-  .time-section {
-    background: white;
-    border-radius: 10px;
-    padding: 16px;
-    margin-bottom: 12px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
-  }
-  .time-section h3 { font-size: 12px; color: #64748b; margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
-  .time-row {
+  /* ===== Header Bar ===== */
+  .header {
     display: flex;
     align-items: center;
     justify-content: space-between;
-    margin-bottom: 8px;
+    padding: 8px 14px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
   }
-  .time-row:last-child { margin-bottom: 0; }
-  .time-row label { font-size: 14px; font-weight: 500; }
-  .time-row input[type="number"] {
-    border: 1px solid #e2e8f0;
-    border-radius: 6px;
-    padding: 6px 10px;
-    font-size: 14px;
-    width: 120px;
-    background: #f8fafc;
-  }
-  .hint {
-    color: #64748b;
-    font-size: 11px;
-    line-height: 1.4;
-    margin-top: 10px;
-  }
-
-  .btn-row {
+  .header-brand {
     display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 10px;
-    margin-bottom: 12px;
+    gap: 6px;
+  }
+  .header-brand img { width: 16px; height: 16px; }
+  .header-name {
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.3px;
+    color: var(--text);
+  }
+  .header-version {
+    font-size: 10px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .content { padding: 10px 12px 12px; }
+
+  /* ===== Status Hero Card ===== */
+  .status-card {
+    background: var(--surface);
+    border-radius: var(--r);
+    padding: 13px 14px;
+    margin-bottom: 10px;
+    box-shadow: var(--shadow);
+    border-left: 3px solid var(--muted);
+    transition: border-color 0.3s, background 0.3s;
+  }
+  /* Dynamic border color via :has() — Chrome/Edge 105+ */
+  .status-card:has(.ac-dot.on) {
+    border-left-color: var(--green);
+    background: linear-gradient(135deg, rgba(34,197,94,0.03) 0%, var(--surface) 50%);
+  }
+  .status-card:has(.ac-dot.unknown) {
+    border-left-color: var(--amber);
+  }
+
+  .ac-indicator {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 14px;
+    font-weight: 600;
+    margin-bottom: 4px;
+  }
+  .ac-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    flex-shrink: 0;
+  }
+  .ac-dot.on { background: var(--green); box-shadow: 0 0 8px rgba(34,197,94,0.45); }
+  .ac-dot.off { background: var(--muted); }
+  .ac-dot.unknown { background: var(--amber); animation: pulse 1s infinite; }
+  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.4 } }
+
+  .countdown-display {
+    align-items: baseline;
+    gap: 4px;
+    font-size: 12px;
+    color: var(--text-2);
+    line-height: 1.5;
+  }
+  .countdown-display strong {
+    font-size: 22px;
+    font-weight: 700;
+    color: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .safetynet-hint {
+    margin-top: 8px;
+    padding: 5px 10px;
+    background: var(--green-bg);
+    border: 1px solid var(--green-bd);
+    border-radius: var(--r-sm);
+    color: var(--green-dk);
+    font-size: 11px;
+    line-height: 1.4;
+    text-align: center;
+  }
+  .safetynet-warning {
+    margin-top: 6px;
+    padding: 5px 10px;
+    background: var(--orange-bg);
+    border: 1px solid var(--orange-bd);
+    border-radius: var(--r-sm);
+    color: var(--orange-dk);
+    font-size: 11px;
+    line-height: 1.4;
+    text-align: center;
+  }
+
+  /* ===== Settings Card (toggle integrated in header) ===== */
+  .settings-card {
+    background: var(--surface);
+    border-radius: var(--r);
+    margin-bottom: 10px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .settings-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
     padding: 10px 14px;
-    background: white;
-    border-radius: 10px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
+    background: linear-gradient(135deg, #f8fafc 0%, #f1f5f9 100%);
+    border-bottom: 1px solid var(--border);
+  }
+  .settings-header h3 {
+    font-size: 11px;
+    color: var(--text-2);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    font-weight: 600;
+  }
+  .toggle-area {
+    display: flex;
+    align-items: center;
+    gap: 8px;
   }
   .toggle-label {
-    font-size: 14px;
-    font-weight: 500;
-    color: #1e293b;
+    font-size: 11px;
+    color: var(--text-2);
     cursor: pointer;
     user-select: none;
+    white-space: nowrap;
   }
+
   /* Toggle Switch */
   .toggle-switch {
     position: relative;
     display: inline-block;
-    width: 48px;
-    height: 26px;
+    width: 44px;
+    height: 24px;
     flex-shrink: 0;
   }
   .toggle-switch input { opacity: 0; width: 0; height: 0; }
@@ -76,162 +195,205 @@
     top: 0; left: 0; right: 0; bottom: 0;
     background-color: #cbd5e1;
     transition: 0.25s;
-    border-radius: 26px;
+    border-radius: 24px;
   }
   .toggle-slider:before {
     position: absolute;
     content: "";
-    height: 20px; width: 20px;
+    height: 18px; width: 18px;
     left: 3px; bottom: 3px;
     background-color: white;
     transition: 0.25s;
     border-radius: 50%;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.15);
   }
   .toggle-switch input:checked + .toggle-slider {
-    background-color: #22c55e;
+    background-color: var(--green);
   }
   .toggle-switch input:checked + .toggle-slider:before {
-    transform: translateX(22px);
+    transform: translateX(20px);
   }
   .toggle-switch input:disabled + .toggle-slider {
     opacity: 0.5;
     cursor: not-allowed;
   }
 
-  .status {
-    text-align: center;
-    font-size: 12px;
-    color: #64748b;
-    margin-top: 8px;
-    min-height: 16px;
-  }
-  .status.success { color: #16a34a; }
-  .status.error { color: #dc2626; }
+  .settings-body { padding: 10px 14px 12px; }
 
-  /* 状态卡片 */
-  .status-card {
-    background: white;
-    border-radius: 10px;
-    padding: 14px 16px;
-    margin-bottom: 12px;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.06);
-  }
-  .ac-indicator {
+  /* Clock mode row */
+  .mode-row {
     display: flex;
     align-items: center;
-    gap: 8px;
-    font-size: 14px;
-    font-weight: 600;
+    padding-bottom: 8px;
     margin-bottom: 8px;
+    border-bottom: 1px dashed var(--border);
   }
-  .ac-dot {
-    width: 10px; height: 10px;
-    border-radius: 50%;
-    display: inline-block;
-    flex-shrink: 0;
-  }
-  .ac-dot.on { background: #22c55e; box-shadow: 0 0 6px rgba(34,197,94,0.5); }
-  .ac-dot.off { background: #94a3b8; }
-  .ac-dot.unknown { background: #fbbf24; animation: pulse 1s infinite; }
-  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.4 } }
-  .countdown-display {
+  .mode-row label {
+    font-size: 13px;
+    font-weight: 500;
+    cursor: pointer;
     display: flex;
-    align-items: baseline;
+    align-items: center;
     gap: 6px;
-    font-size: 12px;
-    color: #64748b;
   }
-  .countdown-display strong {
-    font-size: 20px;
-    font-weight: 700;
-    color: #1e293b;
-    font-variant-numeric: tabular-nums;
-  }
-  .countdown-display .countdown-unit {
-    font-size: 12px;
-    color: #64748b;
-    font-weight: 400;
+  .mode-row input[type="checkbox"] {
+    width: 15px; height: 15px;
+    cursor: pointer;
+    accent-color: var(--accent);
   }
 
-  .safetynet-hint {
-    margin-top: 8px;
-    padding: 6px 10px;
-    background: #f0fdf4;
-    border: 1px solid #bbf7d0;
-    border-radius: 6px;
-    color: #166534;
-    font-size: 11px;
-    line-height: 1.4;
-    text-align: center;
+  /* Time rows */
+  .time-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 7px;
   }
-  .safetynet-warning {
-    margin-top: 8px;
-    padding: 6px 10px;
-    background: #fff7ed;
-    border: 1px solid #fed7aa;
-    border-radius: 6px;
-    color: #9a3412;
+  .time-row:last-of-type { margin-bottom: 0; }
+  .time-row label { font-size: 13px; font-weight: 500; }
+  .time-row input[type="number"] {
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    padding: 5px 10px;
+    font-size: 13px;
+    width: 90px;
+    background: var(--border-2);
+    transition: border-color 0.2s, box-shadow 0.2s, background 0.2s;
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .time-row input[type="number"]:focus {
+    border-color: var(--accent);
+    box-shadow: 0 0 0 3px var(--accent-ring);
+    outline: none;
+    background: var(--surface);
+  }
+  .time-row input[type="number"]:hover:not(:focus) {
+    border-color: #cbd5e1;
+  }
+
+  .hint {
+    color: var(--muted);
     font-size: 11px;
-    line-height: 1.4;
-    text-align: center;
+    line-height: 1.45;
+    margin-top: 8px;
+  }
+
+  /* ===== Footer ===== */
+  .footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+  }
+  .status {
+    font-size: 11px;
+    color: var(--muted);
+    flex: 1;
+    min-height: 16px;
+  }
+  .status.success { color: var(--green); }
+  .status.error { color: #dc2626; }
+
+  .btn-diagnose {
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: var(--r-sm);
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: all 0.2s;
+    white-space: nowrap;
+  }
+  .btn-diagnose:hover {
+    background: #f8fafc;
+    border-color: #cbd5e1;
+    color: var(--text-2);
+  }
+
+  .diagnose-result {
+    font-size: 10px;
+    color: var(--muted);
+    margin-top: 6px;
+    line-height: 1.5;
+    display: none;
+    word-break: break-word;
   }
 </style>
 </head>
 <body>
-<div class="content">
 
-  <div class="status-card" id="statusCard">
-    <div class="ac-indicator">
-      <span class="ac-dot unknown" id="acDot"></span>
-      <span id="acStateText" data-i18n="acLoading"></span>
+  <!-- Compact header bar: icon + name | version -->
+  <div class="header">
+    <div class="header-brand">
+      <img src="icons/icon16.png" alt="">
+      <span class="header-name">AC-UST</span>
     </div>
-    <div class="countdown-display" id="countdownDisplay" style="display:none">
-      <span id="countdownText">--</span>
-    </div>
-    <div class="countdown-display" id="idleDisplay" style="display:none">
-      <span style="color:#94a3b8" data-i18n="acIdle"></span>
-    </div>
-    <div class="safetynet-hint" id="safetynetHint" style="display:none" data-i18n="safetynetSet">
-    </div>
-    <div class="safetynet-warning" id="safetynetWarning" style="display:none"></div>
+    <span class="header-version" id="versionInfo">v--</span>
   </div>
 
-  <div class="time-section">
-    <h3 data-i18n="pwmSettings"></h3>
-    <div class="time-row" style="margin-bottom:10px">
-      <label style="cursor:pointer">
-        <input type="checkbox" id="clockModeToggle" style="margin-right:6px">
-        <span data-i18n="clockModeLabel"></span>
-      </label>
+  <div class="content">
+
+    <!-- Status hero card: AC state + countdown + safetynet -->
+    <div class="status-card" id="statusCard">
+      <div class="ac-indicator">
+        <span class="ac-dot unknown" id="acDot"></span>
+        <span id="acStateText" data-i18n="acLoading"></span>
+      </div>
+      <div class="countdown-display" id="countdownDisplay" style="display:none">
+        <span id="countdownText">--</span>
+      </div>
+      <div class="countdown-display" id="idleDisplay" style="display:none">
+        <span style="color:var(--muted)" data-i18n="acIdle"></span>
+      </div>
+      <div class="safetynet-hint" id="safetynetHint" style="display:none" data-i18n="safetynetSet">
+      </div>
+      <div class="safetynet-warning" id="safetynetWarning" style="display:none"></div>
     </div>
-    <div id="intervalInputs">
-    <div class="time-row">
-      <label data-i18n="onMinutesLabel"></label>
-      <input type="number" id="onMinutes" value="30" min="1" step="1">
+
+    <!-- Settings card: toggle in header, clock/interval in body -->
+    <div class="settings-card">
+      <div class="settings-header">
+        <h3 data-i18n="pwmSettings"></h3>
+        <div class="toggle-area">
+          <span class="toggle-label" id="timerToggleLabel" data-i18n="timerDisabled"></span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="timerToggle">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+      </div>
+      <div class="settings-body">
+        <div class="mode-row">
+          <label>
+            <input type="checkbox" id="clockModeToggle">
+            <span data-i18n="clockModeLabel"></span>
+          </label>
+        </div>
+        <div id="intervalInputs">
+          <div class="time-row">
+            <label data-i18n="onMinutesLabel"></label>
+            <input type="number" id="onMinutes" value="30" min="1" step="1">
+          </div>
+          <div class="time-row">
+            <label data-i18n="offMinutesLabel"></label>
+            <input type="number" id="offMinutes" value="30" min="1" step="1">
+          </div>
+        </div>
+        <div class="hint" id="scheduleHint" data-i18n="scheduleHintDefault"></div>
+      </div>
     </div>
-    <div class="time-row">
-      <label data-i18n="offMinutesLabel"></label>
-      <input type="number" id="offMinutes" value="30" min="1" step="1">
+
+    <!-- Footer: status message + diagnose button + results -->
+    <div class="footer">
+      <div class="status" id="status"></div>
+      <button class="btn-diagnose" id="btnDiagnose" data-i18n="btnDiagnose"></button>
     </div>
-    </div>
-    <div class="hint" id="scheduleHint" data-i18n="scheduleHintDefault"></div>
+    <div class="diagnose-result" id="diagnoseResult"></div>
+
   </div>
 
-  <div class="btn-row">
-    <span class="toggle-label" id="timerToggleLabel" data-i18n="timerDisabled"></span>
-    <label class="toggle-switch">
-      <input type="checkbox" id="timerToggle">
-      <span class="toggle-slider"></span>
-    </label>
-  </div>
-  
-  <div class="status" id="status"></div>
-  <div style="text-align:center;margin-top:6px">
-    <button style="font-size:10px;color:#94a3b8;background:none;border:1px solid #e2e8f0;border-radius:4px;padding:2px 8px;cursor:pointer" id="btnDiagnose" data-i18n="btnDiagnose"></button>
-  </div>
-  <div style="font-size:10px;color:#94a3b8;margin-top:4px;text-align:left;line-height:1.5;display:none" id="diagnoseResult"></div>
-  <div style="text-align:center;color:#94a3b8;font-size:10px;margin-top:6px" id="versionInfo">v--</div>
-</div>
 <script src="i18n.js"></script>
 <script src="popup.js"></script>
 </body>
