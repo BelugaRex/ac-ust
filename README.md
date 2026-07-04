@@ -4,10 +4,12 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气开关，支持 PWM
 
 ## 功能
 
-- **手动开关**：弹窗内一键开启/关闭冷气
-- **PWM 循环定时**：自定义"开 X 分钟 / 关 Y 分钟"持续循环
+- **PWM 循环定时**：自定义"开 X 分钟 / 关 Y 分钟"持续循环，自动控制冷气开关
+- **运行时段**：设置每天运行时段（如 08:00-23:00），时段外自动停机省电
 - **自动确认弹窗**：自动处理浏览器原生 `confirm` 和 Ant Design 确认框
 - **后台运行**：即使关闭弹窗，定时任务仍在 Service Worker 中执行
+- **诊断面板**：一键查看闹钟、storage、content script 状态，自动修复常见问题
+- **中英双语**：支持中文/English，通过 Crowdin 社区翻译更多语言
 
 ## 📦 获取
 
@@ -41,22 +43,28 @@ cd ac-ust
 | 操作 | 说明 |
 |------|------|
 | 定时开关 | 拨动开关开启/关闭 PWM 定时循环（开启时先开冷气） |
-| 时钟模式 | 单数整点开、双数整点关，无需手动设分钟 |
 | 开启分钟 | 每次开启冷气持续多少分钟（修改后自动重启循环） |
 | 关闭分钟 | 每次关闭冷气持续多少分钟（修改后自动重启循环） |
+| 运行时段 | 设置每天运行时段（如 08:00-23:00），时段外自动停机 |
+
+> 💡 **重要**：请将 UST AC 页面在浏览器中**固定标签页**并保持开启，否则定时开关无法控制空调。
 
 ## 项目结构
 
 ```
 ac-ust/
 ├── build.ps1          # 打包脚本 — 生成稳定版到 dist/
-├── manifest.json      # 扩展配置
-├── background.js      # Service Worker — 定时调度
-├── content.js         # Content Script — 页面开关交互
-├── page-confirm.js    # 主环境注入 — 接管原生弹窗
-├── popup.html         # 弹窗界面
-├── popup.js           # 弹窗逻辑
-└── icons/             # 扩展图标
+├── manifest.json      # 扩展配置（版本真相源）
+├── background.js      # Service Worker — 定时调度 + 看门狗 + 自愈
+├── content.js         # Content Script — 页面状态读取与回退验证
+├── page-confirm.js    # 主世界注入 — 接管弹窗 + AntD 开关点击
+├── popup.html         # 弹窗界面（Apple Design System CSS）
+├── popup.js           # 弹窗逻辑 + 诊断 + 保活连接
+├── i18n.js            # fetch-based 国际化加载器
+├── offscreen.js       # 冗余保活心跳
+├── _locales/          # 翻译文件（zh_CN + en，Crowdin 同步）
+├── icons/             # 扩展图标
+└── test/              # 单元测试 + e2e + 图标验证
 ```
 
 ## 🌐 本地化 / Localization
@@ -124,10 +132,11 @@ git push origin my-cool-feature
 
 ## 技术栈
 
-- Chrome Extension Manifest V3
-- Vanilla JavaScript (无框架依赖)
-- Chrome Alarms API
-- Ant Design 开关兼容
+- Chrome Extension Manifest V3 · Vanilla JavaScript（零框架依赖）
+- Chrome Alarms API + Storage API + Scripting API
+- Apple Design System CSS（SF Pro / Inter 字体，毛玻璃 UI）
+- fetch-based i18n（Crowdin 社区翻译）
+- Service Worker 保活（heartbeat + offscreen + waitUntil）
 
 ## 故障排查
 
