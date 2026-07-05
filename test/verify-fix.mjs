@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
+import syncHelpers from '../sync-helpers.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -12,6 +13,7 @@ const ROOT = path.resolve(__dirname, '..');
 // ----- Mock chrome.* API -----
 function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
   let storage = { ac_schedule: { ...initialSchedule } };
+  let storageSync = {};  // [v0.5.6] sync 区的 mock 存储
   const alarms = {
     'ac-pwm': liveAcPwmScheduledTime
       ? { name: 'ac-pwm', scheduledTime: liveAcPwmScheduledTime }
@@ -30,6 +32,18 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
         async set(obj) {
           if (obj.ac_schedule) storage.ac_schedule = { ...obj.ac_schedule };
           if (obj.__heartbeat) storage.__heartbeat = obj.__heartbeat;
+        }
+      },
+      // [v0.5.6] sync area（跨设备同步测试模拟）
+      sync: {
+        async get(key) {
+          if (key === 'ac_schedule_sync') return storageSync.ac_schedule_sync
+            ? { ac_schedule_sync: { ...storageSync.ac_schedule_sync } }
+            : {};
+          return { ...storageSync };
+        },
+        async set(obj) {
+          if (obj.ac_schedule_sync) storageSync.ac_schedule_sync = { ...obj.ac_schedule_sync };
         }
       },
       onChanged: { addListener() {} }
@@ -368,6 +382,100 @@ async function runTests() {
   assertPass(distManifest.default_locale === 'zh_CN',
     'dist/manifest.json 也同步 default_locale=zh_CN');
 
+  // ===== 用例 6: v0.5.6 sync-helpers 跨设备同步纯函数 =====
+  console.log('\n\n=== 用例 6: sync-helpers 跨设备同步纯函数 (v0.5.6) ===\n');
+
+  const { composeSyncPayload, computePhaseAdoption, computeConfigDiff } = syncHelpers;
+
+  const futureTime = Date.now() + 30 * 60 * 1000;  // 30 分钟后
+  const pastTime = Date.now() - 5 * 60 * 1000;       // 5 分钟前
+  const baseSchedule = {
+    enabled: true,
+    onMinutes: 30,
+    offMinutes: 30,
+    activeHours: { enabled: false, start: '08:00', end: '23:00' },
+    pwmState: 'off',
+    nextTriggerAt: futureTime
+  };
+
+  // 6A: composeSyncPayload 未来 nextTriggerAt 原样保留 + 含 syncedAt
+  const payload1 = composeSyncPayload(baseSchedule, /* now */ 1700000000000);
+  assertPass(payload1.enabled === true, '6A: composeSyncPayload enabled 转译');
+  assertPass(payload1.nextTriggerAt === futureTime, '6A: composeSyncPayload 未来 nextTriggerAt 原样保留');
+  assertPass(payload1.syncedAt === 1700000000000, '6A: composeSyncPayload syncedAt 戳记正确');
+  assertPass(payload1.pwmState === 'off' && payload1.onMinutes === 30, '6A: composeSyncPayload 其他字段转译');
+
+  // 6B: activeHours 必须是深拷贝（修改 payload 不能污染源 schedule）
+  payload1.activeHours.enabled = true;
+  payload1.activeHours.start = '00:00';
+  assertPass(baseSchedule.activeHours.enabled === false && baseSchedule.activeHours.start === '08:00',
+    '6B: composeSyncPayload activeHours 深拷贝（改 payload 不污染源）');
+
+  // 6C: 过去 nextTriggerAt 推 0（让对端识别相位未定，避免错误对齐到过去）
+  const schedulePast = { ...baseSchedule, nextTriggerAt: pastTime };
+  const payload2 = composeSyncPayload(schedulePast, Date.now());
+  assertPass(payload2.nextTriggerAt === 0, '6C: composeSyncPayload 过去 nextTriggerAt 推 0');
+
+  // 6D: computePhaseAdoption 自回环抑制——相同 syncedAt 不采纳
+  const remoteT1 = { syncedAt: 1000, nextTriggerAt: futureTime, pwmState: 'off' };
+  const localNoTrigger = { ...baseSchedule, nextTriggerAt: 0 };
+  assertPass(computePhaseAdoption(localNoTrigger, remoteT1, { now: Date.now(), lastSyncedAt: 1000 }) === null,
+    '6D: computePhaseAdoption 相同 syncedAt 自回环 → null');
+  assertPass(computePhaseAdoption(localNoTrigger, remoteT1, { now: Date.now(), lastSyncedAt: 2000 }) === null,
+    '6D: computePhaseAdoption lastSyncedAt > remote.syncedAt 自回环 → null');
+
+  // 6E: 本地无未来触发 → 采纳远端
+  const adoptResultE = computePhaseAdoption(localNoTrigger, remoteT1, { now: Date.now(), lastSyncedAt: 0 });
+  assertPass(adoptResultE !== null, '6E: 本地无未来触发 → 采纳远端');
+  assertPass(adoptResultE && adoptResultE.pwmState === 'off' && adoptResultE.nextTriggerAt === futureTime,
+    '6E: 采纳的相位字段正确');
+
+  // 6F: 陈旧远端触发（在 now - staleMs 之前）→ 跳过相位
+  const staleRemote = { syncedAt: 1000, nextTriggerAt: Date.now() - 90 * 1000, pwmState: 'off' };  // 90s 前
+  assertPass(computePhaseAdoption(localNoTrigger, staleRemote, { now: Date.now(), lastSyncedAt: 0 }) === null,
+    '6F: computePhaseAdoption 陈旧远端触发 → null（不把闹钟调度到过去）');
+
+  // 6G: 容忍窗内偏差 (< 10s) → 跳过（A1 幂等预检兜底）
+  const localWithin = { ...baseSchedule, nextTriggerAt: futureTime + 5_000 };  // 5s 偏差
+  const remoteWithin = { syncedAt: 1000, nextTriggerAt: futureTime, pwmState: 'off' };
+  assertPass(computePhaseAdoption(localWithin, remoteWithin, { now: Date.now(), lastSyncedAt: 0, toleranceMs: 10_000, staleMs: 60_000 }) === null,
+    '6G: 5s 偏差在容忍窗内 → 跳过（避免时钟微抖动反复重调闹钟）');
+
+  // 6H: 偏差超出容忍窗 (> 10s) → 采纳
+  const localDistant = { ...baseSchedule, nextTriggerAt: futureTime + 90 * 1000 };  // 90s 偏差
+  const remoteFuture = { syncedAt: 1000, nextTriggerAt: futureTime, pwmState: 'off' };
+  const adoptH = computePhaseAdoption(localDistant, remoteFuture, { now: Date.now(), lastSyncedAt: 0, toleranceMs: 10_000, staleMs: 60_000 });
+  assertPass(adoptH !== null && adoptH.nextTriggerAt === futureTime,
+    '6H: 90s 偏差超容忍窗 → 采纳远端');
+
+  // 6I: 远端 nextTriggerAt=0 → 无相位信息 → null
+  const remoteNoTrigger = { syncedAt: 1000, nextTriggerAt: 0, pwmState: 'off' };
+  assertPass(computePhaseAdoption(localDistant, remoteNoTrigger, { now: Date.now(), lastSyncedAt: 0 }) === null,
+    '6I: 远端 nextTriggerAt=0 → null（同步无相位）');
+
+  // 6J: computeConfigDiff 检测 onMinutes 变更
+  const diffOn = computeConfigDiff(baseSchedule, { onMinutes: 45, offMinutes: 30, activeHours: baseSchedule.activeHours, enabled: true });
+  assertPass(diffOn.changed === true && diffOn.fields.onMinutes === 45,
+    '6J: computeConfigDiff onMinutes 30→45 被检测');
+
+  // 6K: computeConfigDiff 检测 activeHours 深度变更
+  const remoteActive = { ...baseSchedule, activeHours: { enabled: true, start: '09:00', end: '21:00' } };
+  const diffAh = computeConfigDiff(baseSchedule, remoteActive);
+  assertPass(diffAh.changed === true, '6K: computeConfigDiff activeHours 深度变更被检测');
+  assertPass(diffAh.fields.activeHours && diffAh.fields.activeHours.start === '09:00' && diffAh.fields.activeHours.enabled === true,
+    '6K: computeConfigDiff activeHours 字段值正确');
+
+  // 6L: computeConfigDiff 字段全部一致 → changed=false
+  const diffSame = computeConfigDiff(baseSchedule, { onMinutes: 30, offMinutes: 30, activeHours: baseSchedule.activeHours, enabled: true });
+  assertPass(diffSame.changed === false, '6L: computeConfigDiff 字段一致 → changed=false');
+
+  // 6M: chrome.storage.sync mock 自身可读写（同步链路 mock 完整性回归）
+  const syncMock = createMockChrome(baseSchedule, futureTime);
+  await syncMock.chrome.storage.sync.set({ ac_schedule_sync: composeSyncPayload(baseSchedule, Date.now()) });
+  const syncRead = await syncMock.chrome.storage.sync.get('ac_schedule_sync');
+  assertPass(!!syncRead.ac_schedule_sync && syncRead.ac_schedule_sync.enabled === true,
+    '6M: mock chrome.storage.sync 可写入并回读（sync 区 mock 完整）');
+
   // 汇总
   const passCount = results.filter(r => r.pass).length;
   const totalCount = results.length;
@@ -377,7 +485,7 @@ async function runTests() {
     results.filter(r => !r.pass).forEach(r => console.log('  - ' + r.name));
     process.exit(1);
   } else {
-    console.log('✅ 所有断言通过,v0.4.30 popup 自愈逻辑在用户场景下确实把红灯修复为绿灯。');
+    console.log('✅ 所有断言通过。v0.4.30 popup 自愈 + v0.5.6 跨设备 sync-helpers 全部 OK。');
   }
 }
 

@@ -4,10 +4,18 @@
 
 // i18n 辅助函数 — 使用 fetch-based I18n 模块（绕过 chrome.i18n 不可靠性）
 importScripts('i18n.js');
+importScripts('sync-helpers.js');  // 跨设备同步的纯函数（composeSyncPayload / computePhaseAdoption）
 const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const AC_PAGE = 'https://w5.ab.ust.hk/njggt/app/home';
 const STORAGE_KEY = 'ac_schedule';
+
+// 跨设备同步：瘦化版 schedule 写到 chrome.storage.sync。详见 sync-helpers.js 注释。
+// 同步对象在 sync 区存储键名，由 background.js 独立维护（与 local.ac_schedule 解耦）。
+// lastSyncedAt 用于自回环抑制——Chrome 会把"自己写的 sync"也回灌回本地 onChanged，
+// 通过 syncedAt 对比即可识别并静默跳过；同时承担 last-writer-wins 的本地参照。
+const SYNC_KEY = 'ac_schedule_sync';
+let lastSyncedAt = 0;
 
 let schedule = {
   enabled: false,
@@ -117,6 +125,8 @@ async function onActiveBoundaryCrossed() {
     await persistSchedule('active-hours-enter');
     await setupAlarms(true);
     await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+    // [v0.5.6] 跨设备同步：activeHours 跨边界是低频事件（每日 ≤ 2 次），同步推送
+    await syncScheduleToSync('active-hours-enter');
   } else if (!inside && schedule.enabled) {
     // 退出运行时段 → 关闭 PWM 并停机（避免噪音）
     console.log('[ac-ust] active hours: leaving, auto-disable PWM');
@@ -135,6 +145,8 @@ async function onActiveBoundaryCrossed() {
     await updateBadge();
     await persistSchedule('active-hours-leave');
     await toggleAC('off');
+    // [v0.5.6] 同步推送离开时段状态
+    await syncScheduleToSync('active-hours-leave');
   }
 }
 
@@ -321,6 +333,139 @@ async function persistSchedule(reason = '', options = {}) {
   await chrome.storage.local.set({ [STORAGE_KEY]: { ...schedule } });
 }
 
+// ============================================================
+// 跨设备同步 — chrome.storage.sync 集成层
+// ============================================================
+//
+// 触发同步写入的时机（节流策略，远低于 sync 配额 100 写/小时、1200 写/天）：
+//   • runPwmStep 每次成功的阶段翻转 (toggleOk=true) — 60min 周期 ≈ 24 写/天
+//   • updateSchedule handler（用户改设置/toggle）— 用户发起，低频
+//   • onActiveBoundaryCrossed enter/leave — 每日 ≤ 2 次
+//   • onInstalled install—— push 默认配置到 sync（若 sync 为空）
+//   • init() 启动时—— 不写入，只读采纳
+//
+// 不同步：__heartbeat（20s 一次会打爆配额）、pageTimer*（本机页面态）、
+//        alarmCreatedAt/alarmDelayMinutes（旧版字段）、watchdogCheck 的微调（噪音）。
+// 失败重试时不同步（pwmState 没变，避免 PWM 死循环反复打 sync）。
+//
+// 同步对象结构（瘦化）：见 sync-helpers.js 的 composeSyncPayload。
+// 自回环抑制：自己写入的 sync 会触发本地 onChanged，通过 syncedAt 对比识别为自写
+// 并静默跳过——computePhaseAdoption 内部 lastSyncedAt 守卫已覆盖。
+//
+// 优雅降级：用户未登录浏览器同步 / sync 配额超限 / 企业策略禁用 → 异常被静默吞掉，
+// 行为退化为现有本地 storage 模式（无回归）。
+
+const _syncOpLock = { busy: false };
+
+// 把当前内存 schedule 瘦化后写入 chrome.storage.sync。
+// reason 用于日志。失败静默降级。
+async function syncScheduleToSync(reason = '') {
+  if (!chrome.storage?.sync) return;  // 受限上下文（incognito / 策略禁用）
+  try {
+    const now = Date.now();
+    const slim = composeSyncPayload(schedule, now);
+    await chrome.storage.sync.set({ [SYNC_KEY]: slim });
+    lastSyncedAt = now;  // 标记本次写入的时间，避免 onChanged 自回环误采纳
+    if (reason) {
+      console.log(`[AC扩展] sync ↑ ${reason}: nextTriggerAt=${slim.nextTriggerAt ? new Date(slim.nextTriggerAt).toLocaleString() : '无'}, enabled=${slim.enabled}`);
+    }
+  } catch (e) {
+    console.warn('[AC扩展] sync 写入失败（未登录浏览器同步 / 配额超限？）:', e?.message);
+  }
+}
+
+// 把远端 sync 对象合并到本地 schedule + 重排闹钟。返回 true=已变更并持久化。
+// 注意：调用方需要保证不并发（_syncOpLock 守卫）。
+async function applySyncedPhase(remote, reason = '') {
+  if (!remote || typeof remote !== 'object') return false;
+
+  // 1) config 字段无相位守卫——直接 last-writer-wins 采纳
+  const cfg = computeConfigDiff(schedule, remote);
+  let configChanged = false;
+  if (cfg.changed) {
+    for (const [k, v] of Object.entries(cfg.fields)) {
+      schedule[k] = v;
+    }
+    configChanged = true;
+  }
+
+  // 2) 相位字段需通过严格守卫（陈旧/容忍/自回环），computePhaseAdoption 决策
+  const adopt = computePhaseAdoption(schedule, remote, { lastSyncedAt });
+  let phaseChanged = false;
+  let needAlarmReschedule = false;
+  if (adopt) {
+    const oldPwmState = schedule.pwmState;
+    const oldTrigger = schedule.nextTriggerAt;
+    schedule.pwmState = adopt.pwmState;
+    setNextTriggerAt(adopt.nextTriggerAt);
+    schedule.alarmCreatedAt = Date.now();
+    schedule.alarmDelayMinutes = Math.max(1, (adopt.nextTriggerAt - Date.now()) / 60000);
+    phaseChanged = (oldPwmState !== schedule.pwmState || oldTrigger !== schedule.nextTriggerAt);
+
+    if (phaseChanged && schedule.enabled) {
+      needAlarmReschedule = true;
+      try {
+        await chrome.alarms.clear('ac-pwm');
+        const delayMs = adopt.nextTriggerAt - Date.now();
+        if (delayMs > 0) {
+          // 用绝对时间调度，让多设备对齐到同一时刻（非 delayInMinutes 各自倒计时）
+          chrome.alarms.create('ac-pwm', { when: adopt.nextTriggerAt });
+        } else {
+          // 远端时戳已过期（在 staleMs 60s 窗口内）——推进到下一未来周期边界
+          await advanceExpiredAlarmToNextBoundary(adopt.nextTriggerAt);
+        }
+      } catch (e) {
+        console.warn('[AC扩展] sync 合并：重排 ac-pwm 闹钟失败:', e?.message);
+      }
+    }
+  }
+
+  // 标记最新已知的 remote.syncedAt——即便没采纳相位，也防止稍后 onChanged 自回环再次触发
+  if (remote.syncedAt) lastSyncedAt = Math.max(lastSyncedAt, remote.syncedAt);
+
+  const changed = configChanged || phaseChanged;
+  if (changed) {
+    await persistSchedule(reason || 'sync-采纳', { syncFromLiveAlarm: false });
+    if (phaseChanged) {
+      console.log(`[AC扩展] sync ↓ ${reason}: 已采纳远端相位 pwmState=${schedule.pwmState}, nextTriggerAt=${new Date(schedule.nextTriggerAt).toLocaleString()}`);
+    }
+    if (configChanged) {
+      console.log(`[AC扩展] sync ↓ ${reason}: 已采纳远端 config:`, cfg.fields);
+    }
+    if (needAlarmReschedule) {
+      // active hours 边界闹钟应跟新 schedule 重排（start/end 有变更）
+      rescheduleActiveBoundary();
+    }
+  }
+  return changed;
+}
+
+// 从 chrome.storage.sync 拉取并尝试合并。reason 用于日志。
+// 传 explicitRemote 可跳过读取（onChanged 已传入 newValue）；否则从 sync store 读。
+async function tryAdoptSyncedState(reason = '', explicitRemote = null) {
+  if (_syncOpLock.busy) {
+    console.log(`[AC扩展] sync 合并跳过（上次仍在处理）: ${reason}`);
+    return false;
+  }
+  _syncOpLock.busy = true;
+  try {
+    let remote = explicitRemote;
+    if (!remote && chrome.storage?.sync) {
+      try {
+        const got = await chrome.storage.sync.get(SYNC_KEY);
+        remote = got?.[SYNC_KEY] || null;
+      } catch (e) {
+        console.warn('[AC扩展] sync 读取失败:', e?.message);
+        return false;
+      }
+    }
+    if (!remote) return false;
+    return await applySyncedPhase(remote, reason);
+  } finally {
+    _syncOpLock.busy = false;
+  }
+}
+
 // ----- 官方推荐：setInterval heartbeat — 每 20s 写 storage 重置 SW 空闲计时器 -----
 // Chrome 官方文档明确使用 setInterval + chrome.storage.local.set 作为保活心跳。
 // chrome.storage.local.set 是扩展 API 调用，每次调用都会重置 SW 的 30 秒空闲超时。
@@ -412,6 +557,10 @@ async function init() {
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await loadScheduleFromStorage();
     await backfillNextTriggerAt(true);
+    // [v0.5.6] 跨设备同步：在 setupAlarms 之前尝试从 chrome.storage.sync 采用远端相位。
+    // 如有 sync 数据则合并到本地 schedule，再 setupAlarms，保证本机闹钟从对齐相位出发。
+    // 新装在另一台设备的扩展启动时会先采用主机的 nextTriggerAt，避免本地从默认值跑偏。
+    await tryAdoptSyncedState('init');
     await ensureOffscreen();
     startHeartbeat();
     await setupAlarms();
@@ -672,6 +821,11 @@ async function runPwmStep() {
       await persistSchedule('runPwmStep-clock');
       await updateBadge();
 
+      // [v0.5.6] 跨设备同步（时钟模式分支同样推送相位）
+      if (toggleOkClock) {
+        await syncScheduleToSync('runPwmStep-clock');
+      }
+
       if (targetAction === 'on' && toggleOkClock) {
         await setPageTimer(60);
       }
@@ -771,6 +925,13 @@ async function runPwmStep() {
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await persistSchedule('runPwmStep-interval');
     await updateBadge();
+
+    // [v0.5.6] 跨设备同步：仅当本次 toggle 已确认成功才推送——这样失败重试时
+    // 不会反复灌同相位打 sync 写入配额。push 的 nextTriggerAt 必然 > now，
+    // composeSyncPayload 内部也再次校验（双层防护）。
+    if (toggleOk) {
+      await syncScheduleToSync('runPwmStep');
+    }
 
     if (targetAction === 'on' && toggleOk) {
       await setPageTimer(schedule.onMinutes);
@@ -1502,6 +1663,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       // active hours 边界闹钟：每次 schedule 改变都重新调度
       rescheduleActiveBoundary();
+      // [v0.5.6] 跨设备同步：用户改设置 / toggle 是低频事件，立即推送
+      // 在 sendResponse 之前完成推送，让 popup 拿到已推送的状态（虽然异步到达对端有时延）。
+      await syncScheduleToSync('updateSchedule');
       sendResponse({ success: true, schedule, offResult });
       return;
     }
@@ -1566,23 +1730,51 @@ chrome.runtime.onStartup.addListener(() => {
 chrome.runtime.onInstalled.addListener(async (details) => {
   await initReady;
   if (details.reason === 'install') {
-    // 首次安装：写默认设置
-    await chrome.storage.local.set({
-      [STORAGE_KEY]: {
-        enabled: false,
-        mode: 'pwm',
-        clockMode: true,
-        onMinutes: 60,
-        offMinutes: 60,
-        pwmState: 'off',
-        nextTriggerAt: 0,
-        alarmCreatedAt: 0,
-        alarmDelayMinutes: 0
+    // [v0.5.6] init() 已先尝试从 chrome.storage.sync 采用远端状态。
+    // 这里仅当本地仍无 schedule 时才写默认值——避免在另一台设备已运行 PWM 时
+    // 用本地默认值覆盖刚被 sync 同步过来的相位。
+    const existing = await chrome.storage.local.get(STORAGE_KEY);
+    if (!existing[STORAGE_KEY]) {
+      await chrome.storage.local.set({
+        [STORAGE_KEY]: {
+          enabled: false,
+          mode: 'pwm',
+          clockMode: true,
+          onMinutes: 60,
+          offMinutes: 60,
+          pwmState: 'off',
+          nextTriggerAt: 0,
+          alarmCreatedAt: 0,
+          alarmDelayMinutes: 0
+        }
+      });
+      console.log('[AC扩展] 首次安装，已设置默认值（间隔模式）');
+      // 若 sync 区也空，则把默认配置 seed 给 sync——让后续在其他设备安装的扩展
+      // 自动拿到默认值；若 sync 已有（其他设备先装过），不覆盖。
+      if (chrome.storage?.sync) {
+        try {
+          const syncExisting = await chrome.storage.sync.get(SYNC_KEY);
+          if (!syncExisting[SYNC_KEY]) {
+            await syncScheduleToSync('install-seed');
+          }
+        } catch (e) {
+          console.warn('[AC扩展] install-seed sync 推送失败:', e?.message);
+        }
       }
-    });
-    console.log('[AC扩展] 首次安装，已设置默认值（时钟模式）');
+    } else {
+      console.log('[AC扩展] 首次安装：检测到 schedule 已存在（init 采用 sync 或迁移）跳过默认写入');
+    }
   } else if (details.reason === 'update') {
     console.log(`[AC扩展] 已更新（${details.previousVersion} → ${chrome.runtime.getManifest().version}）`);
+    // [v0.5.6] 更新时把当前 schedule seed 给 sync（若 sync 空），方便新设备加入
+    if (chrome.storage?.sync) {
+      try {
+        const syncExisting = await chrome.storage.sync.get(SYNC_KEY);
+        if (!syncExisting[SYNC_KEY] && schedule?.enabled) {
+          await syncScheduleToSync('update-seed');
+        }
+      } catch (_) { /* ignore */ }
+    }
   }
 });
 
@@ -1592,12 +1784,24 @@ chrome.runtime.onUpdateAvailable.addListener(() => {
   chrome.runtime.reload();
 });
 
-// ----- storage 变动监听：只同步内存状态 -----
+// ----- storage 变动监听：local 只同步内存状态，sync 触发跨设备合并 -----
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== 'local' || !changes[STORAGE_KEY]?.newValue) return;
-  // 只同步内存状态。不要在每次 storage 写入后 setupAlarms，
-  // 否则 runPwmStep 写入下一阶段倒计时时会反复重建闹钟，影响无弹窗后台执行。
-  schedule = { ...schedule, ...changes[STORAGE_KEY].newValue };
+  if (areaName === 'local' && changes[STORAGE_KEY]?.newValue) {
+    // 只同步内存状态。不要在每次 storage 写入后 setupAlarms，
+    // 否则 runPwmStep 写入下一阶段倒计时时会反复重建闹钟，影响无弹窗后台执行。
+    schedule = { ...schedule, ...changes[STORAGE_KEY].newValue };
+    return;
+  }
+
+  if (areaName === 'sync' && changes[SYNC_KEY]?.newValue) {
+    // [v0.5.6] 收到远端 sync 变更 → 异步合并到本地培训 + 重排闹钟。
+    // 不在此 await（onChanged 是同步事件回调，不能阻塞）——tryAdoptSyncedState 自带 _syncOpLock
+    // 互斥保证并发安全。applySyncedPhase 内部会触发 persistSchedule 触发一次 local 变更 →
+    // 上面 local 分支自动同步内存（不会无限循环，因 sync 写采用 lastSyncedAt 守卫）。
+    console.log('[AC扩展] sync ↓ onChanged：收到远端变更，启动异步合并');
+    tryAdoptSyncedState('onChanged-sync', changes[SYNC_KEY].newValue)
+      .catch(e => console.warn('[AC扩展] onChanged sync 合并失败:', e?.message));
+  }
 });
 
 // ----- 启动 -----

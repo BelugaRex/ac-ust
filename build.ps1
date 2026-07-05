@@ -27,6 +27,7 @@ $FilesToCopy = @(
   "popup.html",
   "popup.js",
   "i18n.js",
+  "sync-helpers.js",
   "offscreen.html",
   "offscreen.js",
   "_locales",
