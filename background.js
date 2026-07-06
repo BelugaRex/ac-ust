@@ -379,20 +379,26 @@ async function syncScheduleToSync(reason = '') {
 async function applySyncedPhase(remote, reason = '') {
   if (!remote || typeof remote !== 'object') return false;
 
+  // 先记录 enabled 旧值——config 采纳后判断是否需要重建闹钟基础设施
+  const wasEnabled = schedule.enabled;
+
   // 1) config 字段无相位守卫——直接 last-writer-wins 采纳
   const cfg = computeConfigDiff(schedule, remote);
   let configChanged = false;
+  let activeHoursChanged = false;
   if (cfg.changed) {
     for (const [k, v] of Object.entries(cfg.fields)) {
       schedule[k] = v;
+      if (k === 'activeHours') activeHoursChanged = true;
     }
     configChanged = true;
   }
+  const enabledChanged = cfg.fields.enabled !== undefined;
+  const nowEnabled = schedule.enabled;
 
   // 2) 相位字段需通过严格守卫（陈旧/容忍/自回环），computePhaseAdoption 决策
   const adopt = computePhaseAdoption(schedule, remote, { lastSyncedAt });
   let phaseChanged = false;
-  let needAlarmReschedule = false;
   if (adopt) {
     const oldPwmState = schedule.pwmState;
     const oldTrigger = schedule.nextTriggerAt;
@@ -402,8 +408,7 @@ async function applySyncedPhase(remote, reason = '') {
     schedule.alarmDelayMinutes = Math.max(1, (adopt.nextTriggerAt - Date.now()) / 60000);
     phaseChanged = (oldPwmState !== schedule.pwmState || oldTrigger !== schedule.nextTriggerAt);
 
-    if (phaseChanged && schedule.enabled) {
-      needAlarmReschedule = true;
+    if (phaseChanged && nowEnabled) {
       try {
         await chrome.alarms.clear('ac-pwm');
         const delayMs = adopt.nextTriggerAt - Date.now();
@@ -420,6 +425,49 @@ async function applySyncedPhase(remote, reason = '') {
     }
   }
 
+  // 3) 闹钟基础设施重建——只由 config 变更驱动（相位路径只管 ac-pwm）
+  //    关键修复：若 enabled 在 sync 中翻为 true 但无相位（远端刚 enable 还没跑完第一步），
+  //    只持久化 enabled=true 却不建闹钟，设备 B 永远不会真正执行 PWM。
+  //    反之 enabled 翻为 false 也必须主动清理闹钟 + 停机，否则设备 B 继续跑本地 PWM。
+  let didAlarmInfra = false;
+  if (enabledChanged) {
+    if (nowEnabled) {
+      // false → true：按是否已采纳相位决定是否立即新起 PWM cycle
+      if (phaseChanged) {
+        // 相位路径已建 ac-pwm；只补看门狗 + badge-tick（相位路径不管这两个）
+        await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+        await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+      } else {
+        // 无相位 → 本地全新起一轮 PWM（与 updateSchedule enabled→true 路径一致）
+        schedule.pwmState = 'on';
+        await setupAlarms(true);  // startImmediately → runPwmStep，内部建 ac-pwm + badge-tick
+        await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+      }
+    } else {
+      // true → false：清所有 PWM 相关闹钟 + 停机（B1 顺序：先 persist 再关）
+      schedule.pwmState = 'off';
+      setNextTriggerAt(0);
+      schedule.alarmCreatedAt = 0;
+      schedule.alarmDelayMinutes = 0;
+      schedule.pageTimerMinutes = null;
+      schedule.pageTimerError = '';
+      schedule.pageTimerRetryAt = 0;
+      await chrome.alarms.clear('ac-pwm');
+      await chrome.alarms.clear('ac-page-timer-retry');
+      await chrome.alarms.clear('ac-badge-tick');
+      await chrome.alarms.clear('ac-watchdog');
+      await updateBadge();
+      // A1 幂等预检保证：若 AC 已关则跳过；远端刚关过一次也安全
+      toggleAC('off').catch(e => console.warn('[AC扩展] sync 合并：关机命令失败:', e?.message));
+    }
+    didAlarmInfra = true;
+  }
+
+  // 4) active hours 边界闹钟：activeHours 变更或相位重排后都应重调度
+  if (activeHoursChanged || phaseChanged) {
+    rescheduleActiveBoundary();
+  }
+
   // 标记最新已知的 remote.syncedAt——即便没采纳相位，也防止稍后 onChanged 自回环再次触发
   if (remote.syncedAt) lastSyncedAt = Math.max(lastSyncedAt, remote.syncedAt);
 
@@ -432,9 +480,8 @@ async function applySyncedPhase(remote, reason = '') {
     if (configChanged) {
       console.log(`[AC扩展] sync ↓ ${reason}: 已采纳远端 config:`, cfg.fields);
     }
-    if (needAlarmReschedule) {
-      // active hours 边界闹钟应跟新 schedule 重排（start/end 有变更）
-      rescheduleActiveBoundary();
+    if (didAlarmInfra) {
+      console.log(`[AC扩展] sync ↓ ${reason}: enabled=${wasEnabled}→${nowEnabled}，已重建闹钟基础设施`);
     }
   }
   return changed;
