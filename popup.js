@@ -296,7 +296,7 @@ setInterval(refreshStatus, 1000);
 setInterval(tickActiveHoursBadge, 10000);  // 每 10 秒刷新 active hours 状态徽章
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.5.6';
+const APP_VERSION = '0.5.7';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';

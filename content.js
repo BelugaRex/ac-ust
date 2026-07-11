@@ -54,6 +54,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     setPagePowerOffTimer(msg.minutes).then(result => sendResponse(result));
     return true;
   }
+  if (msg.action === 'getPageTimer') {
+    // v0.5.7：读 picker 当前值——与 setTimer（写）互补，用于跨设备 phase 校验
+    sendResponse(getPagePowerOffTimer());
+    return true;
+  }
   return true;
 });
 
@@ -581,6 +586,23 @@ function findPowerOffTimerInput() {
   }
 
   return pickerInputs.length > 0 ? pickerInputs[0] : null;
+}
+
+// ----- v0.5.7: 读取页面已设置的 "Power-off after" 定时器值 -----
+// 与 setPagePowerOffTimer（写）互补——读 picker 当前的 HH:MM 值，
+// 供 background.js 跨设备 phase 校验（见 sync-helpers.js computePageTimerAdoption）。
+// 只读 DOM，不计算时戳——纯函数 parsePageTimerValue 在 sync-helpers.js 负责解析。
+function getPagePowerOffTimer() {
+  const pickerInput = findPowerOffTimerInput();
+  if (!pickerInput) {
+    return { found: false, value: null };
+  }
+  const value = (pickerInput.value || '').trim();
+  if (!/^\d{2}:\d{2}$/.test(value)) {
+    // picker 有 DOM 但值空/格式不认——可能是空选或未设
+    return { found: true, value: value || null };
+  }
+  return { found: true, value };
 }
 
 })(); // end 幂等守卫 IIFE

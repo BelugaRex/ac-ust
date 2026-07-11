@@ -385,7 +385,7 @@ async function runTests() {
   // ===== 用例 6: v0.5.6 sync-helpers 跨设备同步纯函数 =====
   console.log('\n\n=== 用例 6: sync-helpers 跨设备同步纯函数 (v0.5.6) ===\n');
 
-  const { composeSyncPayload, computePhaseAdoption, computeConfigDiff } = syncHelpers;
+  const { composeSyncPayload, computePhaseAdoption, computeConfigDiff, parsePageTimerValue, computePageTimerAdoption } = syncHelpers;
 
   const futureTime = Date.now() + 30 * 60 * 1000;  // 30 分钟后
   const pastTime = Date.now() - 5 * 60 * 1000;       // 5 分钟前
@@ -622,6 +622,88 @@ async function runTests() {
   assertPass(r7D.schedule.activeHours.enabled === true && r7D.schedule.activeHours.start === '09:00',
     '7D: activeHours 字段被采纳');
 
+  // ===== 用例 8: v0.5.7 page timer 跨设备 phase 校验纯函数 =====
+  // 验证 parsePageTimerValue 和 computePageTimerAdoption 的决策口径。
+  // 这些纯函数为"利用 UST 自带 page timer 做跨设备同步"服务（chrome.storage.sync 的补充通道）。
+  console.log('\n\n=== 用例 8: page timer 跨设备 phase 校验纯函数 (v0.5.7) ===\n');
+
+  // 固定时戳基线，避免 Date.now() 波动影响断言
+  // 假设 "现在" 是 2024-01-15 14:00:00（本地时间）
+  const now8 = new Date(2024, 0, 15, 14, 0, 0, 0).getTime();
+  const futureMs8 = now8 + 60 * 60 * 1000;  // 1 小时后 = 15:00
+
+  // ---- 8A: parsePageTimerValue 合法输入 '15:00' → valid=true ----
+  const pA = parsePageTimerValue('15:00', now8);
+  assertPass(pA !== null, '8A: parsePageTimerValue "15:00" 不返回 null');
+  assertPass(pA && pA.valid === true, '8A: parsePageTimerValue 目标在将来 → valid=true');
+  assertPass(pA && pA.targetMs === futureMs8, '8A: parsePageTimerValue targetMs 对应 15:00:00 当天');
+
+  // ---- 8B: parsePageTimerValue 已过期 '10:00' → valid=false ----
+  const pB = parsePageTimerValue('10:00', now8);
+  assertPass(pB !== null, '8B: parsePageTimerValue "10:00" 不返回 null（格式合法）');
+  assertPass(pB && pB.valid === false, '8B: parsePageTimerValue 目标已过 → valid=false');
+
+  // ---- 8C: parsePageTimerValue 非法输入 → null ----
+  assertPass(parsePageTimerValue('25:00', now8) === null, '8C: parsePageTimerValue "25:00" 小时越界 → null');
+  assertPass(parsePageTimerValue('aa:bb', now8) === null, '8C: parsePageTimerValue "aa:bb" 非数字 → null');
+  assertPass(parsePageTimerValue('', now8) === null, '8C: parsePageTimerValue 空串 → null');
+  assertPass(parsePageTimerValue(null, now8) === null, '8C: parsePageTimerValue null → null');
+
+  // ---- 8D: computePageTimerAdoption page timer 未找到 → null ----
+  const sched8D = { enabled: true, pwmState: 'on', nextTriggerAt: futureMs8 };
+  assertPass(computePageTimerAdoption(sched8D, { found: false, value: null }, { now: now8 }) === null,
+    '8D: page timer 未找到 → null（不干预）');
+
+  // ---- 8E: computePageTimerAdoption page timer 值空 → null ----
+  assertPass(computePageTimerAdoption(sched8D, { found: true, value: null }, { now: now8 }) === null,
+    '8E: page timer found 但 value 空 → null');
+
+  // ---- 8F: computePageTimerAdoption 值已过期 → null ----
+  assertPass(computePageTimerAdoption(sched8D, { found: true, value: '10:00' }, { now: now8 }) === null,
+    '8F: page timer "10:00" 已过期 → null');
+
+  // ---- 8G: computePageTimerAdoption PWM 在"关"阶段 → null（page timer 只映射"关"） ----
+  const sched8G = { enabled: true, pwmState: 'off', nextTriggerAt: futureMs8 };
+  assertPass(computePageTimerAdoption(sched8G, { found: true, value: '16:00' }, { now: now8 }) === null,
+    '8G: pwmState="off" → null（page timer 只映射"关"相位）');
+
+  // ---- 8H: computePageTimerAdoption enabled=false → null ----
+  const sched8H = { enabled: false, pwmState: 'on', nextTriggerAt: futureMs8 };
+  assertPass(computePageTimerAdoption(sched8H, { found: true, value: '16:00' }, { now: now8 }) === null,
+    '8H: enabled=false → null（PWM 未启用，page timer 是手动定时，不干预）');
+
+  // ---- 8I: computePageTimerAdoption 偏差 > 60s → 采纳 page timer ----
+  // 本地 nextTriggerAt = 15:00，page timer = 16:00（差 1 小时）
+  const adoptI = computePageTimerAdoption(sched8D, { found: true, value: '16:00' }, { now: now8 });
+  const expectedI = new Date(2024, 0, 15, 16, 0, 0, 0).getTime();
+  assertPass(adoptI !== null && adoptI.adopt === true, '8I: 1 小时偏差 > 60s → 采纳');
+  assertPass(adoptI && adoptI.nextTriggerAt === expectedI, '8I: 采纳的 nextTriggerAt 对应 16:00');
+  assertPass(adoptI && adoptI.source === 'page-timer', '8I: source=page-timer');
+  assertPass(adoptI && adoptI.reason === 'deviation', '8I: reason=deviation');
+
+  // ---- 8J: computePageTimerAdoption 偏差 ≤ 60s → null（已对齐） ----
+  // 本地 nextTriggerAt = 15:00:30，page timer = 15:00（差 30s < 60s）
+  const sched8J = { enabled: true, pwmState: 'on', nextTriggerAt: futureMs8 + 30_000 };
+  assertPass(computePageTimerAdoption(sched8J, { found: true, value: '15:00' }, { now: now8 }) === null,
+    '8J: 30s 偏差在容忍窗内 → null（已对齐，避免时钟微抖动反复重调）');
+
+  // ---- 8K: computePageTimerAdoption 本地无未来触发 → 直接采纳 ----
+  const sched8K = { enabled: true, pwmState: 'on', nextTriggerAt: 0 };
+  const adoptK = computePageTimerAdoption(sched8K, { found: true, value: '16:00' }, { now: now8 });
+  assertPass(adoptK !== null && adoptK.adopt === true, '8K: 本地无触发但 PWM 在开阶段 → 采纳');
+  assertPass(adoptK && adoptK.reason === 'local-no-trigger', '8K: reason=local-no-trigger');
+
+  // ---- 8L: 自定义 toleranceMs 生效 ----
+  // 本地 nextTriggerAt = 15:00，page timer = 15:02（差 120s）
+  const adoptL = computePageTimerAdoption(sched8D, { found: true, value: '15:02' }, { now: now8, toleranceMs: 180_000 });
+  assertPass(adoptL === null, '8L: 120s 偏差 < toleranceMs(180s) → null（容忍窗放宽后不采纳）');
+
+  // ---- 8M: 边界值——偏差恰好 = toleranceMs → null（≤ 窗内）----
+  // 本地 nextTriggerAt = 15:01:00，page timer = 15:00（差 60s = toleranceMs）
+  const sched8M = { enabled: true, pwmState: 'on', nextTriggerAt: futureMs8 + 60_000 };
+  assertPass(computePageTimerAdoption(sched8M, { found: true, value: '15:00' }, { now: now8 }) === null,
+    '8M: 60s 偏差恰好 = toleranceMs → null（边界上不采纳，≤ 窗内）');
+
   // 汇总
   const passCount = results.filter(r => r.pass).length;
   const totalCount = results.length;
@@ -631,7 +713,7 @@ async function runTests() {
     results.filter(r => !r.pass).forEach(r => console.log('  - ' + r.name));
     process.exit(1);
   } else {
-    console.log('✅ 所有断言通过。v0.4.30 popup 自愈 + v0.5.6 跨设备 sync-helpers 全部 OK。');
+    console.log('✅ 所有断言通过。v0.4.30 popup 自愈 + v0.5.6 跨设备 sync-helpers + v0.5.7 page timer 校验全部 OK。');
   }
 }
 

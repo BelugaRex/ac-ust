@@ -121,6 +121,84 @@ function computeConfigDiff(localSchedule, remote) {
   return { changed, fields: out };
 }
 
+// ---- v0.5.7: 页面定时器作为跨设备验证源 ----
+//
+// UST 空调页面的 "Power-off after" 输入的是绝对时刻 HH:MM（Ant Design
+// 时间选择器），不是相对偏移。绝对时刻是服务器端持久化的可能候选——
+// 如果 UST 服务器确实把定时器同步到同一账号的所有会话，那么打开 AC
+// 页面读取 picker 的当前值就能得到一个跨设备真相源。
+//
+// 这组纯函数负责决策"是否应该采纳页面提交的定时器值"，background.js
+// 调用 content.js 读取 picker 值后传入此处判断。它们故意**只管"关"相位**：
+// page timer 只能设"到点关空调"，没有"到点开"，所以 PWM "开"相位仍由
+// chrome.storage.sync 对齐——两条通道互补。
+//
+// 优雅降级：如果 page timer 并非服务器端同步（只是浏览器本地 React
+// 状态），read 出来的值就是本机自己刚写的——偏差 < toleranceMs，computePageTimerAdoption
+// 返回 null，不干预，功能等于关闭。所以本机制对"未验证同步"的场景是安全的。
+
+// 解析页面 "Power-off after" picker 的 HH:MM 值为绝对时戳。
+// 返回 { targetMs, valid } 或 null（格式非法）。
+// valid=false 表示目标时刻已过——定时器可能已触发或被清空。
+function parsePageTimerValue(value, now = Date.now()) {
+  if (!value || typeof value !== 'string') return null;
+  const m = value.match(/^(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const hh = parseInt(m[1], 10);
+  const mm = parseInt(m[2], 10);
+  if (hh > 23 || mm > 59) return null;
+
+  const d = new Date(now);
+  const target = new Date(d.getFullYear(), d.getMonth(), d.getDate(), hh, mm, 0, 0);
+  const targetMs = target.getTime();
+  return { targetMs, valid: targetMs > now };
+}
+
+// 决策是否采纳页面 page timer 值作为 PWM "关"相位的权威源。
+// pageTimerInput 是 content.js getPagePowerOffTimer() 的返回值
+//   { found: bool, value: 'HH:MM'|null }
+//
+// 返回 null（无需变更）或 { adopt: true, nextTriggerAt, source: 'page-timer', reason }。
+//
+// 决策口径：
+//   1. page timer 未找到/无值 → null（不干预）
+//   2. page timer 值格式非法或已过期（valid=false）→ null
+//   3. PWM 不在"开"阶段（pwmState !== 'on'）→ null（page timer 只映射"关"事件）
+//   4. enabled=false → null（关闭态无 PWM 循环，page timer 是独立手动定时，不干预）
+//   5. 本地无未来触发时间（nextTriggerAt=0）→ 直接采纳 page timer
+//   6. 偏差 ≤ toleranceMs → null（已对齐，避免时钟微抖动反复重调闹钟）
+//   7. 偏差 > toleranceMs → 采纳 page timer（可能另一台设备刚手工设了页面定时器）
+function computePageTimerAdoption(localSchedule, pageTimerInput, opts = {}) {
+  const {
+    now = Date.now(),
+    toleranceMs = 60_000   // 偏差 ≤ 60s 视为已对齐——比 sync 的 10s 宽松，因为 page timer 是手工/异步设置
+  } = opts;
+
+  if (!pageTimerInput || !pageTimerInput.found || !pageTimerInput.value) return null;
+
+  const parsed = parsePageTimerValue(pageTimerInput.value, now);
+  if (!parsed || !parsed.valid) return null;
+
+  // 只在 PWM enabled 且处于"开"阶段（下一步是"关"）才采纳 page timer
+  if (!localSchedule?.enabled) return null;
+  if (localSchedule.pwmState !== 'on') return null;
+
+  const localTrigger = Number(localSchedule.nextTriggerAt) || 0;
+  if (!localTrigger) {
+    // 本地无未来触发但 PWM 在"开"阶段——page timer 是唯一信号
+    return { adopt: true, nextTriggerAt: parsed.targetMs, source: 'page-timer', reason: 'local-no-trigger' };
+  }
+
+  const diff = Math.abs(parsed.targetMs - localTrigger);
+  if (diff <= toleranceMs) {
+    // 在容忍窗内——已对齐，不干预
+    return null;
+  }
+
+  // 偏差超容忍窗——采纳 page timer 作为权威"关"时刻
+  return { adopt: true, nextTriggerAt: parsed.targetMs, source: 'page-timer', reason: 'deviation' };
+}
+
 // ---- CommonJS/Node 兼容（SW 上下文没有 module） ----
 // ESM interop：`import syncHelpers from './sync-helpers.js'` 会拿到 module.exports；
 // 也可 `import { composeSyncPayload } from './sync-helpers.js'` 直接具名导入（Node 18+）。
@@ -129,6 +207,8 @@ if (typeof module !== 'undefined' && module.exports) {
     SYNC_FIELDS,
     composeSyncPayload,
     computePhaseAdoption,
-    computeConfigDiff
+    computeConfigDiff,
+    parsePageTimerValue,
+    computePageTimerAdoption
   };
 }

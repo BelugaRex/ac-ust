@@ -513,6 +513,61 @@ async function tryAdoptSyncedState(reason = '', explicitRemote = null) {
   }
 }
 
+// ----- v0.5.7: 页面定时器作为跨设备 phase 校验源 -----
+// UST 空调页面自带 "Power-off after" 定时器，输入绝对时刻 HH:MM。如果 UST
+// 服务器把定时器值同步到同一账号的所有会话，那么读取 picker 当前值就获得
+// 一个跨设备真相源——不必依赖浏览器账号同步（chrome.storage.sync），连不同
+// 浏览器账号只要登录同一 UST 账号也能对齐。
+//
+// 本函数：找到打开的 AC 页面 → 发 getPageTimer 消息 → content.js 读 picker →
+// computePageTimerAdoption 决策 → 若采纳则更新 nextTriggerAt + 重排 ac-pwm 闹钟 +
+// 把修正后的相位推回 chrome.storage.sync（让其他仅靠 sync 的设备也间接对齐）。
+//
+// 优雅降级：page timer 并非服务器同步时，读回的是本机刚写的值——偏差 <
+// toleranceMs(60s)，computePageTimerAdoption 返回 null，不干预，功能等于关闭。
+// 所以本机制对"尚未验证 page timer 是否多端同步"的场景是安全无副作用的。
+async function tryAdoptPageTimer(reason = '') {
+  if (!schedule.enabled || schedule.pwmState !== 'on') return false;
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
+    if (!tabs.length) return false;
+
+    const result = await chrome.tabs.sendMessage(tabs[0].id, { action: 'getPageTimer' });
+    if (!result || !result.found) return false;
+
+    const adopt = computePageTimerAdoption(schedule, result, { now: Date.now() });
+    if (!adopt) return false;
+
+    // 采纳 page timer 值作为权威"关"时刻
+    const oldTrigger = schedule.nextTriggerAt;
+    setNextTriggerAt(adopt.nextTriggerAt);
+    schedule.alarmCreatedAt = Date.now();
+    schedule.alarmDelayMinutes = Math.max(1, (adopt.nextTriggerAt - Date.now()) / 60000);
+
+    // 重排 ac-pwm 闹钟到新时刻
+    await chrome.alarms.clear('ac-pwm');
+    const delayMs = adopt.nextTriggerAt - Date.now();
+    if (delayMs > 0) {
+      chrome.alarms.create('ac-pwm', { when: adopt.nextTriggerAt });
+    } else {
+      await advanceExpiredAlarmToNextBoundary(adopt.nextTriggerAt);
+    }
+
+    await rescheduleActiveBoundary();
+    await persistSchedule(`page-timer-adopt (${reason})`, { syncFromLiveAlarm: false });
+    // 把修正后的相位推回 sync——让仅靠 sync 的设备也间接对齐到 page timer 的时刻
+    await syncScheduleToSync(`page-timer-adopt (${reason})`);
+
+    const oldStr = oldTrigger ? new Date(oldTrigger).toLocaleTimeString() : '无';
+    console.log(`[AC扩展] page-timer ↓ ${reason}: 采纳 picker=${result.value} → nextTriggerAt=${new Date(adopt.nextTriggerAt).toLocaleTimeString()} (旧 ${oldStr}), 因 ${adopt.reason}`);
+    return true;
+  } catch (e) {
+    // AC 页面可能尚未完全加载 / content script 未就绪——静默降级
+    console.warn(`[AC扩展] page-timer ${reason} 读取失败（可能页面未就绪）:`, e?.message);
+    return false;
+  }
+}
+
 // ----- 官方推荐：setInterval heartbeat — 每 20s 写 storage 重置 SW 空闲计时器 -----
 // Chrome 官方文档明确使用 setInterval + chrome.storage.local.set 作为保活心跳。
 // chrome.storage.local.set 是扩展 API 调用，每次调用都会重置 SW 的 30 秒空闲超时。
@@ -608,6 +663,10 @@ async function init() {
     // 如有 sync 数据则合并到本地 schedule，再 setupAlarms，保证本机闹钟从对齐相位出发。
     // 新装在另一台设备的扩展启动时会先采用主机的 nextTriggerAt，避免本地从默认值跑偏。
     await tryAdoptSyncedState('init');
+    // v0.5.7：在 sync 采纳后尝试从打开的 AC 页面读取 page timer 值，
+    //         用作跨设备 phase 校验（chrome.storage.sync 的补充通道）。
+    //         若无 AC 页面打开则静默跳过——不阻塞 init。
+    await tryAdoptPageTimer('init');
     await ensureOffscreen();
     startHeartbeat();
     await setupAlarms();
@@ -1094,6 +1153,12 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   if (alarm.name === 'ac-watchdog') {
     await watchdogCheck();
+    // v0.5.7：看门狗定期（每 5 分钟）从打开的 AC 页面读取 page timer 值，
+    //         用作跨设备 phase 校验。无 AC 页面则静默跳过。
+    //         5 分钟间隔避免频繁读 DOM（只在 PWM 开阶段 + AC 页面打开时才真正执行）。
+    if (schedule.enabled && schedule.pwmState === 'on') {
+      tryAdoptPageTimer('watchdog').catch(e => /* 不阻塞闹钟流程 */ {});
+    }
   }
 
   if (alarm.name === 'ac-active-boundary') {
