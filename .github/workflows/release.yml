@@ -8,24 +8,15 @@ on:
 permissions:
   contents: write
 
+# 不再附带 CRX 文件。用户从 Chrome Web Store / Edge Add-ons 安装。
+# GitHub Release 仅用于版本历史 + changelog。
+# 如需企业 CRX 部署，本地运行 build.ps1 -Crx 手动打包。
+
 jobs:
   release:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Find CRX file
-        id: crx
-        run: |
-          CRX=$(ls releases/ac-ust-*.crx 2>/dev/null | head -1)
-          if [ -z "$CRX" ]; then
-            echo "No CRX found in releases/"
-            echo "crx_found=false" >> $GITHUB_OUTPUT
-          else
-            echo "crx_path=$CRX" >> $GITHUB_OUTPUT
-            echo "crx_name=$(basename $CRX)" >> $GITHUB_OUTPUT
-            echo "crx_found=true" >> $GITHUB_OUTPUT
-          fi
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -34,13 +25,12 @@ jobs:
           body: |
             ## AC-UST ${{ github.ref_name }}
 
-            公测版本。
-            
-            ### 安装方法
+            ### 安装方式
 
-            下载 `.crx` 文件，拖入 `chrome://extensions` 页面即可安装。
+            **Chrome Web Store / Edge Add-ons**（推荐）：
+            待上架后直接搜索 AC-UST 一键安装，自动更新。
 
-            详见 [releases/README.md](https://github.com/BelugaRex/ac-ust/blob/beta-rex/releases/README.md)。
-          files: |
-            releases/ac-ust-*.crx
-          generate_release_notes: false
+            **Load Unpacked（开发者）**：
+            克隆仓库 → `./build.ps1` → 加载 `dist/` 目录。
+            详见 [README](https://github.com/BelugaRex/ac-ust#readme)。
+          generate_release_notes: true

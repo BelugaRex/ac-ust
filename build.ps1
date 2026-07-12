@@ -94,6 +94,12 @@ Write-Host ""
 # CRX packaging (optional, -Crx switch)
 # ============================================================
 if ($Crx) {
+  Write-Host ""
+  Write-Host "!! DEPRECATED: -Crx is no longer the recommended packaging method."
+  Write-Host "   Users should install from Chrome Web Store / Edge Add-ons."
+  Write-Host "   Use -Zip for store upload packages instead."
+  Write-Host "   CRX is kept ONLY for enterprise policy deployment (ExtensionInstallForcelist)."
+  Write-Host ""
   # --- Resolve browser executable ---
   $browserExe = $null
   if ($BrowserPath) {
@@ -240,6 +246,6 @@ if ($Zip) {
 if (-not $Crx -and -not $Zip) {
   Write-Host ""
   Write-Host "(No package requested. dist/ is ready for Load Unpacked.)"
-  Write-Host "  -Crx  for CRX packaging"
-  Write-Host "  -Zip  for Chrome Web Store ZIP packaging"
+  Write-Host "  -Zip  for Chrome Web Store / Edge Add-ons upload (recommended)"
+  Write-Host "  -Crx  for enterprise CRX (deprecated, see warning above)"
 }
