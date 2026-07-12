@@ -63,10 +63,6 @@
     "message": "🔴 OFF Minutes",
     "description": "关闭分钟数输入框标签"
   },
-  "scheduleHintDefault": {
-    "message": "Click \"Timed On\" to start the AC and cycle by ON/OFF minutes. Click \"Timed Off\" to stop the cycle and turn off the AC.",
-    "description": "间隔模式下的说明文字"
-  },
   "scheduleHintClock": {
     "message": "ON at odd hours (1/3/5...23) · OFF at even hours (0/2/4...22). Click \"Timed On\" to start immediately.",
     "description": "时钟模式下的说明文字"
@@ -98,10 +94,6 @@
   "timerDisabling": {
     "message": "正在关闭...",
     "description": "定时 toggle 关闭中过渡文字"
-  },
-  "safetynetSet": {
-    "message": "🔒 Page safety timer set; core PWM still managed by extension",
-    "description": "页面定时器已设置的安全提示"
   },
   "safetynetNotSet": {
     "message": "ℹ️ Page safety timer not set: $1; PWM cycle will continue",
