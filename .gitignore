@@ -18,7 +18,6 @@ build/
 *.crx
 *.pem
 *.zip
-!releases/*.zip
 
 # Env
 .env
