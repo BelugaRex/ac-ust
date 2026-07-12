@@ -63,10 +63,6 @@
     "message": "🔴 关闭分钟",
     "description": "关闭分钟数输入框标签"
   },
-  "scheduleHintDefault": {
-    "message": "打开定时开关会先开启冷气，然后按“开启分钟 / 关闭分钟”持续循环；关闭开关会停止循环并默认关闭冷气。",
-    "description": "间隔模式下的说明文字"
-  },
   "scheduleHintClock": {
     "message": "单数整点(1/3/5...23)开 · 双数整点(0/2/4...22)关。打开定时开关立即开始。",
     "description": "时钟模式下的说明文字"
@@ -98,10 +94,6 @@
   "timerDisabling": {
     "message": "正在关闭...",
     "description": "定时 toggle 关闭中过渡文字"
-  },
-  "safetynetSet": {
-    "message": "🔒 页面关机保险已设置；核心 PWM 仍由扩展控制",
-    "description": "页面定时器已设置的安全提示"
   },
   "safetynetNotSet": {
     "message": "ℹ️ 页面关机保险暂未设置：$1；PWM 循环仍会继续",
