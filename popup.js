@@ -99,12 +99,19 @@ activeHoursStart.addEventListener('change', commitActiveHours);
 activeHoursEnd.addEventListener('change', commitActiveHours);
 
 // ----- 从后台拉取当前状态 + 直接读真实 PWM 闹钟 -----
+// 性能优化：每 10 次轮询用 1 次完整 getSchedule（含 AC 真实状态），
+// 其余 9 次用 getScheduleLite（省去 tabs.query + sendMessage，降低 ~90% I/O）
+let pollCount = 0;
+let cachedActualStatus = null;
+
 async function refreshStatus() {
   try {
-    const [response, alarm, stored] = await Promise.all([
-      chrome.runtime.sendMessage({ type: 'getSchedule' }),
-      chrome.alarms.get('ac-pwm'),
-      chrome.storage.local.get('ac_schedule')
+    const useLite = pollCount++ % 10 !== 0;
+    const msgType = useLite ? 'getScheduleLite' : 'getSchedule';
+
+    const [response, alarm] = await Promise.all([
+      chrome.runtime.sendMessage({ type: msgType }),
+      chrome.alarms.get('ac-pwm')
     ]);
 
     // getSchedule 正常返回 snapshot；异常时后台可能返回 { success:false, schedule }。
@@ -112,6 +119,13 @@ async function refreshStatus() {
       ? response.schedule
       : response;
 
+    // 缓存 AC 真实状态，lite 轮询时用缓存值补充
+    if (!useLite && schedule?.actualStatus) {
+      cachedActualStatus = schedule.actualStatus;
+    }
+    if (useLite && schedule && !schedule.actualStatus && cachedActualStatus) {
+      schedule.actualStatus = cachedActualStatus;
+    }
 
     updateCountdownDisplay(schedule, alarm);
   } catch (e) {
@@ -296,7 +310,7 @@ setInterval(refreshStatus, 1000);
 setInterval(tickActiveHoursBadge, 10000);  // 每 10 秒刷新 active hours 状态徽章
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.5.7';
+const APP_VERSION = '0.5.8';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';

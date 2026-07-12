@@ -309,7 +309,20 @@ function dispatchUserClick(element) {
 
   // Ant Design switch 是 React button，必须触发 click；只触发一次，避免双切。
   if (element.matches?.('button.ant-switch[role="switch"]')) {
-    element.click?.();
+    try { element.click?.(); } catch (_) {}
+    const switchOpts = { bubbles: true, cancelable: true, view: window, composed: true, button: 0 };
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+      try {
+        const event = type.startsWith('pointer')
+          ? new PointerEvent(type, switchOpts)
+          : new MouseEvent(type, switchOpts);
+        element.dispatchEvent(event);
+      } catch (_) {}
+    }
+    try {
+      element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: ' ', code: 'Space', keyCode: 32 }));
+      element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13 }));
+    } catch (_) {}
     return;
   }
 
