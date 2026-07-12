@@ -16,9 +16,9 @@ Thumbs.db
 dist/
 build/
 *.crx
-!releases/*.crx
 *.pem
 *.zip
+!releases/*.zip
 
 # Env
 .env
