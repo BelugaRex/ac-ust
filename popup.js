@@ -7,7 +7,6 @@ const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const onMinutesInput = document.getElementById('onMinutes');
 const offMinutesInput = document.getElementById('offMinutes');
-const scheduleHint = document.getElementById('scheduleHint');
 const activeHoursToggle = document.getElementById('activeHoursToggle');
 const activeHoursStart = document.getElementById('activeHoursStart');
 const activeHoursEnd = document.getElementById('activeHoursEnd');
@@ -20,7 +19,6 @@ const acStateText = document.getElementById('acStateText');
 const countdownDisplay = document.getElementById('countdownDisplay');
 const idleDisplay = document.getElementById('idleDisplay');
 const countdownText = document.getElementById('countdownText');
-const safetynetHint = document.getElementById('safetynetHint');
 const safetynetWarning = document.getElementById('safetynetWarning');
 
 // popup 打开期间保持与 Service Worker 的长连接。
@@ -146,7 +144,6 @@ function updateCountdownDisplay(schedule, alarm) {
     acStateText.textContent = t('acOff');
     countdownDisplay.style.display = 'none';
     idleDisplay.style.display = 'flex';
-    safetynetHint.style.display = 'none';
     safetynetWarning.style.display = 'none';
     return;
   }
@@ -167,25 +164,17 @@ function updateCountdownDisplay(schedule, alarm) {
   if (currentACOn) {
     acDot.className = 'ac-dot on';
     acStateText.textContent = t('acRunning');
-    if (schedule.pageTimerMinutes) {
-      safetynetHint.style.display = 'block';
-      safetynetHint.textContent = t('safetynetSet');
-      safetynetWarning.style.display = schedule.pageTimerError ? 'block' : 'none';
-      if (schedule.pageTimerError) {
-        safetynetWarning.textContent = t('safetynetError', schedule.pageTimerError);
-      }
-    } else if (schedule.pageTimerError) {
-      safetynetHint.style.display = 'none';
+    if (schedule.pageTimerError) {
       safetynetWarning.style.display = 'block';
-      safetynetWarning.textContent = t('safetynetNotSet', schedule.pageTimerError);
+      safetynetWarning.textContent = schedule.pageTimerMinutes
+        ? t('safetynetError', schedule.pageTimerError)
+        : t('safetynetNotSet', schedule.pageTimerError);
     } else {
-      safetynetHint.style.display = 'none';
       safetynetWarning.style.display = 'none';
     }
   } else {
     acDot.className = 'ac-dot off';
     acStateText.textContent = t('acStopped');
-    safetynetHint.style.display = 'none';
     safetynetWarning.style.display = 'none';
   }
 
@@ -310,7 +299,7 @@ setInterval(refreshStatus, 1000);
 setInterval(tickActiveHoursBadge, 10000);  // 每 10 秒刷新 active hours 状态徽章
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.5.8';
+const APP_VERSION = '0.5.9';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';

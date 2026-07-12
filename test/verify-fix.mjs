@@ -335,14 +335,6 @@ async function runTests() {
   assertPass(acStopped_zh.includes('冷气') || acStopped_zh.includes('关闭'),
     `acStopped 返回中文翻译: "${acStopped_zh}"`);
 
-  // 5b: scheduleHintDefault 必须返回完整中文说明
-  const hint_zh = t(zhCN, 'scheduleHintDefault');
-  console.log('  zh_CN scheduleHintDefault →', JSON.stringify(hint_zh.slice(0, 30)) + '...');
-  assertPass(hint_zh !== 'scheduleHintDefault',
-    'scheduleHintDefault 不再返回 key name (zh_CN)');
-  assertPass(hint_zh.includes('定时') && hint_zh.length > 20,
-    `scheduleHintDefault 返回完整中文句子 (长度 ${hint_zh.length})`);
-
   // 5c: countdownInterval 带占位符替换
   const cd_zh = t(zhCN, 'countdownInterval', '关闭', '30');
   console.log('  zh_CN countdownInterval(关闭,30) →', JSON.stringify(cd_zh));

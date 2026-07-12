@@ -217,18 +217,6 @@
     line-height: 1.14;
   }
 
-  .safetynet-hint {
-    margin-top: var(--s-xs);
-    padding: 8px 12px;
-    background: rgba(36, 138, 61, 0.06);
-    border: 1px solid rgba(36, 138, 61, 0.16);
-    border-radius: var(--r-md);
-    color: var(--c-ink-80);
-    font-size: 12px;
-    line-height: 1.35;
-    letter-spacing: -0.12px;
-    text-align: center;
-  }
   .safetynet-warning {
     margin-top: var(--s-xs);
     padding: 8px 12px;
@@ -568,8 +556,6 @@
       <div class="countdown-display" id="idleDisplay" style="display:none">
         <span style="color:var(--c-muted)" data-i18n="acIdle"></span>
       </div>
-      <div class="safetynet-hint" id="safetynetHint" style="display:none" data-i18n="safetynetSet">
-      </div>
       <div class="safetynet-warning" id="safetynetWarning" style="display:none"></div>
     </div>
 
@@ -606,7 +592,6 @@
             <input type="number" id="offMinutes" value="30" min="1" step="1">
           </div>
         </div>
-        <div class="hint" id="scheduleHint" data-i18n="scheduleHintDefault"></div>
         <div class="hint hint-pin" id="scheduleHintPin" data-i18n="scheduleHintPinTab"></div>
       </div>
     </div>
