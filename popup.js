@@ -465,6 +465,25 @@ btnDiagnose.addEventListener('click', async () => {
       add(false, '后台 SW 无响应');
     }
 
+    // 4.5. v0.5.7 page timer 跨设备 phase 校验诊断
+    // 如果 AC 页面已打开 + PWM 在开阶段(下一步是关),尝试读 picker 值对比本地 nextTriggerAt
+    if (tabs.length > 0 && s.enabled && s.pwmState === 'on') {
+      try {
+        const pt = await chrome.tabs.sendMessage(tabs[0].id, { action: 'getPageTimer' });
+        if (pt && pt.found && pt.value) {
+          const localNext = effectiveNextTriggerAt || s.nextTriggerAt || 0;
+          const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';
+          add(true, `page timer picker="${pt.value}" ← ${fmt(localNext)} (bit=${localNext})`);
+        } else {
+          add(true, 'page timer picker 空/未设 (校验通道待 page timer 有值后自动生效)');
+        }
+      } catch (e) {
+        add(false, 'page timer 读取失败: ' + (e.message||'').slice(0,60));
+      }
+    } else if (s.enabled && s.pwmState === 'on') {
+      add(true, 'page timer 校验待 AC 页面打开后生效');
+    }
+
     // 5. SW 状态可观测性:启动时间 / init 完成时间 / 内存 schedule 与 storage 是否一致
     // 注意:getSwStatus 失败、未响应、或 SW 跑旧代码时 sw 可能为 undefined/success:false,
     // 必须在所有分支都显示信息,避免静默盲区。
