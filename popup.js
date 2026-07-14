@@ -469,21 +469,21 @@ btnDiagnose.addEventListener('click', async () => {
     }
 
     // 4.5. v0.5.10 page timer 跨设备主同步通道诊断
-    // 如果 AC 页面已打开 + PWM 在开阶段(下一步是关),尝试读 picker 值对比本地 nextTriggerAt
-    if (tabs.length > 0 && s.enabled && s.pwmState === 'on') {
+    // page timer 两相位都对齐：pwmState='off'(AC 正开) 直接采纳；pwmState='on'(AC 正关) 掉算下一“开”。
+    if (tabs.length > 0 && s.enabled) {
       try {
         const pt = await chrome.tabs.sendMessage(tabs[0].id, { action: 'getPageTimer' });
         if (pt && pt.found && pt.value) {
           const localNext = effectiveNextTriggerAt || s.nextTriggerAt || 0;
           const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';
-          add(true, `page timer picker="${pt.value}" ← ${fmt(localNext)} (bit=${localNext})`);
+          add(true, `page timer picker="${pt.value}" ← ${fmt(localNext)} (pwmState=${s.pwmState})`);
         } else {
-          add(true, 'page timer picker 空/未设 (校验通道待 page timer 有值后自动生效)');
+          add(true, 'page timer picker 空/未设 (校验待 page timer 有值后自动生效)');
         }
       } catch (e) {
         add(false, 'page timer 读取失败: ' + (e.message||'').slice(0,60));
       }
-    } else if (s.enabled && s.pwmState === 'on') {
+    } else if (s.enabled) {
       add(true, 'page timer 校验待 AC 页面打开后生效');
     }
 
