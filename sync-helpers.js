@@ -121,17 +121,18 @@ function computeConfigDiff(localSchedule, remote) {
   return { changed, fields: out };
 }
 
-// ---- v0.5.7: 页面定时器作为跨设备验证源 ----
+// ---- v0.5.10: 页面定时器作为跨设备主同步通道 ----
 //
-// UST 空调页面的 "Power-off after" 输入的是绝对时刻 HH:MM（Ant Design
-// 时间选择器），不是相对偏移。绝对时刻是服务器端持久化的可能候选——
-// 如果 UST 服务器确实把定时器同步到同一账号的所有会话，那么打开 AC
-// 页面读取 picker 的当前值就能得到一个跨设备真相源。
+// UST 服务器已确认："Power-off after" 定时器值会同步到同一账号的所有会话。
+// chrome.storage.sync 在 Chrome/Edge 跨浏览器时互不互通——只有 page timer
+// 能跨浏览器账号同步（只要登录同一 UST 账号）。因此 v0.5.10 起将 page timer
+// 从"补充通道"升为"跨设备主同步通道"。
 //
-// 这组纯函数负责决策"是否应该采纳页面提交的定时器值"，background.js
-// 调用 content.js 读取 picker 值后传入此处判断。它们故意**只管"关"相位**：
-// page timer 只能设"到点关空调"，没有"到点开"，所以 PWM "开"相位仍由
-// chrome.storage.sync 对齐——两条通道互补。
+// 这组纯函数负责决策"是否应该采纳页面提交的定时器值"。v0.5.10 同时修正了
+// v0.5.7 的 pwmState 条件 bug（之前仅 pwmState='on' 才采纳，但 AC 正开时才
+// 有 page timer 值）。现在两个相位都会对齐：
+//   - pwmState='off'（AC 正开）：page timer 直接映射"关"时刻，采纳 T
+//   - pwmState='on'（AC 正关）：page timer 说"T 关" → 下一轮"开"在 T + offMinutes
 //
 // 优雅降级：如果 page timer 并非服务器端同步（只是浏览器本地 React
 // 状态），read 出来的值就是本机自己刚写的——偏差 < toleranceMs，computePageTimerAdoption
@@ -154,49 +155,82 @@ function parsePageTimerValue(value, now = Date.now()) {
   return { targetMs, valid: targetMs > now };
 }
 
-// 决策是否采纳页面 page timer 值作为 PWM "关"相位的权威源。
+// 决策是否采纳页面 page timer 值作为跨设备 PWM 相位对齐的权威源。
 // pageTimerInput 是 content.js getPagePowerOffTimer() 的返回值
 //   { found: bool, value: 'HH:MM'|null }
 //
 // 返回 null（无需变更）或 { adopt: true, nextTriggerAt, source: 'page-timer', reason }。
 //
+// v0.5.10 起为本：page timer 成为**跨设备主同步通道**（UST 服务器确认跨设备同步），
+// chrome.storage.sync 降为同浏览器生态内的补充通道（Chrome/Edge 账号同步互不互通）。
+//
 // 决策口径：
 //   1. page timer 未找到/无值 → null（不干预）
-//   2. page timer 值格式非法或已过期（valid=false）→ null
-//   3. PWM 不在"开"阶段（pwmState !== 'on'）→ null（page timer 只映射"关"事件）
-//   4. enabled=false → null（关闭态无 PWM 循环，page timer 是独立手动定时，不干预）
-//   5. 本地无未来触发时间（nextTriggerAt=0）→ 直接采纳 page timer
-//   6. 偏差 ≤ toleranceMs → null（已对齐，避免时钟微抖动反复重调闹钟）
-//   7. 偏差 > toleranceMs → 采纳 page timer（可能另一台设备刚手工设了页面定时器）
+//   2. page timer 值格式非法或已过期 → null
+//   3. enabled=false → null
+//   4. pwmState='off'（AC 正开，下一步关）：page timer 直接映射 nextTriggerAt
+//      - 本地无未来触发 → 直接采纳 page timer
+//      - 偏差 > toleranceMs → 采纳 page timer
+//      - 偏差 ≤ toleranceMs → null（已对齐）
+//   5. pwmState='on'（AC 正关，下一步开）：page timer 说"T关" → 下一轮"开"在 T + offMinutes
+//      - 按周期 (onMinutes+offMinutes) 找最接近本地 nextTriggerAt 的"开"边界
+//      - 偏差 > toleranceMs → 采纳推导的"开"时刻
+//      - 偏差 ≤ toleranceMs → null（已对齐）
 function computePageTimerAdoption(localSchedule, pageTimerInput, opts = {}) {
   const {
     now = Date.now(),
-    toleranceMs = 60_000   // 偏差 ≤ 60s 视为已对齐——比 sync 的 10s 宽松，因为 page timer 是手工/异步设置
+    toleranceMs = 60_000   // 偏差 ≤ 60s 视为已对齐
   } = opts;
 
   if (!pageTimerInput || !pageTimerInput.found || !pageTimerInput.value) return null;
+  if (!localSchedule?.enabled) return null;
 
   const parsed = parsePageTimerValue(pageTimerInput.value, now);
   if (!parsed || !parsed.valid) return null;
 
-  // 只在 PWM enabled 且处于"开"阶段（下一步是"关"）才采纳 page timer
-  if (!localSchedule?.enabled) return null;
-  if (localSchedule.pwmState !== 'on') return null;
-
+  const onMinutes = Math.max(1, localSchedule.onMinutes || 60);
+  const offMinutes = Math.max(1, localSchedule.offMinutes || 60);
+  const cycleMs = (onMinutes + offMinutes) * 60000;
+  const pageOffAt = parsed.targetMs;     // 页面定时器说"这个时刻关空调"
   const localTrigger = Number(localSchedule.nextTriggerAt) || 0;
+
+  // 根据 pwmState 决定 page timer 映射到什么
+  let expectedTrigger;
+  if (localSchedule.pwmState === 'off') {
+    // AC 正开（下一步关）→ page timer 直接给"关"时刻
+    // 按周期找最接近本地 nextTriggerAt 的"关"边界，避免 page timer 太远时跳到不合理的周期
+    if (!localTrigger) {
+      expectedTrigger = pageOffAt;
+    } else {
+      const k = Math.round((localTrigger - pageOffAt) / cycleMs);
+      expectedTrigger = pageOffAt + k * cycleMs;
+      if (expectedTrigger < now) expectedTrigger += cycleMs;
+    }
+  } else {
+    // pwmState='on'：AC 正关（下一步开）
+    // page timer "T关" → 之后的"OFF"持续 offMinutes → 下一轮"开"在 T + offMinutes
+    // 按周期找最接近本地 nextTriggerAt 的"开"边界（确保在未来）
+    const baseOnAt = pageOffAt + offMinutes * 60000;
+    if (!localTrigger) {
+      expectedTrigger = baseOnAt;
+      while (expectedTrigger < now) expectedTrigger += cycleMs;
+    } else {
+      const k = Math.round((localTrigger - baseOnAt) / cycleMs);
+      expectedTrigger = baseOnAt + k * cycleMs;
+      if (expectedTrigger < now) expectedTrigger += cycleMs;
+    }
+  }
+
+  // 无本地触发 → 直接采纳
   if (!localTrigger) {
-    // 本地无未来触发但 PWM 在"开"阶段——page timer 是唯一信号
-    return { adopt: true, nextTriggerAt: parsed.targetMs, source: 'page-timer', reason: 'local-no-trigger' };
+    return { adopt: true, nextTriggerAt: expectedTrigger, source: 'page-timer', reason: 'local-no-trigger' };
   }
 
-  const diff = Math.abs(parsed.targetMs - localTrigger);
-  if (diff <= toleranceMs) {
-    // 在容忍窗内——已对齐，不干预
-    return null;
-  }
+  // 偏差检查
+  const diff = Math.abs(expectedTrigger - localTrigger);
+  if (diff <= toleranceMs) return null;   // 已对齐
 
-  // 偏差超容忍窗——采纳 page timer 作为权威"关"时刻
-  return { adopt: true, nextTriggerAt: parsed.targetMs, source: 'page-timer', reason: 'deviation' };
+  return { adopt: true, nextTriggerAt: expectedTrigger, source: 'page-timer', reason: 'deviation' };
 }
 
 // ---- CommonJS/Node 兼容（SW 上下文没有 module） ----

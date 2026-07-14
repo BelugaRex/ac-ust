@@ -299,7 +299,7 @@ setInterval(refreshStatus, 1000);
 setInterval(tickActiveHoursBadge, 10000);  // 每 10 秒刷新 active hours 状态徽章
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.5.9';
+const APP_VERSION = '0.5.10';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -468,7 +468,7 @@ btnDiagnose.addEventListener('click', async () => {
       add(false, '后台 SW 无响应');
     }
 
-    // 4.5. v0.5.7 page timer 跨设备 phase 校验诊断
+    // 4.5. v0.5.10 page timer 跨设备主同步通道诊断
     // 如果 AC 页面已打开 + PWM 在开阶段(下一步是关),尝试读 picker 值对比本地 nextTriggerAt
     if (tabs.length > 0 && s.enabled && s.pwmState === 'on') {
       try {

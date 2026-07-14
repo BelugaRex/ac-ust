@@ -505,21 +505,24 @@ async function tryAdoptSyncedState(reason = '', explicitRemote = null) {
   }
 }
 
-// ----- v0.5.7: 页面定时器作为跨设备 phase 校验源 -----
-// UST 空调页面自带 "Power-off after" 定时器，输入绝对时刻 HH:MM。如果 UST
-// 服务器把定时器值同步到同一账号的所有会话，那么读取 picker 当前值就获得
-// 一个跨设备真相源——不必依赖浏览器账号同步（chrome.storage.sync），连不同
-// 浏览器账号只要登录同一 UST 账号也能对齐。
+// ----- v0.5.10: 页面定时器作为跨设备主同步通道 -----
+// UST 服务器已确认："Power-off after" 定时器值会同步到同一账号的所有会话。
+// chrome.storage.sync 在 Chrome/Edge 跨浏览器时互不互通——只有 page timer
+// 能跨浏览器账号同步（只要登录同一 UST 账号）。
+//
+// v0.5.10 修正了 v0.5.7 的 pwmState 条件 bug（之前仅 pwmState='on' 才采纳，
+// 但 pwmState='off' (AC 正开) 才是页面定时器有值的时刻）。现在两个相位都会
+// 对齐：pwmState='off' 直接采纳 page timer 值；pwmState='on' 从 page timer
+// 掉算下一轮"开"边界 (pageOffAt + offMinutes)。
 //
 // 本函数：找到打开的 AC 页面 → 发 getPageTimer 消息 → content.js 读 picker →
 // computePageTimerAdoption 决策 → 若采纳则更新 nextTriggerAt + 重排 ac-pwm 闹钟 +
-// 把修正后的相位推回 chrome.storage.sync（让其他仅靠 sync 的设备也间接对齐）。
+// 把修正后的相位推回 chrome.storage.sync。
 //
 // 优雅降级：page timer 并非服务器同步时，读回的是本机刚写的值——偏差 <
 // toleranceMs(60s)，computePageTimerAdoption 返回 null，不干预，功能等于关闭。
-// 所以本机制对"尚未验证 page timer 是否多端同步"的场景是安全无副作用的。
 async function tryAdoptPageTimer(reason = '') {
-  if (!schedule.enabled || schedule.pwmState !== 'on') return false;
+  if (!schedule.enabled) return false;
   try {
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
     if (!tabs.length) return false;
@@ -551,7 +554,7 @@ async function tryAdoptPageTimer(reason = '') {
     await syncScheduleToSync(`page-timer-adopt (${reason})`);
 
     const oldStr = oldTrigger ? new Date(oldTrigger).toLocaleTimeString() : '无';
-    console.log(`[AC扩展] page-timer ↓ ${reason}: 采纳 picker=${result.value} → nextTriggerAt=${new Date(adopt.nextTriggerAt).toLocaleTimeString()} (旧 ${oldStr}), 因 ${adopt.reason}`);
+    console.log(`[AC扩展] page-timer ↓ ${reason}: 采纳 picker=${result.value} → nextTriggerAt=${new Date(adopt.nextTriggerAt).toLocaleTimeString()} (旧 ${oldStr}), 因=${adopt.reason}, pwmState=${schedule.pwmState}`);
     return true;
   } catch (e) {
     // AC 页面可能尚未完全加载 / content script 未就绪——静默降级
@@ -648,9 +651,7 @@ async function init() {
     // 如有 sync 数据则合并到本地 schedule，再 setupAlarms，保证本机闹钟从对齐相位出发。
     // 新装在另一台设备的扩展启动时会先采用主机的 nextTriggerAt，避免本地从默认值跑偏。
     await tryAdoptSyncedState('init');
-    // v0.5.7：在 sync 采纳后尝试从打开的 AC 页面读取 page timer 值，
-    //         用作跨设备 phase 校验（chrome.storage.sync 的补充通道）。
-    //         若无 AC 页面打开则静默跳过——不阻塞 init。
+    // v0.5.10：page timer 已升为跨设备主同步通道（无论 pwmState 都会尝试对齐）
     await tryAdoptPageTimer('init');
     await ensureOffscreen();
     startHeartbeat();
@@ -1016,10 +1017,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   if (alarm.name === 'ac-watchdog') {
     await watchdogCheck();
-    // v0.5.7：看门狗定期（每 5 分钟）从打开的 AC 页面读取 page timer 值，
-    //         用作跨设备 phase 校验。无 AC 页面则静默跳过。
-    //         5 分钟间隔避免频繁读 DOM（只在 PWM 开阶段 + AC 页面打开时才真正执行）。
-    if (schedule.enabled && schedule.pwmState === 'on') {
+    // v0.5.10：看门狗每 5 分钟尝试从打开的 AC 页面读取 page timer。
+    //         page timer 现为跨设备主同步通道——不再限制 pwmState='on'。
+    //         无 AC 页面则静默跳过；5 分钟间隔避免频繁读 DOM。
+    if (schedule.enabled) {
       tryAdoptPageTimer('watchdog').catch(e => /* 不阻塞闹钟流程 */ {});
     }
   }

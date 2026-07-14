@@ -55,7 +55,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
   if (msg.action === 'getPageTimer') {
-    // v0.5.7：读 picker 当前值——与 setTimer（写）互补，用于跨设备 phase 校验
+    // v0.5.10：读 picker 当前值——跨设备主同步通道（UST 服务器同步给所有会话）
     sendResponse(getPagePowerOffTimer());
     return true;
   }
@@ -601,7 +601,7 @@ function findPowerOffTimerInput() {
   return pickerInputs.length > 0 ? pickerInputs[0] : null;
 }
 
-// ----- v0.5.7: 读取页面已设置的 "Power-off after" 定时器值 -----
+// ----- v0.5.10: 读取页面已设置的 "Power-off after" 定时器值（跨设备主同步通道） -----
 // 与 setPagePowerOffTimer（写）互补——读 picker 当前的 HH:MM 值，
 // 供 background.js 跨设备 phase 校验（见 sync-helpers.js computePageTimerAdoption）。
 // 只读 DOM，不计算时戳——纯函数 parsePageTimerValue 在 sync-helpers.js 负责解析。
