@@ -614,87 +614,95 @@ async function runTests() {
   assertPass(r7D.schedule.activeHours.enabled === true && r7D.schedule.activeHours.start === '09:00',
     '7D: activeHours 字段被采纳');
 
-  // ===== 用例 8: v0.5.7 page timer 跨设备 phase 校验纯函数 =====
-  // 验证 parsePageTimerValue 和 computePageTimerAdoption 的决策口径。
-  // 这些纯函数为"利用 UST 自带 page timer 做跨设备同步"服务（chrome.storage.sync 的补充通道）。
-  console.log('\n\n=== 用例 8: page timer 跨设备 phase 校验纯函数 (v0.5.7) ===\n');
+  // ===== 用例 8: page timer 跨设备 phase 校验纯函数 (v0.5.10) =====
+  // v0.5.10: page timer 升为跨设备主同步通道（UST 服务器已确认跨设备同步），
+  // chrome.storage.sync 降为同浏览器生态补充（Chrome/Edge 账号同步互不互通）。
+  // 同时修正了 v0.5.7 的 pwmState 条件 bug（之前仅 pwmState='on' 才采纳，已改双向）。
+  console.log('\n\n=== 用例 8: page timer 跨设备 phase 校验纯函数 (v0.5.10) ===\n');
 
-  // 固定时戳基线，避免 Date.now() 波动影响断言
-  // 假设 "现在" 是 2024-01-15 14:00:00（本地时间）
+  // 固定时戳基线：now = 2024-01-15 14:00:00
   const now8 = new Date(2024, 0, 15, 14, 0, 0, 0).getTime();
-  const futureMs8 = now8 + 60 * 60 * 1000;  // 1 小时后 = 15:00
+  const futureMs8 = now8 + 60 * 60 * 1000;  // 15:00
+  const ts16 = new Date(2024, 0, 15, 16, 0, 0, 0).getTime();  // 16:00
 
-  // ---- 8A: parsePageTimerValue 合法输入 '15:00' → valid=true ----
+  // ---- 8A-8C: parsePageTimerValue 不变 ----
   const pA = parsePageTimerValue('15:00', now8);
-  assertPass(pA !== null, '8A: parsePageTimerValue "15:00" 不返回 null');
-  assertPass(pA && pA.valid === true, '8A: parsePageTimerValue 目标在将来 → valid=true');
-  assertPass(pA && pA.targetMs === futureMs8, '8A: parsePageTimerValue targetMs 对应 15:00:00 当天');
+  assertPass(pA !== null && pA.valid === true, '8A: parsePageTimerValue "15:00" → valid=true');
+  assertPass(pA && pA.targetMs === futureMs8, '8A: targetMs 对应 15:00:00');
+  assertPass(parsePageTimerValue('10:00', now8)?.valid === false, '8B: 过期 → valid=false');
+  assertPass(parsePageTimerValue('25:00', now8) === null, '8C: 小时越界 → null');
+  assertPass(parsePageTimerValue(null, now8) === null, '8C: null → null');
 
-  // ---- 8B: parsePageTimerValue 已过期 '10:00' → valid=false ----
-  const pB = parsePageTimerValue('10:00', now8);
-  assertPass(pB !== null, '8B: parsePageTimerValue "10:00" 不返回 null（格式合法）');
-  assertPass(pB && pB.valid === false, '8B: parsePageTimerValue 目标已过 → valid=false');
+  // ---- 8D: 未找到 → null ----
+  const schedOff = { enabled: true, pwmState: 'off', onMinutes: 60, offMinutes: 60, nextTriggerAt: futureMs8 };
+  assertPass(computePageTimerAdoption(schedOff, { found: false, value: null }, { now: now8 }) === null,
+    '8D: page timer 未找到 → null');
 
-  // ---- 8C: parsePageTimerValue 非法输入 → null ----
-  assertPass(parsePageTimerValue('25:00', now8) === null, '8C: parsePageTimerValue "25:00" 小时越界 → null');
-  assertPass(parsePageTimerValue('aa:bb', now8) === null, '8C: parsePageTimerValue "aa:bb" 非数字 → null');
-  assertPass(parsePageTimerValue('', now8) === null, '8C: parsePageTimerValue 空串 → null');
-  assertPass(parsePageTimerValue(null, now8) === null, '8C: parsePageTimerValue null → null');
+  // ---- 8E: 值为空 → null ----
+  assertPass(computePageTimerAdoption(schedOff, { found: true, value: null }, { now: now8 }) === null,
+    '8E: value 空 → null');
 
-  // ---- 8D: computePageTimerAdoption page timer 未找到 → null ----
-  const sched8D = { enabled: true, pwmState: 'on', nextTriggerAt: futureMs8 };
-  assertPass(computePageTimerAdoption(sched8D, { found: false, value: null }, { now: now8 }) === null,
-    '8D: page timer 未找到 → null（不干预）');
+  // ---- 8F: 值已过期 → null ----
+  assertPass(computePageTimerAdoption(schedOff, { found: true, value: '10:00' }, { now: now8 }) === null,
+    '8F: 过期值 → null');
 
-  // ---- 8E: computePageTimerAdoption page timer 值空 → null ----
-  assertPass(computePageTimerAdoption(sched8D, { found: true, value: null }, { now: now8 }) === null,
-    '8E: page timer found 但 value 空 → null');
-
-  // ---- 8F: computePageTimerAdoption 值已过期 → null ----
-  assertPass(computePageTimerAdoption(sched8D, { found: true, value: '10:00' }, { now: now8 }) === null,
-    '8F: page timer "10:00" 已过期 → null');
-
-  // ---- 8G: computePageTimerAdoption PWM 在"关"阶段 → null（page timer 只映射"关"） ----
-  const sched8G = { enabled: true, pwmState: 'off', nextTriggerAt: futureMs8 };
-  assertPass(computePageTimerAdoption(sched8G, { found: true, value: '16:00' }, { now: now8 }) === null,
-    '8G: pwmState="off" → null（page timer 只映射"关"相位）');
-
-  // ---- 8H: computePageTimerAdoption enabled=false → null ----
-  const sched8H = { enabled: false, pwmState: 'on', nextTriggerAt: futureMs8 };
-  assertPass(computePageTimerAdoption(sched8H, { found: true, value: '16:00' }, { now: now8 }) === null,
-    '8H: enabled=false → null（PWM 未启用，page timer 是手动定时，不干预）');
-
-  // ---- 8I: computePageTimerAdoption 偏差 > 60s → 采纳 page timer ----
+  // ---- 8G: pwmState='off'（AC 正开）偏差 1 小时 → 采纳 page timer ----
   // 本地 nextTriggerAt = 15:00，page timer = 16:00（差 1 小时）
-  const adoptI = computePageTimerAdoption(sched8D, { found: true, value: '16:00' }, { now: now8 });
-  const expectedI = new Date(2024, 0, 15, 16, 0, 0, 0).getTime();
-  assertPass(adoptI !== null && adoptI.adopt === true, '8I: 1 小时偏差 > 60s → 采纳');
-  assertPass(adoptI && adoptI.nextTriggerAt === expectedI, '8I: 采纳的 nextTriggerAt 对应 16:00');
-  assertPass(adoptI && adoptI.source === 'page-timer', '8I: source=page-timer');
-  assertPass(adoptI && adoptI.reason === 'deviation', '8I: reason=deviation');
+  const adoptG = computePageTimerAdoption(schedOff, { found: true, value: '16:00' }, { now: now8 });
+  assertPass(adoptG !== null && adoptG.adopt === true, '8G (主场景): pwmState=off, 1h 偏差 → 采纳');
+  assertPass(adoptG && adoptG.nextTriggerAt === ts16, '8G: 采纳的 nextTriggerAt = 16:00');
+  assertPass(adoptG && adoptG.source === 'page-timer', '8G: source=page-timer');
+  assertPass(adoptG && adoptG.reason === 'deviation', '8G: reason=deviation');
 
-  // ---- 8J: computePageTimerAdoption 偏差 ≤ 60s → null（已对齐） ----
-  // 本地 nextTriggerAt = 15:00:30，page timer = 15:00（差 30s < 60s）
-  const sched8J = { enabled: true, pwmState: 'on', nextTriggerAt: futureMs8 + 30_000 };
-  assertPass(computePageTimerAdoption(sched8J, { found: true, value: '15:00' }, { now: now8 }) === null,
-    '8J: 30s 偏差在容忍窗内 → null（已对齐，避免时钟微抖动反复重调）');
+  // ---- 8H: enabled=false → null ----
+  const schedDisabled = { enabled: false, pwmState: 'off', onMinutes: 60, offMinutes: 60, nextTriggerAt: futureMs8 };
+  assertPass(computePageTimerAdoption(schedDisabled, { found: true, value: '16:00' }, { now: now8 }) === null,
+    '8H: enabled=false → null');
 
-  // ---- 8K: computePageTimerAdoption 本地无未来触发 → 直接采纳 ----
-  const sched8K = { enabled: true, pwmState: 'on', nextTriggerAt: 0 };
-  const adoptK = computePageTimerAdoption(sched8K, { found: true, value: '16:00' }, { now: now8 });
-  assertPass(adoptK !== null && adoptK.adopt === true, '8K: 本地无触发但 PWM 在开阶段 → 采纳');
-  assertPass(adoptK && adoptK.reason === 'local-no-trigger', '8K: reason=local-no-trigger');
+  // ---- 8I: pwmState='off' 偏差 ≤ 60s → null（已对齐）----
+  const schedI = { enabled: true, pwmState: 'off', onMinutes: 60, offMinutes: 60, nextTriggerAt: futureMs8 + 30_000 };
+  assertPass(computePageTimerAdoption(schedI, { found: true, value: '15:00' }, { now: now8 }) === null,
+    '8I: 30s 偏差在窗内 → null');
 
-  // ---- 8L: 自定义 toleranceMs 生效 ----
+  // ---- 8J: pwmState='off' 本地无触发 → 直接采纳 ----
+  const schedJ = { enabled: true, pwmState: 'off', onMinutes: 60, offMinutes: 60, nextTriggerAt: 0 };
+  const adoptJ = computePageTimerAdoption(schedJ, { found: true, value: '16:00' }, { now: now8 });
+  assertPass(adoptJ !== null && adoptJ.adopt === true, '8J: 本地无触发 → 采纳');
+  assertPass(adoptJ && adoptJ.nextTriggerAt === ts16, '8J: 采纳的 nextTriggerAt = 16:00');
+  assertPass(adoptJ && adoptJ.reason === 'local-no-trigger', '8J: reason=local-no-trigger');
+
+  // ---- 8K: 自定义 toleranceMs ——
   // 本地 nextTriggerAt = 15:00，page timer = 15:02（差 120s）
-  const adoptL = computePageTimerAdoption(sched8D, { found: true, value: '15:02' }, { now: now8, toleranceMs: 180_000 });
-  assertPass(adoptL === null, '8L: 120s 偏差 < toleranceMs(180s) → null（容忍窗放宽后不采纳）');
+  const adoptK = computePageTimerAdoption(schedOff, { found: true, value: '15:02' }, { now: now8, toleranceMs: 180_000 });
+  assertPass(adoptK === null, '8K: 120s 偏差 < toleranceMs(180s) → null');
 
-  // ---- 8M: 边界值——偏差恰好 = toleranceMs → null（≤ 窗内）----
-  // 本地 nextTriggerAt = 15:01:00，page timer = 15:00（差 60s = toleranceMs）
-  const sched8M = { enabled: true, pwmState: 'on', nextTriggerAt: futureMs8 + 60_000 };
-  assertPass(computePageTimerAdoption(sched8M, { found: true, value: '15:00' }, { now: now8 }) === null,
-    '8M: 60s 偏差恰好 = toleranceMs → null（边界上不采纳，≤ 窗内）');
+  // ---- 8L: 边界——偏差恰好 60s → null ----
+  const schedL = { enabled: true, pwmState: 'off', onMinutes: 60, offMinutes: 60, nextTriggerAt: futureMs8 + 60_000 };
+  assertPass(computePageTimerAdoption(schedL, { found: true, value: '15:00' }, { now: now8 }) === null,
+    '8L: 60s 偏差恰好 = toleranceMs → null');
+
+  // ---- 8M: pwmState='on'（AC 正关，下一步开）：page timer 掉算下一轮"开" ----
+  // now=14:00, page timer='15:00', offMinutes=60 → 下一轮开在 15:00+60min=16:00
+  const schedOn = { enabled: true, pwmState: 'on', onMinutes: 60, offMinutes: 60, nextTriggerAt: futureMs8 };
+  // 本地认为 15:00 开，page timer 参考 15:00 关 → 下一轮开在 16:00
+  // k = round((15:00 - 16:00) / 120min) = round(-0.5) = 0 → expectedTrigger = 16:00
+  // diff = |16:00 - 15:00| = 1h > 60s → 采纳 16:00
+  const adoptM = computePageTimerAdoption(schedOn, { found: true, value: '15:00' }, { now: now8 });
+  assertPass(adoptM !== null && adoptM.adopt === true, '8M: pwmState=on, 偏差 1h → 采纳');
+  assertPass(adoptM && adoptM.nextTriggerAt === ts16, '8M: 采纳的 nextTriggerAt = 16:00（15:00 关 + 60min OFF = 16:00 开）');
+
+  // ---- 8N: pwmState='on' 本地无触发 → 直接采纳推导的"开"时刻 ----
+  const schedN = { enabled: true, pwmState: 'on', onMinutes: 60, offMinutes: 60, nextTriggerAt: 0 };
+  const adoptN = computePageTimerAdoption(schedN, { found: true, value: '15:00' }, { now: now8 });
+  assertPass(adoptN !== null && adoptN.adopt === true, '8N: pwmState=on 无触发 → 采纳');
+  assertPass(adoptN && adoptN.nextTriggerAt === ts16, '8N: 采纳的 nextTriggerAt = 16:00');
+  assertPass(adoptN && adoptN.reason === 'local-no-trigger', '8N: reason=local-no-trigger');
+
+  // ---- 8O: pwmState='on' 偏差 ≤ 60s → null ----
+  // 本地 nextTriggerAt = 16:00:30, page timer = 15:00（个轮开在 16:00）
+  const schedO = { enabled: true, pwmState: 'on', onMinutes: 60, offMinutes: 60, nextTriggerAt: ts16 + 30_000 };
+  assertPass(computePageTimerAdoption(schedO, { found: true, value: '15:00' }, { now: now8 }) === null,
+    '8O: 30s 偏差在窗内 → null');
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;
