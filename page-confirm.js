@@ -25,13 +25,6 @@
       return defaultValue;
     };
 
-    window.__AC_EXTENSION_RESTORE_DIALOGS__ = function() {
-      window.confirm = originalConfirm;
-      window.alert = originalAlert;
-      window.prompt = originalPrompt;
-      delete window.__AC_EXTENSION_DIALOG_PATCHED__;
-      delete window.__AC_EXTENSION_RESTORE_DIALOGS__;
-    };
   }
 
   if (window.__AC_EXTENSION_TOGGLE_PATCHED__) return;

@@ -54,6 +54,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     setPagePowerOffTimer(msg.minutes).then(result => sendResponse(result));
     return true;
   }
+  if (msg.action === 'getPageTimer') {
+    // v0.5.10：读 picker 当前值——跨设备主同步通道（UST 服务器同步给所有会话）
+    sendResponse(getPagePowerOffTimer());
+    return true;
+  }
   return true;
 });
 
@@ -304,7 +309,20 @@ function dispatchUserClick(element) {
 
   // Ant Design switch 是 React button，必须触发 click；只触发一次，避免双切。
   if (element.matches?.('button.ant-switch[role="switch"]')) {
-    element.click?.();
+    try { element.click?.(); } catch (_) {}
+    const switchOpts = { bubbles: true, cancelable: true, view: window, composed: true, button: 0 };
+    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
+      try {
+        const event = type.startsWith('pointer')
+          ? new PointerEvent(type, switchOpts)
+          : new MouseEvent(type, switchOpts);
+        element.dispatchEvent(event);
+      } catch (_) {}
+    }
+    try {
+      element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: ' ', code: 'Space', keyCode: 32 }));
+      element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13 }));
+    } catch (_) {}
     return;
   }
 
@@ -581,6 +599,23 @@ function findPowerOffTimerInput() {
   }
 
   return pickerInputs.length > 0 ? pickerInputs[0] : null;
+}
+
+// ----- v0.5.10: 读取页面已设置的 "Power-off after" 定时器值（跨设备主同步通道） -----
+// 与 setPagePowerOffTimer（写）互补——读 picker 当前的 HH:MM 值，
+// 供 background.js 跨设备 phase 校验（见 sync-helpers.js computePageTimerAdoption）。
+// 只读 DOM，不计算时戳——纯函数 parsePageTimerValue 在 sync-helpers.js 负责解析。
+function getPagePowerOffTimer() {
+  const pickerInput = findPowerOffTimerInput();
+  if (!pickerInput) {
+    return { found: false, value: null };
+  }
+  const value = (pickerInput.value || '').trim();
+  if (!/^\d{2}:\d{2}$/.test(value)) {
+    // picker 有 DOM 但值空/格式不认——可能是空选或未设
+    return { found: true, value: value || null };
+  }
+  return { found: true, value };
 }
 
 })(); // end 幂等守卫 IIFE

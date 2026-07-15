@@ -16,7 +16,6 @@ Thumbs.db
 dist/
 build/
 *.crx
-!releases/*.crx
 *.pem
 *.zip
 

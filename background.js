@@ -4,10 +4,18 @@
 
 // i18n 辅助函数 — 使用 fetch-based I18n 模块（绕过 chrome.i18n 不可靠性）
 importScripts('i18n.js');
+importScripts('sync-helpers.js');  // 跨设备同步的纯函数（composeSyncPayload / computePhaseAdoption）
 const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const AC_PAGE = 'https://w5.ab.ust.hk/njggt/app/home';
 const STORAGE_KEY = 'ac_schedule';
+
+// 跨设备同步：瘦化版 schedule 写到 chrome.storage.sync。详见 sync-helpers.js 注释。
+// 同步对象在 sync 区存储键名，由 background.js 独立维护（与 local.ac_schedule 解耦）。
+// lastSyncedAt 用于自回环抑制——Chrome 会把"自己写的 sync"也回灌回本地 onChanged，
+// 通过 syncedAt 对比即可识别并静默跳过；同时承担 last-writer-wins 的本地参照。
+const SYNC_KEY = 'ac_schedule_sync';
+let lastSyncedAt = 0;
 
 let schedule = {
   enabled: false,
@@ -27,26 +35,6 @@ let schedule = {
 
 let pwmStepRunning = false;
 let lastPwmStepAt = 0;  // A4: 看门狗 cooldown 追踪
-
-// ----- 时钟模式辅助函数 -----
-function getNextHourBoundary(fromMs = Date.now()) {
-  const d = new Date(fromMs);
-  d.setMinutes(0, 0, 0);
-  d.setHours(d.getHours() + 1);
-  return d.getTime();
-}
-
-function getHourAction(timestamp = Date.now()) {
-  // 单数整点(1,3,5,...,23) → ON；双数整点(0,2,4,...,22) → OFF
-  const hour = new Date(timestamp).getHours();
-  return (hour % 2 === 1) ? 'on' : 'off';
-}
-
-function isClockMode() {
-  // v0.5.x 起 UI 只保留间隔模式。字段保留是为了兼容老用户 storage，
-  // 但所有调度路径都强制走间隔模式分支。
-  return false;
-}
 
 // ===== Active Hours (PWM 运行时段，白名单) =====
 // 启用后：在 [start, end) 时段内 PWM 自动运行；时段外自动关闭 PWM（避免噪音）。
@@ -117,6 +105,8 @@ async function onActiveBoundaryCrossed() {
     await persistSchedule('active-hours-enter');
     await setupAlarms(true);
     await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+    // [v0.5.6] 跨设备同步：activeHours 跨边界是低频事件（每日 ≤ 2 次），同步推送
+    await syncScheduleToSync('active-hours-enter');
   } else if (!inside && schedule.enabled) {
     // 退出运行时段 → 关闭 PWM 并停机（避免噪音）
     console.log('[ac-ust] active hours: leaving, auto-disable PWM');
@@ -135,6 +125,8 @@ async function onActiveBoundaryCrossed() {
     await updateBadge();
     await persistSchedule('active-hours-leave');
     await toggleAC('off');
+    // [v0.5.6] 同步推送离开时段状态
+    await syncScheduleToSync('active-hours-leave');
   }
 }
 
@@ -153,7 +145,7 @@ function setNextTriggerAt(nextTriggerAt) {
 }
 
 async function syncStoredTriggerFromAlarm(alarm, reason = '从现有 PWM 闹钟同步绝对触发时间') {
-  if (!schedule.enabled || isClockMode()) return false;
+  if (!schedule.enabled) return false;
 
   const scheduledTime = alarm?.scheduledTime;
   if (!scheduledTime || scheduledTime <= Date.now()) return false;
@@ -192,7 +184,7 @@ async function backfillNextTriggerAt(persist = false) {
   }
 
   // 第二层：legacy 字段也丢了，但 live alarm 还在 → 从 alarm 恢复
-  if (schedule.enabled && !isClockMode()) {
+  if (schedule.enabled) {
     const liveAlarm = await chrome.alarms.get('ac-pwm');
     const liveDueAt = getLiveAlarmEndMs(liveAlarm);
     if (liveDueAt) {
@@ -244,7 +236,7 @@ async function advanceExpiredAlarmToNextBoundary(expiredScheduledTime) {
 }
 
 async function restoreIntervalAlarmFromStorage(reason = '按 storage 剩余时间恢复 PWM 闹钟') {
-  if (!schedule.enabled || isClockMode()) return false;
+  if (!schedule.enabled) return false;
 
   const now = Date.now();
   const liveAlarm = await chrome.alarms.get('ac-pwm');
@@ -293,6 +285,18 @@ async function createAlarm(name, info) {
   }
 }
 
+async function createPwmAlarmWithVerify(delay, logTag = 'PWM') {
+  schedule.alarmCreatedAt = Date.now();
+  schedule.alarmDelayMinutes = delay;
+  await createAlarm('ac-pwm', { delayInMinutes: delay });
+  const verify = await chrome.alarms.get('ac-pwm');
+  setNextTriggerAt(verify?.scheduledTime || (schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000));
+  if (!verify) {
+    console.error(`[AC扩展] ${logTag}: PWM 闹钟创建失败，重试...`);
+    await createAlarm('ac-pwm', { delayInMinutes: delay });
+  }
+}
+
 async function loadScheduleFromStorage() {
   const saved = await chrome.storage.local.get(STORAGE_KEY);
   if (saved[STORAGE_KEY]) {
@@ -304,7 +308,7 @@ async function loadScheduleFromStorage() {
 async function persistSchedule(reason = '', options = {}) {
   const { syncFromLiveAlarm = true } = options;
 
-  if (syncFromLiveAlarm && schedule.enabled && !isClockMode()) {
+  if (syncFromLiveAlarm && schedule.enabled) {
     const liveAlarm = await chrome.alarms.get('ac-pwm');
     const liveDueAt = getLiveAlarmEndMs(liveAlarm);
 
@@ -319,6 +323,244 @@ async function persistSchedule(reason = '', options = {}) {
   }
 
   await chrome.storage.local.set({ [STORAGE_KEY]: { ...schedule } });
+}
+
+// ============================================================
+// 跨设备同步 — chrome.storage.sync 集成层
+// ============================================================
+//
+// 触发同步写入的时机（节流策略，远低于 sync 配额 100 写/小时、1200 写/天）：
+//   • runPwmStep 每次成功的阶段翻转 (toggleOk=true) — 60min 周期 ≈ 24 写/天
+//   • updateSchedule handler（用户改设置/toggle）— 用户发起，低频
+//   • onActiveBoundaryCrossed enter/leave — 每日 ≤ 2 次
+//   • onInstalled install—— push 默认配置到 sync（若 sync 为空）
+//   • init() 启动时—— 不写入，只读采纳
+//
+// 不同步：__heartbeat（20s 一次会打爆配额）、pageTimer*（本机页面态）、
+//        alarmCreatedAt/alarmDelayMinutes（旧版字段）、watchdogCheck 的微调（噪音）。
+// 失败重试时不同步（pwmState 没变，避免 PWM 死循环反复打 sync）。
+//
+// 同步对象结构（瘦化）：见 sync-helpers.js 的 composeSyncPayload。
+// 自回环抑制：自己写入的 sync 会触发本地 onChanged，通过 syncedAt 对比识别为自写
+// 并静默跳过——computePhaseAdoption 内部 lastSyncedAt 守卫已覆盖。
+//
+// 优雅降级：用户未登录浏览器同步 / sync 配额超限 / 企业策略禁用 → 异常被静默吞掉，
+// 行为退化为现有本地 storage 模式（无回归）。
+
+const _syncOpLock = { busy: false };
+
+// 把当前内存 schedule 瘦化后写入 chrome.storage.sync。
+// reason 用于日志。失败静默降级。
+async function syncScheduleToSync(reason = '') {
+  if (!chrome.storage?.sync) return;  // 受限上下文（incognito / 策略禁用）
+  try {
+    const now = Date.now();
+    const slim = composeSyncPayload(schedule, now);
+    await chrome.storage.sync.set({ [SYNC_KEY]: slim });
+    lastSyncedAt = now;  // 标记本次写入的时间，避免 onChanged 自回环误采纳
+    if (reason) {
+      console.log(`[AC扩展] sync ↑ ${reason}: nextTriggerAt=${slim.nextTriggerAt ? new Date(slim.nextTriggerAt).toLocaleString() : '无'}, enabled=${slim.enabled}`);
+    }
+  } catch (e) {
+    console.warn('[AC扩展] sync 写入失败（未登录浏览器同步 / 配额超限？）:', e?.message);
+  }
+}
+
+// 把远端 sync 对象合并到本地 schedule + 重排闹钟。返回 true=已变更并持久化。
+// 注意：调用方需要保证不并发（_syncOpLock 守卫）。
+async function applySyncedPhase(remote, reason = '') {
+  if (!remote || typeof remote !== 'object') return false;
+
+  // 先记录 enabled 旧值——config 采纳后判断是否需要重建闹钟基础设施
+  const wasEnabled = schedule.enabled;
+
+  // 1) config 字段无相位守卫——直接 last-writer-wins 采纳
+  const cfg = computeConfigDiff(schedule, remote);
+  let configChanged = false;
+  let activeHoursChanged = false;
+  if (cfg.changed) {
+    for (const [k, v] of Object.entries(cfg.fields)) {
+      schedule[k] = v;
+      if (k === 'activeHours') activeHoursChanged = true;
+    }
+    configChanged = true;
+  }
+  const enabledChanged = cfg.fields.enabled !== undefined;
+  const nowEnabled = schedule.enabled;
+
+  // 2) 相位字段需通过严格守卫（陈旧/容忍/自回环），computePhaseAdoption 决策
+  const adopt = computePhaseAdoption(schedule, remote, { lastSyncedAt });
+  let phaseChanged = false;
+  if (adopt) {
+    const oldPwmState = schedule.pwmState;
+    const oldTrigger = schedule.nextTriggerAt;
+    schedule.pwmState = adopt.pwmState;
+    setNextTriggerAt(adopt.nextTriggerAt);
+    schedule.alarmCreatedAt = Date.now();
+    schedule.alarmDelayMinutes = Math.max(1, (adopt.nextTriggerAt - Date.now()) / 60000);
+    phaseChanged = (oldPwmState !== schedule.pwmState || oldTrigger !== schedule.nextTriggerAt);
+
+    if (phaseChanged && nowEnabled) {
+      try {
+        await chrome.alarms.clear('ac-pwm');
+        const delayMs = adopt.nextTriggerAt - Date.now();
+        if (delayMs > 0) {
+          // 用绝对时间调度，让多设备对齐到同一时刻（非 delayInMinutes 各自倒计时）
+          chrome.alarms.create('ac-pwm', { when: adopt.nextTriggerAt });
+        } else {
+          // 远端时戳已过期（在 staleMs 60s 窗口内）——推进到下一未来周期边界
+          await advanceExpiredAlarmToNextBoundary(adopt.nextTriggerAt);
+        }
+      } catch (e) {
+        console.warn('[AC扩展] sync 合并：重排 ac-pwm 闹钟失败:', e?.message);
+      }
+    }
+  }
+
+  // 3) 闹钟基础设施重建——只由 config 变更驱动（相位路径只管 ac-pwm）
+  //    关键修复：若 enabled 在 sync 中翻为 true 但无相位（远端刚 enable 还没跑完第一步），
+  //    只持久化 enabled=true 却不建闹钟，设备 B 永远不会真正执行 PWM。
+  //    反之 enabled 翻为 false 也必须主动清理闹钟 + 停机，否则设备 B 继续跑本地 PWM。
+  let didAlarmInfra = false;
+  if (enabledChanged) {
+    if (nowEnabled) {
+      // false → true：按是否已采纳相位决定是否立即新起 PWM cycle
+      if (phaseChanged) {
+        // 相位路径已建 ac-pwm；只补看门狗 + badge-tick（相位路径不管这两个）
+        await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+        await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+      } else {
+        // 无相位 → 本地全新起一轮 PWM（与 updateSchedule enabled→true 路径一致）
+        schedule.pwmState = 'on';
+        await setupAlarms(true);  // startImmediately → runPwmStep，内部建 ac-pwm + badge-tick
+        await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+      }
+    } else {
+      // true → false：清所有 PWM 相关闹钟 + 停机（B1 顺序：先 persist 再关）
+      schedule.pwmState = 'off';
+      setNextTriggerAt(0);
+      schedule.alarmCreatedAt = 0;
+      schedule.alarmDelayMinutes = 0;
+      schedule.pageTimerMinutes = null;
+      schedule.pageTimerError = '';
+      schedule.pageTimerRetryAt = 0;
+      await chrome.alarms.clear('ac-pwm');
+      await chrome.alarms.clear('ac-page-timer-retry');
+      await chrome.alarms.clear('ac-badge-tick');
+      await chrome.alarms.clear('ac-watchdog');
+      await updateBadge();
+      // A1 幂等预检保证：若 AC 已关则跳过；远端刚关过一次也安全
+      toggleAC('off').catch(e => console.warn('[AC扩展] sync 合并：关机命令失败:', e?.message));
+    }
+    didAlarmInfra = true;
+  }
+
+  // 4) active hours 边界闹钟：activeHours 变更或相位重排后都应重调度
+  if (activeHoursChanged || phaseChanged) {
+    rescheduleActiveBoundary();
+  }
+
+  // 标记最新已知的 remote.syncedAt——即便没采纳相位，也防止稍后 onChanged 自回环再次触发
+  if (remote.syncedAt) lastSyncedAt = Math.max(lastSyncedAt, remote.syncedAt);
+
+  const changed = configChanged || phaseChanged;
+  if (changed) {
+    await persistSchedule(reason || 'sync-采纳', { syncFromLiveAlarm: false });
+    if (phaseChanged) {
+      console.log(`[AC扩展] sync ↓ ${reason}: 已采纳远端相位 pwmState=${schedule.pwmState}, nextTriggerAt=${new Date(schedule.nextTriggerAt).toLocaleString()}`);
+    }
+    if (configChanged) {
+      console.log(`[AC扩展] sync ↓ ${reason}: 已采纳远端 config:`, cfg.fields);
+    }
+    if (didAlarmInfra) {
+      console.log(`[AC扩展] sync ↓ ${reason}: enabled=${wasEnabled}→${nowEnabled}，已重建闹钟基础设施`);
+    }
+  }
+  return changed;
+}
+
+// 从 chrome.storage.sync 拉取并尝试合并。reason 用于日志。
+// 传 explicitRemote 可跳过读取（onChanged 已传入 newValue）；否则从 sync store 读。
+async function tryAdoptSyncedState(reason = '', explicitRemote = null) {
+  if (_syncOpLock.busy) {
+    console.log(`[AC扩展] sync 合并跳过（上次仍在处理）: ${reason}`);
+    return false;
+  }
+  _syncOpLock.busy = true;
+  try {
+    let remote = explicitRemote;
+    if (!remote && chrome.storage?.sync) {
+      try {
+        const got = await chrome.storage.sync.get(SYNC_KEY);
+        remote = got?.[SYNC_KEY] || null;
+      } catch (e) {
+        console.warn('[AC扩展] sync 读取失败:', e?.message);
+        return false;
+      }
+    }
+    if (!remote) return false;
+    return await applySyncedPhase(remote, reason);
+  } finally {
+    _syncOpLock.busy = false;
+  }
+}
+
+// ----- v0.5.10: 页面定时器作为跨设备主同步通道 -----
+// UST 服务器已确认："Power-off after" 定时器值会同步到同一账号的所有会话。
+// chrome.storage.sync 在 Chrome/Edge 跨浏览器时互不互通——只有 page timer
+// 能跨浏览器账号同步（只要登录同一 UST 账号）。
+//
+// v0.5.10 修正了 v0.5.7 的 pwmState 条件 bug（之前仅 pwmState='on' 才采纳，
+// 但 pwmState='off' (AC 正开) 才是页面定时器有值的时刻）。现在两个相位都会
+// 对齐：pwmState='off' 直接采纳 page timer 值；pwmState='on' 从 page timer
+// 掉算下一轮"开"边界 (pageOffAt + offMinutes)。
+//
+// 本函数：找到打开的 AC 页面 → 发 getPageTimer 消息 → content.js 读 picker →
+// computePageTimerAdoption 决策 → 若采纳则更新 nextTriggerAt + 重排 ac-pwm 闹钟 +
+// 把修正后的相位推回 chrome.storage.sync。
+//
+// 优雅降级：page timer 并非服务器同步时，读回的是本机刚写的值——偏差 <
+// toleranceMs(60s)，computePageTimerAdoption 返回 null，不干预，功能等于关闭。
+async function tryAdoptPageTimer(reason = '') {
+  if (!schedule.enabled) return false;
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
+    if (!tabs.length) return false;
+
+    const result = await chrome.tabs.sendMessage(tabs[0].id, { action: 'getPageTimer' });
+    if (!result || !result.found) return false;
+
+    const adopt = computePageTimerAdoption(schedule, result, { now: Date.now() });
+    if (!adopt) return false;
+
+    // 采纳 page timer 值作为权威"关"时刻
+    const oldTrigger = schedule.nextTriggerAt;
+    setNextTriggerAt(adopt.nextTriggerAt);
+    schedule.alarmCreatedAt = Date.now();
+    schedule.alarmDelayMinutes = Math.max(1, (adopt.nextTriggerAt - Date.now()) / 60000);
+
+    // 重排 ac-pwm 闹钟到新时刻
+    await chrome.alarms.clear('ac-pwm');
+    const delayMs = adopt.nextTriggerAt - Date.now();
+    if (delayMs > 0) {
+      chrome.alarms.create('ac-pwm', { when: adopt.nextTriggerAt });
+    } else {
+      await advanceExpiredAlarmToNextBoundary(adopt.nextTriggerAt);
+    }
+
+    await rescheduleActiveBoundary();
+    await persistSchedule(`page-timer-adopt (${reason})`, { syncFromLiveAlarm: false });
+    // 把修正后的相位推回 sync——让仅靠 sync 的设备也间接对齐到 page timer 的时刻
+    await syncScheduleToSync(`page-timer-adopt (${reason})`);
+
+    const oldStr = oldTrigger ? new Date(oldTrigger).toLocaleTimeString() : '无';
+    console.log(`[AC扩展] page-timer ↓ ${reason}: 采纳 picker=${result.value} → nextTriggerAt=${new Date(adopt.nextTriggerAt).toLocaleTimeString()} (旧 ${oldStr}), 因=${adopt.reason}, pwmState=${schedule.pwmState}`);
+    return true;
+  } catch (e) {
+    // AC 页面可能尚未完全加载 / content script 未就绪——静默降级
+    console.warn(`[AC扩展] page-timer ${reason} 读取失败（可能页面未就绪）:`, e?.message);
+    return false;
+  }
 }
 
 // ----- 官方推荐：setInterval heartbeat — 每 20s 写 storage 重置 SW 空闲计时器 -----
@@ -337,13 +579,6 @@ function startHeartbeat() {
   if (heartbeatInterval) return;
   runHeartbeat();
   heartbeatInterval = setInterval(runHeartbeat, 20 * 1000);
-}
-
-function stopHeartbeat() {
-  if (heartbeatInterval) {
-    clearInterval(heartbeatInterval);
-    heartbeatInterval = null;
-  }
 }
 
 // ----- 初始化就绪信号（防止消息处理器在 init 完成前执行）-----
@@ -377,7 +612,7 @@ async function watchdogCheck() {
   const alarm = await chrome.alarms.get('ac-pwm');
 
   // 活闹钟存在 → 确保 storage 的 nextTriggerAt 与 alarm 同步（防止 SW 被 kill 后丢失）
-  if (alarm?.scheduledTime && alarm.scheduledTime > Date.now() && !isClockMode()) {
+  if (alarm?.scheduledTime && alarm.scheduledTime > Date.now()) {
     if (!schedule.nextTriggerAt || Math.abs(schedule.nextTriggerAt - alarm.scheduledTime) > 1500) {
       setNextTriggerAt(alarm.scheduledTime);
       schedule.alarmCreatedAt = Date.now();
@@ -412,6 +647,12 @@ async function init() {
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await loadScheduleFromStorage();
     await backfillNextTriggerAt(true);
+    // [v0.5.6] 跨设备同步：在 setupAlarms 之前尝试从 chrome.storage.sync 采用远端相位。
+    // 如有 sync 数据则合并到本地 schedule，再 setupAlarms，保证本机闹钟从对齐相位出发。
+    // 新装在另一台设备的扩展启动时会先采用主机的 nextTriggerAt，避免本地从默认值跑偏。
+    await tryAdoptSyncedState('init');
+    // v0.5.10：page timer 已升为跨设备主同步通道（无论 pwmState 都会尝试对齐）
+    await tryAdoptPageTimer('init');
     await ensureOffscreen();
     startHeartbeat();
     await setupAlarms();
@@ -425,7 +666,7 @@ async function init() {
     // 终极防线：init 完成时，间隔模式下强制从 live ac-pwm 同步 nextTriggerAt 到 storage。
     // 防止 SW 跑早期版本代码、setupAlarms 走重建路径、或某条 persist 漏 sync 时出现
     // "活闹钟在但 storage 缺绝对触发时间" 的红灯。init 末尾是端到端最后一道闭环。
-    if (schedule.enabled && !isClockMode()) {
+    if (schedule.enabled) {
       const finalLiveAlarm = await chrome.alarms.get('ac-pwm');
       const finalLiveDueAt = getLiveAlarmEndMs(finalLiveAlarm);
       if (finalLiveDueAt && (!schedule.nextTriggerAt || Math.abs(schedule.nextTriggerAt - finalLiveDueAt) > 1500)) {
@@ -469,25 +710,7 @@ async function setupAlarms(startImmediately = false) {
     return;
   }
 
-  // ----- 时钟模式：对齐到下一个整点 -----
-  if (isClockMode()) {
-    const nextBoundary = getNextHourBoundary();
-    await chrome.alarms.clear('ac-pwm');
-    await createAlarm('ac-pwm', { when: nextBoundary });
-    // 设置 pwmState 为下一个整点应执行的动作
-    schedule.pwmState = getHourAction(nextBoundary);
-    setNextTriggerAt(0);
-    schedule.alarmCreatedAt = 0;
-    schedule.alarmDelayMinutes = 0;
-    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-    await persistSchedule('setupAlarms-clock', { syncFromLiveAlarm: false });
-    await updateBadge();
-    const nextHour = new Date(nextBoundary).getHours();
-    console.log(`[AC扩展] 时钟模式：下个整点 ${nextHour}:00，动作=${schedule.pwmState}`);
-    return;
-  }
-
-  // ----- 传统间隔模式 -----
+  // ----- 间隔模式 -----
   const now = Date.now();
   const existingAlarm = await chrome.alarms.get('ac-pwm');
   const liveDueAt = getLiveAlarmEndMs(existingAlarm);
@@ -541,29 +764,7 @@ async function updateBadge() {
     return;
   }
 
-  // 时钟模式：显示下一个整点
-  if (isClockMode()) {
-    const boundary = getNextHourBoundary();
-    const remainingMs = boundary - Date.now();
-    if (remainingMs <= 0) {
-      await chrome.action.setBadgeText({ text: 'now' });
-      await chrome.action.setBadgeBackgroundColor({ color: '#f59e0b' });
-      await chrome.action.setTitle({ title: t('badgeClockSoon') });
-      return;
-    }
-    const remainingMin = Math.max(1, Math.ceil(remainingMs / 60000));
-    const badgeText = remainingMin > 999 ? '999+' : String(remainingMin);
-    const nextAction = getHourAction(boundary);
-    const nextHour = new Date(boundary).getHours();
-    await chrome.action.setBadgeText({ text: badgeText });
-    await chrome.action.setBadgeBackgroundColor({ color: nextAction === 'on' ? '#16a34a' : '#64748b' });
-    await chrome.action.setTitle({
-      title: t('badgeClockCountdown', String(nextHour), t(nextAction === 'on' ? 'actionOn' : 'actionOff'), String(remainingMin))
-    });
-    return;
-  }
-
-  // 传统间隔模式
+  // 间隔模式
   const liveAlarm = await chrome.alarms.get('ac-pwm');
   const liveAlarmEnd = getLiveAlarmEndMs(liveAlarm);
   const storedAlarmEnd = getStoredAlarmEndMs();
@@ -613,72 +814,7 @@ async function runPwmStep() {
     await loadScheduleFromStorage();
     if (!schedule.enabled) return;
 
-    // ----- 时钟模式：基于整点判动作 -----
-    if (isClockMode()) {
-      const now = Date.now();
-      const targetAction = getHourAction(now);
-      const nextBoundary = getNextHourBoundary(now);
-      const nextHourAction = getHourAction(nextBoundary);
-      const nextHour = new Date(nextBoundary).getHours();
-      console.log(`[AC扩展] 时钟模式：当前 ${new Date(now).getHours()}:${String(new Date(now).getMinutes()).padStart(2,'0')} → ${targetAction}，下个整点 ${nextHour}:00 → ${nextHourAction}`);
-
-      // 先执行开关并独立验证，成功后再更新 pwmState 和创建闹钟
-      const needOnClock = targetAction === 'on';
-      let toggleOkClock = false;
-
-      // 预检：切换前确认当前 AC 真实状态
-      const preCheckClock = await getCurrentACStatus();
-      if (typeof preCheckClock?.isOn === 'boolean' && preCheckClock.isOn === needOnClock) {
-        console.log(`[AC扩展] 预检：时钟模式 AC 已在目标状态 (${targetAction})，跳过切换`);
-        toggleOkClock = true;
-      }
-
-      for (let retry = 0; retry < 3 && !toggleOkClock; retry++) {
-        try {
-          const tr = await toggleAC(targetAction);
-          if (!tr?.success) schedule.pageTimerError = `自动${needOnClock?'开启':'关闭'}未确认`;
-        } catch (e) {
-          schedule.pageTimerError = `自动${needOnClock?'开启':'关闭'}异常：${e?.message||String(e)}`;
-        }
-        await sleep(3000);
-        const actual = await getCurrentACStatus();
-        if (typeof actual?.isOn === 'boolean' && actual.isOn === needOnClock) {
-          toggleOkClock = true;
-          schedule.pageTimerError = '';
-        } else if (retry < 2) {
-          console.warn(`[AC扩展] 时钟模式独立验证失败(重试${retry+1}/2)`);
-        }
-      }
-
-      if (toggleOkClock) {
-        // 开关成功：更新 pwmState 为下个整点的动作
-        schedule.pwmState = nextHourAction;
-        setNextTriggerAt(0);
-        schedule.alarmCreatedAt = 0;
-        schedule.alarmDelayMinutes = 0;
-        await chrome.alarms.clear('ac-pwm');
-        await createAlarm('ac-pwm', { when: nextBoundary });
-      } else {
-        // 开关失败：保持 pwmState 不变，1 分钟后重试
-        schedule.pageTimerError = schedule.pageTimerError || '验证失败，1分钟后重试';
-        schedule.alarmCreatedAt = Date.now();
-        schedule.alarmDelayMinutes = 1;
-        setNextTriggerAt(schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000);
-        await chrome.alarms.clear('ac-pwm');
-        await createAlarm('ac-pwm', { delayInMinutes: 1 });
-      }
-
-      await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-      await persistSchedule('runPwmStep-clock');
-      await updateBadge();
-
-      if (targetAction === 'on' && toggleOkClock) {
-        await setPageTimer(60);
-      }
-      return;
-    }
-
-    // ----- 传统间隔模式 -----
+    // ----- 间隔模式 -----
     const targetAction = schedule.pwmState === 'on' ? 'on' : 'off';
     const currentDuration = targetAction === 'on' ? schedule.onMinutes : schedule.offMinutes;
     const nextState = targetAction === 'on' ? 'off' : 'on';
@@ -748,15 +884,7 @@ async function runPwmStep() {
     // 只有开关确认成功后才翻转 pwmState 并创建下一次闹钟
     if (toggleOk) {
       schedule.pwmState = nextState;
-      schedule.alarmCreatedAt = Date.now();
-      schedule.alarmDelayMinutes = delay;
-      await createAlarm('ac-pwm', { delayInMinutes: delay });
-      const verify = await chrome.alarms.get('ac-pwm');
-      setNextTriggerAt(verify?.scheduledTime || (schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000));
-      if (!verify) {
-        console.error('[AC扩展] PWM 闹钟创建失败，重试...');
-        await createAlarm('ac-pwm', { delayInMinutes: delay });
-      }
+      await createPwmAlarmWithVerify(delay, 'PWM');
       console.log(`[AC扩展] PWM 下一阶段:${nextState}，${currentDuration}分钟后触发`);
     } else {
       // 开关失败：保持 pwmState 不变，1 分钟后重试
@@ -771,6 +899,13 @@ async function runPwmStep() {
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await persistSchedule('runPwmStep-interval');
     await updateBadge();
+
+    // [v0.5.6] 跨设备同步：仅当本次 toggle 已确认成功才推送——这样失败重试时
+    // 不会反复灌同相位打 sync 写入配额。push 的 nextTriggerAt 必然 > now，
+    // composeSyncPayload 内部也再次校验（双层防护）。
+    if (toggleOk) {
+      await syncScheduleToSync('runPwmStep');
+    }
 
     if (targetAction === 'on' && toggleOk) {
       await setPageTimer(schedule.onMinutes);
@@ -840,7 +975,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await updateBadge();
     // 间隔模式下的 storage 一致性校准:PWM 步骤漏写 storage 时,1 分钟内会被这里纠正。
     // 这样诊断面板看到的 storage.nextTriggerAt 永远不会落后 live ac-pwm 超过 1 分钟。
-    if (schedule.enabled && !isClockMode()) {
+    if (schedule.enabled) {
       try {
         const liveAlarm = await chrome.alarms.get('ac-pwm');
         const liveDueAt = getLiveAlarmEndMs(liveAlarm);
@@ -870,22 +1005,24 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     } catch (e) {
       console.error('[AC扩展] PWM 步骤执行失败:', e);
       if (schedule.enabled) {
-        if (isClockMode()) {
-          await repairScheduleClock();
-        } else {
-          const delay = Math.max(1, schedule.pwmState === 'on' ? schedule.onMinutes : schedule.offMinutes);
-          await createAlarm('ac-pwm', { delayInMinutes: delay });
-          schedule.alarmCreatedAt = Date.now();
-          schedule.alarmDelayMinutes = delay;
-          setNextTriggerAt(schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000);
-          await persistSchedule('onAlarm-error-recovery');
-        }
+        const delay = Math.max(1, schedule.pwmState === 'on' ? schedule.onMinutes : schedule.offMinutes);
+        await createAlarm('ac-pwm', { delayInMinutes: delay });
+        schedule.alarmCreatedAt = Date.now();
+        schedule.alarmDelayMinutes = delay;
+        setNextTriggerAt(schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000);
+        await persistSchedule('onAlarm-error-recovery');
       }
     }
   }
 
   if (alarm.name === 'ac-watchdog') {
     await watchdogCheck();
+    // v0.5.10：看门狗每 5 分钟尝试从打开的 AC 页面读取 page timer。
+    //         page timer 现为跨设备主同步通道——不再限制 pwmState='on'。
+    //         无 AC 页面则静默跳过；5 分钟间隔避免频繁读 DOM。
+    if (schedule.enabled) {
+      tryAdoptPageTimer('watchdog').catch(e => /* 不阻塞闹钟流程 */ {});
+    }
   }
 
   if (alarm.name === 'ac-active-boundary') {
@@ -1143,18 +1280,7 @@ async function ensureScheduleClock() {
   await loadScheduleFromStorage();
   await backfillNextTriggerAt(false);
   if (!schedule.enabled) return;
-  // 时钟模式：检查是否已有有效的未来闹钟
-  if (isClockMode()) {
-    const existingAlarm = await chrome.alarms.get('ac-pwm');
-    if (existingAlarm?.scheduledTime && existingAlarm.scheduledTime > Date.now()) {
-      return;
-    }
-    // 闹钟缺失或已过期 → 补执行当前整点动作
-    await runPwmStep();
-    return;
-  }
-
-  // 传统间隔模式
+  // 间隔模式
   const existingAlarm = await chrome.alarms.get('ac-pwm');
   if (getLiveAlarmEndMs(existingAlarm)) {
     await syncStoredTriggerFromAlarm(existingAlarm, 'ensureScheduleClock: 同步现有 PWM 闹钟');
@@ -1188,23 +1314,7 @@ async function repairScheduleClock() {
     return { success: false, reason: '定时未启用', schedule };
   }
 
-  // 时钟模式：对齐到下一个整点
-  if (isClockMode()) {
-    const nextBoundary = getNextHourBoundary();
-    schedule.pwmState = getHourAction(nextBoundary);
-    setNextTriggerAt(0);
-    schedule.alarmCreatedAt = 0;
-    schedule.alarmDelayMinutes = 0;
-    await chrome.alarms.clear('ac-pwm');
-    await createAlarm('ac-pwm', { when: nextBoundary });
-    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-    await persistSchedule('repairScheduleClock-clock', { syncFromLiveAlarm: false });
-    await updateBadge();
-    const status = await getCurrentACStatus();
-    return { success: true, schedule: { ...schedule, actualStatus: status } };
-  }
-
-  // 传统间隔模式
+  // 间隔模式
   const restored = await restoreIntervalAlarmFromStorage('repair: 按已记录绝对触发时间恢复 PWM 闹钟');
   if (restored) {
     await updateBadge();
@@ -1219,16 +1329,7 @@ async function repairScheduleClock() {
   const delay = Math.max(1, currentOn ? schedule.onMinutes : schedule.offMinutes);
 
   schedule.pwmState = currentOn ? 'off' : 'on';
-  schedule.alarmCreatedAt = Date.now();
-  schedule.alarmDelayMinutes = delay;
-
-  await createAlarm('ac-pwm', { delayInMinutes: delay });
-  const verify = await chrome.alarms.get('ac-pwm');
-  setNextTriggerAt(verify?.scheduledTime || (schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000));
-  if (!verify) {
-    console.error('[AC扩展] repair: PWM 闹钟创建失败，重试...');
-    await createAlarm('ac-pwm', { delayInMinutes: delay });
-  }
+  await createPwmAlarmWithVerify(delay, 'repair');
   await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
   await persistSchedule('repairScheduleClock-interval');
   await updateBadge();
@@ -1236,42 +1337,26 @@ async function repairScheduleClock() {
   return { success: true, schedule: { ...schedule, actualStatus: status } };
 }
 
-async function getScheduleSnapshot() {
+async function getScheduleSnapshot(lite = false) {
   await loadScheduleFromStorage();
   await backfillNextTriggerAt(false);
 
   const alarm = await chrome.alarms.get('ac-pwm');
-  let liveAlarmEnd = 0;
+  const liveAlarmEnd = getLiveAlarmEndMs(alarm);
 
-  if (!isClockMode()) {
-    liveAlarmEnd = getLiveAlarmEndMs(alarm);
-    // 活闹钟存在但 storage 可能缺失 nextTriggerAt → 先更新内存与 storage，再生成快照
-    if (liveAlarmEnd && (!schedule.nextTriggerAt || Math.abs(schedule.nextTriggerAt - alarm.scheduledTime) > 1500)) {
-      setNextTriggerAt(alarm.scheduledTime);
-      schedule.alarmCreatedAt = Date.now();
-      schedule.alarmDelayMinutes = Math.max(1, (alarm.scheduledTime - Date.now()) / 60000);
+  // 活闹钟存在但 storage 可能缺失 nextTriggerAt → 同步内存（lite 模式跳过 storage 写入）
+  if (liveAlarmEnd && (!schedule.nextTriggerAt || Math.abs(schedule.nextTriggerAt - alarm.scheduledTime) > 1500)) {
+    setNextTriggerAt(alarm.scheduledTime);
+    schedule.alarmCreatedAt = Date.now();
+    const diffMs = alarm.scheduledTime - Date.now();
+    schedule.alarmDelayMinutes = Math.max(1, diffMs / 60000);
+    if (!lite) {
       await persistSchedule('getScheduleSnapshot', { syncFromLiveAlarm: false });
     }
   }
 
   let snapshot = { ...schedule };
   const storedAlarmEnd = getStoredAlarmEndMs();
-
-  // 时钟模式：用整点边界时间
-  if (isClockMode()) {
-    const alarmBoundary = alarm?.scheduledTime && alarm.scheduledTime > Date.now()
-      ? alarm.scheduledTime
-      : 0;
-    const nextBoundary = alarmBoundary || getNextHourBoundary();
-    snapshot.alarmCreatedAt = 0;
-    snapshot.alarmDelayMinutes = 0;
-    snapshot._nextBoundary = nextBoundary;
-    snapshot._nextAction = getHourAction(nextBoundary);
-    const status = await getCurrentACStatus();
-    return { ...snapshot, actualStatus: status };
-  }
-
-  // 传统间隔模式
   const nextBoundary = liveAlarmEnd || (storedAlarmEnd > Date.now() ? storedAlarmEnd : 0);
 
   if (schedule.enabled && nextBoundary) {
@@ -1281,6 +1366,11 @@ async function getScheduleSnapshot() {
       snapshot.alarmCreatedAt = Date.now();
       snapshot.alarmDelayMinutes = remainingMs / 60000;
     }
+  }
+
+  if (lite) {
+    // Lite 模式：跳过 getCurrentACStatus（tabs.query + sendMessage），仅返回调度快照
+    return { ...snapshot, actualStatus: null };
   }
 
   const status = await getCurrentACStatus();
@@ -1308,45 +1398,15 @@ async function toggleNowAndSync(action) {
     return { success: true, schedule: { ...schedule, actualStatus: status }, result: toggleResult };
   }
 
-  // 时钟模式：手动切换后重新对齐到下一个整点
-  if (isClockMode()) {
-    const nextBoundary = getNextHourBoundary();
-    schedule.pwmState = getHourAction(nextBoundary);
-    setNextTriggerAt(0);
-    schedule.alarmCreatedAt = 0;
-    schedule.alarmDelayMinutes = 0;
-    schedule.pageTimerMinutes = null;
-    schedule.pageTimerError = '';
-    schedule.pageTimerRetryAt = 0;
-    await chrome.alarms.clear('ac-pwm');
-    await createAlarm('ac-pwm', { when: nextBoundary });
-    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-    await persistSchedule('toggleNowAndSync-clock', { syncFromLiveAlarm: false });
-    await updateBadge();
-    if (action === 'on') {
-      await setPageTimer(60);
-    }
-    const status = await getCurrentACStatus();
-    return { success: true, schedule: { ...schedule, actualStatus: status } };
-  }
-
-  // 传统间隔模式
+  // 间隔模式
   const currentOn = action === 'on';
   const delay = Math.max(1, currentOn ? schedule.onMinutes : schedule.offMinutes);
   schedule.pwmState = currentOn ? 'off' : 'on';
-  schedule.alarmCreatedAt = Date.now();
-  schedule.alarmDelayMinutes = delay;
   schedule.pageTimerMinutes = null;
   schedule.pageTimerError = '';
   schedule.pageTimerRetryAt = 0;
 
-  await createAlarm('ac-pwm', { delayInMinutes: delay });
-  const verify = await chrome.alarms.get('ac-pwm');
-  setNextTriggerAt(verify?.scheduledTime || (schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000));
-  if (!verify) {
-    console.error('[AC扩展] toggle: PWM 闹钟创建失败，重试...');
-    await createAlarm('ac-pwm', { delayInMinutes: delay });
-  }
+  await createPwmAlarmWithVerify(delay, 'toggle');
   await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
   await persistSchedule('toggleNowAndSync-interval');
   await updateBadge();
@@ -1502,11 +1562,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       // active hours 边界闹钟：每次 schedule 改变都重新调度
       rescheduleActiveBoundary();
+      // [v0.5.6] 跨设备同步：用户改设置 / toggle 是低频事件，立即推送
+      // 在 sendResponse 之前完成推送，让 popup 拿到已推送的状态（虽然异步到达对端有时延）。
+      await syncScheduleToSync('updateSchedule');
       sendResponse({ success: true, schedule, offResult });
       return;
     }
     if (msg.type === 'getSchedule') {
       const snapshot = await getScheduleSnapshot();
+      sendResponse(snapshot);
+      return;
+    }
+    if (msg.type === 'getScheduleLite') {
+      // 轻量轮询：跳过 getCurrentACStatus，降低 90% chrome.* I/O
+      const snapshot = await getScheduleSnapshot(true);
       sendResponse(snapshot);
       return;
     }
@@ -1566,23 +1635,51 @@ chrome.runtime.onStartup.addListener(() => {
 chrome.runtime.onInstalled.addListener(async (details) => {
   await initReady;
   if (details.reason === 'install') {
-    // 首次安装：写默认设置
-    await chrome.storage.local.set({
-      [STORAGE_KEY]: {
-        enabled: false,
-        mode: 'pwm',
-        clockMode: true,
-        onMinutes: 60,
-        offMinutes: 60,
-        pwmState: 'off',
-        nextTriggerAt: 0,
-        alarmCreatedAt: 0,
-        alarmDelayMinutes: 0
+    // [v0.5.6] init() 已先尝试从 chrome.storage.sync 采用远端状态。
+    // 这里仅当本地仍无 schedule 时才写默认值——避免在另一台设备已运行 PWM 时
+    // 用本地默认值覆盖刚被 sync 同步过来的相位。
+    const existing = await chrome.storage.local.get(STORAGE_KEY);
+    if (!existing[STORAGE_KEY]) {
+      await chrome.storage.local.set({
+        [STORAGE_KEY]: {
+          enabled: false,
+          mode: 'pwm',
+          clockMode: false,
+          onMinutes: 60,
+          offMinutes: 60,
+          pwmState: 'off',
+          nextTriggerAt: 0,
+          alarmCreatedAt: 0,
+          alarmDelayMinutes: 0
+        }
+      });
+      console.log('[AC扩展] 首次安装，已设置默认值（间隔模式）');
+      // 若 sync 区也空，则把默认配置 seed 给 sync——让后续在其他设备安装的扩展
+      // 自动拿到默认值；若 sync 已有（其他设备先装过），不覆盖。
+      if (chrome.storage?.sync) {
+        try {
+          const syncExisting = await chrome.storage.sync.get(SYNC_KEY);
+          if (!syncExisting[SYNC_KEY]) {
+            await syncScheduleToSync('install-seed');
+          }
+        } catch (e) {
+          console.warn('[AC扩展] install-seed sync 推送失败:', e?.message);
+        }
       }
-    });
-    console.log('[AC扩展] 首次安装，已设置默认值（时钟模式）');
+    } else {
+      console.log('[AC扩展] 首次安装：检测到 schedule 已存在（init 采用 sync 或迁移）跳过默认写入');
+    }
   } else if (details.reason === 'update') {
     console.log(`[AC扩展] 已更新（${details.previousVersion} → ${chrome.runtime.getManifest().version}）`);
+    // [v0.5.6] 更新时把当前 schedule seed 给 sync（若 sync 空），方便新设备加入
+    if (chrome.storage?.sync) {
+      try {
+        const syncExisting = await chrome.storage.sync.get(SYNC_KEY);
+        if (!syncExisting[SYNC_KEY] && schedule?.enabled) {
+          await syncScheduleToSync('update-seed');
+        }
+      } catch (_) { /* ignore */ }
+    }
   }
 });
 
@@ -1592,12 +1689,24 @@ chrome.runtime.onUpdateAvailable.addListener(() => {
   chrome.runtime.reload();
 });
 
-// ----- storage 变动监听：只同步内存状态 -----
+// ----- storage 变动监听：local 只同步内存状态，sync 触发跨设备合并 -----
 chrome.storage.onChanged.addListener((changes, areaName) => {
-  if (areaName !== 'local' || !changes[STORAGE_KEY]?.newValue) return;
-  // 只同步内存状态。不要在每次 storage 写入后 setupAlarms，
-  // 否则 runPwmStep 写入下一阶段倒计时时会反复重建闹钟，影响无弹窗后台执行。
-  schedule = { ...schedule, ...changes[STORAGE_KEY].newValue };
+  if (areaName === 'local' && changes[STORAGE_KEY]?.newValue) {
+    // 只同步内存状态。不要在每次 storage 写入后 setupAlarms，
+    // 否则 runPwmStep 写入下一阶段倒计时时会反复重建闹钟，影响无弹窗后台执行。
+    schedule = { ...schedule, ...changes[STORAGE_KEY].newValue };
+    return;
+  }
+
+  if (areaName === 'sync' && changes[SYNC_KEY]?.newValue) {
+    // [v0.5.6] 收到远端 sync 变更 → 异步合并到本地培训 + 重排闹钟。
+    // 不在此 await（onChanged 是同步事件回调，不能阻塞）——tryAdoptSyncedState 自带 _syncOpLock
+    // 互斥保证并发安全。applySyncedPhase 内部会触发 persistSchedule 触发一次 local 变更 →
+    // 上面 local 分支自动同步内存（不会无限循环，因 sync 写采用 lastSyncedAt 守卫）。
+    console.log('[AC扩展] sync ↓ onChanged：收到远端变更，启动异步合并');
+    tryAdoptSyncedState('onChanged-sync', changes[SYNC_KEY].newValue)
+      .catch(e => console.warn('[AC扩展] onChanged sync 合并失败:', e?.message));
+  }
 });
 
 // ----- 启动 -----

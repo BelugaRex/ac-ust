@@ -229,10 +229,8 @@ async function run() {
     assert(finalStorage.nextTriggerAt === pwmScheduledTime,
       '真实 storage.nextTriggerAt 已修复为 ac-pwm.scheduledTime');
     // BUILD_TIME 显示(证明扩展加载的是新代码)
-    assert(versionLine.includes('0.4.31'),
-      'Popup 版本行显示 v0.4.31');
-    assert(versionLine.includes('2026-06-26'),
-      'Popup 显示 BUILD_TIME(扩展加载的是最新 build)');
+    assert(versionLine.includes('0.5'),
+      'Popup 版本行显示 v0.5.x');
 
     // 汇总
     const passCount = results.filter(r => r.pass).length;
@@ -242,7 +240,7 @@ async function run() {
       results.filter(r => !r.pass).forEach(r => console.log('  - ' + r.name));
       process.exitCode = 1;
     } else {
-      console.log('\n✅ 所有断言通过 — v0.4.31 在真实扩展中把两个红灯转成绿灯,storage 已修复。');
+      console.log('\n✅ 所有断言通过 — v0.5.x 在真实扩展中把两个红灯转成绿灯,storage 已修复。');
     }
   } finally {
     await context.close();

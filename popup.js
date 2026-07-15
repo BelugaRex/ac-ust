@@ -7,7 +7,6 @@ const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const onMinutesInput = document.getElementById('onMinutes');
 const offMinutesInput = document.getElementById('offMinutes');
-const scheduleHint = document.getElementById('scheduleHint');
 const activeHoursToggle = document.getElementById('activeHoursToggle');
 const activeHoursStart = document.getElementById('activeHoursStart');
 const activeHoursEnd = document.getElementById('activeHoursEnd');
@@ -20,7 +19,6 @@ const acStateText = document.getElementById('acStateText');
 const countdownDisplay = document.getElementById('countdownDisplay');
 const idleDisplay = document.getElementById('idleDisplay');
 const countdownText = document.getElementById('countdownText');
-const safetynetHint = document.getElementById('safetynetHint');
 const safetynetWarning = document.getElementById('safetynetWarning');
 
 // popup 打开期间保持与 Service Worker 的长连接。
@@ -99,12 +97,19 @@ activeHoursStart.addEventListener('change', commitActiveHours);
 activeHoursEnd.addEventListener('change', commitActiveHours);
 
 // ----- 从后台拉取当前状态 + 直接读真实 PWM 闹钟 -----
+// 性能优化：每 10 次轮询用 1 次完整 getSchedule（含 AC 真实状态），
+// 其余 9 次用 getScheduleLite（省去 tabs.query + sendMessage，降低 ~90% I/O）
+let pollCount = 0;
+let cachedActualStatus = null;
+
 async function refreshStatus() {
   try {
-    const [response, alarm, stored] = await Promise.all([
-      chrome.runtime.sendMessage({ type: 'getSchedule' }),
-      chrome.alarms.get('ac-pwm'),
-      chrome.storage.local.get('ac_schedule')
+    const useLite = pollCount++ % 10 !== 0;
+    const msgType = useLite ? 'getScheduleLite' : 'getSchedule';
+
+    const [response, alarm] = await Promise.all([
+      chrome.runtime.sendMessage({ type: msgType }),
+      chrome.alarms.get('ac-pwm')
     ]);
 
     // getSchedule 正常返回 snapshot；异常时后台可能返回 { success:false, schedule }。
@@ -112,6 +117,13 @@ async function refreshStatus() {
       ? response.schedule
       : response;
 
+    // 缓存 AC 真实状态，lite 轮询时用缓存值补充
+    if (!useLite && schedule?.actualStatus) {
+      cachedActualStatus = schedule.actualStatus;
+    }
+    if (useLite && schedule && !schedule.actualStatus && cachedActualStatus) {
+      schedule.actualStatus = cachedActualStatus;
+    }
 
     updateCountdownDisplay(schedule, alarm);
   } catch (e) {
@@ -132,7 +144,6 @@ function updateCountdownDisplay(schedule, alarm) {
     acStateText.textContent = t('acOff');
     countdownDisplay.style.display = 'none';
     idleDisplay.style.display = 'flex';
-    safetynetHint.style.display = 'none';
     safetynetWarning.style.display = 'none';
     return;
   }
@@ -153,25 +164,17 @@ function updateCountdownDisplay(schedule, alarm) {
   if (currentACOn) {
     acDot.className = 'ac-dot on';
     acStateText.textContent = t('acRunning');
-    if (schedule.pageTimerMinutes) {
-      safetynetHint.style.display = 'block';
-      safetynetHint.textContent = t('safetynetSet');
-      safetynetWarning.style.display = schedule.pageTimerError ? 'block' : 'none';
-      if (schedule.pageTimerError) {
-        safetynetWarning.textContent = t('safetynetError', schedule.pageTimerError);
-      }
-    } else if (schedule.pageTimerError) {
-      safetynetHint.style.display = 'none';
+    if (schedule.pageTimerError) {
       safetynetWarning.style.display = 'block';
-      safetynetWarning.textContent = t('safetynetNotSet', schedule.pageTimerError);
+      safetynetWarning.textContent = schedule.pageTimerMinutes
+        ? t('safetynetError', schedule.pageTimerError)
+        : t('safetynetNotSet', schedule.pageTimerError);
     } else {
-      safetynetHint.style.display = 'none';
       safetynetWarning.style.display = 'none';
     }
   } else {
     acDot.className = 'ac-dot off';
     acStateText.textContent = t('acStopped');
-    safetynetHint.style.display = 'none';
     safetynetWarning.style.display = 'none';
   }
 
@@ -296,7 +299,7 @@ setInterval(refreshStatus, 1000);
 setInterval(tickActiveHoursBadge, 10000);  // 每 10 秒刷新 active hours 状态徽章
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.5.5';
+const APP_VERSION = '0.5.10';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -463,6 +466,25 @@ btnDiagnose.addEventListener('click', async () => {
       }
     } catch (e) {
       add(false, '后台 SW 无响应');
+    }
+
+    // 4.5. v0.5.10 page timer 跨设备主同步通道诊断
+    // page timer 两相位都对齐：pwmState='off'(AC 正开) 直接采纳；pwmState='on'(AC 正关) 掉算下一“开”。
+    if (tabs.length > 0 && s.enabled) {
+      try {
+        const pt = await chrome.tabs.sendMessage(tabs[0].id, { action: 'getPageTimer' });
+        if (pt && pt.found && pt.value) {
+          const localNext = effectiveNextTriggerAt || s.nextTriggerAt || 0;
+          const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';
+          add(true, `page timer picker="${pt.value}" ← ${fmt(localNext)} (pwmState=${s.pwmState})`);
+        } else {
+          add(true, 'page timer picker 空/未设 (校验待 page timer 有值后自动生效)');
+        }
+      } catch (e) {
+        add(false, 'page timer 读取失败: ' + (e.message||'').slice(0,60));
+      }
+    } else if (s.enabled) {
+      add(true, 'page timer 校验待 AC 页面打开后生效');
     }
 
     // 5. SW 状态可观测性:启动时间 / init 完成时间 / 内存 schedule 与 storage 是否一致

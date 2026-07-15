@@ -1,6 +1,7 @@
 # ============================================================
 # AC-UST Build Script
-# Copies extension runtime files into dist/ for stable local use.
+# Builds dist/ and packages a ZIP for Chrome Web Store / Edge Add-ons upload.
+# Default (no flags): build + ZIP.  -Crx: also package CRX (deprecated, enterprise only).
 # ============================================================
 
 param(
@@ -13,6 +14,12 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
+# Default: produce ZIP for store upload (primary workflow since store launch).
+# -Crx is explicit opt-in; when used alone, skip auto-ZIP.
+if (-not $Crx -and -not $Zip) {
+  $Zip = $true
+}
 
 # Project root
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -27,6 +34,7 @@ $FilesToCopy = @(
   "popup.html",
   "popup.js",
   "i18n.js",
+  "sync-helpers.js",
   "offscreen.html",
   "offscreen.js",
   "_locales",
@@ -79,13 +87,7 @@ if ($ver) {
 
 Write-Host ""
 Write-Host "============================================"
-Write-Host "Build complete! Directory: $(Resolve-Path $OutputDir)"
-Write-Host ""
-Write-Host "Next steps:"
-Write-Host "  1. Open the Chrome/Edge extensions page"
-Write-Host "  2. Enable Developer mode"
-Write-Host "  3. Click 'Load unpacked'"
-Write-Host "  4. Select the dist folder, not the project root"
+Write-Host "Build complete! dist/ staged: $(Resolve-Path $OutputDir)"
 Write-Host "============================================"
 Write-Host ""
 
@@ -93,6 +95,12 @@ Write-Host ""
 # CRX packaging (optional, -Crx switch)
 # ============================================================
 if ($Crx) {
+  Write-Host ""
+  Write-Host "!! DEPRECATED: -Crx is no longer the recommended packaging method."
+  Write-Host "   Users should install from Chrome Web Store / Edge Add-ons."
+  Write-Host "   Use -Zip for store upload packages instead."
+  Write-Host "   CRX is kept ONLY for enterprise policy deployment (ExtensionInstallForcelist)."
+  Write-Host ""
   # --- Resolve browser executable ---
   $browserExe = $null
   if ($BrowserPath) {
@@ -191,9 +199,9 @@ if ($Crx) {
 }
 
 # ============================================================
-# ZIP packaging (optional, -Zip switch)
+# ZIP packaging (default behavior, -Zip switch)
 #   生成可直接上传 Chrome Web Store / Edge Add-ons 的 ZIP 包。
-#   注: Chrome Web Store 接受 ZIP 而非 CRX, 这是日常上架推荐格式。
+#   默认行为: 不指定 -Crx 时自动执行。
 # ============================================================
 if ($Zip) {
   $distAbs = (Resolve-Path $OutputDir).Path
@@ -235,10 +243,4 @@ if ($Zip) {
   Write-Host "============================================"
 }
 
-# 提醒: 没打任何包时给出明确指引
-if (-not $Crx -and -not $Zip) {
-  Write-Host ""
-  Write-Host "(No package requested. dist/ is ready for Load Unpacked.)"
-  Write-Host "  -Crx  for CRX packaging"
-  Write-Host "  -Zip  for Chrome Web Store ZIP packaging"
-}
+# ZIP is now default — no "no package" path exists
