@@ -63,7 +63,7 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
         if (!handler) return undefined;
         return handler(msg);
       },
-      getManifest: () => ({ version: '0.5.11' }),
+      getManifest: () => ({ version: '0.5.12' }),
       getPlatformInfo: async () => ({ os: 'win' }),
       onConnect: { addListener() {} },
       onUpdateAvailable: { addListener() {} }
@@ -373,11 +373,48 @@ async function runTests() {
     'manifest.json 声明 default_locale=zh_CN');
   assertPass(distManifest.default_locale === 'zh_CN',
     'dist/manifest.json 也同步 default_locale=zh_CN');
+  assertPass(distManifest.version === manifest.version,
+    `dist/manifest.json 版本与源码一致 (${manifest.version})`);
+
+  const distRequiredFiles = [
+    'manifest.json', 'background.js', 'content.js', 'page-confirm.js',
+    'popup.html', 'popup.js', 'i18n.js', 'sync-helpers.js',
+    'offscreen.html', 'offscreen.js',
+    '_locales/zh_CN/messages.json', '_locales/en/messages.json',
+    'icons/icon16.png', 'icons/icon48.png', 'icons/icon128.png'
+  ];
+  const missingDistFiles = distRequiredFiles.filter(file => !fs.existsSync(path.join(ROOT, 'dist', file)));
+  assertPass(missingDistFiles.length === 0,
+    `dist 包含全部运行时文件${missingDistFiles.length ? `（缺少 ${missingDistFiles.join(', ')}）` : ''}`);
+
+  const verbatimDistFiles = distRequiredFiles.filter(file => file !== 'popup.js');
+  const mismatchedDistFiles = verbatimDistFiles.filter(file => {
+    const source = fs.readFileSync(path.join(ROOT, file));
+    const built = fs.readFileSync(path.join(ROOT, 'dist', file));
+    return !source.equals(built);
+  });
+  assertPass(mismatchedDistFiles.length === 0,
+    `dist 非注入文件与源码逐字一致${mismatchedDistFiles.length ? `（不一致 ${mismatchedDistFiles.join(', ')}）` : ''}`);
+
+  const distPopupSource = fs.readFileSync(path.join(ROOT, 'dist', 'popup.js'), 'utf8');
+  const distBuildTime = distPopupSource.match(/const BUILD_TIME = '([^']+)'/)?.[1];
+  assertPass(distPopupSource.includes(`const APP_VERSION = '${manifest.version}'`)
+      && !!distBuildTime && distBuildTime !== 'dev',
+    'dist/popup.js 已注入版本号和非 dev 构建时间');
+  assertPass(fs.existsSync(path.join(ROOT, 'releases', `ac-ust-v${manifest.version}.zip`)),
+    `商店 ZIP 已生成: ac-ust-v${manifest.version}.zip`);
 
   // ===== 用例 6: v0.5.6 sync-helpers 跨设备同步纯函数 =====
   console.log('\n\n=== 用例 6: sync-helpers 跨设备同步纯函数 (v0.5.6) ===\n');
 
-  const { composeSyncPayload, computePhaseAdoption, computeConfigDiff, parsePageTimerValue, computePageTimerAdoption } = syncHelpers;
+  const {
+    composeSyncPayload,
+    computePhaseAdoption,
+    computeConfigDiff,
+    parsePageTimerValue,
+    isPageTimerProofFresh,
+    computePageTimerAdoption
+  } = syncHelpers;
 
   const futureTime = Date.now() + 30 * 60 * 1000;  // 30 分钟后
   const pastTime = Date.now() - 5 * 60 * 1000;       // 5 分钟前
@@ -467,6 +504,33 @@ async function runTests() {
   const syncRead = await syncMock.chrome.storage.sync.get('ac_schedule_sync');
   assertPass(!!syncRead.ac_schedule_sync && syncRead.ac_schedule_sync.enabled === true,
     '6M: mock chrome.storage.sync 可写入并回读（sync 区 mock 完整）');
+
+  const proofNow = Date.now();
+  assertPass(isPageTimerProofFresh({
+    pageTimerMinutes: 30,
+    pageTimerTargetAt: proofNow + 30 * 60 * 1000,
+    pageTimerRetryAt: 0
+  }, { now: proofNow }), '6N: 未来页面定时器证明有效');
+  assertPass(isPageTimerProofFresh({
+    pageTimerMinutes: 30,
+    pageTimerTargetAt: proofNow - 60 * 1000,
+    pageTimerRetryAt: 0
+  }, { now: proofNow }), '6N: 90 秒宽限内的刚到期证明仍有效');
+  assertPass(!isPageTimerProofFresh({
+    pageTimerMinutes: 30,
+    pageTimerTargetAt: proofNow - 5 * 60 * 1000,
+    pageTimerRetryAt: 0
+  }, { now: proofNow }), '6N: 数分钟前到期的页面定时器证明失效');
+  assertPass(!isPageTimerProofFresh({
+    pageTimerMinutes: 30,
+    pageTimerTargetAt: 0,
+    pageTimerRetryAt: 0
+  }, { now: proofNow }), '6N: 旧版本缺少绝对到期时间的证明失效');
+  assertPass(!isPageTimerProofFresh({
+    pageTimerMinutes: 30,
+    pageTimerTargetAt: proofNow + 30 * 60 * 1000,
+    pageTimerRetryAt: proofNow + 60 * 1000
+  }, { now: proofNow }), '6N: 等待跨日重试的证明不视为有效');
 
   // ===== 用例 7: v0.5.6 applySyncedPhase 编排路径（enabled 翻转核心修复） =====
   // 这个用例直接验证我修过的 bug：enabled 经 sync 翻转但无 nextTriggerAt 时，
@@ -713,10 +777,10 @@ async function runTests() {
   assertPass(computePageTimerAdoption(schedO, { found: true, value: '15:00' }, { now: now8 }) === null,
     '8O: 30s 偏差在窗内 → null');
 
-  // ===== 用例 9: v0.5.11 AC 开关单一递归收敛链路 =====
+  // ===== 用例 9: v0.5.12 AC 开关单一递归收敛链路 =====
   // 真实 AntD 点击仍需 Edge 手动验证；这里锁定会导致重复提示音的源码结构不变量：
   // 主世界每轮只 click 一次、10 秒后递归复查，background/content 不再叠加第二套点击重试。
-  console.log('\n\n=== 用例 9: AC 开关单一递归收敛链路 (v0.5.11) ===\n');
+  console.log('\n\n=== 用例 9: AC 开关单一递归收敛链路 (v0.5.12) ===\n');
 
   const backgroundSource = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
   const contentSource = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
@@ -739,6 +803,12 @@ async function runTests() {
   const existingTabEnd = backgroundSource.indexOf('\nasync function _toggleOnNewTab', existingTabStart);
   const existingTabBody = existingTabStart >= 0 && existingTabEnd > existingTabStart
     ? backgroundSource.slice(existingTabStart, existingTabEnd)
+    : '';
+
+  const newTabStart = backgroundSource.indexOf('async function _toggleOnNewTab');
+  const newTabEnd = backgroundSource.indexOf('\nasync function getReadyACTab', newTabStart);
+  const newTabBody = newTabStart >= 0 && newTabEnd > newTabStart
+    ? backgroundSource.slice(newTabStart, newTabEnd)
     : '';
 
   const setTimerStart = backgroundSource.indexOf('async function setPageTimer(minutes)');
@@ -777,7 +847,7 @@ async function runTests() {
       && !contentSource.includes('async function clickConfirmDialog('),
     '9K: content 隔离世界不存在第二套开关/确认点击器');
   assertPass(!backgroundSource.includes("toggleAC('off')")
-      && pwmBody.includes('const timerArmed = Number(schedule.pageTimerMinutes) > 0 && !schedule.pageTimerRetryAt'),
+      && pwmBody.includes('const timerArmed = isPageTimerProofFresh(schedule)'),
     '9L: 自动关机只检查页面定时器证明，生产代码不存在 toggleAC(off)');
   assertPass(!contentSource.includes("error: t('contentCrossDayLimit')")
       && contentSource.includes('crossesMidnight,'),
@@ -788,6 +858,17 @@ async function runTests() {
   assertPass(setTimerBody.includes('chrome.tabs.create({ url: AC_PAGE, active: false })')
       && setTimerBody.includes('restoreDiscardedACTab(tab)'),
     '9O: 页面定时器缺少可用标签时只创建隐藏 AC 页恢复，不刷新正常页面');
+  assertPass(pwmBody.includes('isPageTimerProofFresh(schedule)')
+      && backgroundSource.includes('pageTimerTargetAt'),
+    '9P: OFF 只接受带绝对到期时间且仍新鲜的页面定时器证明');
+  assertPass(newTabBody.includes('finally')
+      && newTabBody.includes('ac-close-tab-${tabId}')
+      && !newTabBody.includes('if (result?.success)'),
+    '9Q: 自动创建的开机标签无论成功失败都会安排回收');
+
+  const i18nSource = fs.readFileSync(path.join(ROOT, 'i18n.js'), 'utf8');
+  assertPass(i18nSource.includes("querySelectorAll('[data-i18n-title]')"),
+    '9R: i18n 加载器会翻译 data-i18n-title 属性');
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;
@@ -798,7 +879,7 @@ async function runTests() {
     results.filter(r => !r.pass).forEach(r => console.log('  - ' + r.name));
     process.exit(1);
   } else {
-    console.log('✅ 所有断言通过。popup 自愈 + 跨设备同步 + page timer 校验 + v0.5.11 单一递归点击链路全部 OK。');
+    console.log('✅ 所有断言通过。popup 自愈 + 跨设备同步 + page timer 校验 + v0.5.12 单一递归点击链路全部 OK。');
   }
 }
 

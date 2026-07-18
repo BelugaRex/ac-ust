@@ -28,6 +28,7 @@ let schedule = {
   alarmCreatedAt: 0,      // 闹钟创建时的时间戳 (ms) — 时钟模式不使用
   alarmDelayMinutes: 0,   // 闹钟设定的延迟 (分钟) — 时钟模式不使用
   pageTimerMinutes: null,
+  pageTimerTargetAt: 0,
   pageTimerError: '',
   pageTimerRetryAt: 0,
   activeHours: { enabled: false, start: '08:00', end: '23:00' }  // v0.5.x: PWM 运行时段（白名单，同日）
@@ -825,6 +826,7 @@ async function runPwmStep() {
     // 开启新一轮 ON 前清空上一轮 page timer 证明；OFF 边界必须保留它用于验收。
     if (targetAction === 'on') {
       schedule.pageTimerMinutes = null;
+      schedule.pageTimerTargetAt = 0;
       schedule.pageTimerError = '';
       schedule.pageTimerRetryAt = 0;
     }
@@ -844,13 +846,10 @@ async function runPwmStep() {
     // setPageTimer() 只有在页面输入框读回目标值时才会记录 pageTimerMinutes，
     // 因此这里检查该证明即可，不需要再点击或等待 AC 状态变化。
     if (!toggleOk && targetAction === 'off') {
-      const timerArmed = Number(schedule.pageTimerMinutes) > 0 && !schedule.pageTimerRetryAt;
+      const timerArmed = isPageTimerProofFresh(schedule);
       if (timerArmed) {
         toggleOk = true;
         console.log(`[AC扩展] PWM 关机边界：页面定时器已正确设置 (${schedule.pageTimerMinutes} 分钟)，不点击开关`);
-        schedule.pageTimerMinutes = null;
-        schedule.pageTimerError = '';
-        schedule.pageTimerRetryAt = 0;
       } else {
         const timerResult = await setPageTimer(1);
         schedule.pageTimerError = timerResult?.success
@@ -858,6 +857,13 @@ async function runPwmStep() {
           : `页面关机定时器未正确设置：${timerResult?.error || '未知错误'}`;
         console.warn('[AC扩展] PWM 关机边界：页面定时器证明缺失，已尝试补设 1 分钟定时器；不点击开关');
       }
+    }
+
+    if (toggleOk && targetAction === 'off') {
+      schedule.pageTimerMinutes = null;
+      schedule.pageTimerTargetAt = 0;
+      schedule.pageTimerError = '';
+      schedule.pageTimerRetryAt = 0;
     }
 
     // ON 才调用主世界 ensureACState(true)。点击重试只允许由该递归函数负责。
@@ -944,6 +950,10 @@ async function setPageTimer(minutes) {
     });
     if (result?.success) {
       schedule.pageTimerMinutes = result.actualDelayMinutes || minutes;
+      const parsedTarget = parsePageTimerValue(result.value, Date.now());
+      schedule.pageTimerTargetAt = parsedTarget?.valid
+        ? parsedTarget.targetMs
+        : Date.now() + Math.max(1, Number(schedule.pageTimerMinutes) || 1) * 60000;
       schedule.pageTimerError = '';
       schedule.pageTimerRetryAt = 0;
       await chrome.alarms.clear('ac-page-timer-retry');
@@ -952,6 +962,7 @@ async function setPageTimer(minutes) {
       return result;
     } else if (result?.crossesMidnight) {
       schedule.pageTimerMinutes = minutes;
+      schedule.pageTimerTargetAt = 0;
       schedule.pageTimerError = t('bgPageTimerCrossDay');
       schedule.pageTimerRetryAt = result.retryAt || getNextPageTimerRetryAt();
       await createAlarm('ac-page-timer-retry', { when: schedule.pageTimerRetryAt });
@@ -961,6 +972,7 @@ async function setPageTimer(minutes) {
     } else {
       const failure = result || { success: false, error: t('bgPageTimerFailed') };
       schedule.pageTimerMinutes = null;
+      schedule.pageTimerTargetAt = 0;
       schedule.pageTimerError = failure.error;
       schedule.pageTimerRetryAt = 0;
       await persistSchedule('setPageTimer-failed');
@@ -970,6 +982,7 @@ async function setPageTimer(minutes) {
   } catch (e) {
     const failure = { success: false, error: e?.message || String(e) };
     schedule.pageTimerMinutes = null;
+    schedule.pageTimerTargetAt = 0;
     schedule.pageTimerError = failure.error;
     schedule.pageTimerRetryAt = 0;
     await persistSchedule('setPageTimer-exception');
@@ -983,7 +996,7 @@ async function setPageTimer(minutes) {
 }
 
 async function requestTimerBasedShutdown(reason = '', minutes = 1) {
-  if (Number(schedule.pageTimerMinutes) > 0 && !schedule.pageTimerRetryAt) {
+  if (isPageTimerProofFresh(schedule)) {
     console.log(`[AC扩展] ${reason}: 页面关机定时器已正确设置 (${schedule.pageTimerMinutes} 分钟)，无需点击或重设`);
     return {
       success: true,
@@ -994,8 +1007,22 @@ async function requestTimerBasedShutdown(reason = '', minutes = 1) {
     };
   }
 
+  const hadStaleProof = Number(schedule.pageTimerMinutes) > 0
+    || Number(schedule.pageTimerTargetAt) > 0
+    || Number(schedule.pageTimerRetryAt) > 0;
+  if (hadStaleProof) {
+    schedule.pageTimerMinutes = null;
+    schedule.pageTimerTargetAt = 0;
+    schedule.pageTimerError = '';
+    schedule.pageTimerRetryAt = 0;
+    await chrome.alarms.clear('ac-page-timer-retry');
+  }
+
   const status = await getCurrentACStatus();
   if (status?.isOn === false) {
+    if (hadStaleProof) {
+      await persistSchedule(`${reason}-clear-stale-page-timer-proof`);
+    }
     return { success: true, alreadyDone: true, timerBased: true, reason };
   }
 
@@ -1236,17 +1263,19 @@ async function _toggleOnExistingTab(tab, action) {
 }
 
 async function _toggleOnNewTab(tabId, action) {
-  const tab = await getReadyACTab(tabId, 30000);
-  if (!tab?.id) {
-    return { success: false, error: '新建的 AC 页面未就绪' };
-  }
+  try {
+    const tab = await getReadyACTab(tabId, 30000);
+    if (!tab?.id) {
+      return { success: false, error: '新建的 AC 页面未就绪' };
+    }
 
-  const result = await _toggleOnExistingTab(tab, action);
-  // 只关闭扩展自动创建的标签，不能关闭用户原本打开的 HKUST 页面。
-  if (result?.success) {
-    chrome.alarms.create(`ac-close-tab-${tabId}`, { delayInMinutes: 1 });
+    return await _toggleOnExistingTab(tab, action);
+  } finally {
+    // 只关闭扩展自动创建的标签，不能关闭用户原本打开的 HKUST 页面。
+    if (Number.isInteger(tabId)) {
+      chrome.alarms.create(`ac-close-tab-${tabId}`, { delayInMinutes: 1 });
+    }
   }
-  return result;
 }
 
 async function getReadyACTab(preferredTabId = null, timeoutMs = 30000) {
@@ -1458,6 +1487,7 @@ async function toggleNowAndSync(action) {
   const delay = Math.max(1, currentOn ? schedule.onMinutes : schedule.offMinutes);
   schedule.pwmState = currentOn ? 'off' : 'on';
   schedule.pageTimerMinutes = null;
+  schedule.pageTimerTargetAt = 0;
   schedule.pageTimerError = '';
   schedule.pageTimerRetryAt = 0;
 
@@ -1702,7 +1732,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
           pwmState: 'off',
           nextTriggerAt: 0,
           alarmCreatedAt: 0,
-          alarmDelayMinutes: 0
+          alarmDelayMinutes: 0,
+          pageTimerTargetAt: 0
         }
       });
       console.log('[AC扩展] 首次安装，已设置默认值（间隔模式）');

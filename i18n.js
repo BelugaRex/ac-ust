@@ -72,7 +72,7 @@
     return substitute(entry.message, subs);
   }
 
-  // Apply translations to all [data-i18n] and [data-i18n-html] elements in the DOM.
+  // Apply translations to text, HTML, and title-marked elements in the DOM.
   // Call after load() resolves.
   function applyToDOM(root) {
     const scope = root || document;
@@ -81,6 +81,9 @@
     });
     scope.querySelectorAll('[data-i18n-html]').forEach(el => {
       el.innerHTML = t(el.getAttribute('data-i18n-html'));
+    });
+    scope.querySelectorAll('[data-i18n-title]').forEach(el => {
+      el.setAttribute('title', t(el.getAttribute('data-i18n-title')));
     });
   }
 

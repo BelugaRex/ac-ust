@@ -164,6 +164,20 @@ function parsePageTimerValue(value, now = Date.now()) {
   return { targetMs, valid: targetMs > now };
 }
 
+function isPageTimerProofFresh(schedule, opts = {}) {
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const graceMs = Number.isFinite(opts.graceMs) ? Math.max(0, opts.graceMs) : 90_000;
+  const minutes = Number(schedule?.pageTimerMinutes);
+  const targetAt = Number(schedule?.pageTimerTargetAt);
+
+  if (!Number.isFinite(minutes) || minutes <= 0) return false;
+  if (!Number.isFinite(targetAt) || targetAt <= 0) return false;
+  if (schedule?.pageTimerRetryAt) return false;
+
+  return targetAt >= now - graceMs
+    && targetAt <= now + minutes * 60000 + graceMs;
+}
+
 // 决策是否采纳页面 page timer 值作为跨设备 PWM 相位对齐的权威源。
 // pageTimerInput 是 content.js getPagePowerOffTimer() 的返回值
 //   { found: bool, value: 'HH:MM'|null }
@@ -252,6 +266,7 @@ if (typeof module !== 'undefined' && module.exports) {
     computePhaseAdoption,
     computeConfigDiff,
     parsePageTimerValue,
+    isPageTimerProofFresh,
     computePageTimerAdoption
   };
 }

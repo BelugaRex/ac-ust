@@ -8,40 +8,55 @@
 | 字段 | 值 |
 |------|-----|
 | 名称 | AC-UST |
-| 版本 | 0.4.43 |
+| 版本 | 0.5.12 |
+| 清单 | Manifest V3 |
 | 类别 | 工作效率 (Productivity) |
 | 语言 | 中文（简体）、English |
 | 非交易者账号 | ✅ |
 
+## 简短说明
+
+### 中文
+
+为 HKUST Smart Power Meter 提供可靠的 PWM 冷气循环定时、运行时段和跨设备相位对齐。
+
+### English
+
+Reliable PWM AC scheduling, active hours, and cross-device phase alignment for HKUST Smart Power Meter.
+
 ## 详细说明（中文 / zh-CN）
 
-```
-AC-UST 是一款为香港科技大学智能电表系统（Smart Power Meter）设计的自动冷气控制扩展。
+```text
+AC-UST 是一款为香港科技大学 Smart Power Meter 系统设计的自动冷气控制扩展。
 
 主要功能：
-• 一键开关冷气：无需手动在页面上点击 Ant Design 开关
-• PWM 循环定时：可独立设置"开启分钟数"和"关闭分钟数"，自动循环运行
-• 时钟模式：单数整点开、双数整点关，简单省心
-• 看门狗自愈：定时闹钟异常时自动恢复，确保定时任务稳定运行
-• 余额保护：冷气余额不足时自动避免开启，防止浪费
-• 中英双语：支持中文和英文界面自动切换
+• PWM 循环定时：分别设置冷气开启与关闭分钟数，自动持续循环
+• PWM 运行时段：只在每天指定时段运行，时段外自动停用并请求页面定时关机
+• 页面定时关机：使用 UST 页面自带的 Power-off after 定时器执行关机，避免重复点击开关
+• 跨设备相位对齐：同浏览器生态通过浏览器同步补充对齐，UST 页面定时器负责跨浏览器关机相位校验
+• 看门狗与自愈：自动恢复缺失的后台闹钟，并提供一键诊断
+• 中英双语：支持中文和英文界面，并接入 Crowdin 社区本地化
 
-支持香港科技大学 w5.ab.ust.hk 智能电表系统。
+请勿同时在 Chrome 与 Edge 两个浏览器生态中运行不同配置的 AC-UST。
+
+支持香港科技大学 w5.ab.ust.hk Smart Power Meter 系统。
 开源地址：https://github.com/BelugaRex/ac-ust
 ```
 
 ## Detailed Description (English / en)
 
-```
+```text
 AC-UST is an automatic air-conditioning controller for the HKUST Smart Power Meter system.
 
 Features:
-• One-click AC toggle - no manual Ant Design switch clicking
-• PWM cycle timer - independently set "on minutes" and "off minutes" for automatic cycling
-• Clock mode - on at odd hours, off at even hours, simple and reliable
-• Watchdog self-healing - auto-recovery from alarm anomalies
-• Balance protection - prevents turning on when balance is low
-• Bilingual UI - Chinese & English auto-switching
+• PWM cycle scheduling with independently configurable ON and OFF durations
+• Active hours that limit PWM operation to a daily time window
+• Timer-based shutdown through the portal's Power-off after control, avoiding repeated OFF clicks
+• Cross-device phase alignment using browser sync plus the UST page timer
+• Watchdog recovery and a built-in diagnostics panel
+• Chinese and English UI with Crowdin-based community localization
+
+Do not run independently configured copies in both Chrome and Edge at the same time.
 
 Supports HKUST Smart Power Meter at w5.ab.ust.hk.
 Open source: https://github.com/BelugaRex/ac-ust
@@ -51,30 +66,31 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 | 字段 | 值 |
 |------|-----|
-| 单一用途说明 | 自动控制 HKUST Smart Power Meter 冷气开关，提供 PWM 循环定时、时钟模式、余额保护等功能 |
-| 远程代码 | 否，不使用远程代码 |
-| 隐私政策 URL | https://github.com/BelugaRex/ac-ust/blob/beta-rex/PRIVACY.md |
-| 数据收集 | 不收集任何用户数据（所有配置仅存储在 chrome.storage.local） |
+| 单一用途说明 | 自动控制 HKUST Smart Power Meter 冷气，提供 PWM 循环、运行时段、页面定时关机和状态诊断 |
+| 远程代码 | 否，不加载或执行远程代码 |
+| 隐私政策 URL | https://github.com/BelugaRex/ac-ust/blob/main/PRIVACY.md |
+| 数据收集 | 不收集、出售或传输个人数据；设置仅保存在浏览器 `storage.local` / `storage.sync` |
+| 外部网络 | 仅访问用户主动登录的 HKUST Smart Power Meter 页面 |
 
 ## 权限理由
 
 | 权限 | 理由 |
 |------|------|
-| `alarms` | 定时开关冷气（PWM 循环定时 + 时钟模式） |
-| `storage` | 存储用户的定时设置（开关分钟数、时钟模式、PWM 状态） |
-| `tabs` | 自动打开/刷新冷气控制页面以执行开关操作 |
-| `offscreen` | Service Worker 冗余保活，防止后台调度被浏览器终止 |
-| `scripting` | 在冷气页面未加载扩展脚本时兜底注入 content script |
-| `host_permissions: w5.ab.ust.hk` | 仅用于读取冷气状态、执行开关操作 |
+| `alarms` | 调度 PWM 周期、运行时段边界、看门狗和页面定时器重试 |
+| `storage` | 保存本地设置与运行状态，并在同一浏览器生态内同步精简后的 PWM 配置和相位 |
+| `tabs` | 查找或按需打开 HKUST 冷气页面，以读取状态、开机和设置页面关机定时器 |
+| `offscreen` | 提供 Service Worker 冗余保活，提升后台调度可靠性 |
+| `scripting` | 页面脚本未就绪时兜底注入隔离世界与主世界脚本 |
+| `host_permissions: https://w5.ab.ust.hk/*` | 仅在 HKUST Smart Power Meter 页面读取冷气状态、执行开机和设置关机定时器 |
 
 ## 图片资源
 
-| 资源 | 尺寸 | 说明 |
+| 资源 | 尺寸 | 路径 |
 |------|------|------|
-| 商店图标 | 128×128 | 使用 `icons/icon128.png` |
-| 屏幕截图 | 1280×800 | 至少 1 张（popup 界面 + AC 控制效果） |
-| 小宣传图块 | 440×280 | 可选 |
-| 滚动宣传图块 | 1400×560 | 可选 |
+| 商店图标 | 128×128 | `icons/icon128.png` |
+| 屏幕截图 | 1280×800 | `store-assets/` |
+| 小宣传图块 | 440×280 | `store-assets/` |
+| 滚动宣传图块 | 1400×560 | `store-assets/` |
 
 ## 分发设置
 
@@ -86,66 +102,16 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-```powershell
-# 生成 dist/ 并打包 ZIP
-.\build.ps1
-Compress-Archive -Path dist\* -DestinationPath ac-ust-v0.4.43.zip
-```
+运行 `./build.ps1` 后，上传 `releases/ac-ust-v0.5.12.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
-1. 上传 ZIP → 填写商品详情 → 填写隐私 → 设置分发 → 提交审核
-2. 审核时间：通常 1-3 个工作日
-3. 建议勾选"推迟发布"，审核通过后手动发布
+1. 运行构建与自动化测试，确认版本、ZIP 内容和图标均通过验证。
+2. 在开发者信息中心上传 `releases/ac-ust-v0.5.12.zip`。
+3. 检查商品详情、隐私声明和权限理由后提交审核。
+4. 建议选择推迟发布，审核通过后手动发布。
 
-## Extension Overview
-- **Name**: AC-UST
-- **Version**: 0.4.3
-- **Manifest**: MV3
-- **Category**: Productivity / Utilities
+## 支持
 
-## Short Description (132 chars max)
-Auto-control HKUST Smart Power Meter air conditioning with clock-synced PWM scheduling. Odd hours ON, even hours OFF. Save balance effortlessly.
-
-## Detailed Description
-AC-UST automatically controls the air conditioning switch on the HKUST Smart Power Meter web portal (w5.ab.ust.hk). It uses a clock-synchronized PWM (Pulse Width Modulation) schedule to toggle the AC on and off at precise hour boundaries:
-
-- **Clock Mode (default)**: AC turns ON at odd-numbered hours (1:00, 3:00, 5:00...23:00) and OFF at even-numbered hours (0:00, 2:00, 4:00...22:00).
-- **Interval Mode**: Custom ON/OFF minute intervals with manual override.
-
-Key features:
-- One-click "Timer ON" / "Timer OFF" from the popup
-- Real-time countdown to next toggle with clock-time display
-- Badge shows minutes remaining until next action
-- Auto-confirms page dialogs (no manual clicking needed)
-- Reliable background execution with heartbeat keepalive
-- Stabilization verification prevents UI rollback false-positives
-- Pinned AC page support for faster toggling
-
-## Permissions Justification
-| Permission | Why Needed |
-|-----------|------------|
-| `alarms` | Schedule PWM toggles at precise wall-clock times |
-| `storage` | Save user settings (clock mode, intervals, schedule state) |
-| `tabs` | Find and interact with the HKUST Power Meter page |
-| `offscreen` | Keep Service Worker alive for reliable background timing |
-| `scripting` | Fallback injection if content script is not loaded |
-
-## Host Permissions
-- `https://w5.ab.ust.hk/njggt/app/*` — Required to read AC status, click the switch, and read balance on the HKUST Smart Power Meter portal.
-
-## Screenshots
-<!-- Add paths to screenshots after capturing -->
-- `screenshots/popup-clock-mode.png` — Popup showing clock mode with countdown
-- `screenshots/popup-interval-mode.png` — Popup showing interval mode
-- `screenshots/ac-page.png` — AC control page with extension badge
-
-## Privacy
-- No data collection
-- No analytics
-- No external network requests beyond the HKUST portal
-- All settings stored locally via chrome.storage.local
-
-## Support
-- GitHub: https://github.com/BelugaRex/ac-ust
-- Issues: https://github.com/BelugaRex/ac-ust/issues
+- GitHub：https://github.com/BelugaRex/ac-ust
+- Issues：https://github.com/BelugaRex/ac-ust/issues

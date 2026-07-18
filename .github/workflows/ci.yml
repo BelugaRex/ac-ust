@@ -14,5 +14,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
+      - name: Build extension package
+        shell: pwsh
+        run: ./build.ps1
       - name: Run unit tests
         run: node test/verify-fix.mjs
