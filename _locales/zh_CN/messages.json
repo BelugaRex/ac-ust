@@ -94,7 +94,7 @@
 
   "contentTimeout": { "message": "等待超时，未找到 AC 开关。请确保页面已完全加载", "description": "content.js: 等待开关超时错误" },
   "contentRetryExhausted": { "message": "已尝试 3 次，但 AC 未变成 $1", "description": "content.js: 重试耗尽错误。$1=目标状态" },
-  "contentCrossDayLimit": { "message": "页面定时器只能选择当天时间，跨日 PWM 将由扩展闹钟继续执行", "description": "content.js: 跨日限制提示" },
+  "contentCrossDayLimit": { "message": "页面定时器支持直接输入跨午夜时间", "description": "保留键：跨午夜直接输入提示" },
   "contentNoInput": { "message": "未找到页面定时器输入框", "description": "content.js: 找不到输入框错误" },
   "contentInputRejected": { "message": "输入框未接受时间 $1", "description": "content.js: 输入验证失败。$1=时间值" },
 
