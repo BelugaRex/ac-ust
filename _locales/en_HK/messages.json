@@ -333,7 +333,7 @@
   },
   "contentCrossDayLimit": {
     "message": "Page timer only supports same-day; cross-day PWM will use extension alarms",
-    "description": "content.js: 跨日限制提示"
+    "description": "保留键：跨午夜直接输入提示"
   },
   "contentNoInput": {
     "message": "Could not find page timer input",
