@@ -63,7 +63,7 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
         if (!handler) return undefined;
         return handler(msg);
       },
-      getManifest: () => ({ version: '0.5.10' }),
+      getManifest: () => ({ version: '0.5.11' }),
       getPlatformInfo: async () => ({ os: 'win' }),
       onConnect: { addListener() {} },
       onUpdateAvailable: { addListener() {} }
@@ -473,7 +473,7 @@ async function runTests() {
   //   必须重建闹钟基础设施（ac-pwm/ac-watchdog/ac-badge-tick），否则设备 B 永远
   //   不会真正执行 PWM（伪 enabled=true 但无闹钟）。
   //   测试策略：复刻 background.js applySyncedPhase 的核心决策（与现有 case 1-4
-  //   复刻 popup.js 诊断函数同模式），把对 setupAlarms/createAlarm/clear/toggleAC
+  //   复刻 popup.js 诊断函数同模式），把对 setupAlarms/createAlarm/clear/page timer
   //   等编排调用记录到一个 calls 数组，断言三个场景的调用序列正确。
   console.log('\n\n=== 用例 7: applySyncedPhase 编排路径 (enabled 翻转核心修复) ===\n');
 
@@ -536,7 +536,7 @@ async function runTests() {
         calls.push('clear-ac-page-timer-retry');
         calls.push('clear-ac-badge-tick');
         calls.push('clear-ac-watchdog');
-        calls.push('toggleAC-off');
+        calls.push('requestTimerBasedShutdown');
       }
     }
     if (activeHoursChanged || phaseChanged) calls.push('rescheduleActiveBoundary');
@@ -579,7 +579,7 @@ async function runTests() {
   assertPass(!r7B.calls.includes('create-ac-pwm-when'),
     '7B: 无相位不应预置 ac-pwm（由 setupAlarms→runPwmStep 完成）');
 
-  // 7C: true → false → 必须清所有 PWM 闹钟 + 主动 toggleAC('off)（B1 顺序 + A1 幂等兜底）
+  // 7C: true → false → 必须清所有 PWM 闹钟 + 依靠页面定时器关机（不点击开关）
   const local7C = {
     enabled: true, onMinutes: 30, offMinutes: 30,
     activeHours: { enabled: false, start: '08:00', end: '23:00' },
@@ -594,7 +594,9 @@ async function runTests() {
   assertPass(r7C.calls.includes('clear-ac-pwm'), '7C: 清 ac-pwm');
   assertPass(r7C.calls.includes('clear-ac-watchdog'), '7C: 清 ac-watchdog');
   assertPass(r7C.calls.includes('clear-ac-badge-tick'), '7C: 清 ac-badge-tick');
-  assertPass(r7C.calls.includes('toggleAC-off'), '7C: 调用 toggleAC(off)（A1 幂等保证安全）');
+  assertPass(r7C.calls.includes('requestTimerBasedShutdown'),
+    '7C: 调用 requestTimerBasedShutdown（页面定时器关机，不点击开关）');
+  assertPass(!r7C.calls.includes('toggleAC-off'), '7C: 不调用 toggleAC(off)');
   assertPass(r7C.schedule.pwmState === 'off' && r7C.schedule.nextTriggerAt === 0,
     '7C: schedule.pwmState/nextTriggerAt 被清零');
 
@@ -632,6 +634,13 @@ async function runTests() {
   assertPass(parsePageTimerValue('10:00', now8)?.valid === false, '8B: 过期 → valid=false');
   assertPass(parsePageTimerValue('25:00', now8) === null, '8C: 小时越界 → null');
   assertPass(parsePageTimerValue(null, now8) === null, '8C: null → null');
+
+  // 8C-cross: 页面允许直接输入跨午夜时间（23:50 输入 00:10）
+  const nowCross8 = new Date(2024, 0, 15, 23, 50, 0, 0).getTime();
+  const expectedCross8 = new Date(2024, 0, 16, 0, 10, 0, 0).getTime();
+  const parsedCross8 = parsePageTimerValue('00:10', nowCross8);
+  assertPass(parsedCross8?.valid === true && parsedCross8.targetMs === expectedCross8,
+    '8C-cross: 23:50 读取 00:10 → 识别为次日 00:10');
 
   // ---- 8D: 未找到 → null ----
   const schedOff = { enabled: true, pwmState: 'off', onMinutes: 60, offMinutes: 60, nextTriggerAt: futureMs8 };
@@ -704,6 +713,82 @@ async function runTests() {
   assertPass(computePageTimerAdoption(schedO, { found: true, value: '15:00' }, { now: now8 }) === null,
     '8O: 30s 偏差在窗内 → null');
 
+  // ===== 用例 9: v0.5.11 AC 开关单一递归收敛链路 =====
+  // 真实 AntD 点击仍需 Edge 手动验证；这里锁定会导致重复提示音的源码结构不变量：
+  // 主世界每轮只 click 一次、10 秒后递归复查，background/content 不再叠加第二套点击重试。
+  console.log('\n\n=== 用例 9: AC 开关单一递归收敛链路 (v0.5.11) ===\n');
+
+  const backgroundSource = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+  const contentSource = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
+  const pageConfirmSource = fs.readFileSync(path.join(ROOT, 'page-confirm.js'), 'utf8');
+  const countOccurrences = (source, needle) => source.split(needle).length - 1;
+
+  const ensureStart = pageConfirmSource.indexOf('async function ensureACState(targetState, clickCount = 0)');
+  const ensureEnd = pageConfirmSource.indexOf('\n  function findACSwitchInPageWorld', ensureStart);
+  const ensureBody = ensureStart >= 0 && ensureEnd > ensureStart
+    ? pageConfirmSource.slice(ensureStart, ensureEnd)
+    : '';
+
+  const pwmStart = backgroundSource.indexOf('async function runPwmStep()');
+  const pwmEnd = backgroundSource.indexOf('\n// ----- 设置页面自带定时器', pwmStart);
+  const pwmBody = pwmStart >= 0 && pwmEnd > pwmStart
+    ? backgroundSource.slice(pwmStart, pwmEnd)
+    : '';
+
+  const existingTabStart = backgroundSource.indexOf('async function _toggleOnExistingTab');
+  const existingTabEnd = backgroundSource.indexOf('\nasync function _toggleOnNewTab', existingTabStart);
+  const existingTabBody = existingTabStart >= 0 && existingTabEnd > existingTabStart
+    ? backgroundSource.slice(existingTabStart, existingTabEnd)
+    : '';
+
+  const setTimerStart = backgroundSource.indexOf('async function setPageTimer(minutes)');
+  const setTimerEnd = backgroundSource.indexOf('\nasync function requestTimerBasedShutdown', setTimerStart);
+  const setTimerBody = setTimerStart >= 0 && setTimerEnd > setTimerStart
+    ? backgroundSource.slice(setTimerStart, setTimerEnd)
+    : '';
+
+  assertPass(ensureStart >= 0,
+    '9A: 主世界存在 ensureACState(targetState, clickCount) 递归收敛函数');
+  assertPass(ensureBody.includes('return ensureACState(targetState, clickCount + 1);'),
+    '9B: 每轮等待后只递归调用 ensureACState 自身');
+  assertPass(ensureBody.includes('await sleepInPageWorld(AC_STATE_SETTLE_MS);')
+      && pageConfirmSource.includes('const AC_STATE_SETTLE_MS = 10000;'),
+    '9C: 每次 click 后等待 10 秒再递归复查');
+  assertPass(countOccurrences(ensureBody, 'clickElementOnceInPageWorld(sw)') === 1,
+    '9D: ensureACState 每轮只有一个 AC 开关点击调用点');
+  assertPass(countOccurrences(pageConfirmSource, 'element.click();') === 1,
+    '9E: 主世界统一点击 helper 只执行一次 element.click()');
+  assertPass(!pageConfirmSource.includes('new PointerEvent')
+      && !pageConfirmSource.includes('new MouseEvent')
+      && !pageConfirmSource.includes('new KeyboardEvent'),
+    '9F: AC 主世界不再叠发 pointer/mouse/keyboard 激活事件');
+  assertPass(pageConfirmSource.includes('acStateRequestInFlight')
+      && pageConfirmSource.includes('合并重复的'),
+    '9G: 主世界同目标并发请求复用 single-flight Promise');
+  assertPass(countOccurrences(pwmBody, "toggleAC('on')") === 1
+      && !pwmBody.includes('for (let retry'),
+    '9H: 每个 PWM 开机步骤只调用一次 toggleAC(on)，无外围点击重试循环');
+  assertPass(!backgroundSource.includes('retryExistingTabToggle')
+      && !backgroundSource.includes('async function retryToggle'),
+    '9I: background 已删除四次即时消息重试路径');
+  assertPass(countOccurrences(existingTabBody, 'chrome.tabs.sendMessage(tab.id, { action })') === 1,
+    '9J: 单个标签页切换请求只发送一次 on/off 消息');
+  assertPass(!contentSource.includes('function dispatchUserClick(')
+      && !contentSource.includes('async function clickConfirmDialog('),
+    '9K: content 隔离世界不存在第二套开关/确认点击器');
+  assertPass(!backgroundSource.includes("toggleAC('off')")
+      && pwmBody.includes('const timerArmed = Number(schedule.pageTimerMinutes) > 0 && !schedule.pageTimerRetryAt'),
+    '9L: 自动关机只检查页面定时器证明，生产代码不存在 toggleAC(off)');
+  assertPass(!contentSource.includes("error: t('contentCrossDayLimit')")
+      && contentSource.includes('crossesMidnight,'),
+    '9M: Power-off after 跨午夜时间直接输入，不再被代码拒绝');
+  assertPass(countOccurrences(backgroundSource, 'chrome.tabs.reload(') === 1
+      && backgroundSource.includes('async function restoreDiscardedACTab(tab)'),
+    '9N: 页面只会在浏览器明确 discarded 时恢复一次，无 PWM/失败重试刷新');
+  assertPass(setTimerBody.includes('chrome.tabs.create({ url: AC_PAGE, active: false })')
+      && setTimerBody.includes('restoreDiscardedACTab(tab)'),
+    '9O: 页面定时器缺少可用标签时只创建隐藏 AC 页恢复，不刷新正常页面');
+
   // 汇总
   const passCount = results.filter(r => r.pass).length;
   const totalCount = results.length;
@@ -713,7 +798,7 @@ async function runTests() {
     results.filter(r => !r.pass).forEach(r => console.log('  - ' + r.name));
     process.exit(1);
   } else {
-    console.log('✅ 所有断言通过。v0.4.30 popup 自愈 + v0.5.6 跨设备 sync-helpers + v0.5.7 page timer 校验全部 OK。');
+    console.log('✅ 所有断言通过。popup 自愈 + 跨设备同步 + page timer 校验 + v0.5.11 单一递归点击链路全部 OK。');
   }
 }
 

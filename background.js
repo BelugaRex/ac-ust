@@ -35,6 +35,8 @@ let schedule = {
 
 let pwmStepRunning = false;
 let lastPwmStepAt = 0;  // A4: 看门狗 cooldown 追踪
+let acToggleInFlight = null;
+let acToggleInFlightAction = null;
 
 // ===== Active Hours (PWM 运行时段，白名单) =====
 // 启用后：在 [start, end) 时段内 PWM 自动运行；时段外自动关闭 PWM（避免噪音）。
@@ -115,16 +117,16 @@ async function onActiveBoundaryCrossed() {
     setNextTriggerAt(0);
     schedule.alarmCreatedAt = 0;
     schedule.alarmDelayMinutes = 0;
-    schedule.pageTimerMinutes = null;
-    schedule.pageTimerError = '';
-    schedule.pageTimerRetryAt = 0;
     await chrome.alarms.clear('ac-pwm');
     await chrome.alarms.clear('ac-page-timer-retry');
     await chrome.alarms.clear('ac-badge-tick');
     await chrome.alarms.clear('ac-watchdog');
     await updateBadge();
+    const shutdownResult = await requestTimerBasedShutdown('active-hours-leave');
+    if (!shutdownResult?.success) {
+      schedule.pageTimerError = `退出运行时段后页面关机定时器未确认：${shutdownResult?.error || '未知错误'}`;
+    }
     await persistSchedule('active-hours-leave');
-    await toggleAC('off');
     // [v0.5.6] 同步推送离开时段状态
     await syncScheduleToSync('active-hours-leave');
   }
@@ -441,16 +443,16 @@ async function applySyncedPhase(remote, reason = '') {
       setNextTriggerAt(0);
       schedule.alarmCreatedAt = 0;
       schedule.alarmDelayMinutes = 0;
-      schedule.pageTimerMinutes = null;
-      schedule.pageTimerError = '';
-      schedule.pageTimerRetryAt = 0;
       await chrome.alarms.clear('ac-pwm');
       await chrome.alarms.clear('ac-page-timer-retry');
       await chrome.alarms.clear('ac-badge-tick');
       await chrome.alarms.clear('ac-watchdog');
       await updateBadge();
-      // A1 幂等预检保证：若 AC 已关则跳过；远端刚关过一次也安全
-      toggleAC('off').catch(e => console.warn('[AC扩展] sync 合并：关机命令失败:', e?.message));
+      // 自动关机只依赖 UST 页面定时器，不再点击 AC 开关。
+      const shutdownResult = await requestTimerBasedShutdown('sync-disabled');
+      if (!shutdownResult?.success) {
+        schedule.pageTimerError = `同步停用后页面关机定时器未确认：${shutdownResult?.error || '未知错误'}`;
+      }
     }
     didAlarmInfra = true;
   }
@@ -820,10 +822,12 @@ async function runPwmStep() {
     const nextState = targetAction === 'on' ? 'off' : 'on';
     const delay = Math.max(1, currentDuration);
 
-    // 先清空即将废弃的 page timer 标记
-    schedule.pageTimerMinutes = null;
-    schedule.pageTimerError = '';
-    schedule.pageTimerRetryAt = 0;
+    // 开启新一轮 ON 前清空上一轮 page timer 证明；OFF 边界必须保留它用于验收。
+    if (targetAction === 'on') {
+      schedule.pageTimerMinutes = null;
+      schedule.pageTimerError = '';
+      schedule.pageTimerRetryAt = 0;
+    }
 
     console.log(`[AC扩展] PWM 执行: ${targetAction}，持续 ${currentDuration} 分钟`);
 
@@ -836,48 +840,48 @@ async function runPwmStep() {
       toggleOk = true;
     }
 
-    // 执行开关并独立验证（最多重试 3 次，防 AntD 回滚假成功）
-    for (let retry = 0; retry < 3 && !toggleOk; retry++) {
-      // 第 2 次起强制 reload AC tab:toggleAC 内部 reload 只在 sendMessage 异常时触发,
-      // 若 content.js 返回假成功(点击了但 React 状态没变),永远不会 reload,陷入软重试死循环。
-      // 用户报告"到时间不关空调"的根因之一就是这个 — reload 后 React 状态会重置。
-      if (retry > 0) {
-        try {
-          const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-          if (tabs[0]?.id) {
-            console.warn(`[AC扩展] PWM 重试 ${retry}/2: 强制 reload AC tab 清空 React 卡住状态`);
-            await chrome.tabs.reload(tabs[0].id);
-            await waitForTabReady(tabs[0].id, 30000);
-            await ensureContentScriptLoaded(tabs[0].id);
-            // A3: reload 后先读 AC 真实状态，若已是目标状态则跳过 toggle
-            const postReload = await getCurrentACStatus();
-            if (typeof postReload?.isOn === 'boolean' && postReload.isOn === needOn) {
-              toggleOk = true;
-              console.log('[AC扩展] 重试预检：reload 后 AC 已在目标状态，跳过切换');
-              break;
-            }
-          }
-        } catch (e) {
-          console.warn('[AC扩展] PWM 重试 reload 失败,继续 toggleAC:', e?.message);
-        }
+    // OFF 完全依赖 ON 成功后预设的页面定时器。
+    // setPageTimer() 只有在页面输入框读回目标值时才会记录 pageTimerMinutes，
+    // 因此这里检查该证明即可，不需要再点击或等待 AC 状态变化。
+    if (!toggleOk && targetAction === 'off') {
+      const timerArmed = Number(schedule.pageTimerMinutes) > 0 && !schedule.pageTimerRetryAt;
+      if (timerArmed) {
+        toggleOk = true;
+        console.log(`[AC扩展] PWM 关机边界：页面定时器已正确设置 (${schedule.pageTimerMinutes} 分钟)，不点击开关`);
+        schedule.pageTimerMinutes = null;
+        schedule.pageTimerError = '';
+        schedule.pageTimerRetryAt = 0;
+      } else {
+        const timerResult = await setPageTimer(1);
+        schedule.pageTimerError = timerResult?.success
+          ? '原页面关机定时器缺失，已补设 1 分钟定时器；本轮不推进且不点击开关'
+          : `页面关机定时器未正确设置：${timerResult?.error || '未知错误'}`;
+        console.warn('[AC扩展] PWM 关机边界：页面定时器证明缺失，已尝试补设 1 分钟定时器；不点击开关');
       }
+    }
+
+    // ON 才调用主世界 ensureACState(true)。点击重试只允许由该递归函数负责。
+    if (!toggleOk && targetAction === 'on') {
       try {
-        const toggleResult = await toggleAC(targetAction);
-        if (!toggleResult?.success) {
-          schedule.pageTimerError = `自动${needOn ? '开启' : '关闭'}未确认：${toggleResult?.error || '未知错误'}`;
+        const toggleResult = await toggleAC('on');
+        toggleOk = !!toggleResult?.success;
+        if (!toggleOk) {
+          schedule.pageTimerError = `自动开启未确认：${toggleResult?.error || '未知错误'}`;
         }
       } catch (e) {
-        schedule.pageTimerError = `自动${needOn ? '开启' : '关闭'}异常：${e?.message || String(e)}`;
+        schedule.pageTimerError = `自动开启异常：${e?.message || String(e)}`;
       }
-      // 独立验证：等页面稳定后检查 AC 实际状态
-      await sleep(3000);
-      const actual = await getCurrentACStatus();
-      if (typeof actual?.isOn === 'boolean' && actual.isOn === needOn) {
-        toggleOk = true;
-        schedule.pageTimerError = '';
-        console.log(`[AC扩展] PWM 独立验证通过：AC=${needOn ? 'ON' : 'OFF'}`);
-      } else if (retry < 2) {
-        console.warn(`[AC扩展] PWM 独立验证失败(重试${retry+1}/2)：期望=${needOn?'ON':'OFF'} 实际=${actual?.isOn}`);
+
+      // 消息响应若丢失，只做一次只读复核；这里绝不再次点击。
+      if (!toggleOk) {
+        const actual = await getCurrentACStatus();
+        if (actual?.isOn === true) {
+          toggleOk = true;
+          schedule.pageTimerError = '';
+          console.log('[AC扩展] PWM 开机只读复核通过：AC=ON');
+        } else {
+          console.warn(`[AC扩展] PWM 本轮未开机：实际=${actual?.isOn}；外围不重复点击，1分钟后重试`);
+        }
       }
     }
 
@@ -889,10 +893,7 @@ async function runPwmStep() {
     } else {
       // 开关失败：保持 pwmState 不变，1 分钟后重试
       schedule.pageTimerError = schedule.pageTimerError || `自动${needOn ? '开启' : '关闭'}验证失败，1分钟后重试`;
-      schedule.alarmCreatedAt = Date.now();
-      schedule.alarmDelayMinutes = 1;
-      await createAlarm('ac-pwm', { delayInMinutes: 1 });
-      setNextTriggerAt(schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000);
+      await createPwmAlarmWithVerify(1, 'PWM失败重试');
       console.warn(`[AC扩展] PWM 开关失败，保持 pwmState=${schedule.pwmState}，1分钟后重试`);
     }
 
@@ -919,15 +920,25 @@ async function runPwmStep() {
 
 // ----- 设置页面自带定时器（安全网，自动关不用手动开）-----
 async function setPageTimer(minutes) {
-  const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-  if (tabs.length === 0) {
-    schedule.pageTimerMinutes = null;
-    schedule.pageTimerError = t('bgPageTimerNoTab');
-    await persistSchedule('setPageTimer-no-tab');
-    return;
-  }
+  let autoCreatedTabId = null;
   try {
-    const result = await chrome.tabs.sendMessage(tabs[0].id, {
+    const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
+    let tab = tabs[0] || null;
+
+    if (!tab?.id) {
+      tab = await chrome.tabs.create({ url: AC_PAGE, active: false });
+      autoCreatedTabId = tab?.id || null;
+      if (!autoCreatedTabId) throw new Error(t('bgPageTimerNoTab'));
+      console.log('[AC扩展] 页面定时器：无现有 AC 页面，已创建隐藏标签页');
+    }
+
+    tab = await restoreDiscardedACTab(tab);
+    const pageReady = await waitForTabReady(tab.id, 30000);
+    if (!pageReady) throw new Error('AC 页面等待就绪超时');
+    const contentReady = await ensureContentScriptLoaded(tab.id);
+    if (!contentReady) throw new Error('AC 页面 content script 未就绪');
+
+    const result = await chrome.tabs.sendMessage(tab.id, {
       action: 'setTimer',
       minutes
     });
@@ -938,27 +949,69 @@ async function setPageTimer(minutes) {
       await chrome.alarms.clear('ac-page-timer-retry');
       await persistSchedule('setPageTimer-success');
       console.log(`[AC扩展] 页面定时器已设置为 ${result.value || minutes} (安全网)`);
+      return result;
     } else if (result?.crossesMidnight) {
-      schedule.pageTimerMinutes = null;
+      schedule.pageTimerMinutes = minutes;
       schedule.pageTimerError = t('bgPageTimerCrossDay');
       schedule.pageTimerRetryAt = result.retryAt || getNextPageTimerRetryAt();
       await createAlarm('ac-page-timer-retry', { when: schedule.pageTimerRetryAt });
       await persistSchedule('setPageTimer-cross-midnight');
       console.log('[AC扩展] 页面定时器跨日，已安排午夜后补设');
+      return result;
     } else {
+      const failure = result || { success: false, error: t('bgPageTimerFailed') };
       schedule.pageTimerMinutes = null;
-      schedule.pageTimerError = result?.error || t('bgPageTimerFailed');
+      schedule.pageTimerError = failure.error;
       schedule.pageTimerRetryAt = 0;
       await persistSchedule('setPageTimer-failed');
       console.warn('[AC扩展] 页面定时器设置失败:', schedule.pageTimerError);
+      return failure;
     }
   } catch (e) {
+    const failure = { success: false, error: e?.message || String(e) };
     schedule.pageTimerMinutes = null;
-    schedule.pageTimerError = e?.message || String(e);
+    schedule.pageTimerError = failure.error;
     schedule.pageTimerRetryAt = 0;
     await persistSchedule('setPageTimer-exception');
     console.warn('[AC扩展] 设置页面定时器异常:', e);
+    return failure;
+  } finally {
+    if (autoCreatedTabId) {
+      chrome.alarms.create(`ac-close-tab-${autoCreatedTabId}`, { delayInMinutes: 1 });
+    }
   }
+}
+
+async function requestTimerBasedShutdown(reason = '', minutes = 1) {
+  if (Number(schedule.pageTimerMinutes) > 0 && !schedule.pageTimerRetryAt) {
+    console.log(`[AC扩展] ${reason}: 页面关机定时器已正确设置 (${schedule.pageTimerMinutes} 分钟)，无需点击或重设`);
+    return {
+      success: true,
+      alreadyArmed: true,
+      timerBased: true,
+      minutes: schedule.pageTimerMinutes,
+      reason
+    };
+  }
+
+  const status = await getCurrentACStatus();
+  if (status?.isOn === false) {
+    return { success: true, alreadyDone: true, timerBased: true, reason };
+  }
+
+  const result = await setPageTimer(minutes);
+  if (result?.success) {
+    console.log(`[AC扩展] ${reason}: 已请求页面定时器在 ${minutes} 分钟后关机（不点击开关）`);
+    return { success: true, timerBased: true, minutes, result, reason };
+  }
+
+  return {
+    success: false,
+    timerBased: true,
+    error: result?.error || '页面关机定时器设置失败',
+    result,
+    reason
+  };
 }
 
 // ----- 闹钟触发时执行 -----
@@ -1035,8 +1088,8 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 
   if (alarm.name === 'ac-page-timer-retry') {
-    if (schedule.enabled && schedule.pwmState === 'off') {
-      await setPageTimer(schedule.onMinutes);
+    if (schedule.pageTimerRetryAt) {
+      await setPageTimer(schedule.pageTimerMinutes || (schedule.enabled ? schedule.onMinutes : 1));
     }
   }
 
@@ -1098,8 +1151,41 @@ async function ensureContentScriptLoaded(tabId, maxRetries = 2) {
   return false;
 }
 
+async function restoreDiscardedACTab(tab) {
+  if (!tab?.id || !tab.discarded) return tab;
+
+  console.log('[AC扩展] 标签页已被浏览器丢弃，正在恢复...');
+  await chrome.tabs.reload(tab.id);
+  const ready = await waitForTabReady(tab.id, 30000);
+  if (!ready) throw new Error('被丢弃的 AC 页面恢复超时');
+  return chrome.tabs.get(tab.id);
+}
+
 // ----- 切换 AC 状态 -----
 async function toggleAC(action) {
+  if (acToggleInFlight) {
+    if (acToggleInFlightAction === action) {
+      console.log(`[AC扩展] 合并重复的 toggleAC(${action}) 请求`);
+      return acToggleInFlight;
+    }
+    return {
+      success: false,
+      busy: true,
+      error: `toggleAC(${acToggleInFlightAction}) 仍在执行，本次 ${action} 不重复点击`
+    };
+  }
+
+  acToggleInFlightAction = action;
+  acToggleInFlight = toggleACOnce(action);
+  try {
+    return await acToggleInFlight;
+  } finally {
+    acToggleInFlight = null;
+    acToggleInFlightAction = null;
+  }
+}
+
+async function toggleACOnce(action) {
   // A1: 顶层幂等预检 — 先查当前 AC 真实状态，已是目标则跳过，避免多余开关噪音
   const needOn = action === 'on';
   try {
@@ -1113,16 +1199,8 @@ async function toggleAC(action) {
   const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
   
   if (tabs.length > 0) {
-    let tab = tabs[0];
-    // Edge/Chrome 可能丢弃后台标签页以节省内存，content script 会被卸载。
-    // 检测到 discarded 时先 reload 恢复，再执行操作。
-    if (tab.discarded) {
-      console.log('[AC扩展] 标签页已被浏览器丢弃，正在恢复...');
-      await chrome.tabs.reload(tab.id);
-      await waitForTabReady(tab.id, 30000);
-      // reload 后 tab 对象可能过期，重新获取
-      try { tab = await chrome.tabs.get(tab.id); } catch (_) { /* tab might be gone */ }
-    }
+    // Edge/Chrome 可能丢弃后台标签页以节省内存；只有这种情况允许恢复性 reload。
+    const tab = await restoreDiscardedACTab(tabs[0]);
     return waitUntil(_toggleOnExistingTab(tab, action));
   }
 
@@ -1135,74 +1213,40 @@ async function _toggleOnExistingTab(tab, action) {
   // 先探测 content script 是否就绪，未就绪则用 scripting 兜底注入
   const ready = await ensureContentScriptLoaded(tab.id);
   if (!ready) {
-    return retryExistingTabToggle(tab.id, action, 'content script 注入失败');
+    return { success: false, error: 'content script 注入失败' };
   }
 
   try {
     const result = await chrome.tabs.sendMessage(tab.id, { action });
     console.log(`[AC扩展] ${action} 命令返回:`, result);
     if (!result?.success) {
-      console.warn('[AC扩展] 页面返回未确认，重试:', result);
-      return retryExistingTabToggle(tab.id, action, result?.error || `${action} 命令未确认`);
+      console.warn('[AC扩展] 页面返回未确认，本次不重复发送:', result);
+      return {
+        success: false,
+        tabId: tab.id,
+        result,
+        error: result?.error || `${action} 命令未确认`
+      };
     }
     return { success: true, tabId: tab.id, result };
   } catch (e) {
-    console.error('[AC扩展] 发送消息失败，重试:', e?.message);
-    return retryExistingTabToggle(tab.id, action, e?.message || String(e));
+    console.error('[AC扩展] 发送消息失败，本次不重复发送:', e?.message);
+    return { success: false, tabId: tab.id, error: e?.message || String(e) };
   }
 }
 
 async function _toggleOnNewTab(tabId, action) {
-  return retryToggle(action, 4, tabId, true);
-}
-
-async function retryExistingTabToggle(tabId, action, originalError = '') {
-  try {
-    await chrome.tabs.reload(tabId);
-    await waitForTabReady(tabId, 30000);
-    await ensureContentScriptLoaded(tabId);
-  } catch (e) {
-    console.warn('[AC扩展] 刷新页面失败，尝试 scripting 兜底:', e?.message);
-    await ensureContentScriptLoaded(tabId);
+  const tab = await getReadyACTab(tabId, 30000);
+  if (!tab?.id) {
+    return { success: false, error: '新建的 AC 页面未就绪' };
   }
 
-  const result = await waitUntil(retryToggle(action, 4, tabId, false));
-  if (!result?.success && originalError) {
-    return { ...result, error: `${originalError}; 刷新重试后仍失败：${result?.error || '未知错误'}` };
+  const result = await _toggleOnExistingTab(tab, action);
+  // 只关闭扩展自动创建的标签，不能关闭用户原本打开的 HKUST 页面。
+  if (result?.success) {
+    chrome.alarms.create(`ac-close-tab-${tabId}`, { delayInMinutes: 1 });
   }
   return result;
-}
-
-async function retryToggle(action, retries, preferredTabId = null, closeAfterSuccess = false) {
-  for (let i = 0; i < retries; i++) {
-    const tab = await getReadyACTab(preferredTabId, 30000);
-    if (!tab?.id) {
-      console.log(`[AC扩展] 重试 ${i + 1} 未找到可用 AC 页面`);
-      continue;
-    }
-
-    // 官方推荐：每次重试前确保 content script 已注入
-    await ensureContentScriptLoaded(tab.id);
-
-    try {
-      const result = await chrome.tabs.sendMessage(tab.id, { action });
-      if (!result?.success) {
-        console.log(`[AC扩展] 重试 ${i + 1} 未确认:`, result);
-        continue;
-      }
-      console.log(`[AC扩展] 重试成功 (${i + 1}/${retries})`);
-      // 只关闭扩展自动创建的标签，不能关闭用户原本打开的 HKUST 页面。
-      if (closeAfterSuccess && preferredTabId) {
-        chrome.alarms.create(`ac-close-tab-${preferredTabId}`, { delayInMinutes: 1 });
-      }
-      return { success: true, tabId: tab.id, result };
-    } catch (e) {
-      console.log(`[AC扩展] 重试 ${i + 1} 失败:`, e?.message || String(e));
-      await sleep(750);
-    }
-  }
-  console.error('[AC扩展] 所有重试失败');
-  return { success: false, error: 'AC 页面未就绪，无法完成开关操作' };
 }
 
 async function getReadyACTab(preferredTabId = null, timeoutMs = 30000) {
@@ -1382,7 +1426,18 @@ async function getScheduleSnapshot(lite = false) {
 }
 
 async function toggleNowAndSync(action) {
-  const toggleResult = await toggleAC(action);
+  if (action === 'off') {
+    const timerResult = await requestTimerBasedShutdown('toggle-now-off');
+    const status = await getCurrentACStatus();
+    return {
+      success: !!timerResult?.success,
+      error: timerResult?.error,
+      schedule: { ...schedule, actualStatus: status },
+      result: timerResult
+    };
+  }
+
+  const toggleResult = await toggleAC('on');
 
   if (!toggleResult?.success) {
     return {
@@ -1534,9 +1589,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         setNextTriggerAt(0);
         schedule.alarmCreatedAt = 0;
         schedule.alarmDelayMinutes = 0;
-        schedule.pageTimerMinutes = null;
-        schedule.pageTimerError = '';
-        schedule.pageTimerRetryAt = 0;
         await chrome.alarms.clear('ac-pwm');
         await chrome.alarms.clear('ac-page-timer-retry');
         await chrome.alarms.clear('ac-badge-tick');
@@ -1544,9 +1596,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         await updateBadge();
         // B1: 先持久化"已关闭"状态，再执行关机 — 确保即便 toggleAC 因 SW 终止而丢失，状态已写入 storage
         await persistSchedule('updateSchedule');
-        offResult = await toggleAC('off');
+        offResult = await requestTimerBasedShutdown('schedule-disabled');
         if (!offResult?.success) {
-          schedule.pageTimerError = `定时已关闭，但关机命令未确认：${offResult?.error || '未知错误'}`;
+          schedule.pageTimerError = `定时已关闭，但页面关机定时器未确认：${offResult?.error || '未知错误'}`;
         }
       } else if (!wasEnabled || restart) {
         schedule.pwmState = 'on';

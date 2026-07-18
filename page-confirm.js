@@ -30,14 +30,19 @@
   if (window.__AC_EXTENSION_TOGGLE_PATCHED__) return;
   window.__AC_EXTENSION_TOGGLE_PATCHED__ = true;
 
+  const MAX_AC_SWITCH_CLICKS = 3;
+  const AC_STATE_SETTLE_MS = 10000;
+  let acStateRequestInFlight = null;
+  let acStateRequestTarget = null;
+
   window.addEventListener('__AC_EXTENSION_TOGGLE_AC__', async (event) => {
     const { requestId, action } = event.detail || {};
     if (!requestId || (action !== 'on' && action !== 'off')) return;
 
     const needOn = action === 'on';
-    const result = await toggleACInPageWorld(needOn, action);
+    const result = await requestACState(needOn);
     window.dispatchEvent(new CustomEvent('__AC_EXTENSION_TOGGLE_AC_RESULT__', {
-      detail: { requestId, ...result }
+      detail: { requestId, action, ...result }
     }));
   });
 
@@ -70,39 +75,101 @@
     return { isOn: null, error: '主世界无法判断 AC 状态' };
   }
 
-  async function toggleACInPageWorld(needOn, action) {
-    for (let attempt = 1; attempt <= 3; attempt++) {
-      const sw = await waitForACSwitchInPageWorld(5000);
-      if (!sw) return { success: false, error: '主世界等待 AC 开关超时' };
-
-      const before = getACStatusInPageWorld();
-      console.log(`[AC扩展] 主世界 AC 状态(尝试 ${attempt}/3):`, before);
-      // 仅 on 可快速跳过；off 必须实际点击，防止 aria-checked 假阴性导致虚假成功
-      if (action === 'on' && before.isOn === needOn) {
-        return { success: true, alreadyDone: true, verified: true, action, status: before, via: 'main-world' };
+  async function requestACState(targetState) {
+    if (acStateRequestInFlight) {
+      if (acStateRequestTarget === targetState) {
+        console.log(`[AC扩展] ensureACState: 合并重复的 ${targetState ? 'ON' : 'OFF'} 请求`);
+        return acStateRequestInFlight;
       }
-
-      dispatchUserClickInPageWorld(sw);
-      console.log('[AC扩展] 主世界已点击 AC 开关');
-
-      const confirmed = await clickConfirmDialogInPageWorld(5000);
-      const verified = await waitForTargetStatusInPageWorld(needOn, 6000);
-      if (verified.success) {
-        // 稳定化二次验证：AntD 可能在 API 失败后回滚状态。
-        // 等 2 秒后复检，若已回滚则当作本次尝试失败，继续下一轮。
-        await sleepInPageWorld(2500);
-        const stable = getACStatusInPageWorld();
-        if (stable.isOn === needOn) {
-          return { success: true, verified: true, stable, confirmed, action, attempts: attempt, status: stable, via: 'main-world' };
-        }
-        console.warn('[AC扩展] 主世界状态回滚检测：点击后短暂=' + needOn + '，稳定后=' + stable.isOn);
-      } else {
-        console.warn('[AC扩展] 主世界点击后状态未改变，准备重试:', verified.status);
-      }
-      await sleepInPageWorld(1000);
+      return {
+        success: false,
+        busy: true,
+        error: `另一个 ${acStateRequestTarget ? 'ON' : 'OFF'} 操作仍在进行，本次请求不重复点击`,
+        via: 'main-world-ensureACState'
+      };
     }
 
-    return { success: false, verified: false, action, status: getACStatusInPageWorld(), error: `主世界已尝试 3 次，但 AC 未变成 ${action}` };
+    acStateRequestTarget = targetState;
+    acStateRequestInFlight = ensureACState(targetState);
+    try {
+      return await acStateRequestInFlight;
+    } finally {
+      acStateRequestInFlight = null;
+      acStateRequestTarget = null;
+    }
+  }
+
+  // 递归状态收敛：每轮只做「查状态 → 必要时 click 一次 → 等 10 秒 → 递归复查」。
+  // 所有物理开关尝试都集中在这里，content/background 不再叠加点击重试；
+  // 当前生产调度仅传入 true（ON），OFF 完全由页面定时器执行。
+  async function ensureACState(targetState, clickCount = 0) {
+    const current = getACStatusInPageWorld();
+    if (typeof current.isOn === 'boolean' && current.isOn === targetState) {
+      console.log(`[AC扩展] ensureACState: 已达到 ${targetState ? 'ON' : 'OFF'}，点击数=${clickCount}`);
+      return {
+        success: true,
+        alreadyDone: clickCount === 0,
+        verified: true,
+        stable: true,
+        status: current,
+        clicks: clickCount,
+        via: 'main-world-ensureACState'
+      };
+    }
+
+    if (clickCount >= MAX_AC_SWITCH_CLICKS) {
+      console.warn(`[AC扩展] ensureACState: ${MAX_AC_SWITCH_CLICKS} 次点击后仍未达到 ${targetState ? 'ON' : 'OFF'}`);
+      return {
+        success: false,
+        verified: false,
+        status: current,
+        clicks: clickCount,
+        error: `主世界已点击 ${MAX_AC_SWITCH_CLICKS} 次仍未达到 ${targetState ? 'ON' : 'OFF'}`,
+        via: 'main-world-ensureACState'
+      };
+    }
+
+    const sw = await waitForACSwitchInPageWorld(5000);
+    if (!sw) {
+      return {
+        success: false,
+        verified: false,
+        status: current,
+        clicks: clickCount,
+        error: '主世界等待 AC 开关超时',
+        via: 'main-world-ensureACState'
+      };
+    }
+
+    // 等待 DOM 的过程中状态可能已被另一设备改变，点击前必须再检查一次。
+    const beforeClick = getACStatusInPageWorld();
+    if (typeof beforeClick.isOn === 'boolean' && beforeClick.isOn === targetState) {
+      return {
+        success: true,
+        alreadyDone: clickCount === 0,
+        verified: true,
+        stable: true,
+        status: beforeClick,
+        clicks: clickCount,
+        via: 'main-world-ensureACState'
+      };
+    }
+
+    console.log(`[AC扩展] ensureACState: 当前=${beforeClick.isOn}，目标=${targetState}，执行第 ${clickCount + 1} 次单击`);
+    if (!clickElementOnceInPageWorld(sw)) {
+      return {
+        success: false,
+        verified: false,
+        status: beforeClick,
+        clicks: clickCount,
+        error: '主世界 AC 开关 click() 调用失败',
+        via: 'main-world-ensureACState'
+      };
+    }
+
+    await clickConfirmDialogInPageWorld(3000);
+    await sleepInPageWorld(AC_STATE_SETTLE_MS);
+    return ensureACState(targetState, clickCount + 1);
   }
 
   function findACSwitchInPageWorld() {
@@ -130,43 +197,17 @@
     return legacy || switches[0] || null;
   }
 
-  function dispatchUserClickInPageWorld(element) {
+  function clickElementOnceInPageWorld(element) {
+    if (!element) return false;
     element.scrollIntoView?.({ block: 'center', inline: 'center' });
     element.focus?.();
-
-    // Ant Design 的 switch 是 React button,真正切换在 click handler 上。
-    // 先 .click();某些场景下 .click() 不被 React 识别为 trusted,补一轮 pointer/mouse 序列。
-    // 用户报告"到时间不关空调"的根因之一:.click() 在某些 React 状态下静默失败,
-    // 补 dispatchEvent + keyboard Enter/Space 三重兜底。
-    if (element.matches?.('button.ant-switch[role="switch"]')) {
-      try { element.click?.(); } catch (_) {}
-      const options = { bubbles: true, cancelable: true, view: window, composed: true, button: 0 };
-      for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
-        try {
-          const event = type.startsWith('pointer')
-            ? new PointerEvent(type, options)
-            : new MouseEvent(type, options);
-          element.dispatchEvent(event);
-        } catch (_) {}
-      }
-      // keyboard 兜底:React 通常监听 keydown Space/Enter 切换 switch
-      try {
-        element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: ' ', code: 'Space', keyCode: 32 }));
-        element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13 }));
-      } catch (_) {}
-      return;
+    try {
+      element.click();
+      return true;
+    } catch (error) {
+      console.warn('[AC扩展] 单次 click() 失败:', error?.message || String(error));
+      return false;
     }
-
-    const options = { bubbles: true, cancelable: true, view: window, composed: true };
-    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
-      try {
-        const event = type.startsWith('pointer')
-          ? new PointerEvent(type, options)
-          : new MouseEvent(type, options);
-        element.dispatchEvent(event);
-      } catch (_) {}
-    }
-    element.click?.();
   }
 
   async function clickConfirmDialogInPageWorld(timeoutMs) {
@@ -181,7 +222,7 @@
         return texts.includes(text) || button.matches('.ant-btn-primary') || String(button.className || '').includes('ant-btn-primary');
       });
       if (btn) {
-        dispatchUserClickInPageWorld(btn);
+        clickElementOnceInPageWorld(btn);
         return true;
       }
       await sleepInPageWorld(200);
@@ -197,16 +238,6 @@
       await sleepInPageWorld(300);
     }
     return null;
-  }
-
-  async function waitForTargetStatusInPageWorld(needOn, timeoutMs) {
-    const start = Date.now();
-    while (Date.now() - start <= timeoutMs) {
-      const status = getACStatusInPageWorld();
-      if (status.isOn === needOn) return { success: true, status };
-      await sleepInPageWorld(300);
-    }
-    return { success: false, status: getACStatusInPageWorld() };
   }
 
   function sleepInPageWorld(ms) {

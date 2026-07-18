@@ -94,7 +94,7 @@
 
   "contentTimeout": { "message": "Timeout waiting for AC switch. Ensure page is fully loaded" },
   "contentRetryExhausted": { "message": "Tried 3 times, AC did not become $1" },
-  "contentCrossDayLimit": { "message": "Page timer only supports same-day; cross-day PWM will use extension alarms" },
+  "contentCrossDayLimit": { "message": "The page timer supports direct cross-midnight time input" },
   "contentNoInput": { "message": "Could not find page timer input" },
   "contentInputRejected": { "message": "Input rejected time value $1" },
 

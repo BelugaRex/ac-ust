@@ -139,8 +139,9 @@ function computeConfigDiff(localSchedule, remote) {
 // 返回 null，不干预，功能等于关闭。所以本机制对"未验证同步"的场景是安全的。
 
 // 解析页面 "Power-off after" picker 的 HH:MM 值为绝对时戳。
+// 页面允许直接输入跨午夜时间（例如 23:50 输入 00:10）。同日时刻已过时，
+// 若把它解释为次日后距离当前不超过 12 小时，则按次日处理；否则视为陈旧值。
 // 返回 { targetMs, valid } 或 null（格式非法）。
-// valid=false 表示目标时刻已过——定时器可能已触发或被清空。
 function parsePageTimerValue(value, now = Date.now()) {
   if (!value || typeof value !== 'string') return null;
   const m = value.match(/^(\d{2}):(\d{2})$/);
@@ -151,7 +152,15 @@ function parsePageTimerValue(value, now = Date.now()) {
 
   const d = new Date(now);
   const target = new Date(d.getFullYear(), d.getMonth(), d.getDate(), hh, mm, 0, 0);
-  const targetMs = target.getTime();
+  let targetMs = target.getTime();
+  if (targetMs <= now) {
+    const nextDayTarget = new Date(target);
+    nextDayTarget.setDate(nextDayTarget.getDate() + 1);
+    const nextDayTargetMs = nextDayTarget.getTime();
+    if (nextDayTargetMs - now <= 12 * 60 * 60 * 1000) {
+      targetMs = nextDayTargetMs;
+    }
+  }
   return { targetMs, valid: targetMs > now };
 }
 

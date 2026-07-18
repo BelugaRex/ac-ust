@@ -1,6 +1,6 @@
 // ============================================================
 // Content Script - 注入到 w5.ab.ust.hk/njggt/app/* 页面
-// 负责与页面交互：读取状态、点击开关
+// 负责隔离世界状态读取，并把开关目标委派给主世界 page-confirm.js
 // ============================================================
 
 // 幂等守卫：scripting.executeScript 兜底可能与 manifest content_scripts
@@ -124,98 +124,32 @@ async function getAuthoritativeACStatus() {
 }
 
 // ----- 切换 AC 开关 -----
-async function toggleACSwitch(targetAction) {
+  async function toggleACSwitch(targetAction) {
   console.log(`[AC扩展] 准备切换 AC: ${targetAction}`);
-  const needOn = (targetAction === 'on');
 
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    // 等待开关元素出现 (React 可能需要时间渲染)
-    const switchEl = await waitForSwitch(10000);
-    if (!switchEl) {
-      return { success: false, error: t('contentTimeout') };
-    }
-    
-    // 先检查当前状态
-    const currentStatus = getACStatus();
-    console.log(`[AC扩展] 当前状态(尝试 ${attempt}/3):`, currentStatus);
-    
-    // 判断是否需要切换。
-    // 重要：关机请求不能完全信任隔离世界的状态判断。
-    // 页面实际是 ON 时，隔离世界偶发会读成 OFF，导致直接 alreadyDone 而不点击。
-    // 因此 off 必须交给主世界再次判断/执行；on 保留快速跳过。
-    if (targetAction === 'on' && currentStatus.isOn === needOn) {
-      console.log(`[AC扩展] AC 已处于目标状态 (${targetAction})，无需操作`);
-      return { success: true, alreadyDone: true, action: targetAction, verified: true, status: currentStatus };
-    }
-
-    if (typeof currentStatus.isOn !== 'boolean') {
-      console.warn('[AC扩展] 当前 AC 状态未知，仍尝试点击开关');
-    }
-    
-    // 关键: 覆盖 window.confirm 自动确认
-    const originalConfirm = window.confirm;
-    window.confirm = function(msg) {
-      console.log('[AC扩展] 自动确认弹窗:', msg);
-      window.confirm = originalConfirm;
-      return true;
-    };
-    
-    const mainWorldResult = await requestMainWorldToggle(targetAction, 45000);
-    if (mainWorldResult?.success) {
-      console.log('[AC扩展] 主世界切换成功:', mainWorldResult);
-      return mainWorldResult;
-    }
-    if (mainWorldResult) {
-      console.warn('[AC扩展] 主世界切换未成功，回退到隔离世界点击:', mainWorldResult);
-    }
-
-    // 回退：点击开关。Ant Design 的开关本身就是 button；旧版页面点 input/label 或容器。
-    const clickTarget = getSwitchClickTarget(switchEl);
-    dispatchUserClick(clickTarget);
-    console.log('[AC扩展] 已模拟用户点击开关');
-
-    const confirmed = await clickConfirmDialog(5000);
-    if (confirmed) {
-      console.log('[AC扩展] 已自动确认页面弹窗');
-    }
-    
-    // 等2秒后恢复 confirm
-    setTimeout(() => {
-      if (window.confirm !== originalConfirm) {
-        window.confirm = originalConfirm;
-      }
-    }, 2000);
-
-    const verifiedStatus = await waitForTargetACStatus(needOn, 8000);
-    if (verifiedStatus.success) {
-      // 稳定化二次验证：和主世界一致，等 2.5s 复检防 AntD API 回滚
-      await sleep(2500);
-      const stable = getACStatus();
-      if (stable.isOn === needOn) {
-        return {
-          success: true,
-          action: targetAction,
-          confirmed,
-          verified: true,
-          stable: true,
-          attempts: attempt,
-          status: stable
-        };
-      }
-      console.warn('[AC扩展] 隔离世界状态回滚检测：点击后短暂=' + needOn + '，稳定后=' + stable.isOn);
-    }
-
-    console.warn(`[AC扩展] 点击后状态未变成 ${targetAction}，准备重试`, verifiedStatus.status);
-    await sleep(1000);
+  // 隔离世界只确认页面已渲染，然后把目标状态交给主世界 ensureACState()。
+  // 状态预检、单次 click、10 秒等待与递归复查全部由主世界统一负责。
+  const switchEl = await waitForSwitch(10000);
+  if (!switchEl) {
+    return { success: false, error: t('contentTimeout') };
   }
 
-  const finalStatus = getACStatus();
+  const mainWorldResult = await requestMainWorldToggle(targetAction, 65000);
+
+  if (mainWorldResult?.success) {
+    console.log('[AC扩展] 主世界切换成功:', mainWorldResult);
+    return mainWorldResult;
+  }
+
+  // 主世界失败后不在隔离世界接力点击；下一步只交给后台延迟重试。
+  console.warn('[AC扩展] 主世界切换未成功，隔离世界不再接力点击（避免双切噪音）:', mainWorldResult || 'null');
   return {
     success: false,
     action: targetAction,
     verified: false,
-    status: finalStatus,
-    error: t('contentRetryExhausted', targetAction)
+    via: 'isolated-delegated-to-main',
+    mainWorldResult,
+    error: mainWorldResult?.error || t('contentRetryExhausted', targetAction)
   };
 }
 
@@ -283,97 +217,6 @@ async function requestMainWorldStatus(timeoutMs) {
   });
 }
 
-async function waitForTargetACStatus(needOn, timeoutMs) {
-  const startTime = Date.now();
-  while (Date.now() - startTime <= timeoutMs) {
-    const status = getACStatus();
-    if (status.isOn === needOn) {
-      return { success: true, status };
-    }
-    await sleep(300);
-  }
-  return { success: false, status: getACStatus() };
-}
-
-function getSwitchClickTarget(switchEl) {
-  if (switchEl.matches?.('button.ant-switch')) return switchEl;
-  const input = switchEl.querySelector?.('input[type="checkbox"]');
-  if (input) return input;
-  return switchEl.querySelector?.('label') || switchEl;
-}
-
-function dispatchUserClick(element) {
-  if (!element) return;
-  element.scrollIntoView?.({ block: 'center', inline: 'center' });
-  element.focus?.();
-
-  // Ant Design switch 是 React button，必须触发 click；只触发一次，避免双切。
-  if (element.matches?.('button.ant-switch[role="switch"]')) {
-    try { element.click?.(); } catch (_) {}
-    const switchOpts = { bubbles: true, cancelable: true, view: window, composed: true, button: 0 };
-    for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
-      try {
-        const event = type.startsWith('pointer')
-          ? new PointerEvent(type, switchOpts)
-          : new MouseEvent(type, switchOpts);
-        element.dispatchEvent(event);
-      } catch (_) {}
-    }
-    try {
-      element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: ' ', code: 'Space', keyCode: 32 }));
-      element.dispatchEvent(new KeyboardEvent('keydown', { bubbles: true, cancelable: true, key: 'Enter', code: 'Enter', keyCode: 13 }));
-    } catch (_) {}
-    return;
-  }
-
-  const options = { bubbles: true, cancelable: true, view: window };
-  for (const type of ['pointerdown', 'mousedown', 'pointerup', 'mouseup']) {
-    try {
-      const event = type.startsWith('pointer')
-        ? new PointerEvent(type, options)
-        : new MouseEvent(type, options);
-      element.dispatchEvent(event);
-    } catch (_) {
-      // 某些浏览器上下文没有 PointerEvent；继续走 MouseEvent / click。
-    }
-  }
-  element.click?.();
-
-  if (element.matches?.('input[type="checkbox"]')) {
-    element.dispatchEvent(new Event('input', { bubbles: true }));
-    element.dispatchEvent(new Event('change', { bubbles: true }));
-  }
-}
-
-// ----- 自动点击 Ant Design / 页面内确认弹窗 -----
-async function clickConfirmDialog(timeoutMs) {
-  const startTime = Date.now();
-  const confirmTexts = ['确定', '确认', 'OK', 'Ok', 'ok', 'Yes', 'YES'];
-
-  while (Date.now() - startTime <= timeoutMs) {
-    const buttons = Array.from(document.querySelectorAll(
-      '.ant-modal-confirm-btns button, .ant-modal button, .ant-popconfirm-buttons button, [role="dialog"] button'
-    ));
-
-    const confirmButton = buttons.find((button) => {
-      const text = (button.textContent || '').trim();
-      const className = button.className || '';
-      return confirmTexts.includes(text)
-        || button.matches('.ant-btn-primary')
-        || String(className).includes('ant-btn-primary');
-    });
-
-    if (confirmButton) {
-      dispatchUserClick(confirmButton);
-      return true;
-    }
-
-    await sleep(200);
-  }
-
-  return false;
-}
-
 // ----- 等待开关元素出现 (带超时) -----
 function waitForSwitch(timeoutMs) {
   return new Promise((resolve) => {
@@ -398,13 +241,6 @@ function waitForSwitch(timeoutMs) {
 
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-function getNextMidnightTimestamp() {
-  const next = new Date();
-  next.setDate(next.getDate() + 1);
-  next.setHours(0, 1, 0, 0);
-  return next.getTime();
 }
 
 function setNativeInputValue(input, value) {
@@ -530,15 +366,6 @@ async function setPagePowerOffTimer(totalMinutes) {
     const target = new Date(now.getTime() + requestedMinutes * 60000);
     const crossesMidnight = target.toDateString() !== now.toDateString();
 
-    if (crossesMidnight) {
-      return {
-        success: false,
-        crossesMidnight: true,
-        retryAt: getNextMidnightTimestamp(),
-        error: t('contentCrossDayLimit')
-      };
-    }
-
     const pickerInput = findPowerOffTimerInput();
     if (!pickerInput) {
       return { success: false, error: t('contentNoInput') };
@@ -548,7 +375,7 @@ async function setPagePowerOffTimer(totalMinutes) {
     const mins = target.getMinutes();
     const value = `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
 
-    console.log(`[AC扩展] 模拟手动输入页面关机时间: ${value} (${requestedMinutes} 分钟后)`);
+    console.log(`[AC扩展] 模拟手动输入页面关机时间: ${value} (${requestedMinutes} 分钟后${crossesMidnight ? '，跨午夜' : ''})`);
 
     const typed = await typeTimeIntoPickerInput(pickerInput, value);
     if (!typed) {
@@ -561,7 +388,7 @@ async function setPagePowerOffTimer(totalMinutes) {
       minutes: mins,
       requestedMinutes,
       actualDelayMinutes: requestedMinutes,
-      crossesMidnight: false,
+      crossesMidnight,
       value: pickerInput.value || value
     };
   } catch (e) {
