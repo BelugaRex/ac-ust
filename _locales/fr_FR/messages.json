@@ -332,8 +332,8 @@
     "description": "content.js: 重试耗尽错误。$1=目标状态"
   },
   "contentCrossDayLimit": {
-    "message": "页面定时器只能选择当天时间，跨日 PWM 将由扩展闹钟继续执行",
-    "description": "content.js: 跨日限制提示"
+    "message": "页面定时器支持直接输入跨午夜时间",
+    "description": "保留键：跨午夜直接输入提示"
   },
   "contentNoInput": {
     "message": "未找到页面定时器输入框",
