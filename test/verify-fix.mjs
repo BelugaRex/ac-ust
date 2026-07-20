@@ -63,7 +63,7 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
         if (!handler) return undefined;
         return handler(msg);
       },
-      getManifest: () => ({ version: '0.5.12' }),
+      getManifest: () => ({ version: '0.5.13' }),
       getPlatformInfo: async () => ({ os: 'win' }),
       onConnect: { addListener() {} },
       onUpdateAvailable: { addListener() {} }
@@ -811,7 +811,7 @@ async function runTests() {
     ? backgroundSource.slice(newTabStart, newTabEnd)
     : '';
 
-  const setTimerStart = backgroundSource.indexOf('async function setPageTimer(minutes)');
+  const setTimerStart = backgroundSource.indexOf('async function setPageTimer(minutes,');
   const setTimerEnd = backgroundSource.indexOf('\nasync function requestTimerBasedShutdown', setTimerStart);
   const setTimerBody = setTimerStart >= 0 && setTimerEnd > setTimerStart
     ? backgroundSource.slice(setTimerStart, setTimerEnd)
@@ -852,9 +852,11 @@ async function runTests() {
   assertPass(!contentSource.includes("error: t('contentCrossDayLimit')")
       && contentSource.includes('crossesMidnight,'),
     '9M: Power-off after 跨午夜时间直接输入，不再被代码拒绝');
-  assertPass(countOccurrences(backgroundSource, 'chrome.tabs.reload(') === 1
-      && backgroundSource.includes('async function restoreDiscardedACTab(tab)'),
-    '9N: 页面只会在浏览器明确 discarded 时恢复一次，无 PWM/失败重试刷新');
+  assertPass(countOccurrences(backgroundSource, 'chrome.tabs.reload(') === 2
+      && backgroundSource.includes('async function restoreDiscardedACTab(tab)')
+      && backgroundSource.includes('if (sourceWasAutoCreated && sourceTab?.id)')
+      && backgroundSource.includes('await chrome.tabs.reload(verifierTabId)'),
+    '9N: 刷新仅用于 discarded 恢复或扩展自建验证页，绝不刷新用户已有 AC 页面');
   assertPass(setTimerBody.includes('chrome.tabs.create({ url: AC_PAGE, active: false })')
       && setTimerBody.includes('restoreDiscardedACTab(tab)'),
     '9O: 页面定时器缺少可用标签时只创建隐藏 AC 页恢复，不刷新正常页面');
@@ -870,6 +872,119 @@ async function runTests() {
   assertPass(i18nSource.includes("querySelectorAll('[data-i18n-title]')"),
     '9R: i18n 加载器会翻译 data-i18n-title 属性');
 
+  // ===== 用例 10: v0.5.13 关机不可漏契约 =====
+  // 防止 v0.5.12 "OFF 零点击" 策略下的「忘记关机」回归：ON 路径推进 pwmState
+  // 前 MUST 确认 setPageTimer 成功；失败时保持 pwmState='on' + 提前 return，
+  // 不允许把未推进的相位 sync 给对端。pwmBody 在用例 9 中已读出。
+  console.log('\n\n=== 用例 10: 关机不可漏契约 (v0.5.13) ===\n');
+
+  // 10A: ON 路径在 runPwmStep 之内显式 await setPageTimer(schedule.onMinutes)
+  const setPageTimerCallIdx = pwmBody.indexOf('await setPageTimer(schedule.onMinutes');
+  assertPass(setPageTimerCallIdx > 0,
+    '10A: ON 路径在 runPwmStep 之内显式 await setPageTimer(schedule.onMinutes)');
+
+  // 10B: 推进 schedule.pwmState = nextState 必须出现在 setPageTimer 调用之后
+  // 限字符距离 < 2000 是宽松上限——足够容纳现有失败分支的 if 块，又能在
+  // 旧代码回退（setPageTimer 在 pwmState 推进之后的尾部调用）时失败。
+  const pwmStateAssignIdx = pwmBody.indexOf('schedule.pwmState = nextState');
+  assertPass(pwmStateAssignIdx > 0
+      && setPageTimerCallIdx > 0
+      && setPageTimerCallIdx < pwmStateAssignIdx
+      && pwmStateAssignIdx - setPageTimerCallIdx < 2000,
+    '10B: ON 路径 setPageTimer 必须先于 schedule.pwmState = nextState（避免推进后 setPageTimer 静默失败的「忘记关机」）');
+
+  // 10C: ON 路径显式用 pageTimerResult 检查 setPageTimer 成功
+  assertPass(pwmBody.includes('const pageTimerResult = await setPageTimer(schedule.onMinutes')
+      && pwmBody.includes('if (!pageTimerResult?.success)'),
+    '10C: ON 路径用 pageTimerResult 显式校验 setPageTimer 成功后才推进 pwmState');
+
+  // 10D: 失败分支用 PWM-pageTimer-failed 标签 + 1 分钟后整轮重试
+  assertPass(pwmBody.includes("createPwmAlarmWithVerify(1, 'PWM-pageTimer-failed')"),
+    '10D: setPageTimer 失败后用 PWM-pageTimer-failed 1 分钟后重试整轮 runPwmStep（下次 A1 预检跳过点击，只重试 setPageTimer）');
+
+  // 10E: 失败分支在 syncScheduleToSync('runPwmStep') 前提前 return
+  const setTimerFailIdx = pwmBody.indexOf('!pageTimerResult?.success');
+  const setTimerReturnIdx = pwmBody.indexOf('return;', setTimerFailIdx);
+  const syncRunAfterIdx = pwmBody.indexOf("syncScheduleToSync('runPwmStep')", setTimerFailIdx);
+  assertPass(setTimerFailIdx > 0
+      && setTimerReturnIdx > 0
+      && syncRunAfterIdx > 0
+      && setTimerReturnIdx < syncRunAfterIdx,
+    '10E: setPageTimer 失败分支在 sync 前提前 return，避免把未推进的 pwmState 推给对端让对端帮自己推进相位');
+
+  // 10F: 失败时 pageTimerError 写入明确的失败原因，便于诊断面板排障
+  assertPass(pwmBody.includes("pageTimerError = `开机已成功，但页面关机定时器未确认"),
+    '10F: setPageTimer 失败时诊断 pageTimerError 写明确文案，便于排障');
+
+  // ===== 用例 11: v0.5.13 新鲜页面定时器确认与旁路保护 =====
+  // DOM 实测：已设置时 .ant-picker input 的 value/title 均为 HH:MM，关机后均为空。
+  // 不能把当前 React 页面刚写入的 value 当作服务器持久化成功；必须从全新页面再读一次。
+  console.log('\n\n=== 用例 11: 新鲜页面定时器确认与旁路保护 (v0.5.13) ===\n');
+
+  const verifyStart = backgroundSource.indexOf('async function verifyPageTimerPersistence(');
+  const verifyEnd = backgroundSource.indexOf('\n// 关机定时器设置失败时', verifyStart);
+  const verifyBody = verifyStart >= 0 && verifyEnd > verifyStart
+    ? backgroundSource.slice(verifyStart, verifyEnd)
+    : '';
+  const retryStart = backgroundSource.indexOf('async function schedulePageTimerRetry(');
+  const retryEnd = backgroundSource.indexOf('\n// ----- 设置页面自带定时器', retryStart);
+  const retryBody = retryStart >= 0 && retryEnd > retryStart
+    ? backgroundSource.slice(retryStart, retryEnd)
+    : '';
+  const repairStart = backgroundSource.indexOf('async function repairScheduleClock()');
+  const repairEnd = backgroundSource.indexOf('\nasync function getScheduleSnapshot', repairStart);
+  const repairBody = repairStart >= 0 && repairEnd > repairStart
+    ? backgroundSource.slice(repairStart, repairEnd)
+    : '';
+  const toggleStart = backgroundSource.indexOf('async function toggleNowAndSync(action)');
+  const toggleEnd = backgroundSource.indexOf('\nasync function ensureDiagnosticAlarms', toggleStart);
+  const toggleBody = toggleStart >= 0 && toggleEnd > toggleStart
+    ? backgroundSource.slice(toggleStart, toggleEnd)
+    : '';
+  const advanceStart = backgroundSource.indexOf('async function advanceExpiredAlarmToNextBoundary(');
+  const advanceEnd = backgroundSource.indexOf('\nasync function restoreIntervalAlarmFromStorage', advanceStart);
+  const advanceBody = advanceStart >= 0 && advanceEnd > advanceStart
+    ? backgroundSource.slice(advanceStart, advanceEnd)
+    : '';
+
+  assertPass(verifyBody.includes('if (sourceWasAutoCreated && sourceTab?.id)')
+      && verifyBody.includes('await chrome.tabs.reload(verifierTabId)')
+      && verifyBody.includes("chrome.tabs.create({ url: AC_PAGE, active: false })"),
+    '11A: 自动创建页刷新自身验证；用户已有页改用临时隐藏验证页，不打扰用户');
+  assertPass(verifyBody.includes("{ action: 'getPageTimer' }")
+      && verifyBody.includes('actualValue !== expectedValue')
+      && verifyBody.includes('await chrome.tabs.remove(verifierTabId)'),
+    '11B: 新鲜页必须读回同一 HH:MM，临时验证页完成后立即回收');
+  const verificationCallIdx = setTimerBody.indexOf('verifyPageTimerPersistence(expectedValue, tab, autoCreatedTabId === tab.id)');
+  const proofWriteIdx = setTimerBody.indexOf('schedule.pageTimerMinutes = result.actualDelayMinutes || minutes');
+  assertPass(verificationCallIdx > 0
+      && proofWriteIdx > verificationCallIdx
+      && setTimerBody.includes('verified: true'),
+    '11C: setPageTimer 仅在新鲜页确认后才写入页面关机证明');
+  assertPass(retryBody.includes('schedule.pageTimerRetryMinutes = retryMinutes')
+      && retryBody.includes("createAlarm('ac-page-timer-retry'")
+      && backgroundSource.includes('const retryMinutes = schedule.pageTimerRetryMinutes'),
+    '11D: 非 PWM 的关机请求失败会保存分钟数并由 ac-page-timer-retry 持续重试');
+  const repairTimerIdx = repairBody.indexOf('await setPageTimer(schedule.onMinutes');
+  const repairOffIdx = repairBody.indexOf("schedule.pwmState = currentOn ? 'off' : 'on';");
+  assertPass(repairTimerIdx > 0
+      && repairOffIdx > repairTimerIdx
+      && repairBody.includes("'repair-pageTimer-failed'"),
+    '11E: 时钟修复仅在新鲜确认页面定时器后才恢复 OFF 相位');
+  const toggleTimerIdx = toggleBody.indexOf('await setPageTimer(schedule.onMinutes');
+  const toggleOffIdx = toggleBody.indexOf("schedule.pwmState = currentOn ? 'off' : 'on';");
+  assertPass(toggleTimerIdx > 0
+      && toggleOffIdx > toggleTimerIdx
+      && toggleBody.includes("'toggle-pageTimer-failed'"),
+    '11F: 手动开机仅在新鲜确认页面定时器后才进入 OFF 相位');
+  assertPass(advanceBody.includes("if (nextAction === 'off')")
+      && advanceBody.includes('await setPageTimer(Math.ceil(remainingMinutes)')
+      && advanceBody.includes("'advance-pageTimer-failed'"),
+    '11G: 过期闹钟恢复到 ON 阶段时先重新武装页面关机定时器');
+  assertPass(contentSource.includes("pickerInput.getAttribute('title')")
+      && contentSource.includes('const effectiveValue = value || title'),
+    '11H: DOM 的 title=HH:MM 作为 value 的刷新后兼容回退，空值表示未设定');
+
   // 汇总
   const passCount = results.filter(r => r.pass).length;
   const totalCount = results.length;
@@ -879,7 +994,7 @@ async function runTests() {
     results.filter(r => !r.pass).forEach(r => console.log('  - ' + r.name));
     process.exit(1);
   } else {
-    console.log('✅ 所有断言通过。popup 自愈 + 跨设备同步 + page timer 校验 + v0.5.12 单一递归点击链路全部 OK。');
+    console.log('✅ 所有断言通过。popup 自愈 + 跨设备同步 + page timer 新鲜页面确认 + 关机重试 + 单一递归点击链路全部 OK。');
   }
 }
 

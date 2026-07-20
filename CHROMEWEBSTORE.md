@@ -8,7 +8,7 @@
 | 字段 | 值 |
 |------|-----|
 | 名称 | AC-UST |
-| 版本 | 0.5.12 |
+| 版本 | 0.5.13 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率 (Productivity) |
 | 语言 | 中文（简体）、English |
@@ -32,7 +32,7 @@ AC-UST 是一款为香港科技大学 Smart Power Meter 系统设计的自动冷
 主要功能：
 • PWM 循环定时：分别设置冷气开启与关闭分钟数，自动持续循环
 • PWM 运行时段：只在每天指定时段运行，时段外自动停用并请求页面定时关机
-• 页面定时关机：使用 UST 页面自带的 Power-off after 定时器执行关机，避免重复点击开关
+• 页面定时关机：使用 UST 页面自带的 Power-off after 定时器执行关机；写入后从新鲜页面回读确认，失败自动重试且避免重复点击开关
 • 跨设备相位对齐：同浏览器生态通过浏览器同步补充对齐，UST 页面定时器负责跨浏览器关机相位校验
 • 看门狗与自愈：自动恢复缺失的后台闹钟，并提供一键诊断
 • 中英双语：支持中文和英文界面，并接入 Crowdin 社区本地化
@@ -51,7 +51,7 @@ AC-UST is an automatic air-conditioning controller for the HKUST Smart Power Met
 Features:
 • PWM cycle scheduling with independently configurable ON and OFF durations
 • Active hours that limit PWM operation to a daily time window
-• Timer-based shutdown through the portal's Power-off after control, avoiding repeated OFF clicks
+• Timer-based shutdown through the portal's Power-off after control, verified from a fresh page after writing and retried on failure without repeated OFF clicks
 • Cross-device phase alignment using browser sync plus the UST page timer
 • Watchdog recovery and a built-in diagnostics panel
 • Chinese and English UI with Crowdin-based community localization
@@ -102,12 +102,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `./build.ps1` 后，上传 `releases/ac-ust-v0.5.12.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `./build.ps1` 后，上传 `releases/ac-ust-v0.5.13.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP 内容和图标均通过验证。
-2. 在开发者信息中心上传 `releases/ac-ust-v0.5.12.zip`。
+2. 在开发者信息中心上传 `releases/ac-ust-v0.5.13.zip`。
 3. 检查商品详情、隐私声明和权限理由后提交审核。
 4. 建议选择推迟发布，审核通过后手动发布。
 

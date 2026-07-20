@@ -382,6 +382,7 @@ async function setPagePowerOffTimer(totalMinutes) {
       return { success: false, error: t('contentInputRejected', String(value)) };
     }
 
+    const confirmedValue = (pickerInput.value || pickerInput.getAttribute('title') || value).trim();
     return {
       success: true,
       hours,
@@ -389,7 +390,8 @@ async function setPagePowerOffTimer(totalMinutes) {
       requestedMinutes,
       actualDelayMinutes: requestedMinutes,
       crossesMidnight,
-      value: pickerInput.value || value
+      value: confirmedValue,
+      title: (pickerInput.getAttribute('title') || '').trim()
     };
   } catch (e) {
     return { success: false, error: String(e) };
@@ -437,12 +439,16 @@ function getPagePowerOffTimer() {
   if (!pickerInput) {
     return { found: false, value: null };
   }
+  // 实测页面在已设定时会同时把 HH:MM 写到 value 和 title；关机后两者为空。
+  // value 为主，title 仅作刷新后读取时的兼容回退，避免 AntD 属性更新时序误判。
   const value = (pickerInput.value || '').trim();
-  if (!/^\d{2}:\d{2}$/.test(value)) {
+  const title = (pickerInput.getAttribute('title') || '').trim();
+  const effectiveValue = value || title;
+  if (!/^\d{2}:\d{2}$/.test(effectiveValue)) {
     // picker 有 DOM 但值空/格式不认——可能是空选或未设
-    return { found: true, value: value || null };
+    return { found: true, value: effectiveValue || null, title: title || null };
   }
-  return { found: true, value };
+  return { found: true, value: effectiveValue, title: title || null };
 }
 
 })(); // end 幂等守卫 IIFE

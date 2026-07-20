@@ -30,9 +30,10 @@ node test/verify-fix.mjs
 ```
 
 **验证内容**:
-- 用例 1:用户报告场景(`storage.nextTriggerAt=0 + ac-pwm 在 + 间隔模式 + enabled`)→ 验证 popup 自愈把红灯转绿灯
-- 用例 2:storage 已有正确值 → 不触发自愈
-- 用例 3:时钟模式 → 不触发自愈
+- 用例 1–4：popup 诊断的 `nextTriggerAt` 自愈与 Service Worker 降级行为
+- 用例 5–8：i18n 包体、跨设备相位同步、页面定时器解析与采纳
+- 用例 9–10：单一 ON 点击链路、OFF 零点击以及 ON→OFF 前的定时器证明
+- 用例 11：`Power-off after` 必须在新鲜页面保留同一 `HH:MM`；失败重试、过期闹钟恢复、时钟修复与手动开机都不得绕过该确认
 
 每次修改 popup.js 诊断逻辑或 background.js 自愈路径后,都应先跑这个测试再 commit。
 
