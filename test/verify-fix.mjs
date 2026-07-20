@@ -981,9 +981,27 @@ async function runTests() {
       && advanceBody.includes('await setPageTimer(Math.ceil(remainingMinutes)')
       && advanceBody.includes("'advance-pageTimer-failed'"),
     '11G: 过期闹钟恢复到 ON 阶段时先重新武装页面关机定时器');
+  const powerOffAfterFixture = JSON.parse(fs.readFileSync(
+    path.join(ROOT, 'test', 'fixtures', 'power-off-after-states.json'),
+    'utf8'
+  ));
+  const armedDom = powerOffAfterFixture.armed;
+  const clearedDom = powerOffAfterFixture.cleared;
+  assertPass(armedDom.timerInput.selector === '.ant-picker input'
+      && armedDom.timerInput.readonly === true
+      && /^\d{2}:\d{2}$/.test(armedDom.timerInput.value)
+      && armedDom.timerInput.value === armedDom.timerInput.title
+      && armedDom.acSwitch.ariaChecked === 'true',
+    '11H: 用户实测的已设定状态为 readonly .ant-picker input，value/title 同为 HH:MM，AC=ON');
+  assertPass(clearedDom.timerInput.selector === '.ant-picker input'
+      && clearedDom.timerInput.readonly === true
+      && clearedDom.timerInput.value === ''
+      && clearedDom.timerInput.title === ''
+      && clearedDom.acSwitch.ariaChecked === 'false',
+    '11I: 用户实测的关机状态会清空 value/title，AC=OFF');
   assertPass(contentSource.includes("pickerInput.getAttribute('title')")
       && contentSource.includes('const effectiveValue = value || title'),
-    '11H: DOM 的 title=HH:MM 作为 value 的刷新后兼容回退，空值表示未设定');
+    '11J: 内容脚本以用户实测的 title=HH:MM 作为 value 的刷新后兼容回退');
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;

@@ -1,0 +1,27 @@
+{
+  "description": "Sanitized from the user-provided HKUST Smart Power Meter DOM snapshots: AC ON with a configured Power-off after timer, and AC OFF after that timer clears.",
+  "armed": {
+    "timerInput": {
+      "selector": ".ant-picker input",
+      "readonly": true,
+      "value": "07:00",
+      "title": "07:00"
+    },
+    "acSwitch": {
+      "selector": "button.ant-switch[role=\"switch\"]",
+      "ariaChecked": "true"
+    }
+  },
+  "cleared": {
+    "timerInput": {
+      "selector": ".ant-picker input",
+      "readonly": true,
+      "value": "",
+      "title": ""
+    },
+    "acSwitch": {
+      "selector": "button.ant-switch[role=\"switch\"]",
+      "ariaChecked": "false"
+    }
+  }
+}

@@ -35,6 +35,8 @@ node test/verify-fix.mjs
 - 用例 9–10：单一 ON 点击链路、OFF 零点击以及 ON→OFF 前的定时器证明
 - 用例 11：`Power-off after` 必须在新鲜页面保留同一 `HH:MM`；失败重试、过期闹钟恢复、时钟修复与手动开机都不得绕过该确认
 
+`test/fixtures/power-off-after-states.json` 是从真实页面 DOM 样本提取的脱敏 fixture：已设定时 `.ant-picker input` 的 `value/title` 都是 `HH:MM` 且 AC 为 ON；页面关机后两者清空且 AC 为 OFF。它锁定 content script 的读取依据，不含账号、房间或余额信息。
+
 每次修改 popup.js 诊断逻辑或 background.js 自愈路径后,都应先跑这个测试再 commit。
 
 ### `e2e-verify.cjs`(浏览器层,**手动触发**)
