@@ -40,7 +40,7 @@
     "description": "弹窗 PWM 设置区段标题"
   },
   "activeHoursLabel": {
-    "message": "⏰ 运行时段",
+    "message": "运行时段",
     "description": "PWM 运行时段启用的复选框标签"
   },
   "activeHoursWithin": {
@@ -55,6 +55,14 @@
     "message": "帮助 / 反馈",
     "description": "header 右侧问号图标悬停提示"
   },
+  "activeHoursStartLabel": {
+    "message": "运行时段开始时间",
+    "description": "运行时段开始时间输入框的无障碍标签"
+  },
+  "activeHoursEndLabel": {
+    "message": "运行时段结束时间",
+    "description": "运行时段结束时间输入框的无障碍标签"
+  },
   "onMinutesLabel": {
     "message": "🟢 ON Minutes",
     "description": "开启分钟数输入框标签"
@@ -62,6 +70,34 @@
   "offMinutesLabel": {
     "message": "🔴 OFF Minutes",
     "description": "关闭分钟数输入框标签"
+  },
+  "comfortSettingsTitle": {
+    "message": "显示与舒适度",
+    "description": "弹窗阅读与显示偏好设置标题"
+  },
+  "readingModeLabel": {
+    "message": "易读模式",
+    "description": "启用更大文字与宽松排版的复选框标签"
+  },
+  "readingModeDescription": {
+    "message": "增大文字、放宽行距与字距，并减少不必要的视觉干扰。",
+    "description": "易读模式作用说明"
+  },
+  "readingModeEnabled": {
+    "message": "易读模式已开启",
+    "description": "保存易读模式后的状态反馈"
+  },
+  "readingModeDisabled": {
+    "message": "易读模式已关闭",
+    "description": "关闭易读模式后的状态反馈"
+  },
+  "accessibilityPreferencesError": {
+    "message": "无法保存显示偏好，请重试",
+    "description": "保存无障碍偏好失败时的状态反馈"
+  },
+  "diagnoseResultLabel": {
+    "message": "诊断结果",
+    "description": "诊断输出区域的无障碍标签"
   },
   "scheduleHintClock": {
     "message": "ON at odd hours (1/3/5...23) · OFF at even hours (0/2/4...22). Click \"Timed On\" to start immediately.",
@@ -80,19 +116,19 @@
     "description": "诊断按钮文字"
   },
   "timerEnabled": {
-    "message": "定时已开启 · 点击关闭",
+    "message": "循环定时已开启",
     "description": "定时 toggle 打开时的标签"
   },
   "timerDisabled": {
-    "message": "定时已关闭 · 点击开启",
+    "message": "循环定时已关闭",
     "description": "定时 toggle 关闭时的标签"
   },
   "timerEnabling": {
-    "message": "正在开启...",
+    "message": "正在开启循环定时…",
     "description": "定时 toggle 开启中过渡文字"
   },
   "timerDisabling": {
-    "message": "正在关闭...",
+    "message": "正在关闭循环定时…",
     "description": "定时 toggle 关闭中过渡文字"
   },
   "safetynetNotSet": {
@@ -100,7 +136,7 @@
     "description": "页面定时器未设置但有错误的提示。$1=错误原因"
   },
   "safetynetError": {
-    "message": "ℹ️ $1",
+    "message": "$1",
     "description": "页面定时器错误信息。$1=具体错误"
   },
   "actionOn": {
@@ -150,6 +186,10 @@
   "diagnoseInProgress": {
     "message": "🔍 Diagnosing...",
     "description": "诊断面板加载中文字"
+  },
+  "diagnoseComplete": {
+    "message": "诊断完成",
+    "description": "诊断面板完成时的状态反馈"
   },
   "diagnoseStorageRW": {
     "message": "storage read/write OK",
@@ -356,7 +396,7 @@
     "description": "background.js: 定时器设置失败"
   },
   "scheduleHintPinTab": {
-    "message": "💡 请将 UST AC 页面在浏览器中固定标签页并保持开启，否则定时开关无法控制空调。",
+    "message": "请将 UST AC 页面在浏览器中固定标签页并保持开启，否则定时开关无法控制空调。",
     "description": "提醒用户固定 AC 标签页"
   },
   "versionMismatch": {
