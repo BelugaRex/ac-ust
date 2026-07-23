@@ -21,7 +21,6 @@ const countdownDisplay = document.getElementById('countdownDisplay');
 const idleDisplay = document.getElementById('idleDisplay');
 const countdownText = document.getElementById('countdownText');
 const safetynetWarning = document.getElementById('safetynetWarning');
-const readingModeToggle = document.getElementById('readingModeToggle');
 
 // popup 打开期间保持与 Service Worker 的长连接。
 // 这样用户盯着弹窗时，后台不会只靠一次性 sendMessage 存活。
@@ -38,8 +37,6 @@ try {
 // ----- 加载已保存的设置 -----
 let currentScheduleEnabled = false;
 let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
-const ACCESSIBILITY_PREFERENCES_KEY = 'ac_accessibility_preferences';
-let accessibilityPreferences = { readingMode: false };
 let lastAnnouncedState = '';
 
 async function loadSettings() {
@@ -57,41 +54,6 @@ async function loadSettings() {
   };
   syncActiveHoursUI();
 }
-
-function applyAccessibilityPreferences() {
-  document.body.classList.toggle('reading-mode', accessibilityPreferences.readingMode);
-  readingModeToggle.checked = accessibilityPreferences.readingMode;
-}
-
-async function loadAccessibilityPreferences() {
-  const stored = await chrome.storage.local.get(ACCESSIBILITY_PREFERENCES_KEY);
-  const saved = stored[ACCESSIBILITY_PREFERENCES_KEY];
-  accessibilityPreferences = {
-    readingMode: saved?.readingMode === true
-  };
-  applyAccessibilityPreferences();
-}
-
-readingModeToggle.addEventListener('change', async () => {
-  const previousReadingMode = accessibilityPreferences.readingMode;
-  const readingMode = readingModeToggle.checked;
-  readingModeToggle.disabled = true;
-  accessibilityPreferences = { readingMode };
-  applyAccessibilityPreferences();
-
-  try {
-    await chrome.storage.local.set({
-      [ACCESSIBILITY_PREFERENCES_KEY]: accessibilityPreferences
-    });
-    showStatus(t(readingMode ? 'readingModeEnabled' : 'readingModeDisabled'), 'success');
-  } catch (_) {
-    accessibilityPreferences = { readingMode: previousReadingMode };
-    applyAccessibilityPreferences();
-    showStatus(t('accessibilityPreferencesError'), 'error');
-  } finally {
-    readingModeToggle.disabled = false;
-  }
-});
 
 function syncActiveHoursUI() {
   activeHoursToggle.checked = currentActiveHours.enabled;
@@ -345,7 +307,6 @@ async function startup() {
   await I18n.load();
   I18n.applyToDOM();
   document.documentElement.lang = I18n.getLang().replace('_', '-');
-  await loadAccessibilityPreferences();
   await loadSettings();
   await refreshStatus();
 }
@@ -355,7 +316,7 @@ setInterval(refreshStatus, 1000);
 setInterval(tickActiveHoursBadge, 10000);  // 每 10 秒刷新 active hours 状态徽章
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.6.0';
+const APP_VERSION = '0.6.1';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';

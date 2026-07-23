@@ -19,12 +19,6 @@
   "activeHoursEndLabel": { "message": "运行时段结束时间", "description": "运行时段结束时间输入框的无障碍标签" },
   "onMinutesLabel": { "message": "开启时长（分钟）", "description": "开启分钟数输入框标签" },
   "offMinutesLabel": { "message": "关闭时长（分钟）", "description": "关闭分钟数输入框标签" },
-  "comfortSettingsTitle": { "message": "显示与舒适度", "description": "弹窗阅读与显示偏好设置标题" },
-  "readingModeLabel": { "message": "易读模式", "description": "启用更大文字与宽松排版的复选框标签" },
-  "readingModeDescription": { "message": "增大文字、放宽行距与字距，并减少不必要的视觉干扰。", "description": "易读模式作用说明" },
-  "readingModeEnabled": { "message": "易读模式已开启", "description": "保存易读模式后的状态反馈" },
-  "readingModeDisabled": { "message": "易读模式已关闭", "description": "关闭易读模式后的状态反馈" },
-  "accessibilityPreferencesError": { "message": "无法保存显示偏好，请重试", "description": "保存无障碍偏好失败时的状态反馈" },
   "diagnoseResultLabel": { "message": "诊断结果", "description": "诊断输出区域的无障碍标签" },
 
   "scheduleHintClock": { "message": "单数整点(1/3/5...23)开 · 双数整点(0/2/4...22)关。打开定时开关立即开始。", "description": "时钟模式下的说明文字" },

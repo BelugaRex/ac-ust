@@ -13,8 +13,7 @@ const ROOT = path.resolve(__dirname, '..');
 // ----- Mock chrome.* API -----
 function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
   let storage = {
-    ac_schedule: { ...initialSchedule },
-    ac_accessibility_preferences: {}
+    ac_schedule: { ...initialSchedule }
   };
   let storageSync = {};  // [v0.5.6] sync 区的 mock 存储
   const alarms = {
@@ -29,17 +28,11 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
       local: {
         async get(key) {
           if (key === 'ac_schedule') return { ac_schedule: { ...storage.ac_schedule } };
-          if (key === 'ac_accessibility_preferences') {
-            return { ac_accessibility_preferences: { ...storage.ac_accessibility_preferences } };
-          }
           if (key === '__heartbeat') return { __heartbeat: Date.now() };
           return { ...storage };
         },
         async set(obj) {
           if (obj.ac_schedule) storage.ac_schedule = { ...obj.ac_schedule };
-          if (obj.ac_accessibility_preferences) {
-            storage.ac_accessibility_preferences = { ...obj.ac_accessibility_preferences };
-          }
           if (obj.__heartbeat) storage.__heartbeat = obj.__heartbeat;
         }
       },
@@ -72,7 +65,7 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
         if (!handler) return undefined;
         return handler(msg);
       },
-      getManifest: () => ({ version: '0.6.0' }),
+      getManifest: () => ({ version: '0.6.1' }),
       getPlatformInfo: async () => ({ os: 'win' }),
       onConnect: { addListener() {} },
       onUpdateAvailable: { addListener() {} }
@@ -1129,13 +1122,11 @@ async function runTests() {
       && popupHtml.includes('aria-labelledby="pwmSettingsTitle"')
       && popupHtml.includes('aria-describedby="timerToggleState"')
       && popupHtml.includes('for="onMinutes"')
-      && popupHtml.includes('for="offMinutes"')
-      && popupHtml.includes('for="readingModeToggle"'),
-    '12F: 帮助、开关、分钟输入和易读模式均有程序化可访问名称');
+      && popupHtml.includes('for="offMinutes"'),
+    '12F: 帮助、开关和分钟输入均有程序化可访问名称');
   assertPass(/\.header-help\s*\{[\s\S]{0,260}width:\s*44px;[\s\S]{0,80}height:\s*44px;/.test(popupHtml)
       && popupHtml.includes('min-height: 44px;')
-      && popupHtml.includes('.toggle-switch input:focus-visible + .toggle-slider')
-      && popupHtml.includes('summary:focus-visible'),
+      && popupHtml.includes('.toggle-switch input:focus-visible + .toggle-slider'),
     '12G: 弹窗交互控件提供 44px 命中区与可见键盘焦点');
 
   const releaseWorkflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
@@ -1193,29 +1184,28 @@ async function runTests() {
       && initBody13.includes("persistSchedule('init-recover-overdue-page-timer-retry'"),
     '13E: 启动会重新排程浏览器关闭期间错过的页面定时器重试');
 
-  // ===== 用例 14: 易读与低干扰弹窗回归 =====
-  console.log('\n\n=== 用例 14: 易读与低干扰弹窗回归 ===\n');
+  // ===== 用例 14: 清晰与低干扰弹窗回归 =====
+  console.log('\n\n=== 用例 14: 清晰与低干扰弹窗回归 ===\n');
 
   const popupSource = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
   assertPass(popupHtml.includes('id="statusAnnouncement" role="status" aria-live="polite"')
       && popupHtml.includes('role="region" aria-labelledby="acStateText"')
       && popupHtml.includes('id="diagnoseResult" role="region"'),
     '14A: 状态、提示与诊断结果提供语义区域和受控实时反馈');
-  assertPass(popupHtml.includes('body.reading-mode')
-      && popupHtml.includes('id="readingModeToggle"')
-      && popupHtml.includes('id="readingModeDescription"'),
-    '14B: 弹窗提供可选易读模式及其可见说明');
+  assertPass(!popupHtml.includes('body.reading-mode')
+      && !popupHtml.includes('id="readingModeToggle"')
+      && !popupHtml.includes('class="comfort-card"')
+      && !popupSource.includes('ac_accessibility_preferences'),
+    '14B: 弹窗已移除易读模式、专属卡片和本地偏好分支');
   assertPass(!popupHtml.includes('@keyframes pulse')
       && !popupHtml.includes('animation: pulse')
       && popupHtml.includes('@media (prefers-reduced-motion: reduce)')
       && popupHtml.includes('@media (prefers-contrast: more)')
       && popupHtml.includes('@media (prefers-color-scheme: dark)'),
     '14C: 弹窗移除持续闪烁，并适配减弱动态、高对比度和深色外观');
-  assertPass(popupSource.includes("const ACCESSIBILITY_PREFERENCES_KEY = 'ac_accessibility_preferences';")
-      && popupSource.includes('async function loadAccessibilityPreferences()')
-      && popupSource.includes('[ACCESSIBILITY_PREFERENCES_KEY]: accessibilityPreferences')
-      && popupSource.includes("document.body.classList.toggle('reading-mode'"),
-    '14D: 易读偏好从独立 local storage 键加载、保存并应用到 popup');
+  assertPass(popupHtml.includes('html { -webkit-text-size-adjust: 100%; }')
+      && /body\s*\{[\s\S]{0,260}font-size:\s*15px;[\s\S]{0,80}line-height:\s*1\.5;/.test(popupHtml),
+    '14D: 默认排版保持清晰，并允许浏览器文字缩放');
   assertPass(popupSource.includes('function announceState(message)')
       && popupSource.includes('if (!message || message === lastAnnouncedState) return;')
       && !popupSource.includes("statusDiv.textContent = '';"),

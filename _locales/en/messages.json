@@ -19,12 +19,6 @@
   "activeHoursEndLabel": { "message": "Active hours end time" },
   "onMinutesLabel": { "message": "ON duration (minutes)" },
   "offMinutesLabel": { "message": "OFF duration (minutes)" },
-  "comfortSettingsTitle": { "message": "Display and comfort" },
-  "readingModeLabel": { "message": "Easy-read mode" },
-  "readingModeDescription": { "message": "Uses larger text, roomier line and letter spacing, and less visual distraction." },
-  "readingModeEnabled": { "message": "Easy-read mode is on" },
-  "readingModeDisabled": { "message": "Easy-read mode is off" },
-  "accessibilityPreferencesError": { "message": "Could not save display preferences. Please try again." },
   "diagnoseResultLabel": { "message": "Diagnostic results" },
 
   "scheduleHintClock": { "message": "ON at odd hours (1/3/5...23) · OFF at even hours (0/2/4...22). Turn on the timer toggle to start immediately." },

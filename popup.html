@@ -539,51 +539,6 @@
     overflow-wrap: anywhere;
   }
 
-  .comfort-card {
-    background: var(--c-canvas);
-    border: 1px solid var(--c-hairline);
-    border-radius: var(--r-lg);
-    margin-bottom: var(--s-sm);
-    overflow: hidden;
-  }
-  .comfort-card summary {
-    display: flex;
-    align-items: center;
-    min-height: 44px;
-    padding: 10px 16px;
-    color: var(--c-ink);
-    cursor: pointer;
-    font-family: var(--font-display);
-    font-size: 15px;
-    font-weight: 600;
-    line-height: 1.4;
-    letter-spacing: 0;
-  }
-  .comfort-body {
-    padding: 0 16px 16px;
-    border-top: 1px solid var(--c-divider);
-  }
-  .comfort-toggle {
-    display: flex;
-    align-items: center;
-    min-height: 44px;
-    gap: 8px;
-    color: var(--c-ink-80);
-    cursor: pointer;
-    font-size: 14px;
-    line-height: 1.5;
-  }
-  .comfort-toggle input[type="checkbox"] {
-    width: 18px;
-    height: 18px;
-    accent-color: var(--c-accent);
-  }
-  .comfort-description {
-    color: var(--c-muted);
-    font-size: 13px;
-    line-height: 1.5;
-    letter-spacing: 0;
-  }
   .visually-hidden {
     position: absolute;
     width: 1px;
@@ -594,41 +549,6 @@
     clip: rect(0, 0, 0, 0);
     white-space: nowrap;
     border: 0;
-  }
-
-  body.reading-mode {
-    font-size: 16px;
-    line-height: 1.6;
-    letter-spacing: 0.02em;
-  }
-  body.reading-mode .header-name,
-  body.reading-mode .settings-header h3,
-  body.reading-mode .ac-indicator,
-  body.reading-mode .active-hours-row label.ah-label,
-  body.reading-mode .time-row label {
-    font-size: 16px;
-    line-height: 1.55;
-    letter-spacing: 0.02em;
-  }
-  body.reading-mode .toggle-state,
-  body.reading-mode .active-hours-row input[type="time"],
-  body.reading-mode .active-hours-row .ah-status,
-  body.reading-mode .time-row input[type="number"],
-  body.reading-mode .hint,
-  body.reading-mode .status,
-  body.reading-mode .btn-diagnose,
-  body.reading-mode .comfort-toggle,
-  body.reading-mode .comfort-description,
-  body.reading-mode .diagnose-result {
-    font-size: 14px;
-    line-height: 1.6;
-    letter-spacing: 0.02em;
-  }
-  body.reading-mode .countdown-display strong {
-    font-size: 32px;
-  }
-  body.reading-mode .header-version {
-    display: none;
   }
 
   @media (max-width: 300px) {
@@ -701,8 +621,7 @@
       --c-warning-border: #8b4300;
     }
     .status-card,
-    .settings-card,
-    .comfort-card {
+    .settings-card {
       border-width: 2px;
     }
   }
@@ -732,7 +651,6 @@
   button:focus-visible,
   a:focus-visible,
   input:focus-visible,
-  summary:focus-visible,
   .header-help:focus-visible {
     outline: 2px solid var(--c-accent-hover);
     outline-offset: 2px;
@@ -808,17 +726,6 @@
         <div class="hint hint-pin" id="scheduleHintPin" data-i18n="scheduleHintPinTab"></div>
       </div>
     </div>
-
-    <details class="comfort-card">
-      <summary data-i18n="comfortSettingsTitle"></summary>
-      <div class="comfort-body">
-        <label class="comfort-toggle" for="readingModeToggle">
-          <input type="checkbox" id="readingModeToggle" aria-describedby="readingModeDescription">
-          <span data-i18n="readingModeLabel"></span>
-        </label>
-        <p class="comfort-description" id="readingModeDescription" data-i18n="readingModeDescription"></p>
-      </div>
-    </details>
 
     <!-- Footer: status message + diagnose button + results -->
     <div class="footer">
