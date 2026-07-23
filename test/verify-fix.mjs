@@ -12,7 +12,10 @@ const ROOT = path.resolve(__dirname, '..');
 
 // ----- Mock chrome.* API -----
 function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
-  let storage = { ac_schedule: { ...initialSchedule } };
+  let storage = {
+    ac_schedule: { ...initialSchedule },
+    ac_accessibility_preferences: {}
+  };
   let storageSync = {};  // [v0.5.6] sync 区的 mock 存储
   const alarms = {
     'ac-pwm': liveAcPwmScheduledTime
@@ -26,11 +29,17 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
       local: {
         async get(key) {
           if (key === 'ac_schedule') return { ac_schedule: { ...storage.ac_schedule } };
+          if (key === 'ac_accessibility_preferences') {
+            return { ac_accessibility_preferences: { ...storage.ac_accessibility_preferences } };
+          }
           if (key === '__heartbeat') return { __heartbeat: Date.now() };
           return { ...storage };
         },
         async set(obj) {
           if (obj.ac_schedule) storage.ac_schedule = { ...obj.ac_schedule };
+          if (obj.ac_accessibility_preferences) {
+            storage.ac_accessibility_preferences = { ...obj.ac_accessibility_preferences };
+          }
           if (obj.__heartbeat) storage.__heartbeat = obj.__heartbeat;
         }
       },
@@ -63,7 +72,7 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
         if (!handler) return undefined;
         return handler(msg);
       },
-      getManifest: () => ({ version: '0.5.13' }),
+      getManifest: () => ({ version: '0.6.0' }),
       getPlatformInfo: async () => ({ os: 'win' }),
       onConnect: { addListener() {} },
       onUpdateAvailable: { addListener() {} }
@@ -358,8 +367,15 @@ async function runTests() {
   const dataI18nKeys = [...popupHtml.matchAll(/data-i18n="([^"]+)"/g)].map(m => m[1]);
   console.log('  popup.html data-i18n keys:', dataI18nKeys.join(', '));
   for (const key of dataI18nKeys) {
-    assertPass(!!zhCN[key],
-      `popup.html data-i18n="${key}" 在 zh_CN messages.json 中存在`);
+    assertPass(!!zhCN[key] && !!en[key],
+      `popup.html data-i18n="${key}" 在中英文 messages.json 中存在`);
+  }
+
+  const dataI18nAriaLabelKeys = [...popupHtml.matchAll(/data-i18n-aria-label="([^"]+)"/g)].map(m => m[1]);
+  console.log('  popup.html data-i18n-aria-label keys:', dataI18nAriaLabelKeys.join(', '));
+  for (const key of dataI18nAriaLabelKeys) {
+    assertPass(!!zhCN[key] && !!en[key],
+      `popup.html data-i18n-aria-label="${key}" 在中英文 messages.json 中存在`);
   }
 
   // 5f: popup.html 不应残留 __MSG_*__ 占位符
@@ -375,6 +391,20 @@ async function runTests() {
     'dist/manifest.json 也同步 default_locale=zh_CN');
   assertPass(distManifest.version === manifest.version,
     `dist/manifest.json 版本与源码一致 (${manifest.version})`);
+
+  const sourceLocaleResources = manifest.web_accessible_resources || [];
+  const distLocaleResources = distManifest.web_accessible_resources || [];
+  const hasUstLocaleResourceRule = (resources) => resources.some(rule =>
+    rule.resources?.includes('_locales/*/messages.json')
+      && rule.matches?.includes('https://w5.ab.ust.hk/*')
+  );
+  assertPass(hasUstLocaleResourceRule(sourceLocaleResources),
+    'manifest 为 UST 页面内容脚本公开 locale JSON（fetch i18n）');
+  assertPass(hasUstLocaleResourceRule(distLocaleResources),
+    'dist/manifest.json 保留 locale JSON 的 web_accessible_resources 规则');
+  assertPass(manifest.host_permissions?.length === 1
+      && manifest.host_permissions[0] === 'https://w5.ab.ust.hk/*',
+    'manifest 仅请求自动调度所需的 UST 单一来源 host permission');
 
   const distRequiredFiles = [
     'manifest.json', 'background.js', 'content.js', 'page-confirm.js',
@@ -852,11 +882,16 @@ async function runTests() {
   assertPass(!contentSource.includes("error: t('contentCrossDayLimit')")
       && contentSource.includes('crossesMidnight,'),
     '9M: Power-off after 跨午夜时间直接输入，不再被代码拒绝');
-  assertPass(countOccurrences(backgroundSource, 'chrome.tabs.reload(') === 2
+  const verificationStartForReload = backgroundSource.indexOf('async function verifyPageTimerPersistence(');
+  const verificationEndForReload = backgroundSource.indexOf('\n// 关机定时器设置失败时', verificationStartForReload);
+  const verifySectionForReload = verificationStartForReload >= 0 && verificationEndForReload > verificationStartForReload
+    ? backgroundSource.slice(verificationStartForReload, verificationEndForReload)
+    : '';
+  assertPass(countOccurrences(backgroundSource, 'chrome.tabs.reload(') === 1
       && backgroundSource.includes('async function restoreDiscardedACTab(tab)')
-      && backgroundSource.includes('if (sourceWasAutoCreated && sourceTab?.id)')
-      && backgroundSource.includes('await chrome.tabs.reload(verifierTabId)'),
-    '9N: 刷新仅用于 discarded 恢复或扩展自建验证页，绝不刷新用户已有 AC 页面');
+      && !verifySectionForReload.includes('chrome.tabs.reload(')
+      && !verifySectionForReload.includes('sourceWasAutoCreated'),
+    '9N: 刷新只用于 discarded 恢复；页面定时器验证绝不刷新写入来源页');
   assertPass(setTimerBody.includes('chrome.tabs.create({ url: AC_PAGE, active: false })')
       && setTimerBody.includes('restoreDiscardedACTab(tab)'),
     '9O: 页面定时器缺少可用标签时只创建隐藏 AC 页恢复，不刷新正常页面');
@@ -947,15 +982,26 @@ async function runTests() {
     ? backgroundSource.slice(advanceStart, advanceEnd)
     : '';
 
-  assertPass(verifyBody.includes('if (sourceWasAutoCreated && sourceTab?.id)')
-      && verifyBody.includes('await chrome.tabs.reload(verifierTabId)')
+  assertPass(!verifyBody.includes('chrome.tabs.reload(')
+      && !verifyBody.includes('sourceWasAutoCreated')
+      && verifyBody.includes('for (let attempt = 0; attempt < PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length; attempt++)')
       && verifyBody.includes("chrome.tabs.create({ url: AC_PAGE, active: false })"),
-    '11A: 自动创建页刷新自身验证；用户已有页改用临时隐藏验证页，不打扰用户');
+    '11A: 写入来源页绝不刷新；每次验证均使用独立临时隐藏页');
   assertPass(verifyBody.includes("{ action: 'getPageTimer' }")
-      && verifyBody.includes('actualValue !== expectedValue')
+      && verifyBody.includes('actualValue === expectedValue')
+      && verifyBody.includes('lastFailure = `第 ${attempt + 1} 次新鲜页读回不匹配')
       && verifyBody.includes('await chrome.tabs.remove(verifierTabId)'),
-    '11B: 新鲜页必须读回同一 HH:MM，临时验证页完成后立即回收');
-  const verificationCallIdx = setTimerBody.indexOf('verifyPageTimerPersistence(expectedValue, tab, autoCreatedTabId === tab.id)');
+    '11B: 新鲜页必须读回同一 HH:MM，未匹配会记录失败并回收临时验证页');
+  assertPass(backgroundSource.includes('const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [3000, 5000, 10000];')
+      && verifyBody.includes('await sleep(PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS[attempt]);')
+      && verifyBody.includes('attempts: attempt + 1')
+      && verifyBody.includes('attempts: PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length'),
+    '11B-1: 写入后按 3 秒、5 秒、10 秒退避进行新鲜页读回');
+  assertPass(verifyBody.includes('let verifierTabId = null;')
+      && verifyBody.includes('finally')
+      && verifyBody.includes('await chrome.tabs.remove(verifierTabId);'),
+    '11B-2: 每次验证尝试都会在 finally 中回收临时隐藏页');
+  const verificationCallIdx = setTimerBody.indexOf('verifyPageTimerPersistence(expectedValue)');
   const proofWriteIdx = setTimerBody.indexOf('schedule.pageTimerMinutes = result.actualDelayMinutes || minutes');
   assertPass(verificationCallIdx > 0
       && proofWriteIdx > verificationCallIdx
@@ -1002,6 +1048,182 @@ async function runTests() {
   assertPass(contentSource.includes("pickerInput.getAttribute('title')")
       && contentSource.includes('const effectiveValue = value || title'),
     '11J: 内容脚本以用户实测的 title=HH:MM 作为 value 的刷新后兼容回退');
+
+  // ===== 用例 12: 审计修复回归（只读轮询、HIG、发布与安装） =====
+  console.log('\n\n=== 用例 12: 审计修复回归（只读轮询、HIG、发布与安装） ===\n');
+
+  const snapshotStart = backgroundSource.indexOf('async function getScheduleSnapshot(lite = false) {');
+  const snapshotEnd = backgroundSource.indexOf('\nasync function toggleNowAndSync', snapshotStart);
+  const snapshotBody = snapshotStart >= 0 && snapshotEnd > snapshotStart
+    ? backgroundSource.slice(snapshotStart, snapshotEnd)
+    : '';
+  assertPass(snapshotStart >= 0 && !snapshotBody.includes('persistSchedule(')
+      && !snapshotBody.includes('backfillNextTriggerAt('),
+    '12A: getScheduleSnapshot 普通轮询不触发持久化或自愈写入');
+  assertPass(/msg\.type === 'getSchedule'[\s\S]{0,180}getScheduleSnapshot\(\)/.test(backgroundSource)
+      && /msg\.type === 'getScheduleLite'[\s\S]{0,220}getScheduleSnapshot\(true\)/.test(backgroundSource),
+    '12B: getSchedule 与 getScheduleLite 都只委派给快照读取器');
+
+  const createScheduleSnapshotHarness = new Function('initialSchedule', 'liveAlarm', 'actualStatus', `
+    let schedule = { ...initialSchedule };
+    let storageWriteCount = 0;
+    const chrome = {
+      storage: {
+        local: {
+          async get() { return { ac_schedule: { ...schedule } }; },
+          async set() { storageWriteCount += 1; }
+        }
+      },
+      alarms: {
+        async get(name) { return name === 'ac-pwm' && liveAlarm ? { ...liveAlarm } : undefined; }
+      }
+    };
+    async function loadScheduleFromStorage() {
+      const saved = await chrome.storage.local.get('ac_schedule');
+      if (saved.ac_schedule) schedule = { ...schedule, ...saved.ac_schedule };
+    }
+    function getLiveAlarmEndMs(alarm) {
+      return alarm?.scheduledTime > Date.now() ? alarm.scheduledTime : 0;
+    }
+    function getLegacyAlarmEndMs() {
+      return schedule.alarmCreatedAt && schedule.alarmDelayMinutes
+        ? schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000
+        : 0;
+    }
+    async function getCurrentACStatus() { return actualStatus; }
+    async function persistSchedule() { storageWriteCount += 1; }
+    async function backfillNextTriggerAt() { storageWriteCount += 1; }
+    ${snapshotBody}
+    return {
+      getScheduleSnapshot,
+      getStorageWriteCount: () => storageWriteCount,
+      getMemorySchedule: () => ({ ...schedule })
+    };
+  `);
+  const liveDueAt12 = Date.now() + 5 * 60 * 1000;
+  const initialSchedule12 = {
+    enabled: true,
+    pwmState: 'off',
+    nextTriggerAt: 0,
+    alarmCreatedAt: 0,
+    alarmDelayMinutes: 0
+  };
+  const snapshotHarness = createScheduleSnapshotHarness(
+    initialSchedule12,
+    { name: 'ac-pwm', scheduledTime: liveDueAt12 },
+    { isOn: true }
+  );
+  const fullSnapshot12 = await snapshotHarness.getScheduleSnapshot();
+  const liteSnapshot12 = await snapshotHarness.getScheduleSnapshot(true);
+  assertPass(snapshotHarness.getStorageWriteCount() === 0,
+    '12C: full/lite 普通读取都不写 chrome.storage.local');
+  assertPass(snapshotHarness.getMemorySchedule().nextTriggerAt === 0,
+    '12D: 普通读取不修改内存 schedule 的 nextTriggerAt');
+  assertPass(fullSnapshot12.nextTriggerAt === liveDueAt12
+      && fullSnapshot12.actualStatus?.isOn === true
+      && liteSnapshot12.nextTriggerAt === liveDueAt12
+      && liteSnapshot12.actualStatus === null,
+    '12E: full/lite 快照均投影 live alarm，lite 仍跳过 AC 状态查询');
+
+  assertPass(popupHtml.includes('data-i18n-aria-label="helpTooltip"')
+      && popupHtml.includes('aria-labelledby="pwmSettingsTitle"')
+      && popupHtml.includes('aria-describedby="timerToggleState"')
+      && popupHtml.includes('for="onMinutes"')
+      && popupHtml.includes('for="offMinutes"')
+      && popupHtml.includes('for="readingModeToggle"'),
+    '12F: 帮助、开关、分钟输入和易读模式均有程序化可访问名称');
+  assertPass(/\.header-help\s*\{[\s\S]{0,260}width:\s*44px;[\s\S]{0,80}height:\s*44px;/.test(popupHtml)
+      && popupHtml.includes('min-height: 44px;')
+      && popupHtml.includes('.toggle-switch input:focus-visible + .toggle-slider')
+      && popupHtml.includes('summary:focus-visible'),
+    '12G: 弹窗交互控件提供 44px 命中区与可见键盘焦点');
+
+  const releaseWorkflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
+  assertPass(/fetch-depth:\s*0/.test(releaseWorkflow)
+      && releaseWorkflow.includes('git fetch origin main:refs/remotes/origin/main')
+      && releaseWorkflow.includes('git merge-base --is-ancestor "$tag_commit" origin/main'),
+    '12H: Release 工作流以完整 Git 历史验证 tag commit 属于 main');
+  const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+  assertPass(readme.includes('下载源码 ZIP，解压后运行 `./build.ps1`，再 Load Unpacked `dist/`'),
+    '12I: GitHub Releases 安装说明先构建，再加载 dist');
+  const webStoreMetadata = fs.readFileSync(path.join(ROOT, 'CHROMEWEBSTORE.md'), 'utf8');
+  assertPass(webStoreMetadata.includes(`| 版本 | ${manifest.version} |`)
+      && webStoreMetadata.includes(`releases/ac-ust-v${manifest.version}.zip`),
+    '12J: Chrome Web Store 元数据版本和 ZIP 文件名与 manifest 同步');
+
+  // ===== 用例 13: PWM 持久化恢复独立于 popup 轮询 =====
+  console.log('\n\n=== 用例 13: PWM 持久化恢复独立于 popup 轮询 ===\n');
+
+  const initStart13 = backgroundSource.indexOf('async function init() {');
+  const initEnd13 = backgroundSource.indexOf('\n// ----- 设置/更新 PWM 循环闹钟 -----', initStart13);
+  const initBody13 = initStart13 >= 0 && initEnd13 > initStart13
+    ? backgroundSource.slice(initStart13, initEnd13)
+    : '';
+  const setupStart13 = backgroundSource.indexOf('async function setupAlarms(startImmediately = false) {');
+  const setupEnd13 = backgroundSource.indexOf('\nfunction sanitizeMinutes', setupStart13);
+  const setupBody13 = setupStart13 >= 0 && setupEnd13 > setupStart13
+    ? backgroundSource.slice(setupStart13, setupEnd13)
+    : '';
+  const watchdogStart13 = backgroundSource.indexOf('async function watchdogCheck() {');
+  const watchdogEnd13 = backgroundSource.indexOf('\n// ----- 启动时加载设置并创建闹钟 -----', watchdogStart13);
+  const watchdogBody13 = watchdogStart13 >= 0 && watchdogEnd13 > watchdogStart13
+    ? backgroundSource.slice(watchdogStart13, watchdogEnd13)
+    : '';
+  const alarmListenerStart13 = backgroundSource.indexOf('chrome.alarms.onAlarm.addListener(async (alarm) => {');
+  const alarmListenerEnd13 = backgroundSource.indexOf('\n// ----- 官方推荐：长时间操作保活', alarmListenerStart13);
+  const alarmListenerBody13 = alarmListenerStart13 >= 0 && alarmListenerEnd13 > alarmListenerStart13
+    ? backgroundSource.slice(alarmListenerStart13, alarmListenerEnd13)
+    : '';
+
+  assertPass(initBody13.includes('await backfillNextTriggerAt(true);')
+      && initBody13.includes("await persistSchedule('init-finalSync'"),
+    '13A: Service Worker 初始化会从 legacy/live alarm 回填并持久化 nextTriggerAt');
+  assertPass(setupBody13.includes('await syncStoredTriggerFromAlarm(existingAlarm')
+      && setupBody13.includes('await repairScheduleClock();'),
+    '13B: 启动恢复会同步 live alarm；双重缺失时会安全重建 PWM');
+  assertPass(watchdogBody13.includes("await persistSchedule('watchdogCheck'")
+      && watchdogBody13.includes('restoreIntervalAlarmFromStorage'),
+    '13C: 5 分钟看门狗会校准 storage，并恢复缺失的 PWM alarm');
+  assertPass(alarmListenerBody13.includes("await persistSchedule('badge-tick-sync'")
+      && alarmListenerBody13.includes("if (alarm.name === 'ac-badge-tick')"),
+    '13D: 每分钟 badge tick 会把 live alarm 的相位写回 storage');
+  assertPass(initBody13.includes('const retryMinutes = Number(schedule.pageTimerRetryMinutes) || 0;')
+      && initBody13.includes("createAlarm('ac-page-timer-retry', { when: retryAt })")
+      && initBody13.includes("await schedulePageTimerRetry(retryMinutes, '启动恢复错过的页面定时器重试');")
+      && initBody13.includes("persistSchedule('init-recover-overdue-page-timer-retry'"),
+    '13E: 启动会重新排程浏览器关闭期间错过的页面定时器重试');
+
+  // ===== 用例 14: 易读与低干扰弹窗回归 =====
+  console.log('\n\n=== 用例 14: 易读与低干扰弹窗回归 ===\n');
+
+  const popupSource = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
+  assertPass(popupHtml.includes('id="statusAnnouncement" role="status" aria-live="polite"')
+      && popupHtml.includes('role="region" aria-labelledby="acStateText"')
+      && popupHtml.includes('id="diagnoseResult" role="region"'),
+    '14A: 状态、提示与诊断结果提供语义区域和受控实时反馈');
+  assertPass(popupHtml.includes('body.reading-mode')
+      && popupHtml.includes('id="readingModeToggle"')
+      && popupHtml.includes('id="readingModeDescription"'),
+    '14B: 弹窗提供可选易读模式及其可见说明');
+  assertPass(!popupHtml.includes('@keyframes pulse')
+      && !popupHtml.includes('animation: pulse')
+      && popupHtml.includes('@media (prefers-reduced-motion: reduce)')
+      && popupHtml.includes('@media (prefers-contrast: more)')
+      && popupHtml.includes('@media (prefers-color-scheme: dark)'),
+    '14C: 弹窗移除持续闪烁，并适配减弱动态、高对比度和深色外观');
+  assertPass(popupSource.includes("const ACCESSIBILITY_PREFERENCES_KEY = 'ac_accessibility_preferences';")
+      && popupSource.includes('async function loadAccessibilityPreferences()')
+      && popupSource.includes('[ACCESSIBILITY_PREFERENCES_KEY]: accessibilityPreferences')
+      && popupSource.includes("document.body.classList.toggle('reading-mode'"),
+    '14D: 易读偏好从独立 local storage 键加载、保存并应用到 popup');
+  assertPass(popupSource.includes('function announceState(message)')
+      && popupSource.includes('if (!message || message === lastAnnouncedState) return;')
+      && !popupSource.includes("statusDiv.textContent = '';"),
+    '14E: 状态宣告按语义变化去重，用户操作反馈不会在 3 秒后自动消失');
+  assertPass(popupSource.includes('document.documentElement.lang = I18n.getLang().replace')
+      && popupSource.includes('function renderDiagnoseResult(lines)')
+      && !popupSource.includes("diagnoseResult.innerHTML = lines.join('<br>')"),
+    '14F: popup 语言随界面语言更新，诊断结果以安全、可导航的文本节点呈现');
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;

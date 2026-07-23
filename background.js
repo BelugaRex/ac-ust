@@ -8,6 +8,7 @@ importScripts('sync-helpers.js');  // 跨设备同步的纯函数（composeSyncP
 const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const AC_PAGE = 'https://w5.ab.ust.hk/njggt/app/home';
+const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [3000, 5000, 10000];
 const STORAGE_KEY = 'ac_schedule';
 
 // 跨设备同步：瘦化版 schedule 写到 chrome.storage.sync。详见 sync-helpers.js 注释。
@@ -704,9 +705,17 @@ async function init() {
       await createAlarm('ac-watchdog', { periodInMinutes: 5 });
     }
     // 关闭 PWM / 离开运行时段后也可能仍需补设 1 分钟关机定时器，
-    // 因此不以 schedule.enabled 为前提恢复该重试闹钟。
-    if (schedule.pageTimerRetryAt && schedule.pageTimerRetryAt > Date.now()) {
-      await createAlarm('ac-page-timer-retry', { when: schedule.pageTimerRetryAt });
+    // 因此不以 schedule.enabled 为前提恢复该重试闹钟。浏览器关闭期间错过的
+    // retry 也必须重新排程，不能因原时间已经过去而静默放弃关机安全网。
+    const retryMinutes = Number(schedule.pageTimerRetryMinutes) || 0;
+    const retryAt = Number(schedule.pageTimerRetryAt) || 0;
+    if (retryMinutes > 0) {
+      if (retryAt > Date.now()) {
+        await createAlarm('ac-page-timer-retry', { when: retryAt });
+      } else {
+        await schedulePageTimerRetry(retryMinutes, '启动恢复错过的页面定时器重试');
+        await persistSchedule('init-recover-overdue-page-timer-retry', { syncFromLiveAlarm: false });
+      }
     }
     // 终极防线：init 完成时，间隔模式下强制从 live ac-pwm 同步 nextTriggerAt 到 storage。
     // 防止 SW 跑早期版本代码、setupAlarms 走重建路径、或某条 persist 漏 sync 时出现
@@ -987,52 +996,51 @@ async function runPwmStep() {
 }
 
 // 通过新鲜页面确认 Power-off after 已离开当前 React 状态并真正持久化。
-// 若 setPageTimer 自己创建了隐藏 AC 页，就刷新该隐藏页；若用户已有页面，则另开
-// 一个临时隐藏页验证，绝不刷新用户正在看的标签页（避免 v0.5.11 的频繁刷新回归）。
-async function verifyPageTimerPersistence(expectedValue, sourceTab, sourceWasAutoCreated) {
-  let verifierTabId = null;
-  let shouldCloseVerifier = false;
+// 写入来源页无论是用户页还是扩展自建隐藏页都不能刷新：过早导航可能中断 UST
+// 的异步提交。每次读回都新建临时隐藏页，按退避窗口等待服务器落盘后再验证。
+async function verifyPageTimerPersistence(expectedValue) {
+  let lastActualValue = '';
+  let lastFailure = '';
 
-  try {
-    // 给页面提交到 UST 后端一点时间；随后读取的必须来自一次全新导航。
-    await sleep(750);
+  for (let attempt = 0; attempt < PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length; attempt++) {
+    let verifierTabId = null;
+    try {
+      await sleep(PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS[attempt]);
 
-    if (sourceWasAutoCreated && sourceTab?.id) {
-      verifierTabId = sourceTab.id;
-      await chrome.tabs.reload(verifierTabId);
-      await sleep(250);
-    } else {
       const verifierTab = await chrome.tabs.create({ url: AC_PAGE, active: false });
       verifierTabId = verifierTab?.id || null;
-      shouldCloseVerifier = true;
-    }
+      if (!verifierTabId) throw new Error('无法创建页面定时器验证标签页');
 
-    if (!verifierTabId) throw new Error('无法创建页面定时器验证标签页');
-    const pageReady = await waitForTabReady(verifierTabId, 30000);
-    if (!pageReady) throw new Error('页面定时器验证页等待就绪超时');
-    const contentReady = await ensureContentScriptLoaded(verifierTabId);
-    if (!contentReady) throw new Error('页面定时器验证页 content script 未就绪');
+      const pageReady = await waitForTabReady(verifierTabId, 30000);
+      if (!pageReady) throw new Error('页面定时器验证页等待就绪超时');
+      const contentReady = await ensureContentScriptLoaded(verifierTabId);
+      if (!contentReady) throw new Error('页面定时器验证页 content script 未就绪');
 
-    const readback = await chrome.tabs.sendMessage(verifierTabId, { action: 'getPageTimer' });
-    const actualValue = String(readback?.value || readback?.title || '').trim();
-    if (!readback?.found || actualValue !== expectedValue) {
-      return {
-        success: false,
-        error: `刷新后页面定时器未保留目标值（期望 ${expectedValue}，实际 ${actualValue || '空'}）`,
-        actualValue
-      };
-    }
+      const readback = await chrome.tabs.sendMessage(verifierTabId, { action: 'getPageTimer' });
+      const actualValue = String(readback?.value || readback?.title || '').trim();
+      lastActualValue = actualValue;
+      if (readback?.found && actualValue === expectedValue) {
+        return { success: true, value: actualValue, attempts: attempt + 1 };
+      }
 
-    return { success: true, value: actualValue };
-  } catch (e) {
-    return { success: false, error: e?.message || String(e) };
-  } finally {
-    // 临时验证页只负责一次新鲜读回，完成后立即回收；自动创建的原页面仍沿用
-    // setPageTimer finally 中已有的 ac-close-tab-* 延迟回收逻辑。
-    if (shouldCloseVerifier && verifierTabId) {
-      try { await chrome.tabs.remove(verifierTabId); } catch (_) { /* tab may already be closed */ }
+      lastFailure = `第 ${attempt + 1} 次新鲜页读回不匹配（期望 ${expectedValue}，实际 ${actualValue || '空'}）`;
+    } catch (e) {
+      lastFailure = `第 ${attempt + 1} 次新鲜页验证异常：${e?.message || String(e)}`;
+    } finally {
+      // 每个临时验证页只负责一次全新导航读回，立即回收；写入来源页仍由
+      // setPageTimer finally 中已有的 ac-close-tab-* 延迟回收逻辑统一处理。
+      if (verifierTabId) {
+        try { await chrome.tabs.remove(verifierTabId); } catch (_) { /* tab may already be closed */ }
+      }
     }
   }
+
+  return {
+    success: false,
+    error: `页面定时器经 ${PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length} 次新鲜页验证后仍未持久化：${lastFailure || '未知错误'}`,
+    actualValue: lastActualValue,
+    attempts: PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length
+  };
 }
 
 // 关机定时器设置失败时，记录明确的目标分钟数并用独立闹钟持续重试。
@@ -1099,11 +1107,11 @@ async function setPageTimer(minutes, { retryOnFailure = true } = {}) {
       return await finishFailure({ success: false, error: '页面定时器未返回可验证的目标时间' }, 'empty-value');
     }
 
-    const verification = await verifyPageTimerPersistence(expectedValue, tab, autoCreatedTabId === tab.id);
+    const verification = await verifyPageTimerPersistence(expectedValue);
     if (!verification.success) {
       return await finishFailure({
         success: false,
-        error: verification.error || '页面定时器刷新后未确认'
+        error: verification.error || '页面定时器新鲜页面验证后未确认'
       }, 'persistence-check-failed');
     }
 
@@ -1558,27 +1566,34 @@ async function repairScheduleClock() {
 
 async function getScheduleSnapshot(lite = false) {
   await loadScheduleFromStorage();
-  await backfillNextTriggerAt(false);
 
   const alarm = await chrome.alarms.get('ac-pwm');
   const liveAlarmEnd = getLiveAlarmEndMs(alarm);
+  const snapshot = { ...schedule };
 
-  // 活闹钟存在但 storage 可能缺失 nextTriggerAt → 同步内存（lite 模式跳过 storage 写入）
-  if (liveAlarmEnd && (!schedule.nextTriggerAt || Math.abs(schedule.nextTriggerAt - alarm.scheduledTime) > 1500)) {
-    setNextTriggerAt(alarm.scheduledTime);
-    schedule.alarmCreatedAt = Date.now();
-    const diffMs = alarm.scheduledTime - Date.now();
-    schedule.alarmDelayMinutes = Math.max(1, diffMs / 60000);
-    if (!lite) {
-      await persistSchedule('getScheduleSnapshot', { syncFromLiveAlarm: false });
-    }
+  // getSchedule/getScheduleLite 是 popup 的普通轮询入口，必须保持只读。
+  // live alarm 或旧相对字段只能补充本次返回快照；持久化自愈留给 init、
+  // watchdog 和用户主动触发的诊断，避免打开 popup 改变下一次 PWM 调度。
+  if (!snapshot.nextTriggerAt) {
+    const legacyEnd = getLegacyAlarmEndMs();
+    if (legacyEnd) snapshot.nextTriggerAt = legacyEnd;
   }
 
-  let snapshot = { ...schedule };
-  const storedAlarmEnd = getStoredAlarmEndMs();
+  if (liveAlarmEnd && (!snapshot.nextTriggerAt || Math.abs(snapshot.nextTriggerAt - alarm.scheduledTime) > 1500)) {
+    snapshot.nextTriggerAt = alarm.scheduledTime;
+    snapshot.alarmCreatedAt = Date.now();
+    const diffMs = alarm.scheduledTime - Date.now();
+    snapshot.alarmDelayMinutes = Math.max(1, diffMs / 60000);
+  }
+
+  const storedAlarmEnd = snapshot.nextTriggerAt || (
+    snapshot.alarmCreatedAt && snapshot.alarmDelayMinutes
+      ? snapshot.alarmCreatedAt + snapshot.alarmDelayMinutes * 60000
+      : 0
+  );
   const nextBoundary = liveAlarmEnd || (storedAlarmEnd > Date.now() ? storedAlarmEnd : 0);
 
-  if (schedule.enabled && nextBoundary) {
+  if (snapshot.enabled && nextBoundary) {
     const remainingMs = nextBoundary - Date.now();
     if (remainingMs > 0) {
       snapshot._nextBoundary = nextBoundary;
@@ -1594,7 +1609,7 @@ async function getScheduleSnapshot(lite = false) {
 
   const status = await getCurrentACStatus();
   // 弹窗轮询只读展示，不在这里改写 storage 或重建闹钟，避免重新打开弹窗时漂移触发时间。
-  if (typeof status?.isOn === 'boolean' && schedule.enabled) {
+  if (typeof status?.isOn === 'boolean' && snapshot.enabled) {
     snapshot._effectivePwmState = status.isOn ? 'off' : 'on';
   }
   return { ...snapshot, actualStatus: status };

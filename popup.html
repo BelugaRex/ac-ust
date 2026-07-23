@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
 <meta charset="utf-8">
 <style>
@@ -15,12 +15,12 @@
    *    若用户机器已安装 Inter,以下栈会自动优先使用它
    *    (若需扩展内置 Inter 字体文件以彻底对齐 Apple 美学,需另开 issue 单独打包)
    *
-   * 显示尺寸用负字距 (-0.12 → -0.374px) 重现 Apple 的"紧凑"标题节律
-   * 正文 17px / 行高 1.47 / 字距 -0.374px (用 system-ui 等价字体时收紧 0.03 行高)
+  * 正文、状态和表单优先保证在紧凑弹窗中的清晰层级与可读性
    */
 
   /* ===== Design Tokens ===== */
   :root {
+    color-scheme: light dark;
     /* 颜色: 单一 Action Blue + 表面色 + 墨色文本 */
     --c-accent: #0066cc;           /* Action Blue (主交互色) */
     --c-accent-hover: #0071e3;     /* Focus Blue (键盘聚焦环) */
@@ -45,6 +45,7 @@
     --c-success-bg: #f5fbf6;
     --c-warning: #b25a00;
     --c-warning-bg: #fff8ef;
+    --c-warning-border: rgba(178, 90, 0, 0.18);
     --c-danger: #d70015;
 
     /* 圆角: Apple 的系统化半径语法 (避免混用多种中等半径) */
@@ -79,15 +80,14 @@
   html { -webkit-text-size-adjust: 100%; }
 
   body {
-    width: 320px;
+    width: 340px;
+    max-width: 100vw;
     font-family: var(--font-text);
     background: var(--c-parchment);
     color: var(--c-ink);
-    /* 17px 是 Apple 的正文基准; popup 中降至 14px 以适应 320px 节奏
-       字距走 caption 档 (-0.224px) 避免小屏阅读过紧 */
-    font-size: 14px;
-    line-height: 1.43;
-    letter-spacing: -0.224px;
+    font-size: 15px;
+    line-height: 1.5;
+    letter-spacing: 0;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
   }
@@ -97,8 +97,10 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 44px;            /* Apple nav-link 行高一致 (touch target) */
-    padding: 0 16px;
+    min-height: 44px;
+    gap: 4px 8px;
+    flex-wrap: wrap;
+    padding: 6px 16px;
     background: rgba(245, 245, 247, 0.86);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
     backdrop-filter: saturate(180%) blur(20px);
@@ -116,10 +118,10 @@
   .header-name {
     /* Apple tagline token: 21px/600 — 在 popup 中缩到 14px 保持比例感 */
     font-family: var(--font-display);
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 600;
     line-height: 1.19;
-    letter-spacing: -0.12px;    /* nav-link 档字距 */
+    letter-spacing: 0;
     color: var(--c-ink);
   }
   .header-right {
@@ -132,12 +134,12 @@
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 22px;
-    height: 22px;
+    width: 44px;
+    height: 44px;
     border-radius: var(--r-pill);
     background: var(--c-chip);
     color: var(--c-ink);
-    font-size: 11px;
+    font-size: 13px;
     font-weight: 600;
     text-decoration: none;
     line-height: 1;
@@ -150,10 +152,10 @@
   .header-help:active { transform: scale(0.95); } /* Apple 系统级按压微交互 */
   .header-version {
     /* micro-legal token: 10px/400/-0.08px */
-    font-size: 10px;
+    font-size: 11px;
     color: var(--c-muted);
     font-variant-numeric: tabular-nums;
-    letter-spacing: -0.08px;
+    letter-spacing: 0;
   }
 
   .content { padding: var(--s-sm); } /* 12px 内容区外边距产生卡间距 */
@@ -182,28 +184,35 @@
     font-size: 17px;
     font-weight: 600;
     line-height: 1.24;
-    letter-spacing: -0.374px;
+    letter-spacing: 0;
     margin-bottom: 4px;
     color: var(--c-ink);
   }
   .ac-dot {
     width: 9px; height: 9px;
+    border: 2px solid transparent;
     border-radius: var(--r-pill);
     display: inline-block;
     flex-shrink: 0;
   }
   .ac-dot.on { background: var(--c-accent); }
-  .ac-dot.off { background: var(--c-muted-2); }
-  .ac-dot.unknown { background: var(--c-chip); animation: pulse 1s infinite; }
-  @keyframes pulse { 0%,100% { opacity:1 } 50% { opacity:0.4 } }
+  .ac-dot.off {
+    background: transparent;
+    border-color: var(--c-muted-2);
+    border-radius: var(--r-xs);
+  }
+  .ac-dot.unknown {
+    background: transparent;
+    border-color: var(--c-chip);
+  }
 
   .countdown-display {
     align-items: baseline;
     gap: 4px;
-    font-size: 14px;
+    font-size: 15px;
     color: var(--c-muted);
-    line-height: 1.43;
-    letter-spacing: -0.224px;
+    line-height: 1.5;
+    letter-spacing: 0;
   }
   .countdown-display strong {
     /* lead token-like: 28px/600,这是 popup 内最大的数字字
@@ -221,13 +230,13 @@
     margin-top: var(--s-xs);
     padding: 8px 12px;
     background: var(--c-warning-bg);
-    border: 1px solid rgba(178, 90, 0, 0.18);
+    border: 1px solid var(--c-warning-border);
     border-radius: var(--r-md);
     color: var(--c-warning);
-    font-size: 12px;
-    line-height: 1.35;
-    letter-spacing: -0.12px;
-    text-align: center;
+    font-size: 13px;
+    line-height: 1.5;
+    letter-spacing: 0;
+    text-align: left;
   }
 
   /* ===== Settings Card (utility card: 白底 + 发丝边 + lg 圆角) ===== */
@@ -242,16 +251,19 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 14px 16px;
+    gap: 8px;
+    flex-wrap: wrap;
+    min-height: 56px;
+    padding: 6px 16px;
     background: var(--c-canvas);
     border-bottom: 1px solid var(--c-divider);
   }
   .settings-header h3 {
     /* caption-strong token: 14px/600/1.29 — popup 内做卡头 */
     font-family: var(--font-display);
-    font-size: 14px;
+    font-size: 15px;
     color: var(--c-ink);
-    letter-spacing: -0.224px;
+    letter-spacing: 0;
     font-weight: 600;
     line-height: 1.29;
     text-transform: none;
@@ -261,14 +273,14 @@
     display: flex;
     align-items: center;
     gap: 8px;
+    min-height: 44px;
+    margin-left: auto;
   }
-  .toggle-label {
-    font-size: 12px;
+  .toggle-state {
+    font-size: 13px;
     color: var(--c-muted);
-    cursor: pointer;
-    user-select: none;
     white-space: nowrap;
-    letter-spacing: -0.12px;
+    letter-spacing: 0;
   }
 
   /* Toggle Switch — Apple pill toggle 风格 */
@@ -276,14 +288,14 @@
     position: relative;
     display: inline-block;
     width: 46px;
-    height: 26px;
+    height: 44px;
     flex-shrink: 0;
   }
   .toggle-switch input { opacity: 0; width: 0; height: 0; }
   .toggle-slider {
     position: absolute;
     cursor: pointer;
-    top: 0; left: 0; right: 0; bottom: 0;
+    top: 9px; left: 0; right: 0; bottom: 9px;
     background-color: var(--c-chip);
     transition: background-color 0.2s ease;
     border-radius: var(--r-pill);
@@ -310,6 +322,10 @@
     opacity: 0.5;
     cursor: not-allowed;
   }
+  .toggle-switch input:focus-visible + .toggle-slider {
+    outline: 2px solid var(--c-accent-hover);
+    outline-offset: 2px;
+  }
   .toggle-switch:has(input:checked) {
     transform-origin: right center;
   }
@@ -334,10 +350,11 @@
     font-size: 14px;
     font-weight: 400;
     line-height: 1.43;
-    letter-spacing: -0.224px;
+    letter-spacing: 0;
     cursor: pointer;
     display: flex;
     align-items: center;
+    min-height: 44px;
     gap: 7px;
     flex-shrink: 0;
     color: var(--c-ink-80);
@@ -351,13 +368,14 @@
     border: 1px solid var(--c-hairline);
     border-radius: var(--r-pill);
     padding: 6px 10px;
-    font-size: 12px;
-    line-height: 1.43;
-    letter-spacing: -0.12px;
+    font-size: 14px;
+    line-height: 1.5;
+    letter-spacing: 0;
     background: var(--c-pearl);
     color: var(--c-ink);
     font-variant-numeric: tabular-nums;
     width: 92px;
+    min-height: 44px;
     transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
   }
   .active-hours-row input[type="time"]:disabled {
@@ -375,13 +393,13 @@
   }
   .active-hours-row .ah-sep {
     color: var(--c-muted);
-    font-size: 12px;
-    letter-spacing: -0.12px;
+    font-size: 13px;
+    letter-spacing: 0;
   }
 
   .active-hours-row .ah-status {
     margin-left: auto;
-    font-size: 11px;
+    font-size: 12px;
     padding: 4px 9px;
     border-radius: var(--r-pill);
     background: var(--c-pearl);
@@ -389,7 +407,7 @@
     border: 1px solid var(--c-hairline);
     white-space: nowrap;
     line-height: 1.2;
-    letter-spacing: -0.12px;
+    letter-spacing: 0;
   }
   .active-hours-row .ah-status.active {
     background: var(--c-accent-soft);
@@ -414,7 +432,7 @@
     font-size: 14px;
     font-weight: 400;
     line-height: 1.43;
-    letter-spacing: -0.224px;
+    letter-spacing: 0;
     color: var(--c-ink-80);
   }
   .time-row input[type="number"] {
@@ -423,8 +441,9 @@
     padding: 7px 12px;
     font-size: 14px;
     line-height: 1.43;
-    letter-spacing: -0.224px;
+    letter-spacing: 0;
     width: 96px;
+    min-height: 44px;
     background: var(--c-pearl);
     color: var(--c-ink);
     transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
@@ -453,9 +472,9 @@
 
   .hint {
     color: var(--c-muted);
-    font-size: 12px;
-    line-height: 1.43;
-    letter-spacing: -0.12px;
+    font-size: 13px;
+    line-height: 1.5;
+    letter-spacing: 0;
     margin-top: var(--s-xs);
   }
   .hint-pin {
@@ -471,16 +490,18 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
+    align-items: flex-start;
     gap: 8px;
+    flex-wrap: wrap;
     padding-top: var(--s-xxs);
   }
   .status {
-    font-size: 12px;
+    font-size: 13px;
     color: var(--c-muted);
     flex: 1;
-    min-height: 16px;
-    line-height: 1.43;
-    letter-spacing: -0.12px;
+    min-height: 20px;
+    line-height: 1.5;
+    letter-spacing: 0;
   }
   .status.success { color: var(--c-accent); }
   .status.error { color: var(--c-danger); }
@@ -488,15 +509,16 @@
   .btn-diagnose {
     /* button-secondary-pill token: 透明底 + Action Blue 描边 + pill */
     font-family: var(--font-text);
-    font-size: 12px;
+    font-size: 13px;
     font-weight: 400;
     line-height: 1.29;
-    letter-spacing: -0.12px;
+    letter-spacing: 0;
     color: var(--c-accent);
     background: var(--c-canvas);
     border: 1px solid var(--c-accent);
     border-radius: var(--r-pill);
     padding: 6px 14px;
+    min-height: 44px;
     cursor: pointer;
     white-space: nowrap;
     transition: transform 0.16s ease, background 0.16s ease, color 0.16s ease;
@@ -508,19 +530,209 @@
   .btn-diagnose:active { transform: scale(0.95); } /* Apple 系统级按压反馈 */
 
   .diagnose-result {
-    font-family: var(--font-mono);
-    font-size: 11px;
+    font-family: var(--font-text);
+    font-size: 13px;
     color: var(--c-muted);
     margin-top: var(--s-xs);
-    line-height: 1.55;
+    line-height: 1.6;
     display: none;
-    word-break: break-word;
+    overflow-wrap: anywhere;
+  }
+
+  .comfort-card {
+    background: var(--c-canvas);
+    border: 1px solid var(--c-hairline);
+    border-radius: var(--r-lg);
+    margin-bottom: var(--s-sm);
+    overflow: hidden;
+  }
+  .comfort-card summary {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    padding: 10px 16px;
+    color: var(--c-ink);
+    cursor: pointer;
+    font-family: var(--font-display);
+    font-size: 15px;
+    font-weight: 600;
+    line-height: 1.4;
+    letter-spacing: 0;
+  }
+  .comfort-body {
+    padding: 0 16px 16px;
+    border-top: 1px solid var(--c-divider);
+  }
+  .comfort-toggle {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+    gap: 8px;
+    color: var(--c-ink-80);
+    cursor: pointer;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  .comfort-toggle input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    accent-color: var(--c-accent);
+  }
+  .comfort-description {
+    color: var(--c-muted);
+    font-size: 13px;
+    line-height: 1.5;
+    letter-spacing: 0;
+  }
+  .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+  }
+
+  body.reading-mode {
+    font-size: 16px;
+    line-height: 1.6;
+    letter-spacing: 0.02em;
+  }
+  body.reading-mode .header-name,
+  body.reading-mode .settings-header h3,
+  body.reading-mode .ac-indicator,
+  body.reading-mode .active-hours-row label.ah-label,
+  body.reading-mode .time-row label {
+    font-size: 16px;
+    line-height: 1.55;
+    letter-spacing: 0.02em;
+  }
+  body.reading-mode .toggle-state,
+  body.reading-mode .active-hours-row input[type="time"],
+  body.reading-mode .active-hours-row .ah-status,
+  body.reading-mode .time-row input[type="number"],
+  body.reading-mode .hint,
+  body.reading-mode .status,
+  body.reading-mode .btn-diagnose,
+  body.reading-mode .comfort-toggle,
+  body.reading-mode .comfort-description,
+  body.reading-mode .diagnose-result {
+    font-size: 14px;
+    line-height: 1.6;
+    letter-spacing: 0.02em;
+  }
+  body.reading-mode .countdown-display strong {
+    font-size: 32px;
+  }
+  body.reading-mode .header-version {
+    display: none;
+  }
+
+  @media (max-width: 300px) {
+    .settings-header,
+    .time-row {
+      align-items: stretch;
+      flex-direction: column;
+    }
+    .toggle-area {
+      justify-content: space-between;
+      margin-left: 0;
+    }
+    .time-row input[type="number"] {
+      width: 100%;
+    }
+    .active-hours-row .ah-status {
+      margin-left: 0;
+    }
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --c-accent: #409cff;
+      --c-accent-hover: #64b5ff;
+      --c-accent-ring: rgba(64, 156, 255, 0.36);
+      --c-accent-soft: rgba(64, 156, 255, 0.2);
+      --c-canvas: #1c1c1e;
+      --c-parchment: #000000;
+      --c-pearl: #2c2c2e;
+      --c-ink: #f5f5f7;
+      --c-ink-80: #e5e5ea;
+      --c-muted: #aeaeb2;
+      --c-muted-2: #8e8e93;
+      --c-hairline: #48484a;
+      --c-divider: #38383a;
+      --c-chip: #48484a;
+      --c-success: #30d158;
+      --c-success-bg: #1b3324;
+      --c-warning: #ffb340;
+      --c-warning-bg: #3a2c16;
+      --c-warning-border: rgba(255, 179, 64, 0.5);
+      --c-danger: #ff6961;
+    }
+    .header {
+      background: rgba(28, 28, 30, 0.9);
+      border-bottom-color: rgba(255, 255, 255, 0.16);
+    }
+    .header-help {
+      background: #48484a;
+    }
+    .header-help:hover,
+    .active-hours-row input[type="time"]:not(:disabled):hover:not(:focus),
+    .time-row input[type="number"]:hover:not(:focus) {
+      border-color: #8e8e93;
+    }
+    .header-help:hover {
+      background: #636366;
+    }
+    .toggle-slider:before {
+      background-color: #f5f5f7;
+    }
+  }
+
+  @media (prefers-contrast: more) {
+    :root {
+      --c-muted: #4d4d4d;
+      --c-muted-2: #4d4d4d;
+      --c-hairline: #666666;
+      --c-divider: #767676;
+      --c-warning-border: #8b4300;
+    }
+    .status-card,
+    .settings-card,
+    .comfort-card {
+      border-width: 2px;
+    }
+  }
+
+  @media (prefers-color-scheme: dark) and (prefers-contrast: more) {
+    :root {
+      --c-muted: #f2f2f7;
+      --c-muted-2: #f2f2f7;
+      --c-hairline: #d1d1d6;
+      --c-divider: #aeaeb2;
+      --c-warning-border: #ffd60a;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      scroll-behavior: auto !important;
+      transition-duration: 0.01ms !important;
+    }
   }
 
   /* 焦点环: Action Blue 2px outline (Apple 的 focus 信号) */
   button:focus-visible,
   a:focus-visible,
   input:focus-visible,
+  summary:focus-visible,
   .header-help:focus-visible {
     outline: 2px solid var(--c-accent-hover);
     outline-offset: 2px;
@@ -537,7 +749,7 @@
       <span class="header-name">AC-UST</span>
     </div>
     <div class="header-right">
-      <a class="header-help" id="helpLink" href="https://github.com/BelugaRex/ac-ust#readme" target="_blank" rel="noopener" title="" data-i18n-title="helpTooltip">?</a>
+      <a class="header-help" id="helpLink" href="https://github.com/BelugaRex/ac-ust#readme" target="_blank" rel="noopener" title="" data-i18n-title="helpTooltip" data-i18n-aria-label="helpTooltip">?</a>
       <span class="header-version" id="versionInfo">v--</span>
     </div>
   </div>
@@ -545,9 +757,9 @@
   <div class="content">
 
     <!-- Status hero card: AC state + countdown + safetynet -->
-    <div class="status-card" id="statusCard">
+    <div class="status-card" id="statusCard" role="region" aria-labelledby="acStateText">
       <div class="ac-indicator">
-        <span class="ac-dot unknown" id="acDot"></span>
+        <span class="ac-dot unknown" id="acDot" aria-hidden="true"></span>
         <span id="acStateText" data-i18n="acLoading"></span>
       </div>
       <div class="countdown-display" id="countdownDisplay" style="display:none">
@@ -556,17 +768,18 @@
       <div class="countdown-display" id="idleDisplay" style="display:none">
         <span style="color:var(--c-muted)" data-i18n="acIdle"></span>
       </div>
-      <div class="safetynet-warning" id="safetynetWarning" style="display:none"></div>
+      <div class="safetynet-warning" id="safetynetWarning" role="status" aria-live="polite" aria-atomic="true" style="display:none"></div>
     </div>
+    <p class="visually-hidden" id="statusAnnouncement" role="status" aria-live="polite" aria-atomic="true"></p>
 
     <!-- Settings card: toggle in header, clock/interval in body -->
-    <div class="settings-card">
+    <div class="settings-card" role="group" aria-labelledby="pwmSettingsTitle">
       <div class="settings-header">
-        <h3 data-i18n="pwmSettings"></h3>
+        <h3 id="pwmSettingsTitle" data-i18n="pwmSettings"></h3>
         <div class="toggle-area">
-          <span class="toggle-label" id="timerToggleLabel" data-i18n="timerDisabled"></span>
+          <span class="toggle-state" id="timerToggleState" data-i18n="timerDisabled" aria-live="polite" aria-atomic="true"></span>
           <label class="toggle-switch">
-            <input type="checkbox" id="timerToggle">
+            <input type="checkbox" id="timerToggle" aria-labelledby="pwmSettingsTitle" aria-describedby="timerToggleState">
             <span class="toggle-slider"></span>
           </label>
         </div>
@@ -577,18 +790,18 @@
             <input type="checkbox" id="activeHoursToggle">
             <span data-i18n="activeHoursLabel"></span>
           </label>
-          <input type="time" id="activeHoursStart" value="08:00" aria-label="start">
+          <input type="time" id="activeHoursStart" value="08:00" data-i18n-aria-label="activeHoursStartLabel">
           <span class="ah-sep">—</span>
-          <input type="time" id="activeHoursEnd" value="23:00" aria-label="end">
+          <input type="time" id="activeHoursEnd" value="23:00" data-i18n-aria-label="activeHoursEndLabel">
           <span class="ah-status" id="activeHoursStatus"></span>
         </div>
         <div id="intervalInputs">
           <div class="time-row">
-            <label data-i18n="onMinutesLabel"></label>
+            <label for="onMinutes" data-i18n="onMinutesLabel"></label>
             <input type="number" id="onMinutes" value="30" min="1" step="1">
           </div>
           <div class="time-row">
-            <label data-i18n="offMinutesLabel"></label>
+            <label for="offMinutes" data-i18n="offMinutesLabel"></label>
             <input type="number" id="offMinutes" value="30" min="1" step="1">
           </div>
         </div>
@@ -596,12 +809,23 @@
       </div>
     </div>
 
+    <details class="comfort-card">
+      <summary data-i18n="comfortSettingsTitle"></summary>
+      <div class="comfort-body">
+        <label class="comfort-toggle" for="readingModeToggle">
+          <input type="checkbox" id="readingModeToggle" aria-describedby="readingModeDescription">
+          <span data-i18n="readingModeLabel"></span>
+        </label>
+        <p class="comfort-description" id="readingModeDescription" data-i18n="readingModeDescription"></p>
+      </div>
+    </details>
+
     <!-- Footer: status message + diagnose button + results -->
     <div class="footer">
-      <div class="status" id="status"></div>
+      <div class="status" id="status" role="status" aria-live="polite" aria-atomic="true"></div>
       <button class="btn-diagnose" id="btnDiagnose" data-i18n="btnDiagnose"></button>
     </div>
-    <div class="diagnose-result" id="diagnoseResult"></div>
+    <div class="diagnose-result" id="diagnoseResult" role="region" tabindex="0" aria-live="off" data-i18n-aria-label="diagnoseResultLabel"></div>
 
   </div>
 

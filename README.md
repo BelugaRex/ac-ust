@@ -9,8 +9,9 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气开关，支持 PWM
 - **跨设备同步**：多台设备运行扩展时自动对齐 PWM 循环，不会同时反复开关同一台空调
 - **自动确认弹窗**：自动处理浏览器原生 `confirm` 和 Ant Design 确认框
 - **后台运行**：即使关闭弹窗，定时任务仍在 Service Worker 中执行
-- **关机确认**：每次设置 `Power-off after` 后都从新鲜页面回读同一时间；未确认时自动重试，不把本页刚显示的值当作成功
+- **关机确认**：设置 `Power-off after` 后保留写入页，改由独立新鲜页按 `3/5/10` 秒退避回读同一时间；未确认时自动重试，不把本页刚显示的值当作成功
 - **诊断面板**：一键查看闹钟、storage、content script 状态，自动修复常见问题
+- **易读与低干扰**：默认提供更清晰的文字、状态反馈和减弱动态效果适配；可按需开启易读模式，放大文字并放宽排版
 - **中英双语**：支持中文/English，通过 Crowdin 社区翻译更多语言
 
 ## 📦 获取
@@ -19,7 +20,7 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气开关，支持 PWM
 |------|------|
 | **[Chrome Web Store](https://chromewebstore.google.com)** | 即将上架，一键安装自动更新 |
 | **开发者模式** | `git clone` → `./build.ps1` → Load Unpacked `dist/` |
-| **GitHub Releases** | 下载源码 ZIP，解压后 Load Unpacked |
+| **GitHub Releases** | 下载源码 ZIP，解压后运行 `./build.ps1`，再 Load Unpacked `dist/` |
 
 ## 安装
 
@@ -48,6 +49,7 @@ cd ac-ust
 | 开启分钟 | 每次开启冷气持续多少分钟（修改后自动重启循环） |
 | 关闭分钟 | 每次关闭冷气持续多少分钟（修改后自动重启循环） |
 | 运行时段 | 设置每天运行时段（如 08:00-23:00），时段外自动停机 |
+| 显示与舒适度 | 按需开启易读模式；文字会更大、行距与字距更宽，非必要动态效果更少 |
 
 > 💡 **重要**：请将 UST AC 页面在浏览器中**固定标签页**并保持开启，否则定时开关无法控制空调。
 
@@ -155,7 +157,7 @@ git push origin my-cool-feature
 - `nextTriggerAt` 是**运行时派生值**，表示当前 PWM 阶段的未来切换时刻；它会随着每一轮开/关切换而变化。
 - 如果诊断里出现“`ac-pwm` 闹钟存在，但 storage 绝对触发时间缺失”，通常表示后台在创建/恢复闹钟后，`nextTriggerAt` 没有及时回写到 storage。
 - 当前实现会优先以 live `ac-pwm` 的 `scheduledTime` 纠偏 `nextTriggerAt`，并在读取 AC 状态时优先询问主世界脚本，避免隔离世界把 `ON` 误读成 `OFF`。
-- `Power-off after` 的本页输入值不是最终凭据：扩展会在隐藏的新鲜页面读回相同的 `HH:MM` 后才推进到下一关机阶段。验证失败会保留安全相位并重试；不会刷新你正在看的 AC 页面。
+- `Power-off after` 的本页输入值不是最终凭据：扩展会保留写入页，以隐藏的新鲜页面按 `3/5/10` 秒退避读回相同的 `HH:MM` 后才推进到下一关机阶段。验证失败会保留安全相位并重试；浏览器重启后错过的 retry 也会重新排程，且不会刷新你正在看的 AC 页面。
 - 如果后续仍复现“alarm 还在但时间丢失”，下一步应把阶段检查点（例如 `alarmCreatedAt`、`alarmDelayMinutes`、`pwmState`）进一步提升为正式真相源，由它们重算 `nextTriggerAt`。
 
 ## License

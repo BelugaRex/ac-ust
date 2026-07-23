@@ -12,14 +12,16 @@ const activeHoursStart = document.getElementById('activeHoursStart');
 const activeHoursEnd = document.getElementById('activeHoursEnd');
 const activeHoursStatus = document.getElementById('activeHoursStatus');
 const timerToggle = document.getElementById('timerToggle');
-const timerToggleLabel = document.getElementById('timerToggleLabel');
+const timerToggleState = document.getElementById('timerToggleState');
 const statusDiv = document.getElementById('status');
+const statusAnnouncement = document.getElementById('statusAnnouncement');
 const acDot = document.getElementById('acDot');
 const acStateText = document.getElementById('acStateText');
 const countdownDisplay = document.getElementById('countdownDisplay');
 const idleDisplay = document.getElementById('idleDisplay');
 const countdownText = document.getElementById('countdownText');
 const safetynetWarning = document.getElementById('safetynetWarning');
+const readingModeToggle = document.getElementById('readingModeToggle');
 
 // popup 打开期间保持与 Service Worker 的长连接。
 // 这样用户盯着弹窗时，后台不会只靠一次性 sendMessage 存活。
@@ -36,6 +38,9 @@ try {
 // ----- 加载已保存的设置 -----
 let currentScheduleEnabled = false;
 let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
+const ACCESSIBILITY_PREFERENCES_KEY = 'ac_accessibility_preferences';
+let accessibilityPreferences = { readingMode: false };
+let lastAnnouncedState = '';
 
 async function loadSettings() {
   const result = await chrome.storage.local.get('ac_schedule');
@@ -52,6 +57,41 @@ async function loadSettings() {
   };
   syncActiveHoursUI();
 }
+
+function applyAccessibilityPreferences() {
+  document.body.classList.toggle('reading-mode', accessibilityPreferences.readingMode);
+  readingModeToggle.checked = accessibilityPreferences.readingMode;
+}
+
+async function loadAccessibilityPreferences() {
+  const stored = await chrome.storage.local.get(ACCESSIBILITY_PREFERENCES_KEY);
+  const saved = stored[ACCESSIBILITY_PREFERENCES_KEY];
+  accessibilityPreferences = {
+    readingMode: saved?.readingMode === true
+  };
+  applyAccessibilityPreferences();
+}
+
+readingModeToggle.addEventListener('change', async () => {
+  const previousReadingMode = accessibilityPreferences.readingMode;
+  const readingMode = readingModeToggle.checked;
+  readingModeToggle.disabled = true;
+  accessibilityPreferences = { readingMode };
+  applyAccessibilityPreferences();
+
+  try {
+    await chrome.storage.local.set({
+      [ACCESSIBILITY_PREFERENCES_KEY]: accessibilityPreferences
+    });
+    showStatus(t(readingMode ? 'readingModeEnabled' : 'readingModeDisabled'), 'success');
+  } catch (_) {
+    accessibilityPreferences = { readingMode: previousReadingMode };
+    applyAccessibilityPreferences();
+    showStatus(t('accessibilityPreferencesError'), 'error');
+  } finally {
+    readingModeToggle.disabled = false;
+  }
+});
 
 function syncActiveHoursUI() {
   activeHoursToggle.checked = currentActiveHours.enabled;
@@ -135,6 +175,19 @@ async function refreshStatus() {
   }
 }
 
+function announceState(message) {
+  if (!message || message === lastAnnouncedState) return;
+  lastAnnouncedState = message;
+  statusAnnouncement.textContent = message;
+}
+
+function updateSafetynetWarning(message) {
+  const changed = safetynetWarning.textContent !== message;
+  safetynetWarning.style.display = message ? 'block' : 'none';
+  safetynetWarning.textContent = message;
+  if (changed && message) announceState(message);
+}
+
 function updateCountdownDisplay(schedule, alarm) {
   if (!schedule || !schedule.enabled) {
     currentScheduleEnabled = false;
@@ -144,7 +197,8 @@ function updateCountdownDisplay(schedule, alarm) {
     acStateText.textContent = t('acOff');
     countdownDisplay.style.display = 'none';
     idleDisplay.style.display = 'flex';
-    safetynetWarning.style.display = 'none';
+    updateSafetynetWarning('');
+    announceState(t('acOff'));
     return;
   }
 
@@ -164,18 +218,20 @@ function updateCountdownDisplay(schedule, alarm) {
   if (currentACOn) {
     acDot.className = 'ac-dot on';
     acStateText.textContent = t('acRunning');
+    announceState(t('acRunning'));
     if (schedule.pageTimerError) {
-      safetynetWarning.style.display = 'block';
-      safetynetWarning.textContent = schedule.pageTimerMinutes
+      const warning = schedule.pageTimerMinutes
         ? t('safetynetError', schedule.pageTimerError)
         : t('safetynetNotSet', schedule.pageTimerError);
+      updateSafetynetWarning(warning);
     } else {
-      safetynetWarning.style.display = 'none';
+      updateSafetynetWarning('');
     }
   } else {
     acDot.className = 'ac-dot off';
     acStateText.textContent = t('acStopped');
-    safetynetWarning.style.display = 'none';
+    updateSafetynetWarning('');
+    announceState(t('acStopped'));
   }
 
   // 计算倒计时（v0.5.x 起只保留间隔模式）
@@ -248,11 +304,13 @@ timerToggle.addEventListener('change', async () => {
   if (_toggleProgrammatic) return; // 程序同步，不触发 updateSchedule
   const enabled = timerToggle.checked;
   timerToggle.disabled = true; // 防止双击
-  timerToggleLabel.textContent = enabled ? t('timerEnabling') : t('timerDisabling');
+  timerToggleState.textContent = enabled ? t('timerEnabling') : t('timerDisabling');
+  timerToggle.setAttribute('aria-busy', 'true');
   try {
     await updateSchedule(enabled, true);
   } finally {
     timerToggle.disabled = false;
+    timerToggle.removeAttribute('aria-busy');
   }
 });
 
@@ -260,7 +318,7 @@ timerToggle.addEventListener('change', async () => {
 function syncToggleState(enabled) {
   _toggleProgrammatic = true;
   timerToggle.checked = enabled;
-  timerToggleLabel.textContent = enabled ? t('timerEnabled') : t('timerDisabled');
+  timerToggleState.textContent = enabled ? t('timerEnabled') : t('timerDisabled');
   _toggleProgrammatic = false;
 }
 
@@ -280,16 +338,14 @@ for (const input of [onMinutesInput, offMinutesInput]) {
 function showStatus(msg, type) {
   statusDiv.textContent = msg;
   statusDiv.className = 'status ' + type;
-  setTimeout(() => {
-    statusDiv.textContent = '';
-    statusDiv.className = 'status';
-  }, 3000);
 }
 
 async function startup() {
   // 先加载 i18n 翻译，再填充 DOM 静态文本，最后拉取状态
   await I18n.load();
   I18n.applyToDOM();
+  document.documentElement.lang = I18n.getLang().replace('_', '-');
+  await loadAccessibilityPreferences();
   await loadSettings();
   await refreshStatus();
 }
@@ -299,7 +355,7 @@ setInterval(refreshStatus, 1000);
 setInterval(tickActiveHoursBadge, 10000);  // 每 10 秒刷新 active hours 状态徽章
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.5.13';
+const APP_VERSION = '0.6.0';
 // BUILD_TIME 由 build.ps1 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -325,9 +381,20 @@ if (versionInfo) {
 const btnDiagnose = document.getElementById('btnDiagnose');
 const diagnoseResult = document.getElementById('diagnoseResult');
 
+function renderDiagnoseResult(lines) {
+  const fragment = document.createDocumentFragment();
+  lines.forEach((line, index) => {
+    if (index > 0) fragment.append(document.createElement('br'));
+    fragment.append(document.createTextNode(line));
+  });
+  diagnoseResult.replaceChildren(fragment);
+}
+
 btnDiagnose.addEventListener('click', async () => {
   diagnoseResult.style.display = 'block';
-  diagnoseResult.innerHTML = '🔍 诊断中...';
+  diagnoseResult.textContent = t('diagnoseInProgress');
+  showStatus(t('diagnoseInProgress'), '');
+  btnDiagnose.disabled = true;
   
   const lines = [];
   function add(ok, msg) { lines.push((ok ? '✅' : '❌') + ' ' + msg); }
@@ -541,6 +608,8 @@ btnDiagnose.addEventListener('click', async () => {
     lines.push('❌ 诊断异常: ' + (e.message||'').slice(0,80));
   }
   
-  diagnoseResult.innerHTML = lines.join('<br>');
+  renderDiagnoseResult(lines);
+  btnDiagnose.disabled = false;
+  showStatus(t('diagnoseComplete'), 'success');
 });
 

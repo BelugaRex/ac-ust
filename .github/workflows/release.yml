@@ -17,6 +17,19 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Verify tag commit belongs to main
+        shell: bash
+        run: |
+          git fetch origin main:refs/remotes/origin/main
+          tag_commit="$(git rev-list -n 1 "$GITHUB_REF")"
+          if ! git merge-base --is-ancestor "$tag_commit" origin/main; then
+            echo "::error::Tag $GITHUB_REF is not reachable from origin/main. Refusing to create a release."
+            exit 1
+          fi
+          echo "Verified $GITHUB_REF commit is reachable from origin/main."
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

@@ -85,6 +85,9 @@
     scope.querySelectorAll('[data-i18n-title]').forEach(el => {
       el.setAttribute('title', t(el.getAttribute('data-i18n-title')));
     });
+    scope.querySelectorAll('[data-i18n-aria-label]').forEach(el => {
+      el.setAttribute('aria-label', t(el.getAttribute('data-i18n-aria-label')));
+    });
   }
 
   global.I18n = { load, t, applyToDOM, getLang: () => activeLang || SOURCE_LANG };
