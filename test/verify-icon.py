@@ -87,42 +87,79 @@ def alpha_at(x, y):
 
 print(f'Decoded: mode=RGBA size=({w}, {h})')
 
-# 16px is the primary browser-toolbar size. The power bar and lower ring
-# must survive rasterization as distinct gold regions.
-icon16_path = os.path.join(icons_dir, 'icon16.png')
-with open(icon16_path, 'rb') as f:
-    icon16 = f.read()
-icon16_pos = 8
-icon16_idat = bytearray()
-while icon16_pos < len(icon16):
-    chunk_len = struct.unpack('>I', icon16[icon16_pos:icon16_pos + 4])[0]
-    chunk_type = icon16[icon16_pos + 4:icon16_pos + 8]
-    chunk_data = icon16[icon16_pos + 8:icon16_pos + 8 + chunk_len]
-    icon16_pos += chunk_len + 12
+# 16px is the primary browser-toolbar size. It is pixel-authored with no
+# antialiasing so the cycle arrow and snowflake remain separate.
+toolbar16_path = os.path.join(icons_dir, 'action16.png')
+with open(toolbar16_path, 'rb') as f:
+    toolbar16 = f.read()
+toolbar16_pos = 8
+toolbar16_idat = bytearray()
+while toolbar16_pos < len(toolbar16):
+    chunk_len = struct.unpack('>I', toolbar16[toolbar16_pos:toolbar16_pos + 4])[0]
+    chunk_type = toolbar16[toolbar16_pos + 4:toolbar16_pos + 8]
+    chunk_data = toolbar16[toolbar16_pos + 8:toolbar16_pos + 8 + chunk_len]
+    toolbar16_pos += chunk_len + 12
     if chunk_type == b'IHDR':
-        icon16_w, icon16_h, _, _, _, _, _ = struct.unpack('>IIBBBBB', chunk_data)
+        toolbar16_w, toolbar16_h, _, _, _, _, _ = struct.unpack('>IIBBBBB', chunk_data)
     elif chunk_type == b'IDAT':
-        icon16_idat.extend(chunk_data)
+        toolbar16_idat.extend(chunk_data)
 
-icon16_raw = zlib.decompress(icon16_idat)
-icon16_stride = icon16_w * 4
-assert icon16_w == 16 and icon16_h == 16, 'Expected 16x16 toolbar icon'
-assert len(icon16_raw) == icon16_h * (icon16_stride + 1), 'Invalid 16px scanlines'
-assert all(icon16_raw[y * (icon16_stride + 1)] == 0 for y in range(icon16_h)), \
+toolbar16_raw = zlib.decompress(toolbar16_idat)
+toolbar16_stride = toolbar16_w * 4
+assert toolbar16_w == 16 and toolbar16_h == 16, 'Expected 16x16 toolbar icon'
+assert len(toolbar16_raw) == toolbar16_h * (toolbar16_stride + 1), \
+    'Invalid 16px scanlines'
+assert all(toolbar16_raw[y * (toolbar16_stride + 1)] == 0
+           for y in range(toolbar16_h)), \
     'Expected unfiltered 16px scanlines'
-icon16_rows = [
-    icon16_raw[y * (icon16_stride + 1) + 1:(y + 1) * (icon16_stride + 1)]
-    for y in range(icon16_h)
+toolbar16_rows = [
+    toolbar16_raw[y * (toolbar16_stride + 1) + 1:
+                  (y + 1) * (toolbar16_stride + 1)]
+    for y in range(toolbar16_h)
 ]
 
-def is_gold16(x, y):
-    r, g, b, a = icon16_rows[y][x * 4:x * 4 + 4]
-    return a >= 64 and r > 180 and g > 120 and b < 100
+toolbar16_pixels = [
+    tuple(row[x * 4:x * 4 + 4])
+    for row in toolbar16_rows for x in range(16)
+]
+transparent = (0, 0, 0, 0)
+navy = (0, 47, 108, 255)
+gold = (255, 205, 0, 255)
+toolbar16_hard_edged = set(toolbar16_pixels) <= {transparent, navy, gold}
+visible16 = [
+    (index % 16, index // 16)
+    for index, pixel in enumerate(toolbar16_pixels) if pixel != transparent
+]
+toolbar16_full_canvas = (
+    min(x for x, _ in visible16) == 0
+    and max(x for x, _ in visible16) == 15
+    and min(y for _, y in visible16) <= 1
+    and max(y for _, y in visible16) >= 14
+)
+toolbar16_centroid = (
+    sum(x for x, _ in visible16) / len(visible16),
+    sum(y for _, y in visible16) / len(visible16),
+)
+toolbar16_centered = all(abs(value - 7.5) <= 0.15 for value in toolbar16_centroid)
 
-gold16_pixels = sum(is_gold16(x, y) for y in range(16) for x in range(16))
-power_bar_visible = any(is_gold16(x, y) for y in range(3, 7) for x in range(7, 9))
-power_ring_visible = any(is_gold16(x, y) for y in range(9, 13) for x in range(5, 11))
-toolbar_icon_legible = gold16_pixels >= 20 and power_bar_visible and power_ring_visible
+def is_gold16(x, y):
+    return toolbar16_pixels[y * 16 + x] == gold
+
+snowflake_visible = sum(is_gold16(x, y) for y in range(5, 12)
+                        for x in range(5, 12)) >= 15
+arrowhead_visible = sum(is_gold16(x, y) for y in range(2, 5)
+                        for x in range(11, 16)) >= 8
+toolbar_icon_legible = (toolbar16_hard_edged and toolbar16_full_canvas
+                        and toolbar16_centered
+                        and snowflake_visible and arrowhead_visible)
+
+toolbar_sizes_native = True
+for toolbar_size in (16, 20, 24, 32, 48):
+    toolbar_path = os.path.join(icons_dir, f'action{toolbar_size}.png')
+    with open(toolbar_path, 'rb') as f:
+        toolbar_header = f.read(24)
+    toolbar_w, toolbar_h = struct.unpack('>II', toolbar_header[16:24])
+    toolbar_sizes_native &= toolbar_w == toolbar_size and toolbar_h == toolbar_size
 
 # 3. Edge transparency check (16px padding should be transparent)
 edge_transparent = True
@@ -150,7 +187,8 @@ print(f'Center 80x80 opaque ratio: {opaque_pct:.0f}%')
 
 # 5. Verdict
 checks = [
-    ('16px toolbar power glyph visible', toolbar_icon_legible),
+    ('16px toolbar snowflake + cycle glyph is hard-edged', toolbar_icon_legible),
+    ('16/20/24/32/48px toolbar icons are native-sized', toolbar_sizes_native),
     ('PNG signature valid', sig == b'\x89PNG\r\n\x1a\n'),
     ('Size 128x128', w == 128 and h == 128),
     ('RGBA color mode', bitd == 8 and ct == 6),

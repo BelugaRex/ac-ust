@@ -2,18 +2,19 @@
 """Generate AC-UST extension icons — pure stdlib (no Pillow).
 
 Design:
-- Concept: a bold power symbol = direct AC control, authored on the
-    16px grid before being extended to larger sizes
+- Concept: one cycle arrow = PWM automation; a centered snowflake = AC
+- Toolbar geometry is authored for 16px first, then rendered at native
+    20/24/32/48px sizes for high-DPI browser scaling
 - Palette: HKUST blue & gold (university colours, per Wikipedia
   infobox; blue ≈ Pantone 295C, gold ≈ Pantone 116C approximations)
 - Squircle tile, 12.5% transparent padding (16px at 128, satisfying
   test/verify-icon.py padding check)
-- Arrowheads are gold and oversized so they stay visible at 16px
-  (colour + size separation; a flat white ring read as "just a ring")
+- Toolbar icons use a transparent background and nearly the full canvas;
+    store/extension-list icons keep the branded squircle tile
 
 Usage:
   python3 tools/gen-icon.py                # candidate sheet → $TMPDIR
-  python3 tools/gen-icon.py apply [NAME]   # write icons/icon{16,48,128}.png
+    python3 tools/gen-icon.py apply [NAME]   # write brand + toolbar icons
 """
 
 import math
@@ -34,7 +35,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # Minimum stroke full-width per output size: small sizes get bolder
 # geometry instead of a blur of sub-pixel lines.
-MIN_W = {128: 0.0, 48: 2.6, 16: 2.0}
+MIN_W = {128: 0.0, 48: 2.6, 32: 2.0, 24: 1.5, 20: 1.25, 16: 1.0}
 
 
 # ---------------------------------------------------------------- shapes
@@ -77,6 +78,16 @@ def arrow_at(cx, cy, r, theta_deg, length, width):
     return tri(ax, ay, bx, by, cx2, cy2)
 
 
+def snowflake(key, radius, width):
+    """Three crossing strokes forming a six-arm snowflake."""
+    layers = []
+    for angle in (0, 60, 120):
+        t = math.radians(angle)
+        dx, dy = radius * math.cos(t), radius * math.sin(t)
+        layers.append((cap(-dx, -dy, dx, dy, width / 2), key))
+    return layers
+
+
 def _cycle2(arc_key, head_key, r=26.0, w=7.6, head_l=17.0, head_w=19.0):
     """Two chase arrows: arcs at top/bottom, oversized heads."""
     return [
@@ -112,25 +123,52 @@ def concept_cycle2_inverted(_size):
     return GOLD, _cycle2('N', 'N')
 
 
-def concept_power(_size):
-    """Navy tile, bold gold power symbol optimized for 16px."""
+def concept_snow_cycle(_size):
+    """Branded tile with a cycle arrow surrounding an AC snowflake."""
     layers = [
-        (arc(0, 1, 28, 10, 315, 270), 'G'),
-        (cap(0, -31, 0, -5, 5), 'G'),
+        (arc(0, 0, 29, 8, 60, 270), 'W'),
+        (arrow_at(0, 0, 29, 330, 18, 20), 'G'),
     ]
+    layers.extend(snowflake('G', 15, 5))
     return NAVY, layers
 
 
+def concept_toolbar_snow_cycle(size):
+    """Transparent, full-canvas cycle/snowflake mark for browser chrome."""
+    layers = [
+        (arc(0, 0, 43, 24, 60, 270), 'W'),
+        (arc(0, 0, 43, 15, 60, 270), 'N'),
+        (arrow_at(0, 0, 43, 330, 28, 30), 'N'),
+        (arrow_at(0, 0, 43, 330, 20, 19), 'G'),
+    ]
+    if size <= 16:
+        snow_outer = (25, 16)
+        snow_inner = (22, 9)
+    elif size <= 20:
+        snow_outer = (23, 15)
+        snow_inner = (20, 8)
+    else:
+        snow_outer = (19, 13)
+        snow_inner = (16, 6)
+    layers.extend(snowflake('N', *snow_outer))
+    layers.extend(snowflake('G', *snow_inner))
+    return None, layers
+
+
 CONCEPTS = {
-    'power': concept_power,
+    'snow-cycle': concept_snow_cycle,
     'cycle2-duotone': concept_cycle2_duotone,
     'cycle1-duotone': concept_cycle1_duotone,
     'cycle2-allgold': concept_cycle2_allgold,
     'cycle2-inverted': concept_cycle2_inverted,
 }
+PREVIEW_CONCEPTS = {
+    'toolbar-snow-cycle': concept_toolbar_snow_cycle,
+    **CONCEPTS,
+}
 
 # The concept that produced the shipped icons/.
-CURRENT_CONCEPT = 'power'
+CURRENT_CONCEPT = 'snow-cycle'
 
 COLOR_KEYS = {'W': WHITE, 'G': GOLD, 'N': NAVY}
 
@@ -183,7 +221,7 @@ def covers(shape, x, y):
 
 
 def render(size, tile_rgb, layers_at_128):
-    """Render squircle tile + layered glyph at size×size with SS×SS AA."""
+    """Render an optional squircle tile + glyph with SS×SS antialiasing."""
     s = size / 128.0
 
     def scale_shape(shape):
@@ -213,18 +251,21 @@ def render(size, tile_rgb, layers_at_128):
             sr = sg = sb = 0
             for sy in range(SS):
                 yy = y + (sy + 0.5) / SS
-                ay_ = abs((yy - c) / half) ** SQUIRCLE_N
-                if ay_ > 1.0:
+                ay_ = abs((yy - c) / half) ** SQUIRCLE_N if tile_rgb else 0
+                if tile_rgb and ay_ > 1.0:
                     continue
                 for sx in range(SS):
                     xx = x + (sx + 0.5) / SS
-                    if abs((xx - c) / half) ** SQUIRCLE_N + ay_ > 1.0:
+                    if (tile_rgb and
+                            abs((xx - c) / half) ** SQUIRCLE_N + ay_ > 1.0):
                         continue
                     gx, gy = xx - c, yy - c
                     col = tile_rgb
                     for sh, key in layers:
                         if covers(sh, gx, gy):
                             col = tile_rgb if key == 'T' else COLOR_KEYS[key]
+                    if col is None:
+                        continue
                     sr += col[0]
                     sg += col[1]
                     sb += col[2]
@@ -235,6 +276,34 @@ def render(size, tile_rgb, layers_at_128):
                 pix[o + 1] = sg // n
                 pix[o + 2] = sb // n
                 pix[o + 3] = round(n / n_sub * 255)
+    return pix
+
+
+def render_toolbar_16():
+    """Pixel-authored 16px mark: no scaling and no antialiasing."""
+    navy = set()
+    for y, x0, x1 in (
+        (1, 4, 10), (2, 3, 11), (3, 2, 4), (4, 1, 3),
+        (5, 1, 2), (5, 13, 14), (6, 0, 2), (6, 13, 14),
+        (7, 0, 1), (7, 13, 15), (8, 0, 1), (8, 14, 15),
+        (9, 0, 2), (9, 13, 15), (10, 1, 2), (10, 13, 14),
+        (11, 1, 3), (11, 12, 14), (12, 2, 4), (12, 11, 13),
+        (13, 3, 12), (14, 5, 10),
+    ):
+        navy.update((x, y) for x in range(x0, x1 + 1))
+
+    gold = {(12, 2)}
+    gold.update((x, 3) for x in range(11, 14))
+    gold.update((x, 4) for x in range(10, 15))
+    gold.update((x, 8) for x in range(5, 12))
+    gold.update((8, y) for y in range(5, 12))
+    gold.update({(6, 6), (10, 6), (6, 10), (10, 10)})
+
+    pix = bytearray(16 * 16 * 4)
+    for points, color in ((navy, NAVY), (gold, GOLD)):
+        for x, y in points:
+            o = (y * 16 + x) * 4
+            pix[o:o + 4] = bytes((*color, 255))
     return pix
 
 
@@ -267,7 +336,7 @@ def candidate_sheet(path):
     cols = [(128, 1, b'\xF5\xF5\xF7'), (48, 2, b'\xF5\xF5\xF7'),
             (16, 8, b'\xF5\xF5\xF7'), (16, 8, b'\x20\x21\x24')]
     sheet_w = gap + len(cols) * (cell + gap)
-    sheet_h = gap + len(CONCEPTS) * (cell + gap)
+    sheet_h = gap + len(PREVIEW_CONCEPTS) * (cell + gap)
     pix = bytearray(b'\xFF' * (sheet_w * sheet_h * 4))
 
     def fill(dst_x, dst_y, bg):
@@ -293,13 +362,16 @@ def candidate_sheet(path):
                 pix[o:o + 3] = col
 
     row = 0
-    for make in CONCEPTS.values():
+    for name, make in PREVIEW_CONCEPTS.items():
         y = gap + row * (cell + gap)
         for ci, (size, scale, bg) in enumerate(cols):
             x = gap + ci * (cell + gap)
             fill(x, y, bg)
             tile_rgb, layers = make(size)
-            src = render(size, tile_rgb, layers)
+            if name == 'toolbar-snow-cycle' and size == 16:
+                src = render_toolbar_16()
+            else:
+                src = render(size, tile_rgb, layers)
             off = (cell - size * scale) // 2
             blit(x + off, y + off, size, src, scale, bg)
         row += 1
@@ -312,6 +384,13 @@ def apply(concept):
         tile_rgb, layers = make(size)
         pix = render(size, tile_rgb, layers)
         out = os.path.join(ROOT, 'icons', f'icon{size}.png')
+        write_png(out, size, size, pix)
+        print(f'wrote {out} ({size}x{size})')
+    for size in (16, 20, 24, 32, 48):
+        toolbar_rgb, toolbar_layers = concept_toolbar_snow_cycle(size)
+        pix = render_toolbar_16() if size == 16 else render(
+            size, toolbar_rgb, toolbar_layers)
+        out = os.path.join(ROOT, 'icons', f'action{size}.png')
         write_png(out, size, size, pix)
         print(f'wrote {out} ({size}x{size})')
 
@@ -328,7 +407,7 @@ def main():
     tmp = os.environ.get('TMPDIR', '/tmp')
     sheet = os.path.join(tmp, 'ac-ust-icon-candidates.png')
     candidate_sheet(sheet)
-    print(f'candidate sheet (rows: {", ".join(CONCEPTS)}): {sheet}')
+    print(f'candidate sheet (rows: {", ".join(PREVIEW_CONCEPTS)}): {sheet}')
 
 
 if __name__ == '__main__':

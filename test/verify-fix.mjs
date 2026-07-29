@@ -399,12 +399,25 @@ async function runTests() {
       && manifest.host_permissions[0] === 'https://w5.ab.ust.hk/*',
     'manifest 仅请求自动调度所需的 UST 单一来源 host permission');
 
+  const expectedActionIcons = {
+    16: 'icons/action16.png', 20: 'icons/action20.png',
+    24: 'icons/action24.png', 32: 'icons/action32.png',
+    48: 'icons/action48.png'
+  };
+  assertPass(Object.entries(expectedActionIcons).every(([size, iconPath]) =>
+      manifest.action?.default_icon?.[size] === iconPath),
+    'manifest 为常见 DPI 缩放提供原生 16/20/24/32/48px 工具栏图标');
+  assertPass(Object.entries(expectedActionIcons).every(([size, iconPath]) =>
+      distManifest.action?.default_icon?.[size] === iconPath),
+    'dist/manifest.json 保留全部原生工具栏图标映射');
+
   const distRequiredFiles = [
     'manifest.json', 'background.js', 'content.js', 'page-confirm.js',
     'popup.html', 'popup.js', 'i18n.js', 'sync-helpers.js',
     'offscreen.html', 'offscreen.js',
     '_locales/zh_CN/messages.json', '_locales/en/messages.json',
-    'icons/icon16.png', 'icons/icon48.png', 'icons/icon128.png'
+    'icons/icon16.png', 'icons/icon48.png', 'icons/icon128.png',
+    ...Object.values(expectedActionIcons)
   ];
   const missingDistFiles = distRequiredFiles.filter(file => !fs.existsSync(path.join(ROOT, 'dist', file)));
   assertPass(missingDistFiles.length === 0,

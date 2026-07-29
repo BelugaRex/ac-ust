@@ -42,9 +42,11 @@
     "default_popup": "popup.html",
     "default_title": "AC-UST",
     "default_icon": {
-      "16": "icons/icon16.png",
-      "48": "icons/icon48.png",
-      "128": "icons/icon128.png"
+      "16": "icons/action16.png",
+      "20": "icons/action20.png",
+      "24": "icons/action24.png",
+      "32": "icons/action32.png",
+      "48": "icons/action48.png"
     }
   },
   "icons": {
