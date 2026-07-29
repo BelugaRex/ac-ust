@@ -2,8 +2,8 @@
 """Generate AC-UST extension icons — pure stdlib (no Pillow).
 
 Design:
-- Concept: two chase arrows = the extension's core function
-  (automatic PWM on/off cycling), not a generic "AC" symbol
+- Concept: a bold power symbol = direct AC control, authored on the
+    16px grid before being extended to larger sizes
 - Palette: HKUST blue & gold (university colours, per Wikipedia
   infobox; blue ≈ Pantone 295C, gold ≈ Pantone 116C approximations)
 - Squircle tile, 12.5% transparent padding (16px at 128, satisfying
@@ -112,7 +112,17 @@ def concept_cycle2_inverted(_size):
     return GOLD, _cycle2('N', 'N')
 
 
+def concept_power(_size):
+    """Navy tile, bold gold power symbol optimized for 16px."""
+    layers = [
+        (arc(0, 1, 28, 10, 315, 270), 'G'),
+        (cap(0, -31, 0, -5, 5), 'G'),
+    ]
+    return NAVY, layers
+
+
 CONCEPTS = {
+    'power': concept_power,
     'cycle2-duotone': concept_cycle2_duotone,
     'cycle1-duotone': concept_cycle1_duotone,
     'cycle2-allgold': concept_cycle2_allgold,
@@ -120,7 +130,7 @@ CONCEPTS = {
 }
 
 # The concept that produced the shipped icons/.
-CURRENT_CONCEPT = 'cycle2-duotone'
+CURRENT_CONCEPT = 'power'
 
 COLOR_KEYS = {'W': WHITE, 'G': GOLD, 'N': NAVY}
 
