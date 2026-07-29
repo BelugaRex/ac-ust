@@ -89,7 +89,7 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 | 资源 | 尺寸 | 路径 |
 |------|------|------|
-| 商店图标 | 128×128 | `icons/icon128.png` |
+| 商店图标 | 128×128 | `icons/ac-ust_128.png` |
 | 屏幕截图 | 1280×800 | `store-assets/` |
 | 小宣传图块 | 440×280 | `store-assets/` |
 | 滚动宣传图块 | 1400×560 | `store-assets/` |

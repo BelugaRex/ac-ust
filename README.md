@@ -75,8 +75,8 @@ ac-ust/
 ├── offscreen.js       # 冗余保活心跳
 ├── offscreen.html     # offscreen 入口
 ├── _locales/          # 翻译文件（zh_CN + en，Crowdin 同步）
-├── icons/             # 品牌图标 + 原生多尺寸工具栏图标（由 tools/gen-icon.py 生成）
-├── tools/             # 开发工具（gen-icon.py 图标生成器，纯标准库）
+├── icons/             # 像素 logo 母版（16/24/32，pixilart.com 手绘）+ 派生的 48/128
+├── tools/             # 开发工具（scale-pixil-logo.py 派生 48/128，gen-icon.py 旧矢量方案；纯标准库）
 └── test/              # 单元测试 + e2e + 图标验证
 ```
 

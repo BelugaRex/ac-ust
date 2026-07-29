@@ -400,24 +400,37 @@ async function runTests() {
     'manifest 仅请求自动调度所需的 UST 单一来源 host permission');
 
   const expectedActionIcons = {
-    16: 'icons/action16.png', 20: 'icons/action20.png',
-    24: 'icons/action24.png', 32: 'icons/action32.png',
-    48: 'icons/action48.png'
+    16: 'icons/ac-ust_16.png',
+    24: 'icons/ac-ust_24.png',
+    32: 'icons/ac-ust_32.png'
   };
   assertPass(Object.entries(expectedActionIcons).every(([size, iconPath]) =>
       manifest.action?.default_icon?.[size] === iconPath),
-    'manifest 为常见 DPI 缩放提供原生 16/20/24/32/48px 工具栏图标');
+    'manifest 为工具栏提供原生 16/24/32px 图标');
   assertPass(Object.entries(expectedActionIcons).every(([size, iconPath]) =>
       distManifest.action?.default_icon?.[size] === iconPath),
-    'dist/manifest.json 保留全部原生工具栏图标映射');
+    'dist/manifest.json 保留全部工具栏图标映射');
+  const expectedExtensionIcons = {
+    16: 'icons/ac-ust_16.png',
+    48: 'icons/ac-ust_48.png',
+    128: 'icons/ac-ust_128.png'
+  };
+  assertPass(Object.entries(expectedExtensionIcons).every(([size, iconPath]) =>
+      manifest.icons?.[size] === iconPath),
+    'manifest 的扩展图标入口为管理页/商店提供 16/48/128px logo');
+  assertPass(Object.entries(expectedExtensionIcons).every(([size, iconPath]) =>
+      distManifest.icons?.[size] === iconPath),
+    'dist/manifest.json 保留扩展图标映射');
 
   const distRequiredFiles = [
     'manifest.json', 'background.js', 'content.js', 'page-confirm.js',
     'popup.html', 'popup.js', 'i18n.js', 'sync-helpers.js',
     'offscreen.html', 'offscreen.js',
     '_locales/zh_CN/messages.json', '_locales/en/messages.json',
-    'icons/icon16.png', 'icons/icon48.png', 'icons/icon128.png',
-    ...Object.values(expectedActionIcons)
+    ...new Set([
+      ...Object.values(expectedActionIcons),
+      ...Object.values(expectedExtensionIcons)
+    ])
   ];
   const missingDistFiles = distRequiredFiles.filter(file => !fs.existsSync(path.join(ROOT, 'dist', file)));
   assertPass(missingDistFiles.length === 0,
