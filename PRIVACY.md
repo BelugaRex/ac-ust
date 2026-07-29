@@ -14,7 +14,7 @@ AC-UST does **not** collect, transmit, or share any personal information or user
 | Chrome Storage (`chrome.storage.sync`) | v0.5.6+ synchronizes timer settings + PWM phase across the same browser account's devices (so multi-device PWM doesn't fight over the AC) | ✅ Browser account sync store (user-controlled) | ⚠️ Only via the browser's own account sync feature — never sent to any AC-UST/developer server |
 | HKUST Smart Power Meter page (`w5.ab.ust.hk`) | Read AC switch state, remaining balance, and toggle AC on/off; v0.5.7+ also reads the page's built-in "Power-off after" timer value (HH:MM) for cross-device phase validation | ❌ | ❌ Never |
 | Chrome Alarms (`chrome.alarms`) | Schedule timed AC on/off events | ✅ Locally only | ❌ Never |
-| Chrome Tabs | Open/refresh the AC control page for scheduled operations | ❌ | ❌ Never |
+| Chrome Tabs | Find or open only matching `https://w5.ab.ust.hk/njggt/app/*` tabs for scheduled operations; other tabs are not read or recorded | ❌ | ❌ Never |
 
 ### What data does AC-UST NOT collect?
 
