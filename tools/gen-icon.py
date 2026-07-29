@@ -231,6 +231,11 @@ def render(size, tile_rgb, layers_at_128):
 # ---------------------------------------------------------------- output
 
 def write_png(path, w, h, pix):
+    expected_len = w * h * 4
+    if len(pix) != expected_len:
+        raise ValueError(
+            f'RGBA buffer has {len(pix)} bytes; expected {expected_len}')
+
     def chunk(tag, data):
         return (struct.pack('>I', len(data)) + tag + data
                 + struct.pack('>I', zlib.crc32(tag + data) & 0xFFFFFFFF))
@@ -256,9 +261,10 @@ def candidate_sheet(path):
     pix = bytearray(b'\xFF' * (sheet_w * sheet_h * 4))
 
     def fill(dst_x, dst_y, bg):
+        rgba_row = (bg + b'\xFF') * cell
         for yy in range(cell):
             o = ((dst_y + yy) * sheet_w + dst_x) * 4
-            pix[o:o + cell * 4] = bg * cell
+            pix[o:o + cell * 4] = rgba_row
 
     def blit(dst_x, dst_y, size, src, scale, bg):
         side = size * scale
