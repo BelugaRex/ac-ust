@@ -21,11 +21,12 @@ AC-UST 是无依赖的纯 JS Chrome/Edge 扩展,测试分两层,各自职责清�
 **用途**:用 mock chrome API 模拟用户场景,验证 popup.js 诊断面板的自愈逻辑。
 
 **前置条件**:
-- Node.js(>=18,支持原生 ESM)
+- Node.js 20（在仓库根目录运行 `nvm install && nvm use`）
 - 不需要任何 npm install,纯 Node 内置模块
+- 已运行 `bash ./build.sh` 生成 `dist/` 与商店 ZIP
 
 **运行**:
-```pwsh
+```bash
 node test/verify-fix.mjs
 ```
 
@@ -41,21 +42,21 @@ node test/verify-fix.mjs
 
 ### `e2e-verify.cjs`(浏览器层,**手动触发**)
 
-**用途**:用 Playwright 启动系统 Edge + 加载 dist/ 扩展,模拟用户点击诊断按钮,读取真实诊断输出。这是 evaluator 友好的"实际扩展中验证"路径,但**需要桌面图形环境**,CI 中无法跑。
+**用途**:用 Playwright 启动系统 Chrome/Edge + 加载 dist/ 扩展,模拟用户点击诊断按钮,读取真实诊断输出。这是 evaluator 友好的"实际扩展中验证"路径,但**需要桌面图形环境**,CI 中无法跑。
 
 **前置条件**:
 - `npm install playwright`(临时安装,不入 package.json)
-- 桌面环境(headed Edge 可启动,headless 模式 MV3 行为异常)
-- 系统已装 Microsoft Edge
+- 桌面环境(headed Chrome/Edge 可启动,headless 模式 MV3 行为异常)
+- 系统已装 Chrome 或 Edge
 
 **运行**:
-```pwsh
+```bash
 npm install playwright --no-save
 node test/e2e-verify.cjs
 ```
 
 **注意**:
-- 会启动真实 Edge 窗口
+- 会启动真实浏览器窗口
 - 测试 profile 在 `.test-profile/`(自动清理)
 - 测试结束自动关闭 Edge
 

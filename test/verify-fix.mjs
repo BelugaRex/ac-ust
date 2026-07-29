@@ -309,7 +309,7 @@ async function runTests() {
     '用例 4 显示 "popup 已接管 storage 自愈" 绿灯');
 
   // ===== 用例 5: i18n fetch-based 加载器 — 验证用户报告的三个坏键 =====
-  console.log('\n\n=== 用例 5:i18n 翻译加载 (用户报告 acStopped/countdownInterval/scheduleHintDefault 显示为 key name) ===\n');
+  console.log('\n\n=== 用例 5:i18n 翻译加载 (用户报告 acStopped/countdownInterval 显示为 key name) ===\n');
 
   // 加载真实的 messages.json
   const zhCN = JSON.parse(fs.readFileSync(path.join(ROOT, '_locales', 'zh_CN', 'messages.json'), 'utf8'));
@@ -1135,7 +1135,7 @@ async function runTests() {
       && releaseWorkflow.includes('git merge-base --is-ancestor "$tag_commit" origin/main'),
     '12H: Release 工作流以完整 Git 历史验证 tag commit 属于 main');
   const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
-  assertPass(readme.includes('下载源码 ZIP，解压后运行 `./build.ps1`，再 Load Unpacked `dist/`'),
+  assertPass(readme.includes('下载源码 ZIP，解压后运行 `bash ./build.sh`，再 Load Unpacked `dist/`'),
     '12I: GitHub Releases 安装说明先构建，再加载 dist');
   const webStoreMetadata = fs.readFileSync(path.join(ROOT, 'CHROMEWEBSTORE.md'), 'utf8');
   assertPass(webStoreMetadata.includes(`| 版本 | ${manifest.version} |`)

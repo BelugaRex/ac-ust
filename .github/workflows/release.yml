@@ -8,9 +8,7 @@ on:
 permissions:
   contents: write
 
-# 不再附带 CRX 文件。用户从 Chrome Web Store / Edge Add-ons 安装。
 # GitHub Release 仅用于版本历史 + changelog。
-# 如需企业 CRX 部署，本地运行 build.ps1 -Crx 手动打包。
 
 jobs:
   release:
@@ -44,6 +42,6 @@ jobs:
             待上架后直接搜索 AC-UST 一键安装，自动更新。
 
             **Load Unpacked（开发者）**：
-            克隆仓库 → `./build.ps1` → 加载 `dist/` 目录。
+            克隆仓库 → `bash ./build.sh` → 加载 `dist/` 目录。
             详见 [README](https://github.com/BelugaRex/ac-ust#readme)。
           generate_release_notes: true

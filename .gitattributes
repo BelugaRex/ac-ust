@@ -1,0 +1,7 @@
+# Keep WSL source checkouts stable and executable.
+* text=auto eol=lf
+
+# Never normalize release artifacts, private keys, or image assets.
+*.png binary
+*.pem binary
+*.zip binary

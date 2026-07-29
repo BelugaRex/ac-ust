@@ -19,8 +19,8 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气开关，支持 PWM
 | 方式 | 说明 |
 |------|------|
 | **[Chrome Web Store](https://chromewebstore.google.com)** | 即将上架，一键安装自动更新 |
-| **开发者模式** | `git clone` → `./build.ps1` → Load Unpacked `dist/` |
-| **GitHub Releases** | 下载源码 ZIP，解压后运行 `./build.ps1`，再 Load Unpacked `dist/` |
+| **开发者模式** | `git clone` → `bash ./build.sh` → Load Unpacked `dist/` |
+| **GitHub Releases** | 下载源码 ZIP，解压后运行 `bash ./build.sh`，再 Load Unpacked `dist/` |
 
 ## 安装
 
@@ -31,15 +31,17 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气开关，支持 PWM
 git clone https://github.com/BelugaRex/ac-ust.git
 cd ac-ust
 
-# 2. 打包到 dist/ 目录（PowerShell）
-.\build.ps1
+# 2. 打包到 dist/ 目录（WSL/Linux，需 Python 3）
+bash ./build.sh
 
 # 3. 打开 Chrome/Edge
 #    地址栏输入 chrome://extensions 或 edge://extensions
 #    开启「开发者模式」→「加载已解压的扩展」→ 选择 dist 文件夹
 ```
 
-> 登录 [HKUST Power Meter](https://w5.ab.ust.hk/njggt/app/home) 即可使用。更新代码后重新运行 `.\build.ps1`，再到扩展管理页点刷新图标即可。
+> 登录 [HKUST Power Meter](https://w5.ab.ust.hk/njggt/app/home) 即可使用。更新代码后重新运行 `bash ./build.sh`，再到扩展管理页点刷新图标即可。
+
+> 自动化测试使用 Node.js 20；在仓库根目录执行 `nvm install && nvm use` 后，再运行 `node test/verify-fix.mjs`。
 
 ## 使用说明
 
@@ -61,7 +63,7 @@ cd ac-ust
 
 ```
 ac-ust/
-├── build.ps1          # 打包脚本 — 生成稳定版到 dist/
+├── build.sh           # WSL/Linux 打包脚本 — 生成 dist/ 和商店 ZIP
 ├── manifest.json      # 扩展配置（版本真相源）
 ├── background.js      # Service Worker — 定时调度 + 看门狗 + 自愈
 ├── content.js         # Content Script — 页面状态读取与回退验证
