@@ -21,3 +21,5 @@ build/
 # Env
 .env
 .env.local
+# E2E browser profile
+.test-profile/

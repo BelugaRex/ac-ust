@@ -40,6 +40,23 @@ node test/verify-fix.mjs
 
 每次修改 popup.js 诊断逻辑或 background.js 自愈路径后,都应先跑这个测试再 commit。
 
+### `verify-icon.py`(图标契约,涉及图标时跑)
+
+**用途**:校验五个扩展图标的契约,纯 Python 标准库,无需 Node。
+
+**验证内容**:
+- 16/24/32/48/128 均为原生尺寸的 8-bit RGBA PNG,签名与 CRC 有效
+- 16px 母版调色板硬边、满画布、雪花+循环箭头可辨识
+- 48/128 与 24/32 母版精确最近邻一致(即 `tools/scale-pixil-logo.py` 的产物)
+- `popup.html` 只引用 `icons/` 下真实存在的图标文件
+
+**运行**:
+```bash
+python3 test/verify-icon.py
+```
+
+修改或重画任何 `icons/` 文件后,先重跑 `python3 tools/scale-pixil-logo.py` 再跑本测试。
+
 ### `e2e-verify.cjs`(浏览器层,**手动触发**)
 
 **用途**:用 Playwright 启动系统 Chrome/Edge + 加载 dist/ 扩展,模拟用户点击诊断按钮,读取真实诊断输出。这是 evaluator 友好的"实际扩展中验证"路径,但**需要桌面图形环境**,CI 中无法跑。

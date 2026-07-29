@@ -2,8 +2,10 @@
 
 16/24/32 are hand-drawn Pixilart masters; 48/128 must be exact
 nearest-neighbor derivations produced by tools/scale-pixil-logo.py.
+Also guards popup.html against referencing deleted icon files.
 """
 import os
+import re
 import struct
 import zlib
 
@@ -200,6 +202,17 @@ derived_icons_exact = (
     and pixels_of(128) == nearest_neighbor_derivation(32, 3, 128)
 )
 
+popup_path = os.path.join(os.path.dirname(icons_dir), 'popup.html')
+with open(popup_path, encoding='utf-8') as popup_file:
+    popup_icon_refs = sorted(set(
+        re.findall(r'icons/([A-Za-z0-9_-]+\.png)', popup_file.read())
+    ))
+missing_popup_icons = [
+    ref for ref in popup_icon_refs
+    if not os.path.isfile(os.path.join(icons_dir, ref))
+]
+popup_icons_exist = not missing_popup_icons
+
 checks = [
     ('16/24/32/48/128px icons are all native-sized', all_sizes_native),
     ('PNG signatures, encoding, and CRC checksums are valid', pngs_valid),
@@ -207,6 +220,7 @@ checks = [
      toolbar_icon_legible),
     ('48/128px icons are nearest-neighbor derivations of the 24/32px '
      'masters (tools/scale-pixil-logo.py)', derived_icons_exact),
+    ('popup.html references only existing icon files', popup_icons_exist),
 ]
 
 print()
@@ -222,6 +236,8 @@ for label, ok in checks:
                 for size in expected_sizes if images[size][3]
             ]
             print(f'      Bad files: {bad_files}')
+        elif label.startswith('popup.html'):
+            print(f'      Missing files: {missing_popup_icons}')
 
 print()
 if all_ok:
