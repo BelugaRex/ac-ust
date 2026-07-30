@@ -1,10 +1,10 @@
 {
   "extName": { "message": "AC-UST", "description": "扩展名称" },
   "extShortName": { "message": "AC-UST", "description": "扩展短名称" },
-  "extDesc": { "message": "定时开关 HKUST Smart Power Meter 冷气 - 自动在设定时间开关空调", "description": "扩展描述，Chrome Web Store 显示" },
+  "extDesc": { "message": "以 PWM 循环定时自动控制 HKUST Smart Power Meter 冷气", "description": "扩展描述，Chrome Web Store 显示" },
   "extActionTitle": { "message": "冷气定时控制", "description": "工具栏图标悬停提示文字" },
 
-  "acLoading": { "message": "加载中...", "description": "弹窗初始加载状态文字" },
+  "acLoading": { "message": "加载中…", "description": "弹窗初始加载状态文字" },
   "acIdle": { "message": "定时未启用", "description": "定时未启用时的状态文字" },
   "acRunning": { "message": "冷气运行中", "description": "冷气当前正在运行的状态文字" },
   "acStopped": { "message": "冷气已关闭", "description": "冷气当前已关闭的状态文字" },
@@ -66,14 +66,14 @@
   "diagnosePwmSync": { "message": "ac-pwm 与 storage 触发时间同步", "description": "诊断：PWM 与 storage 同步检查" },
   "diagnoseBadgeAlarm": { "message": "ac-badge-tick 角标刷新（每分钟）", "description": "诊断：角标闹钟" },
   "diagnoseBadgeRebuilt": { "message": " (已补建: ", "description": "诊断：角标闹钟补建前缀" },
-  "diagnoseWatchdog": { "message": "ac-watchdog 看门狗（每5分钟）", "description": "诊断：看门狗闹钟" },
+  "diagnoseWatchdog": { "message": "ac-watchdog 看门狗（每 5 分钟）", "description": "诊断：看门狗闹钟" },
   "diagnoseHeartbeat": { "message": "setInterval heartbeat（storage 每 20s）", "description": "诊断：心跳" },
   "diagnoseAlarmNotExpired": { "message": "闹钟未过期 (到期: ", "description": "诊断：闹钟未过期前缀" },
-  "diagnoseTabOpen": { "message": "AC页面已打开 (", "description": "诊断：AC 页面已打开前缀" },
+  "diagnoseTabOpen": { "message": "冷气页面已打开 (", "description": "诊断：AC 页面已打开前缀" },
   "diagnoseTabCount": { "message": "个标签页)", "description": "诊断：标签页数量后缀" },
   "diagnoseTabNotDiscarded": { "message": "标签页未被浏览器丢弃", "description": "诊断：标签页未被丢弃" },
   "diagnoseContentOK": { "message": "content script 响应正常", "description": "诊断：content script 正常" },
-  "diagnoseAcReadable": { "message": "AC状态可读: ", "description": "诊断：AC 状态可读前缀" },
+  "diagnoseAcReadable": { "message": "冷气状态可读: ", "description": "诊断：AC 状态可读前缀" },
   "diagnoseContentNoResponse": { "message": "content script 无响应: ", "description": "诊断：content script 无响应前缀" },
   "diagnoseSWOK": { "message": "后台 SW 响应正常", "description": "诊断：SW 响应正常" },
   "diagnoseClockSync": { "message": "clockMode 同步: ", "description": "诊断：时钟模式同步前缀" },
@@ -86,7 +86,7 @@
   "diagnosePopHealedSw": { "message": "popup 已接管 storage 自愈(SW 详细状态不可用,功能正常)", "description": "诊断：popup 已自愈接管提示" },
   "diagnoseGetSwFailed": { "message": "getSwStatus 后台失败: ", "description": "诊断：getSwStatus 失败前缀" },
   "diagnoseGetSwAbnormal": { "message": "getSwStatus 异常响应: ", "description": "诊断：getSwStatus 异常前缀" },
-  "diagnoseGetSwNone": { "message": "getSwStatus 无响应且 popup 未自愈 — 建议在 edge://extensions 重新加载扩展", "description": "诊断：SW 完全无响应且未自愈" },
+  "diagnoseGetSwNone": { "message": "getSwStatus 无响应且 popup 未自愈 — 请在扩展管理页重新加载扩展", "description": "诊断：SW 完全无响应且未自愈" },
   "diagnoseBuildTime": { "message": "BUILD_TIME: $1", "description": "诊断：构建时间戳。$1=时间字符串" },
   "diagnoseException": { "message": "诊断异常: ", "description": "诊断：异常前缀" },
 
@@ -96,7 +96,7 @@
   "badgeIntervalSoon": { "message": "即将$1冷气", "description": "间隔模式：即将切换时图标标题。$1=开启/关闭" },
   "badgeIntervalCountdown": { "message": "$1，约 $2 分钟后自动$3", "description": "间隔模式：倒计时图标标题。$1=冷气运行中/冷气已关闭，$2=分钟，$3=开启/关闭" },
 
-  "contentTimeout": { "message": "等待超时，未找到 AC 开关。请确保页面已完全加载", "description": "content.js: 等待开关超时错误" },
+  "contentTimeout": { "message": "等待超时，未找到冷气开关。请确保页面已完全加载", "description": "content.js: 等待开关超时错误" },
   "contentRetryExhausted": { "message": "已尝试 3 次，但 AC 未变成 $1", "description": "content.js: 重试耗尽错误。$1=目标状态" },
   "contentCrossDayLimit": { "message": "页面定时器支持直接输入跨午夜时间", "description": "保留键：跨午夜直接输入提示" },
   "contentNoInput": { "message": "未找到页面定时器输入框", "description": "content.js: 找不到输入框错误" },
@@ -106,7 +106,7 @@
   "bgPageTimerCrossDay": { "message": "跨日 PWM 已启用；页面关机保险将在午夜后自动补设", "description": "background.js: 跨日提示" },
   "bgPageTimerFailed": { "message": "页面定时器设置失败", "description": "background.js: 定时器设置失败" },
 
-  "scheduleHintPinTab": { "message": "请将 UST AC 页面在浏览器中固定标签页并保持开启，否则定时开关无法控制空调。", "description": "提醒用户固定 AC 标签页" },
+  "scheduleHintPinTab": { "message": "请在浏览器中固定 UST AC 页面标签页并保持开启，否则定时无法控制冷气。", "description": "提醒用户固定 AC 标签页" },
 
   "versionMismatch": { "message": "[AC-UST] 版本不一致：manifest=$1, 源码=$2。请重载扩展。", "description": "版本不一致的 console 警告" },
   "popupSelfHealFail": { "message": "popup 侧 storage 自愈失败: ", "description": "popup 自愈失败日志前缀" }
