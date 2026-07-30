@@ -32,7 +32,7 @@ node test/verify-fix.mjs
 
 **验证内容**:
 - 用例 1–4：popup 诊断的 `nextTriggerAt` 自愈与 Service Worker 降级行为
-- 用例 5–8：i18n 包体、跨设备相位同步、页面定时器解析与采纳
+- 用例 5–8：i18n 包体、跨设备相位同步、页面定时器解析与采纳、popup 布局防回归（CSS 禁 vw/vh，body 固定 340px）
 - 用例 9–10：单一 ON 点击链路、OFF 零点击以及 ON→OFF 前的定时器证明
 - 用例 11：`Power-off after` 必须在新鲜页面保留同一 `HH:MM`；失败重试、过期闹钟恢复、时钟修复与手动开机都不得绕过该确认
 

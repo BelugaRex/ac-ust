@@ -385,6 +385,15 @@ async function runTests() {
   assertPass(distManifest.version === manifest.version,
     `dist/manifest.json 版本与源码一致 (${manifest.version})`);
 
+  // 5h: popup 布局防回归 —— 弹窗尺寸禁用视口单位。vw/vh 在 popup 初始布局
+  // 竞态中曾把窗口塌成一条窄竖条（见 git daa6f14）。先剥掉 CSS 注释再查，
+  // 因为防回归注释本身会提到这些单位。
+  const popupCssNoComments = popupHtml.replace(/\/\*[\s\S]*?\*\//g, '');
+  assertPass(!/\d\s*vw\b|\d\s*vh\b/.test(popupCssNoComments),
+    'popup.html 的 CSS 不使用 vw/vh 视口单位（防窗口塌陷回归）');
+  assertPass(/body\s*\{[^}]*?width:\s*340px/.test(popupCssNoComments),
+    'popup body 固定 340px 宽度');
+
   const sourceLocaleResources = manifest.web_accessible_resources || [];
   const distLocaleResources = distManifest.web_accessible_resources || [];
   const hasUstLocaleResourceRule = (resources) => resources.some(rule =>
