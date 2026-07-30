@@ -347,13 +347,13 @@
 
   /* ===== PWM 运行时段行 (configurator-chip 风格的小药丸) ===== */
   .active-hours-row {
-    display: flex;
+    display: grid;
+    grid-template-columns: 1fr;
     align-items: center;
     padding-bottom: var(--s-sm);
     margin-bottom: var(--s-sm);
     border-bottom: 1px solid var(--c-divider);
-    gap: 8px;
-    flex-wrap: wrap;
+    gap: 8px 10px;
   }
   .active-hours-row label.ah-label {
     font-size: 15px;
@@ -366,6 +366,7 @@
     min-height: 44px;
     gap: 7px;
     flex-shrink: 0;
+    grid-column: 1 / -1;
     color: var(--c-ink-80);
   }
   .active-hours-row input[type="checkbox"] {
@@ -385,7 +386,8 @@
     background: var(--c-pearl);
     color: var(--c-ink);
     font-variant-numeric: tabular-nums;
-    width: 96px;
+    width: 100%;
+    min-width: 0;
     min-height: 34px;
     transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
   }
@@ -408,8 +410,19 @@
     letter-spacing: 0;
   }
 
+  .active-hours-controls {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+
   .active-hours-row .ah-status {
-    margin-left: auto;
+    grid-column: 1 / -1;
+    margin-left: 0;
+    justify-self: start;
     font-size: 13px;
     padding: 4px 9px;
     border-radius: var(--r-pill);
@@ -585,6 +598,12 @@
   }
 
   @media (max-width: 359px) {
+    .static-preview .active-hours-row {
+      grid-template-columns: 1fr;
+    }
+    .static-preview .active-hours-controls {
+      grid-column: 1;
+    }
     .static-preview .settings-header {
       align-items: stretch;
       flex-direction: column;
@@ -745,10 +764,12 @@
             <input type="checkbox" id="activeHoursToggle">
             <span data-i18n="activeHoursLabel"></span>
           </label>
-          <input type="time" id="activeHoursStart" value="08:00" data-i18n-aria-label="activeHoursStartLabel">
-          <span class="ah-sep">—</span>
-          <input type="time" id="activeHoursEnd" value="23:00" data-i18n-aria-label="activeHoursEndLabel">
-          <span class="ah-status" id="activeHoursStatus"></span>
+          <div class="active-hours-controls">
+            <input type="time" id="activeHoursStart" value="08:00" data-i18n-aria-label="activeHoursStartLabel">
+            <span class="ah-sep">—</span>
+            <input type="time" id="activeHoursEnd" value="23:00" data-i18n-aria-label="activeHoursEndLabel">
+          </div>
+          <span class="ah-status" id="activeHoursStatus" style="display:none"></span>
         </div>
         <div id="intervalInputs" class="duration-row">
           <div class="duration-field">
