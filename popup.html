@@ -48,13 +48,13 @@
     --c-warning-border: rgba(178, 90, 0, 0.18);
     --c-danger: #d70015;
 
-    /* 圆角: Apple 的系统化半径语法 (避免混用多种中等半径) */
+    /* 圆角: 收紧的桌面尺度 (避免混用多种中等半径) */
     --r-none: 0px;
     --r-xs: 5px;
     --r-sm: 8px;
-    --r-md: 11px;
-    --r-lg: 18px;     /* 存储 utility card */
-    --r-pill: 9999px; /* 主 CTA / 配置器 chip / 搜索框 */
+    --r-md: 9px;
+    --r-lg: 10px;     /* 卡片 */
+    --r-pill: 9999px; /* 仅保留给 toggle、状态徽标、圆点这些天生胶囊形的元素 */
 
     /* 间距: Apple 的 8px 基准节奏 */
     --s-xxs: 4px;
@@ -153,8 +153,8 @@
   }
   .header-help:active { transform: scale(0.95); } /* Apple 系统级按压微交互 */
   .header-version {
-    /* micro-legal token: 10px/400/-0.08px */
-    font-size: 11px;
+    /* micro-legal: 跟随 16px 基准梯度 */
+    font-size: 12px;
     color: var(--c-muted);
     font-variant-numeric: tabular-nums;
     letter-spacing: 0;
@@ -211,7 +211,7 @@
   .countdown-display {
     align-items: baseline;
     gap: 4px;
-    font-size: 15px;
+    font-size: 16px;
     color: var(--c-muted);
     line-height: 1.5;
     letter-spacing: 0;
@@ -235,7 +235,7 @@
     border: 1px solid var(--c-warning-border);
     border-radius: var(--r-md);
     color: var(--c-warning);
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.5;
     letter-spacing: 0;
     text-align: left;
@@ -261,9 +261,9 @@
     border-bottom: 1px solid var(--c-divider);
   }
   .settings-header h3 {
-    /* caption-strong token: 14px/600/1.29 — popup 内做卡头 */
+    /* 卡头与 16px 基准同号 */
     font-family: var(--font-display);
-    font-size: 15px;
+    font-size: 16px;
     color: var(--c-ink);
     letter-spacing: 0;
     font-weight: 600;
@@ -279,7 +279,7 @@
     margin-left: auto;
   }
   .toggle-state {
-    font-size: 13px;
+    font-size: 14px;
     color: var(--c-muted);
     white-space: nowrap;
     letter-spacing: 0;
@@ -349,7 +349,7 @@
     flex-wrap: wrap;
   }
   .active-hours-row label.ah-label {
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 400;
     line-height: 1.43;
     letter-spacing: 0;
@@ -367,17 +367,19 @@
     accent-color: var(--c-accent);
   }
   .active-hours-row input[type="time"] {
+    /* 桌面鼠标环境的紧凑输入框：高度由 padding+字号决定，min-height 仅底线；
+       无障碍由浏览器缩放兜底（放大时盒子随字号生长，不裁字） */
     border: 1px solid var(--c-hairline);
-    border-radius: var(--r-pill);
-    padding: 6px 10px;
-    font-size: 14px;
+    border-radius: var(--r-sm);
+    padding: 4px 10px;
+    font-size: 15px;
     line-height: 1.5;
     letter-spacing: 0;
     background: var(--c-pearl);
     color: var(--c-ink);
     font-variant-numeric: tabular-nums;
-    width: 92px;
-    min-height: 44px;
+    width: 96px;
+    min-height: 34px;
     transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
   }
   .active-hours-row input[type="time"]:disabled {
@@ -395,13 +397,13 @@
   }
   .active-hours-row .ah-sep {
     color: var(--c-muted);
-    font-size: 13px;
+    font-size: 14px;
     letter-spacing: 0;
   }
 
   .active-hours-row .ah-status {
     margin-left: auto;
-    font-size: 12px;
+    font-size: 13px;
     padding: 4px 9px;
     border-radius: var(--r-pill);
     background: var(--c-pearl);
@@ -431,21 +433,22 @@
   }
   .time-row:last-of-type { margin-bottom: 0; }
   .time-row label {
-    font-size: 14px;
+    font-size: 15px;
     font-weight: 400;
     line-height: 1.43;
     letter-spacing: 0;
     color: var(--c-ink-80);
   }
   .time-row input[type="number"] {
+    /* 紧凑输入框，同 time 输入的瘦身理由 */
     border: 1px solid var(--c-hairline);
-    border-radius: var(--r-pill);
-    padding: 7px 12px;
-    font-size: 14px;
+    border-radius: var(--r-sm);
+    padding: 4px 12px;
+    font-size: 15px;
     line-height: 1.43;
     letter-spacing: 0;
     width: 96px;
-    min-height: 44px;
+    min-height: 34px;
     background: var(--c-pearl);
     color: var(--c-ink);
     transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
@@ -474,7 +477,7 @@
 
   .hint {
     color: var(--c-muted);
-    font-size: 13px;
+    font-size: 14px;
     line-height: 1.5;
     letter-spacing: 0;
     margin-top: var(--s-xs);
@@ -498,7 +501,7 @@
     padding-top: var(--s-xxs);
   }
   .status {
-    font-size: 13px;
+    font-size: 14px;
     color: var(--c-muted);
     flex: 1;
     min-height: 20px;
@@ -511,14 +514,14 @@
   .btn-diagnose {
     /* button-secondary-pill token: 透明底 + Action Blue 描边 + pill */
     font-family: var(--font-text);
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 400;
     line-height: 1.29;
     letter-spacing: 0;
     color: var(--c-accent);
     background: var(--c-canvas);
     border: 1px solid var(--c-accent);
-    border-radius: var(--r-pill);
+    border-radius: var(--r-sm);
     padding: 6px 14px;
     min-height: 44px;
     cursor: pointer;
@@ -533,7 +536,7 @@
 
   .diagnose-result {
     font-family: var(--font-text);
-    font-size: 13px;
+    font-size: 14px;
     color: var(--c-muted);
     margin-top: var(--s-xs);
     line-height: 1.6;
@@ -649,14 +652,14 @@
     }
   }
 
-  /* 焦点环: Action Blue 2px outline (Apple 的 focus 信号) */
+  /* 焦点环: Action Blue 2px outline (Apple 的 focus 信号)
+     不写 border-radius,让 outline 跟随每个元素自己的圆角 */
   button:focus-visible,
   a:focus-visible,
   input:focus-visible,
   .header-help:focus-visible {
     outline: 2px solid var(--c-accent-hover);
     outline-offset: 2px;
-    border-radius: var(--r-pill);
   }
 </style>
 </head>
