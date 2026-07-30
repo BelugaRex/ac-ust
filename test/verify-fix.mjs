@@ -393,6 +393,13 @@ async function runTests() {
     'popup.html 的 CSS 不使用 vw/vh 视口单位（防窗口塌陷回归）');
   assertPass(/body\s*\{[^}]*?width:\s*360px/.test(popupCssNoComments),
     'popup body 固定 360px 宽度');
+  assertPass(/\.static-preview\s+body\s*\{[^}]*?width:\s*360px[^}]*?max-width:\s*100%/.test(popupCssNoComments),
+    '静态网页预览允许 body 适配视口宽度');
+  assertPass(/@media\s*\(max-width:\s*359px\)[\s\S]*?\.static-preview\s+\.duration-row\s*\{[^}]*?flex-direction:\s*column/.test(popupCssNoComments),
+    '静态网页预览 359px 以下将时长控件堆叠');
+  const popupJs = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
+  assertPass(/static-preview/.test(popupJs),
+    '静态网页预览运行时标记存在且不改变扩展 popup 固定宽度');
 
   const sourceLocaleResources = manifest.web_accessible_resources || [];
   const distLocaleResources = distManifest.web_accessible_resources || [];

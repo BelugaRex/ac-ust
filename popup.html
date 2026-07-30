@@ -93,6 +93,13 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
+  /* 普通 HTTP 预览允许适配标准网页视口；扩展 popup 没有此 class，仍固定 360px。 */
+  .static-preview body {
+    width: 360px;
+    max-width: 100%;
+    min-width: 0;
+  }
+
   /* ===== Header Bar (参考 sub-nav-frosted: 羊皮卷 80% + 模糊化) ===== */
   .header {
     display: flex;
@@ -573,6 +580,23 @@
       flex-direction: column;
     }
     .active-hours-row .ah-status {
+      margin-left: 0;
+    }
+  }
+
+  @media (max-width: 359px) {
+    .static-preview .settings-header {
+      align-items: stretch;
+      flex-direction: column;
+    }
+    .static-preview .toggle-area {
+      justify-content: space-between;
+      margin-left: 0;
+    }
+    .static-preview .duration-row {
+      flex-direction: column;
+    }
+    .static-preview .active-hours-row .ah-status {
       margin-left: 0;
     }
   }

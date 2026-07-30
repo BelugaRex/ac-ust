@@ -2,6 +2,12 @@
 // Popup 脚本 - 设置界面逻辑 + 实时倒计时
 // ============================================================
 
+// 普通 HTTP 预览没有 chrome.runtime.id；只给预览页加响应式标记，
+// 扩展 popup 继续使用固定宽度，避免初始布局竞态再次塌陷。
+if (!globalThis.chrome?.runtime?.id) {
+  document.documentElement.classList.add('static-preview');
+}
+
 // i18n 辅助函数 — 委托给 I18n 模块（fetch-based，绕过 chrome.i18n 不可靠性）
 const t = (key, ...subs) => I18n.t(key, ...subs);
 
