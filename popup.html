@@ -80,8 +80,9 @@
   html { -webkit-text-size-adjust: 100%; }
 
   body {
+    /* 固定 340px,不用 max-width:100vw —— popup 窗口按文档尺寸自适应,
+       初始布局时 vw 可能按过小视口求值,导致窗口塌成一条窄竖条 */
     width: 340px;
-    max-width: 100vw;
     font-family: var(--font-text);
     background: var(--c-parchment);
     color: var(--c-ink);
