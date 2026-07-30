@@ -1159,10 +1159,13 @@ async function runTests() {
       && popupHtml.includes('for="onMinutes"')
       && popupHtml.includes('for="offMinutes"'),
     '12F: 帮助、开关和分钟输入均有程序化可访问名称');
-  assertPass(/\.header-help\s*\{[\s\S]{0,260}width:\s*44px;[\s\S]{0,80}height:\s*44px;/.test(popupHtml)
+  // 桌面 popup 以鼠标为主：图标按钮 26px（macOS 惯例），行级主控件保留 44px；
+  // 键盘焦点环与 aria 名称是全量保留的无障碍底线。
+  assertPass(/\.header-help\s*\{[\s\S]{0,400}width:\s*26px;[\s\S]{0,80}height:\s*26px;/.test(popupHtml)
       && popupHtml.includes('min-height: 44px;')
+      && popupHtml.includes('.header-help:focus-visible')
       && popupHtml.includes('.toggle-switch input:focus-visible + .toggle-slider'),
-    '12G: 弹窗交互控件提供 44px 命中区与可见键盘焦点');
+    '12G: 帮助按钮 26px、行高 44px，键盘焦点环均可见');
 
   const releaseWorkflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
   assertPass(/fetch-depth:\s*0/.test(releaseWorkflow)

@@ -131,15 +131,16 @@
     gap: 8px;
   }
   .header-help {
-    /* Apple button-icon-circular: 半透明圆片控件 */
+    /* 扁平图标按钮（macOS 工具栏语义）：默认无底色，hover 才显露实心填充；
+       不用液态玻璃/半透明模糊质感 */
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 44px;
-    height: 44px;
-    border-radius: var(--r-pill);
-    background: var(--c-chip);
-    color: var(--c-ink);
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: transparent;
+    color: var(--c-muted);
     font-size: 13px;
     font-weight: 600;
     text-decoration: none;
@@ -147,8 +148,8 @@
     transition: transform 0.16s ease, background 0.16s ease, color 0.16s ease;
   }
   .header-help:hover {
-    background: #c7c7cc;
-    color: var(--c-accent);
+    background: #e8e8ed;
+    color: var(--c-ink);
   }
   .header-help:active { transform: scale(0.95); } /* Apple 系统级按压微交互 */
   .header-version {
@@ -598,7 +599,7 @@
       border-bottom-color: rgba(255, 255, 255, 0.16);
     }
     .header-help {
-      background: #48484a;
+      background: transparent;
     }
     .header-help:hover,
     .active-hours-row input[type="time"]:not(:disabled):hover:not(:focus),
@@ -606,7 +607,7 @@
       border-color: #8e8e93;
     }
     .header-help:hover {
-      background: #636366;
+      background: #3a3a3c;
     }
     .toggle-slider:before {
       background-color: #f5f5f7;
