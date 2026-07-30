@@ -1241,9 +1241,10 @@ async function runTests() {
       && popupHtml.includes('@media (prefers-contrast: more)')
       && popupHtml.includes('@media (prefers-color-scheme: dark)'),
     '14C: 弹窗移除持续闪烁，并适配减弱动态、高对比度和深色外观');
+  // 基准字号 16px（与 16px 头栏 icon 同尺寸，2026-07-30 用户拍板）
   assertPass(popupHtml.includes('html { -webkit-text-size-adjust: 100%; }')
-      && /body\s*\{[\s\S]{0,260}font-size:\s*15px;[\s\S]{0,80}line-height:\s*1\.5;/.test(popupHtml),
-    '14D: 默认排版保持清晰，并允许浏览器文字缩放');
+      && /body\s*\{[\s\S]{0,400}font-size:\s*16px;[\s\S]{0,120}line-height:\s*1\.5;/.test(popupHtml),
+    '14D: 默认排版 16px 清晰，并允许浏览器文字缩放');
   assertPass(popupSource.includes('function announceState(message)')
       && popupSource.includes('if (!message || message === lastAnnouncedState) return;')
       && !popupSource.includes("statusDiv.textContent = '';"),

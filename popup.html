@@ -86,7 +86,7 @@
     font-family: var(--font-text);
     background: var(--c-parchment);
     color: var(--c-ink);
-    font-size: 15px;
+    font-size: 16px; /* 主字号与 16px 头栏 icon 同尺寸 */
     line-height: 1.5;
     letter-spacing: 0;
     -webkit-font-smoothing: antialiased;
@@ -117,9 +117,9 @@
   }
   .header-brand img { width: 16px; height: 16px; }
   .header-name {
-    /* Apple tagline token: 21px/600 — 在 popup 中缩到 14px 保持比例感 */
+    /* 字标与 16px 品牌 icon 同尺寸,保持头栏视觉对齐 */
     font-family: var(--font-display);
-    font-size: 15px;
+    font-size: 16px;
     font-weight: 600;
     line-height: 1.19;
     letter-spacing: 0;
