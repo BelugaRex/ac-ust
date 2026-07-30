@@ -391,8 +391,8 @@ async function runTests() {
   const popupCssNoComments = popupHtml.replace(/\/\*[\s\S]*?\*\//g, '');
   assertPass(!/\d\s*vw\b|\d\s*vh\b/.test(popupCssNoComments),
     'popup.html 的 CSS 不使用 vw/vh 视口单位（防窗口塌陷回归）');
-  assertPass(/body\s*\{[^}]*?width:\s*340px/.test(popupCssNoComments),
-    'popup body 固定 340px 宽度');
+  assertPass(/body\s*\{[^}]*?width:\s*360px/.test(popupCssNoComments),
+    'popup body 固定 360px 宽度');
 
   const sourceLocaleResources = manifest.web_accessible_resources || [];
   const distLocaleResources = distManifest.web_accessible_resources || [];

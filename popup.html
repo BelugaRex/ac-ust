@@ -80,9 +80,9 @@
   html { -webkit-text-size-adjust: 100%; }
 
   body {
-    /* 固定 340px,不用 max-width:100vw —— popup 窗口按文档尺寸自适应,
+    /* 固定 360px,不用 max-width:100vw —— popup 窗口按文档尺寸自适应,
        初始布局时 vw 可能按过小视口求值,导致窗口塌成一条窄竖条 */
-    width: 340px;
+    width: 360px;
     font-family: var(--font-text);
     background: var(--c-parchment);
     color: var(--c-ink);
@@ -424,53 +424,57 @@
     border: 1px solid var(--c-hairline);
   }
 
-  /* Time rows (-pills 输入) */
-  .time-row {
+  /* Duration fields (两个时长并排两列，标签在输入框上方) */
+  .duration-row {
     display: flex;
-    align-items: center;
-    justify-content: space-between;
+    gap: 10px;
     margin-bottom: var(--s-xs);
   }
-  .time-row:last-of-type { margin-bottom: 0; }
-  .time-row label {
-    font-size: 15px;
+  .duration-field {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+  }
+  .duration-field label {
+    font-size: 14px;
     font-weight: 400;
     line-height: 1.43;
     letter-spacing: 0;
     color: var(--c-ink-80);
   }
-  .time-row input[type="number"] {
-    /* 紧凑输入框，同 time 输入的瘦身理由 */
+  .duration-field input[type="number"] {
+    /* 紧凑输入框：高度随字号生长，缩放不裁字 */
     border: 1px solid var(--c-hairline);
     border-radius: var(--r-sm);
     padding: 4px 12px;
     font-size: 15px;
     line-height: 1.43;
     letter-spacing: 0;
-    width: 96px;
+    width: 100%;
     min-height: 34px;
     background: var(--c-pearl);
     color: var(--c-ink);
     transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
-    text-align: right;
     font-variant-numeric: tabular-nums;
   }
-  .time-row input[type="number"]:focus {
+  .duration-field input[type="number"]:focus {
     border-color: var(--c-accent);
     box-shadow: 0 0 0 3px var(--c-accent-ring);
     outline: none;
     background: var(--c-canvas);
   }
-  .time-row input[type="number"]:hover:not(:focus) {
+  .duration-field input[type="number"]:hover:not(:focus) {
     border-color: #c7c7cc;
   }
   /* 隐藏 number 输入框的 spinner 以保持 Apple 极简观感 */
-  .time-row input[type="number"]::-webkit-inner-spin-button,
-  .time-row input[type="number"]::-webkit-outer-spin-button {
+  .duration-field input[type="number"]::-webkit-inner-spin-button,
+  .duration-field input[type="number"]::-webkit-outer-spin-button {
     -webkit-appearance: none;
     margin: 0;
   }
-  .time-row input[type="number"] {
+  .duration-field input[type="number"] {
     -moz-appearance: textfield;
     appearance: textfield;
   }
@@ -557,8 +561,7 @@
   }
 
   @media (max-width: 300px) {
-    .settings-header,
-    .time-row {
+    .settings-header {
       align-items: stretch;
       flex-direction: column;
     }
@@ -566,8 +569,8 @@
       justify-content: space-between;
       margin-left: 0;
     }
-    .time-row input[type="number"] {
-      width: 100%;
+    .duration-row {
+      flex-direction: column;
     }
     .active-hours-row .ah-status {
       margin-left: 0;
@@ -606,7 +609,7 @@
     }
     .header-help:hover,
     .active-hours-row input[type="time"]:not(:disabled):hover:not(:focus),
-    .time-row input[type="number"]:hover:not(:focus) {
+    .duration-field input[type="number"]:hover:not(:focus) {
       border-color: #8e8e93;
     }
     .header-help:hover {
@@ -723,12 +726,12 @@
           <input type="time" id="activeHoursEnd" value="23:00" data-i18n-aria-label="activeHoursEndLabel">
           <span class="ah-status" id="activeHoursStatus"></span>
         </div>
-        <div id="intervalInputs">
-          <div class="time-row">
+        <div id="intervalInputs" class="duration-row">
+          <div class="duration-field">
             <label for="onMinutes" data-i18n="onMinutesLabel"></label>
             <input type="number" id="onMinutes" value="30" min="1" step="1">
           </div>
-          <div class="time-row">
+          <div class="duration-field">
             <label for="offMinutes" data-i18n="offMinutesLabel"></label>
             <input type="number" id="offMinutes" value="30" min="1" step="1">
           </div>
