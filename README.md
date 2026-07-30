@@ -74,7 +74,7 @@ ac-ust/
 ├── sync-helpers.js    # 跨设备同步纯函数（chrome.storage.sync + page timer 对齐）
 ├── offscreen.js       # 冗余保活心跳
 ├── offscreen.html     # offscreen 入口
-├── _locales/          # 翻译文件（zh_CN + en，Crowdin 同步）
+├── _locales/          # 翻译文件（zh_CN + en 作者直维护，其他语言 Crowdin 同步）
 ├── icons/             # 像素 logo 母版（16/24/32，pixilart.com 手绘）+ 派生的 48/128
 ├── tools/             # 开发工具（scale-pixil-logo.py 派生 48/128 图标，纯标准库）
 └── test/              # 单元测试 + e2e + 图标验证
@@ -83,6 +83,8 @@ ac-ust/
 ## 🌐 本地化 / Localization
 
 想让 AC-UST 支持你的语言？**不需要懂代码**，只需两步：
+
+> 中文（zh_CN）和 English（en）由作者直接维护；Crowdin 只用于**其他语言**的社区翻译。
 
 ### 方式一：通过 Crowdin（推荐）
 
@@ -140,8 +142,8 @@ git push origin my-cool-feature
 - **不要直接推送到 `beta-rex` 或 `main`** — 这是作者的分支，请通过 PR 贡献
 - **一个 PR 做一件事**，方便 review
 - **先跑测试再 commit**：`node test/verify-fix.mjs`
-- **翻译贡献**：通过 [Crowdin](https://crowdin.com/project/ac-ust) 或直接编辑 `_locales/` 下的 JSON 文件
-- **Crowdin 自动 PR**：如果内容全是源语言（未翻译），直接关闭即可；有真正翻译时再合并
+- **翻译贡献**：其他语言通过 [Crowdin](https://crowdin.com/project/ac-ust) 或直接编辑 `_locales/` 下的 JSON 文件；`zh_CN` 与 `en` 由作者直接维护，请勿改动
+- **Crowdin 自动 PR**：如果内容全是源语言（未翻译），直接关闭即可；有真正翻译时再合并；若 PR 含 `_locales/zh_CN/` 或 `_locales/en/` 改动，一律关闭不合并
 
 ## 技术栈
 

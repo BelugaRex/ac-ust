@@ -9,6 +9,12 @@
 # 所以 translation 必须用 %locale_with_underscore% 而非 %locale%。
 # languages_mapping 把 Crowdin 内部码映射为 Chrome 实际期望的目录名
 # （Chrome 对大部分语言用二字母码 en/ja/ko，仅少数需要 region 后缀）。
+#
+# 语言所有权：zh_CN（源）与 en 由作者直接维护。
+# - 不要在 Crowdin 项目里把英文设为目标语言；
+# - 回流 PR 若含 _locales/zh_CN/ 或 _locales/en/ 改动，直接关闭不合并。
+# 'en-US'→'en' 映射保留仅为防呆：一旦误开英文目标语言，
+# 输出也会落在规范目录里，便于审查时被发现并关闭。
 
 project_id_env: CROWDIN_PROJECT_ID
 api_token_env: CROWDIN_PERSONAL_TOKEN
