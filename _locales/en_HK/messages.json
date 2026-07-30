@@ -372,7 +372,7 @@
     "description": "background.js: 定时器设置失败"
   },
   "scheduleHintPinTab": {
-    "message": "请将 UST AC 页面在浏览器中固定标签页并保持开启，否则定时开关无法控制空调。",
+    "message": "请在浏览器中固定 UST AC 页面标签页并保持开启，否则定时无法控制冷气。",
     "description": "提醒用户固定 AC 标签页"
   },
   "versionMismatch": {
