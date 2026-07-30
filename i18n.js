@@ -17,8 +17,26 @@
   let activeLang = null;
   let loadPromise = null;
 
+  // 非扩展环境（如 VS Code 静态预览）没有完整 chrome.*：
+  // 语言退回 navigator.language，fetch 退回相对路径，保证纯 HTTP 也能渲染文案。
+  function uiLang() {
+    const c = globalThis.chrome;
+    const raw = (c && c.i18n && typeof c.i18n.getUILanguage === 'function')
+      ? c.i18n.getUILanguage()
+      : (globalThis.navigator && navigator.language) || '';
+    return raw.replace('-', '_');
+  }
+
+  function localeUrl(lang) {
+    const path = `_locales/${lang}/messages.json`;
+    const c = globalThis.chrome;
+    return (c && c.runtime && typeof c.runtime.getURL === 'function')
+      ? c.runtime.getURL(path)
+      : path;
+  }
+
   function pickLang() {
-    const ui = (chrome.i18n?.getUILanguage?.() || '').replace('-', '_');
+    const ui = uiLang();
     // 精确匹配 → 模糊匹配 (zh_CN -> zh) → 源语言
     if (cache[ui]) return ui;
     const short = ui.split('_')[0];
@@ -29,7 +47,7 @@
   async function loadLang(lang) {
     if (cache[lang]) return cache[lang];
     try {
-      const url = chrome.runtime.getURL(`_locales/${lang}/messages.json`);
+      const url = localeUrl(lang);
       const res = await fetch(url);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       cache[lang] = await res.json();
@@ -42,7 +60,7 @@
   async function load() {
     if (loadPromise) return loadPromise;
     loadPromise = (async () => {
-      const ui = (chrome.i18n?.getUILanguage?.() || '').replace('-', '_');
+      const ui = uiLang();
       // 预加载 UI 语言 + 源语言（fallback）
       await Promise.all([loadLang(ui), loadLang(SOURCE_LANG)]);
       activeLang = pickLang();
