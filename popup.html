@@ -115,7 +115,7 @@
     align-items: center;
     gap: 8px;
   }
-  .header-brand img { width: 18px; height: 18px; }
+  .header-brand img { width: 16px; height: 16px; }
   .header-name {
     /* Apple tagline token: 21px/600 — 在 popup 中缩到 14px 保持比例感 */
     font-family: var(--font-display);
@@ -664,7 +664,12 @@
   <!-- Compact header bar: icon + name | help | version -->
   <div class="header">
     <div class="header-brand">
-      <img src="icons/ac-ust_16.png" alt="">
+      <!-- 像素母版 1:1 显示；2x/3x 按 HIG 分辨率无关原则给浏览器整数倍档位 -->
+      <img src="icons/ac-ust_16.png"
+           srcset="icons/ac-ust_16.png 1x,
+                   icons/ac-ust_32.png 2x,
+                   icons/ac-ust_48.png 3x"
+           width="16" height="16" alt="">
       <span class="header-name">AC-UST</span>
     </div>
     <div class="header-right">
