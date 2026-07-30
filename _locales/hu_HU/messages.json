@@ -8,7 +8,7 @@
     "description": "扩展短名称"
   },
   "extDesc": {
-    "message": "定时开关 HKUST Smart Power Meter 冷气 - 自动在设定时间开关空调",
+    "message": "以 PWM 循环定时自动控制 HKUST Smart Power Meter 冷气",
     "description": "扩展描述，Chrome Web Store 显示"
   },
   "extActionTitle": {
@@ -16,7 +16,7 @@
     "description": "工具栏图标悬停提示文字"
   },
   "acLoading": {
-    "message": "加载中...",
+    "message": "加载中…",
     "description": "弹窗初始加载状态文字"
   },
   "acIdle": {
@@ -228,7 +228,7 @@
     "description": "诊断：角标闹钟补建前缀"
   },
   "diagnoseWatchdog": {
-    "message": "ac-watchdog 看门狗（每5分钟）",
+    "message": "ac-watchdog 看门狗（每 5 分钟）",
     "description": "诊断：看门狗闹钟"
   },
   "diagnoseHeartbeat": {
@@ -240,7 +240,7 @@
     "description": "诊断：闹钟未过期前缀"
   },
   "diagnoseTabOpen": {
-    "message": "AC页面已打开 (",
+    "message": "冷气页面已打开 (",
     "description": "诊断：AC 页面已打开前缀"
   },
   "diagnoseTabCount": {
@@ -256,7 +256,7 @@
     "description": "诊断：content script 正常"
   },
   "diagnoseAcReadable": {
-    "message": "AC状态可读: ",
+    "message": "冷气状态可读: ",
     "description": "诊断：AC 状态可读前缀"
   },
   "diagnoseContentNoResponse": {
@@ -308,7 +308,7 @@
     "description": "诊断：getSwStatus 异常前缀"
   },
   "diagnoseGetSwNone": {
-    "message": "getSwStatus 无响应且 popup 未自愈 — 建议在 edge://extensions 重新加载扩展",
+    "message": "getSwStatus 无响应且 popup 未自愈 — 请在扩展管理页重新加载扩展",
     "description": "诊断：SW 完全无响应且未自愈"
   },
   "diagnoseBuildTime": {
@@ -340,7 +340,7 @@
     "description": "间隔模式：倒计时图标标题。$1=冷气运行中/冷气已关闭，$2=分钟，$3=开启/关闭"
   },
   "contentTimeout": {
-    "message": "等待超时，未找到 AC 开关。请确保页面已完全加载",
+    "message": "等待超时，未找到冷气开关。请确保页面已完全加载",
     "description": "content.js: 等待开关超时错误"
   },
   "contentRetryExhausted": {
@@ -372,7 +372,7 @@
     "description": "background.js: 定时器设置失败"
   },
   "scheduleHintPinTab": {
-    "message": "请将 UST AC 页面在浏览器中固定标签页并保持开启，否则定时开关无法控制空调。",
+    "message": "请在浏览器中固定 UST AC 页面标签页并保持开启，否则定时无法控制冷气。",
     "description": "提醒用户固定 AC 标签页"
   },
   "versionMismatch": {
