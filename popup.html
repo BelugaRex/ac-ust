@@ -2,18 +2,19 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8">
-<style>
+<style media="not all">
   /*
    * ===== Apple-inspired Design System =====
    * 参考资料: APPLE-DESIGN.md
    *
-   * 字体策略 (无 SF Pro 时的回退):
-   *  - macOS/iOS/Safari: -apple-system / BlinkMacSystemFont 直接走 SF Pro,效果与官方一致
-   *  - Windows: system-ui → Segoe UI Variable/Segoe UI (微软雅黑 / 微软雅黑 UI)
-   *  - Linux: system-ui → 默认无衬线字体 (Ubuntu/Droid Sans/Noto Sans)
-   *  - 开源替代: Inter (Google Fonts, variable) 与 SF Pro 最接近
-   *    若用户机器已安装 Inter,以下栈会自动优先使用它
-   *    (若需扩展内置 Inter 字体文件以彻底对齐 Apple 美学,需另开 issue 单独打包)
+   * 字体策略 (跨平台逐字形回退):
+   *  - macOS/iOS: -apple-system / SF Pro 直接生效，中文自动随系统走苹方
+   *  - Windows: Segoe UI Variable (Win11) → Segoe UI (Win10) 显示拉丁与数字；
+   *    中文显式回退 Microsoft YaHei UI → Microsoft YaHei，不吃浏览器默认兑底
+   *  - Linux: system-ui → Noto Sans CJK SC / 文泉驿等默认无衬线
+   *  - 开源替代: 用户机器已装 Inter 时自动优先 (与 SF Pro 最接近)
+   *  - 关键纪律：input/button 等表单控件默认不继承 body 字体，
+   *    必须显式 font-family: inherit，否则数字字形与正文不统一
    *
   * 正文、状态和表单优先保证在紧凑弹窗中的清晰层级与可读性
    */
@@ -22,20 +23,20 @@
   :root {
     color-scheme: light dark;
     /* 颜色: 单一 Action Blue + 表面色 + 墨色文本 */
-    --c-accent: #0066cc;           /* Action Blue (主交互色) */
-    --c-accent-hover: #0071e3;     /* Focus Blue (键盘聚焦环) */
+    --c-accent: #0071e3;           /* Apple Web Hero CTA 蓝：比旧 #0066cc 更暖亮，少“医院蓝”冷感 */
+    --c-accent-hover: #2997ff;     /* Focus 环亮一阶（Apple Web Hero hover 色，浅底上浮现清晰可见） */
     --c-accent-on-dark: #2997ff;   /* 深色面用蓝 (此处基本不用) */
-    --c-accent-ring: rgba(0, 102, 204, 0.16);
-    --c-accent-soft: rgba(0, 102, 204, 0.08);
+    --c-accent-ring: rgba(0, 113, 227, 0.16);
+    --c-accent-soft: rgba(0, 113, 227, 0.08);
 
     --c-canvas: #ffffff;           /* 主画布白 */
     --c-parchment: #f5f5f7;        /* Apple 标志性暖白 (页面背景) */
-    --c-pearl: #fafafc;            /* 次级 ghost button 比画布更浅 */
+    --c-pearl: #f4f4f5;            /* 次级 input 底：中性浅灰，避开紫白 nudge，与 canvas 白形成可辨内凹层级 */
 
     --c-ink: #1d1d1f;              /* 标题/正文近黑墨 */
     --c-ink-80: #333333;           /* 次级文本 */
-    --c-muted: #7a7a7a;            /* 远端灰 */
-    --c-muted-2: #86868b;          /* 中性灰 (匄 ld 文字) */
+    --c-muted: #5f5f5f;            /* 远端灰 (浅色默认加深至 parchment ~5.8:1、白底 ~6.4:1。达 WCAG AA 4.5:1) */
+    --c-muted-2: #6e6e73;          /* 中性灰 (默认加深至 ~4.7:1；高对比度档进一步压至 #4d4d4d) */
 
     --c-hairline: #e0e0e0;         /* 1px 发丝边框 */
     --c-divider: #f0f0f0;          /* 软分隔线 */
@@ -64,9 +65,9 @@
     --s-lg: 24px;
     --s-xl: 32px;
 
-    /* 字体族: 显式优先级, 让 macOS 自动走 SF Pro */
-    --font-display: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
-    --font-text: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+    /* 字体族: 逐字形回退 —— 拉丁/数字优先几何无衬线，CJK 显式声明 UI 调优变体 */
+    --font-display: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI Variable Display", "Segoe UI", system-ui, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
+    --font-text: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI Variable Text", "Segoe UI", system-ui, "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
     --font-mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
     /* 唯一允许的投影 (本扩展内仅状态圆点等极少数情况使用)
@@ -80,9 +81,9 @@
   html { -webkit-text-size-adjust: 100%; }
 
   body {
-    /* 固定 360px,不用 max-width:100vw —— popup 窗口按文档尺寸自适应,
-       初始布局时 vw 可能按过小视口求值,导致窗口塌成一条窄竖条 */
-    width: 360px;
+    /* 由内容决定 popup 宽度；不使用 vw/vh，避免初始布局竞态导致窗口塌陷 */
+    width: max-content;
+    min-width: 0;
     font-family: var(--font-text);
     background: var(--c-parchment);
     color: var(--c-ink);
@@ -93,11 +94,23 @@
     -moz-osx-font-smoothing: grayscale;
   }
 
-  /* 普通 HTTP 预览允许适配标准网页视口；扩展 popup 没有此 class，仍固定 360px。 */
+  .app-shell {
+    width: max-content;
+    /* 设计宽度下限：zh 4 字标签内容仅 ~228px 会过窄；
+       300px 接近主流扩展 popup 尺度（Dark Reader ~300、uBlock ~270）。
+       min-width 同时钳制 max-content 贡献，body 与静态预览缩放都跟随此下限；
+       更宽的 locale 仍能自然撑开，不用 vw 避免窗口塌陷回归。 */
+    min-width: 300px;
+  }
+
+  /* 普通 HTTP 预览保持插件原始排版，由脚本在窄窗口中整体等比缩放。 */
   .static-preview body {
-    width: 360px;
-    max-width: 100%;
+    width: auto;
     min-width: 0;
+    overflow-x: clip;
+  }
+  .static-preview .app-shell {
+    transform-origin: top left;
   }
 
   /* ===== Header Bar (参考 sub-nav-frosted: 羊皮卷 80% + 模糊化) ===== */
@@ -105,10 +118,9 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    min-height: 44px;
-    gap: 4px 8px;
+    gap: 8px;
     flex-wrap: wrap;
-    padding: 6px 16px;
+    padding: 8px 16px 7px;
     background: rgba(245, 245, 247, 0.86);
     -webkit-backdrop-filter: saturate(180%) blur(20px);
     backdrop-filter: saturate(180%) blur(20px);
@@ -122,7 +134,12 @@
     align-items: center;
     gap: 8px;
   }
-  .header-brand img { width: 16px; height: 16px; }
+  .header-brand img {
+    width: 16px;
+    height: 16px;
+    /* 锁定 16px 像素艺术母版，HiDPI 屏缩放保留像素锐边而非平滑模糊 */
+    image-rendering: pixelated;
+  }
   .header-name {
     /* 字标与 16px 品牌 icon 同尺寸,保持头栏视觉对齐 */
     font-family: var(--font-display);
@@ -148,7 +165,7 @@
     border-radius: 50%;
     background: transparent;
     color: var(--c-muted);
-    font-size: 13px;
+    font-size: 16px;
     font-weight: 600;
     text-decoration: none;
     line-height: 1;
@@ -160,37 +177,50 @@
   }
   .header-help:active { transform: scale(0.95); } /* Apple 系统级按压微交互 */
   .header-version {
-    /* micro-legal: 跟随 16px 基准梯度 */
-    font-size: 12px;
+    /* 版本信息为最低优先级元数据：11px 略高于 HIG 11pt 最小字号地板，去斜体强调体在不拉开与其它文本差异的前提下避免与正文混合。 */
+    font-size: 11px;
+    font-style: normal;
+    line-height: 16px;
     color: var(--c-muted);
     font-variant-numeric: tabular-nums;
     letter-spacing: 0;
+    white-space: nowrap;
+    text-align: right;
   }
 
-  .content { padding: var(--s-sm); } /* 12px 内容区外边距产生卡间距 */
+  .content {
+    width: max-content;
+    /* header（含版本时间戳）比表单宽时，卡片撑满 shell 宽度，
+       保证卡片右缘与 header 右缘对齐；表单更宽时仍由内容决定自然宽 */
+    min-width: 100%;
+    padding: var(--s-xs);
+  } /* 固定 8px 外侧 gutter，内容宽度由内部组件决定 */
 
   /* ===== Status Hero Card (参考 product-tile-light) ===== */
   .status-card {
     background: var(--c-canvas);
     border-radius: var(--r-lg);
-    padding: 18px 18px 16px;
-    margin-bottom: var(--s-sm);
+    /* 左右 1px 可见边框 + 15px padding = 16px 视觉内缩；上下收紧 */
+    padding: 12px 15px;
+    margin-bottom: var(--s-xs);
     border: 1px solid var(--c-hairline);
     transition: border-color 0.2s ease, background 0.2s ease;
   }
   .status-card:has(.ac-dot.on) {
-    border-color: rgba(0, 102, 204, 0.28);
+    /* 运行中整卡浸入 success 绿调：状态区与下方白色设置卡形成强对比（Grammarly/AdBlock 式彩色状态区） */
+    background: var(--c-success-bg);
+    border-color: rgba(36, 138, 61, 0.32);
   }
   .status-card:has(.ac-dot.unknown) {
     border-color: var(--c-hairline);
   }
 
   .ac-indicator {
-    /* body-strong token: 17px/600/1.24/-0.374px */
+    /* body-strong token: 16px/600/1.24/0 */
     display: flex;
     align-items: center;
     gap: 8px;
-    font-size: 17px;
+    font-size: 16px;
     font-weight: 600;
     line-height: 1.24;
     letter-spacing: 0;
@@ -204,7 +234,8 @@
     display: inline-block;
     flex-shrink: 0;
   }
-  .ac-dot.on { background: var(--c-accent); }
+  /* 状态信号走 success 绿；accent 蓝保留给纯交互（toggle/链接/focus/按钮），避免“蓝=既可点又=运行中”歧义 */
+  .ac-dot.on { background: var(--c-success); }
   .ac-dot.off {
     background: transparent;
     border-color: var(--c-muted-2);
@@ -215,44 +246,63 @@
     border-color: var(--c-chip);
   }
 
-  .countdown-display {
-    align-items: baseline;
-    gap: 4px;
-    font-size: 16px;
-    color: var(--c-muted);
-    line-height: 1.5;
-    letter-spacing: 0;
+  /* Hero 倒计时：Forest/uBlock Origin 式视觉锚点 —— 大号等宽数字是弹窗第一焦点。
+     字号上限对本元素单独放宽至 32px（popup 其余文本仍 ≤16px）。
+     构图：caption 靠左、大数字靠右底部对齐，数字右缘与下方表单控件同列，
+     避免左列堆积、右侧空白的失衡排版。 */
+  .hero-countdown {
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: var(--s-xs);
+    margin-top: var(--s-xs);
   }
-  .countdown-display strong {
-    /* lead token-like: 28px/600,这是 popup 内最大的数字字
-       略带正字距以呈现数字"主角"感 */
+  .hero-number {
     font-family: var(--font-display);
-    font-size: 28px;
-    font-weight: 600;
+    font-size: 32px;
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
     color: var(--c-ink);
     font-variant-numeric: tabular-nums;
-    letter-spacing: 0.196px;
-    line-height: 1.14;
+  }
+  .hero-caption {
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--c-muted);
+    letter-spacing: 0;
+  }
+  .hero-idle {
+    margin-top: var(--s-xs);
+    font-size: 12px;
+    line-height: 16px;
+    color: var(--c-muted);
+    letter-spacing: 0;
   }
 
   .safetynet-warning {
     margin-top: var(--s-xs);
-    padding: 8px 12px;
+    padding: 7px 15px;
     background: var(--c-warning-bg);
     border: 1px solid var(--c-warning-border);
     border-radius: var(--r-md);
     color: var(--c-warning);
-    font-size: 14px;
+    font-size: 16px;
+    font-weight: 500;
     line-height: 1.5;
     letter-spacing: 0;
     text-align: left;
   }
 
-  /* ===== Settings Card (utility card: 白底 + 发丝边 + lg 圆角) ===== */
+  /* ===== Settings Card：统一 form-row 表单（label 左 / 控件右） =====
+     依据 Apple HIG Layout：
+     - 「Align components with one another to make them easier to scan」
+       所有行同一结构，所有控件右缘对齐在同一列；
+     - 「Indentation…helps people understand an information hierarchy」
+       子行 16px 缩进表达从属关系，不再靠列轨道错位对齐。 */
   .settings-card {
     background: var(--c-canvas);
     border-radius: var(--r-lg);
-    margin-bottom: var(--s-sm);
+    margin-bottom: var(--s-xs);
     border: 1px solid var(--c-hairline);
     overflow: hidden;
   }
@@ -262,8 +312,8 @@
     justify-content: space-between;
     gap: 8px;
     flex-wrap: wrap;
-    min-height: 56px;
-    padding: 6px 16px;
+    /* 上下 1px 边框/分隔线补偿后视觉 12px */
+    padding: 11px 15px;
     background: var(--c-canvas);
     border-bottom: 1px solid var(--c-divider);
   }
@@ -282,11 +332,13 @@
     display: flex;
     align-items: center;
     gap: 8px;
-    min-height: 44px;
     margin-left: auto;
   }
   .toggle-state {
-    font-size: 14px;
+    /* 开关状态属于元数据：12px muted 降级，不与 16px 标题抢层级 */
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 16px;
     color: var(--c-muted);
     white-space: nowrap;
     letter-spacing: 0;
@@ -296,15 +348,30 @@
   .toggle-switch {
     position: relative;
     display: inline-block;
-    width: 46px;
-    height: 44px;
+    width: 36px;
+    height: 20px;
     flex-shrink: 0;
   }
-  .toggle-switch input { opacity: 0; width: 0; height: 0; }
+  .toggle-switch::after {
+    content: "";
+    position: absolute;
+    inset: -12px -4px;
+    cursor: pointer;
+  }
+  .toggle-switch input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    font-size: 16px;
+    cursor: pointer;
+  }
   .toggle-slider {
     position: absolute;
     cursor: pointer;
-    top: 9px; left: 0; right: 0; bottom: 9px;
+    inset: 0;
     background-color: var(--c-chip);
     transition: background-color 0.2s ease;
     border-radius: var(--r-pill);
@@ -312,7 +379,7 @@
   .toggle-slider:before {
     position: absolute;
     content: "";
-    height: 22px; width: 22px;
+    height: 16px; width: 16px;
     left: 2px; bottom: 2px;
     background-color: white;
     transition: transform 0.2s ease;
@@ -325,7 +392,7 @@
     background-color: var(--c-accent);
   }
   .toggle-switch input:checked + .toggle-slider:before {
-    transform: translateX(20px);
+    transform: translateX(16px);
   }
   .toggle-switch input:disabled + .toggle-slider {
     opacity: 0.5;
@@ -343,175 +410,146 @@
     transform: scale(0.96);
   }
 
-  .settings-body { padding: 14px 16px 16px; }
-
-  /* ===== PWM 运行时段行 (configurator-chip 风格的小药丸) ===== */
-  .active-hours-row {
-    display: grid;
-    grid-template-columns: 1fr;
-    align-items: center;
-    padding-bottom: var(--s-sm);
-    margin-bottom: var(--s-sm);
-    border-bottom: 1px solid var(--c-divider);
-    gap: 8px 10px;
+  /* 主/从 toggle 区分：settings-header 主 toggle 36×20，运行时段行子 toggle 按 HIG macOS 子控件尺度递减为 32×18，命中区继续由 ::after 维持 ≥44px */
+  #activeHoursRow .toggle-switch {
+    width: 32px;
+    height: 18px;
   }
-  .active-hours-row label.ah-label {
-    font-size: 15px;
-    font-weight: 400;
-    line-height: 1.43;
-    letter-spacing: 0;
-    cursor: pointer;
-    display: flex;
-    align-items: center;
-    min-height: 44px;
-    gap: 7px;
-    flex-shrink: 0;
-    grid-column: 1 / -1;
-    color: var(--c-ink-80);
+  #activeHoursRow .toggle-slider:before {
+    height: 14px;
+    width: 14px;
   }
-  .active-hours-row input[type="checkbox"] {
-    width: 16px; height: 16px;
-    cursor: pointer;
-    accent-color: var(--c-accent);
-  }
-  .active-hours-row input[type="time"] {
-    /* 桌面鼠标环境的紧凑输入框：高度由 padding+字号决定，min-height 仅底线；
-       无障碍由浏览器缩放兜底（放大时盒子随字号生长，不裁字） */
-    border: 1px solid var(--c-hairline);
-    border-radius: var(--r-sm);
-    padding: 4px 10px;
-    font-size: 15px;
-    line-height: 1.5;
-    letter-spacing: 0;
-    background: var(--c-pearl);
-    color: var(--c-ink);
-    font-variant-numeric: tabular-nums;
-    width: 100%;
-    min-width: 0;
-    min-height: 34px;
-    transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
-  }
-  .active-hours-row input[type="time"]:disabled {
-    opacity: 0.45;
-    cursor: not-allowed;
-  }
-  .active-hours-row input[type="time"]:not(:disabled):hover:not(:focus) {
-    border-color: #c7c7cc;
-  }
-  .active-hours-row input[type="time"]:not(:disabled):focus {
-    border-color: var(--c-accent);
-    box-shadow: 0 0 0 3px var(--c-accent-ring);
-    outline: none;
-    background: var(--c-canvas);
-  }
-  .active-hours-row .ah-sep {
-    color: var(--c-muted);
-    font-size: 14px;
-    letter-spacing: 0;
+  #activeHoursRow .toggle-switch input:checked + .toggle-slider:before {
+    transform: translateX(14px);
   }
 
-  .active-hours-controls {
-    display: grid;
-    grid-column: 1 / -1;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
-    align-items: center;
-    gap: 8px;
-    min-width: 0;
-  }
-
-  .active-hours-row .ah-status {
-    grid-column: 1 / -1;
-    margin-left: 0;
-    justify-self: start;
-    font-size: 13px;
-    padding: 4px 9px;
-    border-radius: var(--r-pill);
-    background: var(--c-pearl);
-    color: var(--c-muted);
-    border: 1px solid var(--c-hairline);
-    white-space: nowrap;
-    line-height: 1.2;
-    letter-spacing: 0;
-  }
-  .active-hours-row .ah-status.active {
-    background: var(--c-accent-soft);
-    color: var(--c-accent);
-    border: 1px solid rgba(0, 102, 204, 0.18);
-  }
-  .active-hours-row .ah-status.idle {
-    background: var(--c-pearl);
-    color: var(--c-muted);
-    border: 1px solid var(--c-hairline);
-  }
-
-  /* Duration fields (两个时长并排两列，标签在输入框上方) */
-  .duration-row {
-    display: flex;
-    gap: 10px;
-    margin-bottom: var(--s-xs);
-  }
-  .duration-field {
-    flex: 1;
+  /* 表单区段：区段间 1px 分隔线，段内行距 8px */
+  .form-section {
     display: flex;
     flex-direction: column;
-    gap: 4px;
-    min-width: 0;
+    gap: var(--s-xs);
+    /* 左右 1px 边框补偿后视觉 16px */
+    padding: 8px 15px;
   }
-  .duration-field label {
-    font-size: 14px;
+  .form-section + .form-section {
+    border-top: 1px solid var(--c-divider);
+  }
+  .form-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s-xs);
+    min-height: 32px;
+  }
+  .form-row.sub {
+    /* HIG 缩进：子行从属于上方主行（运行时段 → 开始/结束时间） */
+    padding-left: 16px;
+  }
+  .row-label {
+    font-size: 16px;
     font-weight: 400;
     line-height: 1.43;
     letter-spacing: 0;
     color: var(--c-ink-80);
+    white-space: nowrap;
+    cursor: pointer;
   }
-  .duration-field input[type="number"] {
-    /* 紧凑输入框：高度随字号生长，缩放不裁字 */
+  .form-row.sub:has(input:disabled) .row-label {
+    /* 父开关关闭时子行标签与输入框一并降级 */
+    color: var(--c-muted-2);
+  }
+
+  /* 所有输入控件统一 5rem×32px/16px，右缘与 toggle 同列对齐 */
+  .form-row input[type="time"],
+  .form-row input[type="number"] {
     border: 1px solid var(--c-hairline);
     border-radius: var(--r-sm);
-    padding: 4px 12px;
-    font-size: 15px;
-    line-height: 1.43;
+    padding: 0 7px;
+    margin: 0;
+    /* 控件默认 UA 字体不继承 body：显式继承设计字体栈，数字字形与全 popup 统一 */
+    font-family: inherit;
+    font-size: 16px;
+    line-height: 1.2;
     letter-spacing: 0;
-    width: 100%;
-    min-height: 34px;
     background: var(--c-pearl);
     color: var(--c-ink);
-    transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
     font-variant-numeric: tabular-nums;
+    width: 5rem;
+    min-width: 5rem;
+    height: 32px;
+    min-height: 32px;
+    flex-shrink: 0;
+    transition: border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
   }
-  .duration-field input[type="number"]:focus {
-    border-color: var(--c-accent);
-    box-shadow: 0 0 0 3px var(--c-accent-ring);
-    outline: none;
-    background: var(--c-canvas);
-  }
-  .duration-field input[type="number"]:hover:not(:focus) {
-    border-color: #c7c7cc;
-  }
-  /* 隐藏 number 输入框的 spinner 以保持 Apple 极简观感 */
-  .duration-field input[type="number"]::-webkit-inner-spin-button,
-  .duration-field input[type="number"]::-webkit-outer-spin-button {
-    -webkit-appearance: none;
-    margin: 0;
-  }
-  .duration-field input[type="number"] {
+  .form-row input[type="number"] {
     -moz-appearance: textfield;
     appearance: textfield;
   }
-
-  .hint {
-    color: var(--c-muted);
-    font-size: 14px;
-    line-height: 1.5;
-    letter-spacing: 0;
-    margin-top: var(--s-xs);
+  .form-row input[type="time"]::-webkit-calendar-picker-indicator {
+    width: 16px;
+    height: 16px;
+    padding: 0;
+    margin: 0;
   }
-  .hint-pin {
+  .form-row input:disabled {
+    opacity: 0.45;
+    cursor: not-allowed;
+  }
+  .form-row input[type="time"]:not(:disabled):hover:not(:focus),
+  .form-row input[type="number"]:not(:disabled):hover:not(:focus) {
+    border-color: #c7c7cc;
+  }
+  .form-row input[type="time"]:not(:disabled):focus,
+  .form-row input[type="number"]:not(:disabled):focus {
+    border-color: var(--c-accent);
+    box-shadow: 0 0 0 3px var(--c-accent-ring);
+    outline: none;
+    background: var(--c-canvas);
+  }
+  /* 隐藏 number 输入框的 spinner 以保持 Apple 极简观感 */
+  .form-row input[type="number"]::-webkit-inner-spin-button,
+  .form-row input[type="number"]::-webkit-outer-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+
+  /* 数字输入框内嵌单位：值靠左、单位 12px muted 靠右，
+     标签不再需要「（分钟）」括注，框内空间被有意义内容填充 */
+  .number-field {
+    position: relative;
+    display: inline-flex;
+    flex-shrink: 0;
+    width: 5rem;
+  }
+  .number-field input[type="number"] {
+    width: 100%;
+    min-width: 0;
+  }
+  .field-unit {
+    position: absolute;
+    right: 7px;
+    top: 50%;
+    transform: translateY(-50%);
+    font-size: 12px;
+    line-height: 1;
+    color: var(--c-muted);
+    pointer-events: none;
+  }
+
+  .settings-hint {
+    /* 固定标签页提醒：caption 级 12px/500 muted，作为卡内最末区段。
+       width:0 + min-width:100% 抵消长文本的 max-content 贡献，
+       防止整句不换行把 popup 自然宽度撑宽（旧 hint-pin 同款防护）。 */
     border-top: 1px solid var(--c-divider);
-    padding-top: var(--s-xs);
-    margin-top: var(--s-xs);
-    color: var(--c-ink-80);
+    padding: 8px 15px;
+    color: var(--c-muted);
+    font-size: 12px;
     font-weight: 500;
+    line-height: 16px;
+    letter-spacing: 0;
+    width: 0;
+    min-width: 100%;
+    overflow-wrap: anywhere;
   }
 
   /* ===== Footer (Apple footer: 紧致法定信息 + 单行链) ===== */
@@ -519,38 +557,43 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    align-items: flex-start;
     gap: 8px;
     flex-wrap: wrap;
-    padding-top: var(--s-xxs);
+    padding-top: var(--s-xs);
   }
   .status {
-    font-size: 14px;
+    /* 瞬时反馈消息属于元数据：12px muted，不与正文抢层级 */
+    font-size: 12px;
     color: var(--c-muted);
     flex: 1;
-    min-height: 20px;
-    line-height: 1.5;
+    line-height: 16px;
     letter-spacing: 0;
   }
-  .status.success { color: var(--c-accent); }
+  /* HIG：绿色语义留给成功状态；accent 蓝保留给交互（toggle/链接/焦点/按钮），避免“蓝=既可点又=成功”歧义 */
+  .status.success { color: var(--c-success); }
   .status.error { color: var(--c-danger); }
 
   .btn-diagnose {
     /* button-secondary-pill token: 透明底 + Action Blue 描边 + pill */
     font-family: var(--font-text);
-    font-size: 14px;
-    font-weight: 400;
+    font-size: 16px;
+    font-weight: 600;
     line-height: 1.29;
     letter-spacing: 0;
     color: var(--c-accent);
     background: var(--c-canvas);
     border: 1px solid var(--c-accent);
     border-radius: var(--r-sm);
-    padding: 6px 14px;
-    min-height: 44px;
+    padding: 7px 15px;
+    position: relative;
     cursor: pointer;
     white-space: nowrap;
     transition: transform 0.16s ease, background 0.16s ease, color 0.16s ease;
+  }
+  .btn-diagnose::after {
+    content: "";
+    position: absolute;
+    inset: -4px;
   }
   .btn-diagnose:hover {
     background: var(--c-accent);
@@ -560,7 +603,7 @@
 
   .diagnose-result {
     font-family: var(--font-text);
-    font-size: 14px;
+    font-size: 16px;
     color: var(--c-muted);
     margin-top: var(--s-xs);
     line-height: 1.6;
@@ -581,54 +624,25 @@
   }
 
   @media (max-width: 300px) {
-    .settings-header {
+    html:not(.static-preview) .settings-header {
       align-items: stretch;
       flex-direction: column;
     }
-    .toggle-area {
+    html:not(.static-preview) .toggle-area {
       justify-content: space-between;
-      margin-left: 0;
-    }
-    .duration-row {
-      flex-direction: column;
-    }
-    .active-hours-row .ah-status {
-      margin-left: 0;
-    }
-  }
-
-  @media (max-width: 359px) {
-    .static-preview .active-hours-row {
-      grid-template-columns: 1fr;
-    }
-    .static-preview .active-hours-controls {
-      grid-column: 1;
-    }
-    .static-preview .settings-header {
-      align-items: stretch;
-      flex-direction: column;
-    }
-    .static-preview .toggle-area {
-      justify-content: space-between;
-      margin-left: 0;
-    }
-    .static-preview .duration-row {
-      flex-direction: column;
-    }
-    .static-preview .active-hours-row .ah-status {
       margin-left: 0;
     }
   }
 
   @media (prefers-color-scheme: dark) {
     :root {
-      --c-accent: #409cff;
-      --c-accent-hover: #64b5ff;
-      --c-accent-ring: rgba(64, 156, 255, 0.36);
-      --c-accent-soft: rgba(64, 156, 255, 0.2);
+      --c-accent: #0a84ff;           /* Apple 系统级深色蓝：替代 #409cff 霸道霓虹感 */
+      --c-accent-hover: #409cff;      /* Focus 环亮一阶 */
+      --c-accent-ring: rgba(10, 132, 255, 0.36);
+      --c-accent-soft: rgba(10, 132, 255, 0.18);
       --c-canvas: #1c1c1e;
-      --c-parchment: #000000;
-      --c-pearl: #2c2c2e;
+      --c-parchment: #0e0e10;        /* 深色背为软黑而非 OLED 纯黑，缓解 popup 小窗墙压感 */
+      --c-pearl: #2a2a2c;
       --c-ink: #f5f5f7;
       --c-ink-80: #e5e5ea;
       --c-muted: #aeaeb2;
@@ -647,16 +661,20 @@
       background: rgba(28, 28, 30, 0.9);
       border-bottom-color: rgba(255, 255, 255, 0.16);
     }
+    /* 深色档跟随状态点 success 绿：避免 accent 蓝与交互信号重叠，与浅色档语义一致 */
+    .status-card:has(.ac-dot.on) {
+      background: var(--c-success-bg);
+      border-color: rgba(48, 209, 88, 0.4);
+    }
     .header-help {
       background: transparent;
     }
-    .header-help:hover,
-    .active-hours-row input[type="time"]:not(:disabled):hover:not(:focus),
-    .duration-field input[type="number"]:hover:not(:focus) {
-      border-color: #8e8e93;
-    }
     .header-help:hover {
       background: #3a3a3c;
+    }
+    .form-row input[type="time"]:not(:disabled):hover:not(:focus),
+    .form-row input[type="number"]:not(:disabled):hover:not(:focus) {
+      border-color: #8e8e93;
     }
     .toggle-slider:before {
       background-color: #f5f5f7;
@@ -669,6 +687,7 @@
       --c-muted-2: #4d4d4d;
       --c-hairline: #666666;
       --c-divider: #767676;
+      --c-chip: #9a9a9a;            /* toggle off 轨道在白底从 #d2d2d7(~1.5:1) 加深至 ~3:1 组件对比线 */
       --c-warning-border: #8b4300;
     }
     .status-card,
@@ -707,40 +726,498 @@
     outline: 2px solid var(--c-accent-hover);
     outline-offset: 2px;
   }
+
+  /* ===== Coherent desktop popup layout =====
+     One stable width, one card radius and a compact type hierarchy. */
+  :root {
+    --ui-accent: #0a66c2;
+    --ui-accent-hover: #07579f;
+    --ui-focus: rgba(10, 102, 194, 0.22);
+    --ui-bg: #f3f4f6;
+    --ui-surface: #ffffff;
+    --ui-field: #f7f7f8;
+    --ui-text: #202124;
+    --ui-secondary: #5f6368;
+    --ui-tertiary: #74777c;
+    --ui-border: #dfe1e5;
+    --ui-divider: #eceef1;
+    --ui-toggle: #aeb3ba;
+    --ui-success: #188038;
+    --ui-warning: #9a4d00;
+    --ui-warning-bg: #fff7e8;
+    --ui-warning-border: #f0d29f;
+    --ui-danger: #c5221f;
+    --ui-radius: 8px;
+    --ui-control-radius: 6px;
+    --ui-font: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  }
+
+  body {
+    width: 348px;
+    min-width: 348px;
+    background: var(--ui-bg);
+    color: var(--ui-text);
+    font-family: var(--ui-font);
+    font-size: 14px;
+    line-height: 1.45;
+  }
+
+  button,
+  input {
+    font-family: inherit;
+    letter-spacing: 0;
+  }
+
+  .app-shell {
+    width: 348px;
+    min-width: 348px;
+  }
+
+  .static-preview body {
+    width: 348px;
+    min-width: 348px;
+    overflow-x: clip;
+  }
+
+  .header {
+    min-height: 44px;
+    padding: 8px 14px;
+    flex-wrap: nowrap;
+    background: var(--ui-surface);
+    border-bottom-color: var(--ui-border);
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+  }
+
+  .header-name {
+    color: var(--ui-text);
+    font-family: var(--ui-font);
+    font-size: 15px;
+    font-weight: 650;
+    line-height: 20px;
+  }
+
+  .header-right {
+    gap: 6px;
+  }
+
+  .header-help {
+    width: 28px;
+    height: 28px;
+    color: var(--ui-secondary);
+    font-size: 15px;
+  }
+
+  .header-help:hover {
+    background: var(--ui-bg);
+    color: var(--ui-text);
+  }
+
+  .header-version {
+    color: var(--ui-tertiary);
+    font-size: 11px;
+    line-height: 16px;
+  }
+
+  .content {
+    width: auto;
+    min-width: 0;
+    padding: 12px;
+  }
+
+  .status-card,
+  .settings-card {
+    background: var(--ui-surface);
+    border-color: var(--ui-border);
+    border-radius: var(--ui-radius);
+  }
+
+  .status-card,
+  .status-card:has(.ac-dot.on),
+  .status-card:has(.ac-dot.unknown) {
+    padding: 14px 16px 16px;
+    margin-bottom: 10px;
+    background: var(--ui-surface);
+    border-color: var(--ui-border);
+  }
+
+  .ac-indicator {
+    gap: 7px;
+    margin-bottom: 0;
+    color: var(--ui-secondary);
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 18px;
+  }
+
+  .ac-dot {
+    width: 8px;
+    height: 8px;
+  }
+
+  .ac-dot.on {
+    background: var(--ui-success);
+  }
+
+  .ac-dot.off {
+    border-color: var(--ui-tertiary);
+    border-radius: 3px;
+  }
+
+  .ac-dot.unknown {
+    border-color: var(--ui-toggle);
+  }
+
+  .hero-countdown {
+    align-items: baseline;
+    justify-content: flex-start;
+    gap: 8px;
+    margin-top: 8px;
+  }
+
+  .hero-number {
+    color: var(--ui-text);
+    font-family: var(--ui-font);
+    font-size: 32px;
+    font-weight: 650;
+    line-height: 36px;
+    letter-spacing: 0;
+  }
+
+  .hero-caption,
+  .hero-idle {
+    color: var(--ui-secondary);
+    font-size: 13px;
+    line-height: 18px;
+  }
+
+  .safetynet-warning {
+    margin-top: 10px;
+    padding: 9px 10px;
+    background: var(--ui-warning-bg);
+    border-color: var(--ui-warning-border);
+    border-radius: var(--ui-control-radius);
+    color: var(--ui-warning);
+    font-size: 12px;
+    font-weight: 400;
+    line-height: 17px;
+  }
+
+  .settings-card {
+    margin-bottom: 0;
+  }
+
+  .settings-header,
+  .section-heading {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  .settings-header {
+    min-height: 46px;
+    padding: 10px 15px;
+    flex-direction: row;
+    flex-wrap: nowrap;
+    background: var(--ui-surface);
+    border-bottom-color: var(--ui-divider);
+  }
+
+  .settings-header h3 {
+    color: var(--ui-text);
+    font-family: var(--ui-font);
+    font-size: 15px;
+    font-weight: 650;
+    line-height: 20px;
+  }
+
+  .toggle-area {
+    margin-left: auto;
+  }
+
+  .toggle-switch,
+  #activeHoursRow .toggle-switch {
+    width: 38px;
+    height: 22px;
+  }
+
+  .toggle-switch::after {
+    inset: -10px -4px;
+  }
+
+  .toggle-slider {
+    background: var(--ui-toggle);
+  }
+
+  .toggle-slider::before,
+  #activeHoursRow .toggle-slider::before {
+    width: 18px;
+    height: 18px;
+  }
+
+  .toggle-switch input:checked + .toggle-slider {
+    background: var(--ui-accent);
+  }
+
+  .toggle-switch input:checked + .toggle-slider::before,
+  #activeHoursRow .toggle-switch input:checked + .toggle-slider::before {
+    transform: translateX(16px);
+  }
+
+  .setting-group {
+    padding: 13px 15px 15px;
+  }
+
+  .setting-group + .setting-group {
+    border-top: 1px solid var(--ui-divider);
+  }
+
+  .section-heading {
+    min-height: 24px;
+    margin-bottom: 10px;
+  }
+
+  .section-title {
+    color: var(--ui-text);
+    font-size: 14px;
+    font-weight: 600;
+    line-height: 20px;
+    cursor: pointer;
+  }
+
+  .field-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+  }
+
+  .field {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 5px;
+  }
+
+  .field-label {
+    color: var(--ui-secondary);
+    font-size: 12px;
+    font-weight: 500;
+    line-height: 16px;
+    cursor: pointer;
+  }
+
+  .field:has(input:disabled) .field-label {
+    color: var(--ui-tertiary);
+  }
+
+  .field input[type="time"],
+  .field input[type="number"] {
+    width: 100%;
+    min-width: 0;
+    height: 36px;
+    min-height: 36px;
+    margin: 0;
+    padding: 0 10px;
+    background: var(--ui-field);
+    border-color: var(--ui-border);
+    border-radius: var(--ui-control-radius);
+    color: var(--ui-text);
+    font-size: 14px;
+    line-height: 20px;
+  }
+
+  .field input[type="number"] {
+    padding-right: 48px;
+  }
+
+  .field input:not(:disabled):hover:not(:focus) {
+    border-color: #c4c7cc;
+  }
+
+  .field input:not(:disabled):focus {
+    background: var(--ui-surface);
+    border-color: var(--ui-accent);
+    box-shadow: 0 0 0 3px var(--ui-focus);
+  }
+
+  .number-field {
+    display: block;
+    width: auto;
+    min-width: 0;
+  }
+
+  .field-unit {
+    right: 10px;
+    color: var(--ui-tertiary);
+    font-size: 11px;
+    line-height: 14px;
+  }
+
+  .settings-hint {
+    width: auto;
+    min-width: 0;
+    padding: 10px 15px 11px;
+    background: var(--ui-field);
+    border-top-color: var(--ui-divider);
+    color: var(--ui-secondary);
+    font-size: 11px;
+    font-weight: 400;
+    line-height: 16px;
+  }
+
+  .footer {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding-top: 10px;
+  }
+
+  .status {
+    min-height: 0;
+    color: var(--ui-secondary);
+    font-size: 12px;
+    line-height: 16px;
+  }
+
+  .status:empty {
+    display: none;
+  }
+
+  .status.success {
+    color: var(--ui-success);
+  }
+
+  .status.error {
+    color: var(--ui-danger);
+  }
+
+  .btn-diagnose {
+    width: 100%;
+    height: 36px;
+    padding: 0 12px;
+    background: var(--ui-surface);
+    border-color: var(--ui-border);
+    border-radius: var(--ui-control-radius);
+    color: var(--ui-secondary);
+    font-family: var(--ui-font);
+    font-size: 13px;
+    font-weight: 600;
+    line-height: 20px;
+  }
+
+  .btn-diagnose::after {
+    display: none;
+  }
+
+  .btn-diagnose:hover {
+    background: var(--ui-field);
+    border-color: #c4c7cc;
+    color: var(--ui-text);
+  }
+
+  .diagnose-result {
+    margin-top: 10px;
+    padding: 12px;
+    background: var(--ui-surface);
+    border: 1px solid var(--ui-border);
+    border-radius: var(--ui-radius);
+    color: var(--ui-secondary);
+    font-family: var(--ui-font);
+    font-size: 12px;
+    line-height: 1.6;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ui-accent: #6b9fca;
+      --ui-accent-hover: #82afd3;
+      --ui-focus: rgba(107, 159, 202, 0.24);
+      --ui-bg: #26272b;
+      --ui-surface: #2e2f34;
+      --ui-field: #37383e;
+      --ui-text: #d2d4d8;
+      --ui-secondary: #aeb1b6;
+      --ui-tertiary: #90949a;
+      --ui-border: #45474e;
+      --ui-divider: #3a3c42;
+      --ui-toggle: #62666d;
+      --ui-success: #72b383;
+      --ui-warning: #f6b861;
+      --ui-warning-bg: #352816;
+      --ui-warning-border: #6f5125;
+      --ui-danger: #f28b82;
+    }
+
+    .header,
+    .status-card:has(.ac-dot.on) {
+      background: var(--ui-surface);
+      border-color: var(--ui-border);
+    }
+
+    .header-help:hover {
+      background: var(--ui-field);
+    }
+
+    .field input:not(:disabled):hover:not(:focus),
+    .btn-diagnose:hover {
+      border-color: #73777e;
+    }
+  }
+
+  @media (prefers-contrast: more) {
+    :root {
+      --ui-secondary: #35383c;
+      --ui-tertiary: #45484c;
+      --ui-border: #5f6368;
+      --ui-divider: #777b80;
+      --ui-toggle: #70757a;
+    }
+  }
+
+  @media (prefers-color-scheme: dark) and (prefers-contrast: more) {
+    :root {
+      --ui-secondary: #f1f3f4;
+      --ui-tertiary: #d7d9dc;
+      --ui-border: #d7d9dc;
+      --ui-divider: #aeb1b5;
+    }
+  }
 </style>
+<link rel="stylesheet" href="popup.css?v=0.6.1">
 </head>
 <body>
+
+<div class="app-shell" id="appShell">
 
   <!-- Compact header bar: icon + name | help | version -->
   <div class="header">
     <div class="header-brand">
-      <!-- 像素母版 1:1 显示；2x/3x 按 HIG 分辨率无关原则给浏览器整数倍档位 -->
+      <!-- 像素艺术母版：固定只用 16px，HiDPI 屏不替换为放大稿 -->
       <img src="icons/ac-ust_16.png"
-           srcset="icons/ac-ust_16.png 1x,
-                   icons/ac-ust_32.png 2x,
-                   icons/ac-ust_48.png 3x"
            width="16" height="16" alt="">
       <span class="header-name">AC-UST</span>
     </div>
     <div class="header-right">
-      <a class="header-help" id="helpLink" href="https://github.com/BelugaRex/ac-ust#readme" target="_blank" rel="noopener" title="" data-i18n-title="helpTooltip" data-i18n-aria-label="helpTooltip">?</a>
+      <a class="header-help" id="helpLink" href="https://github.com/BelugaRex/ac-ust/issues/new/choose" target="_blank" rel="noopener" title="" data-i18n-title="helpTooltip" data-i18n-aria-label="helpTooltip">?</a>
       <span class="header-version" id="versionInfo">v--</span>
     </div>
   </div>
 
   <div class="content">
 
-    <!-- Status hero card: AC state + countdown + safetynet -->
+    <!-- Status hero card: AC state + big countdown + safetynet -->
     <div class="status-card" id="statusCard" role="region" aria-labelledby="acStateText">
       <div class="ac-indicator">
         <span class="ac-dot unknown" id="acDot" aria-hidden="true"></span>
         <span id="acStateText" data-i18n="acLoading"></span>
       </div>
-      <div class="countdown-display" id="countdownDisplay" style="display:none">
-        <span id="countdownText">--</span>
+      <div class="hero-countdown" id="countdownDisplay" style="display:none">
+        <span class="hero-number" id="countdownNumber">--</span>
+        <span class="hero-caption" id="countdownText">--</span>
       </div>
-      <div class="countdown-display" id="idleDisplay" style="display:none">
-        <span style="color:var(--c-muted)" data-i18n="acIdle"></span>
+      <div class="hero-idle" id="idleDisplay" style="display:none">
+        <span data-i18n="acIdle"></span>
       </div>
       <div class="safetynet-warning" id="safetynetWarning" role="status" aria-live="polite" aria-atomic="true" style="display:none"></div>
     </div>
@@ -751,38 +1228,51 @@
       <div class="settings-header">
         <h3 id="pwmSettingsTitle" data-i18n="pwmSettings"></h3>
         <div class="toggle-area">
-          <span class="toggle-state" id="timerToggleState" data-i18n="timerDisabled" aria-live="polite" aria-atomic="true"></span>
+          <span class="visually-hidden" id="timerToggleState" data-i18n="timerDisabled" aria-live="polite" aria-atomic="true"></span>
           <label class="toggle-switch">
             <input type="checkbox" id="timerToggle" aria-labelledby="pwmSettingsTitle" aria-describedby="timerToggleState">
             <span class="toggle-slider"></span>
           </label>
         </div>
       </div>
-      <div class="settings-body">
-        <div class="active-hours-row" id="activeHoursRow">
-          <label class="ah-label">
+      <div class="setting-group" id="activeHoursSection">
+        <div class="section-heading" id="activeHoursRow">
+          <label class="section-title" for="activeHoursToggle" data-i18n="activeHoursLabel"></label>
+          <label class="toggle-switch">
             <input type="checkbox" id="activeHoursToggle">
-            <span data-i18n="activeHoursLabel"></span>
+            <span class="toggle-slider"></span>
           </label>
-          <div class="active-hours-controls">
+        </div>
+        <div class="field-grid">
+          <div class="field">
+            <label class="field-label" for="activeHoursStart" data-i18n="activeHoursStartShort"></label>
             <input type="time" id="activeHoursStart" value="08:00" data-i18n-aria-label="activeHoursStartLabel">
-            <span class="ah-sep">—</span>
+          </div>
+          <div class="field">
+            <label class="field-label" for="activeHoursEnd" data-i18n="activeHoursEndShort"></label>
             <input type="time" id="activeHoursEnd" value="23:00" data-i18n-aria-label="activeHoursEndLabel">
           </div>
-          <span class="ah-status" id="activeHoursStatus" style="display:none"></span>
         </div>
-        <div id="intervalInputs" class="duration-row">
-          <div class="duration-field">
-            <label for="onMinutes" data-i18n="onMinutesLabel"></label>
-            <input type="number" id="onMinutes" value="30" min="1" step="1">
-          </div>
-          <div class="duration-field">
-            <label for="offMinutes" data-i18n="offMinutesLabel"></label>
-            <input type="number" id="offMinutes" value="30" min="1" step="1">
-          </div>
-        </div>
-        <div class="hint hint-pin" id="scheduleHintPin" data-i18n="scheduleHintPinTab"></div>
       </div>
+      <div class="setting-group" id="intervalInputs">
+        <div class="field-grid">
+          <div class="field">
+            <label class="field-label" for="onMinutes" data-i18n="onMinutesLabel"></label>
+            <span class="number-field">
+              <input type="number" id="onMinutes" value="30" min="1" step="1">
+              <span class="field-unit" data-i18n="unitMinutes"></span>
+            </span>
+          </div>
+          <div class="field">
+            <label class="field-label" for="offMinutes" data-i18n="offMinutesLabel"></label>
+            <span class="number-field">
+              <input type="number" id="offMinutes" value="30" min="1" step="1">
+              <span class="field-unit" data-i18n="unitMinutes"></span>
+            </span>
+          </div>
+        </div>
+      </div>
+      <div class="settings-hint" id="scheduleHintPin" data-i18n="scheduleHintPinTab"></div>
     </div>
 
     <!-- Footer: status message + diagnose button + results -->
@@ -794,7 +1284,9 @@
 
   </div>
 
+</div>
+
 <script src="i18n.js"></script>
-<script src="popup.js"></script>
+<script src="popup.js?v=0.6.1"></script>
 </body>
 </html>

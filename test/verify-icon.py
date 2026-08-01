@@ -132,7 +132,8 @@ blue = (0, 116, 188, 255)
 cyan = (99, 202, 225, 255)
 snowflake = (239, 240, 240, 255)
 gold = (255, 212, 0, 255)
-expected_palette = {transparent, blue, cyan, snowflake, gold}
+background = (180, 180, 180, 255)
+expected_palette = {transparent, blue, cyan, snowflake, gold, background}
 toolbar16_palette = set(toolbar16_pixels)
 toolbar16_hard_edged = toolbar16_palette <= expected_palette
 visible16 = [

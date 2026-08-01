@@ -1,0 +1,94 @@
+name: Bug 报告
+description: 报告可复现的问题，帮助我们定位并修复故障
+title: "[Bug] "
+labels: []
+assignees: []
+body:
+  - type: markdown
+    attributes:
+      value: |
+        感谢你报告问题。请尽量提供完整的复现步骤和环境信息。
+
+  - type: textarea
+    id: description
+    attributes:
+      label: 问题描述
+      description: 请说明发生了什么，以及它对使用造成了什么影响。
+      placeholder: 清楚、简洁地描述问题。
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: 复现步骤
+      description: 请列出能够稳定重现问题的操作步骤。
+      placeholder: |
+        1. 打开……
+        2. 设置……
+        3. 观察到……
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: 预期行为
+      description: 请说明你原本期望发生什么。
+    validations:
+      required: true
+
+  - type: dropdown
+    id: browser
+    attributes:
+      label: 浏览器
+      options:
+        - Google Chrome
+        - Microsoft Edge
+        - 其他 Chromium 浏览器
+    validations:
+      required: true
+
+  - type: input
+    id: browser-version
+    attributes:
+      label: 浏览器版本
+      placeholder: 例如 Chrome 140.0.0.0
+    validations:
+      required: true
+
+  - type: input
+    id: extension-version
+    attributes:
+      label: AC-UST 版本
+      description: 可在弹窗右上角查看版本号。
+      placeholder: 例如 0.6.1
+    validations:
+      required: true
+
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: 诊断结果
+      description: 请运行弹窗底部的“运行诊断”，粘贴与问题有关的结果。请勿提交账号或其他敏感信息。
+      render: text
+
+  - type: textarea
+    id: screenshots
+    attributes:
+      label: 截图或录屏
+      description: 如有需要，可直接拖放图片或录屏。
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: 补充信息
+      description: 可填写操作系统、是否固定 UST AC 标签页，以及其他可能有关的信息。
+
+  - type: checkboxes
+    id: duplicate-check
+    attributes:
+      label: 提交前确认
+      options:
+        - label: 我已搜索现有 Issue，确认没有相同问题。
+          required: true

@@ -16,6 +16,7 @@ RUNTIME_FILES=(
   content.js
   page-confirm.js
   popup.html
+  popup.css
   popup.js
   i18n.js
   sync-helpers.js

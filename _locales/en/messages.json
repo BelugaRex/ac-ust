@@ -14,11 +14,14 @@
   "activeHoursLabel": { "message": "Active hours" },
   "activeHoursWithin": { "message": "Active" },
   "activeHoursOutside": { "message": "Idle" },
-  "helpTooltip": { "message": "Help / Feedback" },
+  "helpTooltip": { "message": "Submit an issue / Feedback" },
   "activeHoursStartLabel": { "message": "Active hours start time" },
   "activeHoursEndLabel": { "message": "Active hours end time" },
-  "onMinutesLabel": { "message": "On duration (minutes)" },
-  "offMinutesLabel": { "message": "Off duration (minutes)" },
+  "activeHoursStartShort": { "message": "Start time" },
+  "activeHoursEndShort": { "message": "End time" },
+  "onMinutesLabel": { "message": "On duration" },
+  "offMinutesLabel": { "message": "Off duration" },
+  "unitMinutes": { "message": "min" },
   "diagnoseResultLabel": { "message": "Diagnostic results" },
 
   "scheduleHintClock": { "message": "ON at odd hours (1/3/5...23) · OFF at even hours (0/2/4...22). Turn on the timer toggle to start immediately." },
@@ -27,10 +30,10 @@
   "btnTimedOff": { "message": "⏹️ Timed Off" },
   "btnDiagnose": { "message": "Run diagnostics" },
 
-  "timerEnabled": { "message": "Cycle timer is on" },
-  "timerDisabled": { "message": "Cycle timer is off" },
-  "timerEnabling": { "message": "Turning on cycle timer…" },
-  "timerDisabling": { "message": "Turning off cycle timer…" },
+  "timerEnabled": { "message": "On" },
+  "timerDisabled": { "message": "Off" },
+  "timerEnabling": { "message": "Turning on…" },
+  "timerDisabling": { "message": "Turning off…" },
 
   "safetynetNotSet": { "message": "Page safety timer is not set: $1; PWM cycle will continue" },
   "safetynetError": { "message": "$1" },
@@ -39,7 +42,7 @@
   "actionOff": { "message": "OFF" },
 
   "countdownClock": { "message": "Next <strong>$1:00</strong> → $2" },
-  "countdownInterval": { "message": "Auto $1 in&nbsp;<strong>$2</strong>&nbsp;min" },
+  "countdownCaption": { "message": "min until auto $1" },
   "countdownSoon": { "message": "Auto $1 soon" },
 
   "statusClosing": { "message": "Turning off AC…" },

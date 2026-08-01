@@ -24,7 +24,10 @@
     const raw = (c && c.i18n && typeof c.i18n.getUILanguage === 'function')
       ? c.i18n.getUILanguage()
       : (globalThis.navigator && navigator.language) || '';
-    return raw.replace('-', '_');
+    const normalized = raw.replace('-', '_');
+    // 作者维护的英文目录是 `_locales/en`，浏览器通常返回 en-US/en-GB。
+    if (/^en(?:_|$)/i.test(normalized)) return 'en';
+    return normalized;
   }
 
   function localeUrl(lang) {

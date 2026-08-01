@@ -337,15 +337,15 @@ async function runTests() {
   assertPass(acStopped_zh.includes('冷气') || acStopped_zh.includes('关闭'),
     `acStopped 返回中文翻译: "${acStopped_zh}"`);
 
-  // 5c: countdownInterval 带占位符替换
-  const cd_zh = t(zhCN, 'countdownInterval', '关闭', '30');
-  console.log('  zh_CN countdownInterval(关闭,30) →', JSON.stringify(cd_zh));
-  assertPass(cd_zh !== 'countdownInterval',
-    'countdownInterval 不再返回 key name (zh_CN)');
-  assertPass(cd_zh.includes('关闭') && cd_zh.includes('30'),
-    `countdownInterval 占位符替换正确: "${cd_zh}"`);
-  assertPass(!cd_zh.includes('$1') && !cd_zh.includes('$2'),
-    'countdownInterval 无残留 $1/$2 占位符');
+  // 5c: countdownCaption 带占位符替换
+  const cd_zh = t(zhCN, 'countdownCaption', '关闭');
+  console.log('  zh_CN countdownCaption(关闭) →', JSON.stringify(cd_zh));
+  assertPass(cd_zh !== 'countdownCaption',
+    'countdownCaption 不再返回 key name (zh_CN)');
+  assertPass(cd_zh.includes('关闭'),
+    `countdownCaption 占位符替换正确: "${cd_zh}"`);
+  assertPass(!cd_zh.includes('$1'),
+    'countdownCaption 无残留 $1 占位符');
 
   // 5d: 英文翻译也覆盖同样的 key（Crowdin 双向对齐）
   const acStopped_en = t(en, 'acStopped');
@@ -384,28 +384,85 @@ async function runTests() {
     'dist/manifest.json 也同步 default_locale=zh_CN');
   assertPass(distManifest.version === manifest.version,
     `dist/manifest.json 版本与源码一致 (${manifest.version})`);
+  assertPass(popupHtml.includes(`<script src="popup.js?v=${manifest.version}"></script>`),
+    'popup 脚本资源版本参数与 manifest 同步，静态预览不会复用旧脚本缓存');
 
-  // 5h: popup 布局防回归 —— 弹窗尺寸禁用视口单位。vw/vh 在 popup 初始布局
-  // 竞态中曾把窗口塌成一条窄竖条（见 git daa6f14）。先剥掉 CSS 注释再查，
-  // 因为防回归注释本身会提到这些单位。
-  const popupCssNoComments = popupHtml.replace(/\/\*[\s\S]*?\*\//g, '');
+  // 5h: popup 布局防回归 —— 固定桌面面板宽度，避免 intrinsic/vw 初始布局竞态。
+  const popupCss = fs.readFileSync(path.join(ROOT, 'popup.css'), 'utf8');
+  const popupCssNoComments = popupCss.replace(/\/\*[\s\S]*?\*\//g, '');
+  assertPass(popupHtml.includes('<style media="not all">')
+      && popupHtml.includes(`<link rel="stylesheet" href="popup.css?v=${manifest.version}">`),
+    'popup 停用遗留内联样式，并只加载新的实体 macOS 风格样式表');
   assertPass(!/\d\s*vw\b|\d\s*vh\b/.test(popupCssNoComments),
     'popup.html 的 CSS 不使用 vw/vh 视口单位（防窗口塌陷回归）');
-  assertPass(/body\s*\{[^}]*?width:\s*360px/.test(popupCssNoComments),
-    'popup body 固定 360px 宽度');
-  assertPass(/\.static-preview\s+body\s*\{[^}]*?width:\s*360px[^}]*?max-width:\s*100%/.test(popupCssNoComments),
-    '静态网页预览允许 body 适配视口宽度');
-  assertPass(/@media\s*\(max-width:\s*359px\)[\s\S]*?\.static-preview\s+\.duration-row\s*\{[^}]*?flex-direction:\s*column/.test(popupCssNoComments),
-    '静态网页预览 359px 以下将时长控件堆叠');
-  assertPass(/\.active-hours-controls\s*\{[^}]*?grid-template-columns:\s*minmax\(0,\s*1fr\)\s+auto\s+minmax\(0,\s*1fr\)/.test(popupCssNoComments),
-    '运行时段开始/结束时间使用并排三列控件组');
-  assertPass(/class="active-hours-controls"[\s\S]*?id="activeHoursStart"[\s\S]*?id="activeHoursEnd"/.test(popupHtml),
-    '运行时段两个时间框位于同一控件组');
-  assertPass(/@media\s*\(max-width:\s*359px\)[\s\S]*?\.static-preview\s+\.active-hours-row\s*\{[^}]*?grid-template-columns:\s*1fr/.test(popupCssNoComments),
-    '窄网页预览让运行时段标签独占一行但保留时间框并排');
+  assertPass(!/\d+\.\d+px\b/.test(popupCssNoComments),
+    'popup.css 的显式像素尺寸均使用整数，避免主动引入子像素几何');
+  assertPass(/--popup-width:\s*250px/.test(popupCssNoComments)
+      && /body\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
+      && /\.app-shell\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
+      && /\.static-preview body\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
+      && /\.static-preview \.app-shell\s*\{[^}]*?transform-origin:\s*top left/.test(popupCssNoComments),
+    'popup、shell 与静态预览共用 250px 宽度令牌；窄预览仍从左上角整体缩放');
+  assertPass(/--font:\s*"Inter Variable",\s*"Inter",\s*-apple-system/.test(popupCssNoComments)
+      && popupCssNoComments.includes('"PingFang SC"')
+      && popupCssNoComments.includes('"Microsoft YaHei UI"')
+      && popupCssNoComments.includes('"Noto Sans CJK SC"'),
+    'popup 优先使用 Inter，并保留 macOS、Windows 与 Linux 中文字体回退');
+  assertPass(/\.content\s*\{[^}]*?width:\s*auto[^}]*?min-width:\s*0[^}]*?padding:\s*8px 12px/.test(popupCssNoComments),
+    '内容区使用水平12px、垂直8px的紧凑 gutter，不再由标签或版本元数据决定面板宽度');
+  assertPass(/\.status-card,\s*\.settings-card\s*\{[^}]*?background:\s*var\(--surface\)[^}]*?border:\s*1px solid var\(--border\)/.test(popupCssNoComments)
+      && popupHtml.includes('class="hero-number" id="countdownNumber"')
+      && /\.hero-countdown\s*\{[^}]*?align-items:\s*baseline/.test(popupCssNoComments),
+    '状态卡保持中性表面，状态由语义圆点表达；倒计时数字和说明按基线连续阅读');
+  assertPass(popupHtml.includes('class="visually-hidden" id="timerToggleState"')
+      && !popupHtml.includes('class="toggle-state" id="timerToggleState"'),
+    '主开关状态保留给辅助技术，但不再与拨杆重复显示');
+  assertPass(/id="activeHoursRow"[\s\S]*?for="activeHoursToggle"[\s\S]*?class="toggle-switch"/.test(popupHtml)
+      && /for="activeHoursStart"[\s\S]*?id="activeHoursStart"[\s\S]*?for="activeHoursEnd"[\s\S]*?id="activeHoursEnd"/.test(popupHtml)
+      && !popupHtml.includes('id="activeHoursStatus"'),
+    '运行时段主行含标签与拨杆，开始/结束字段保留完整无障碍名称');
+  assertPass((popupHtml.match(/class="field-grid"/g) || []).length === 2
+      && (popupHtml.match(/class="field"/g) || []).length === 4
+      && /\.field-grid\s*\{[^}]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*?gap:\s*10px/.test(popupCssNoComments),
+    '运行时段与循环时长各使用一组等宽双列字段');
+  assertPass(/\.field input\[type="time"\]\s*,\s*\.field input\[type="number"\]\s*\{[^}]*?width:\s*100%[^}]*?height:\s*32px[^}]*?font-size:\s*13px/.test(popupCssNoComments),
+    '四个字段统一填满列宽，使用 32px 控件高度和 13px 数字');
+  assertPass(/\.toggle-switch\s*\{[^}]*?width:\s*36px[^}]*?height:\s*20px/.test(popupCssNoComments)
+      && /\.toggle-switch::after\s*\{[^}]*?inset:\s*-11px\s+-4px/.test(popupCssNoComments)
+      && (popupHtml.match(/class="toggle-switch"/g) || []).length === 2,
+    '两个拨杆统一为 36×20px，并通过绝对命中区达到桌面指针目标要求');
+  assertPass((popupHtml.match(/class="number-field"/g) || []).length === 2
+      && (popupHtml.match(/class="field-unit" data-i18n="unitMinutes"/g) || []).length === 2
+      && /\.field-unit\s*\{[^}]*?position:\s*absolute[^}]*?pointer-events:\s*none/.test(popupCssNoComments),
+    '两个时长输入框内嵌「分钟」单位（不响应指针），标签保持精简');
+  assertPass(/body\s*\{[^}]*?font-size:\s*13px/.test(popupCssNoComments)
+      && /\.header-name\s*\{[^}]*?font-size:\s*14px/.test(popupCssNoComments)
+      && /\.field-label\s*\{[^}]*?font-size:\s*11px/.test(popupCssNoComments)
+      && /\.hero-number\s*\{[^}]*?font-size:\s*26px/.test(popupCssNoComments)
+      && /\.header-version\s*\{[^}]*?font-size:\s*11px/.test(popupCssNoComments),
+    '排版层级固定为 11/12/13/14/15px，26px 仅用于倒计时主数字');
   const popupJs = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
-  assertPass(/static-preview/.test(popupJs),
-    '静态网页预览运行时标记存在且不改变扩展 popup 固定宽度');
+  assertPass(popupJs.includes('const IS_STATIC_PREVIEW = !globalThis.chrome?.runtime?.id;')
+      && /const staticPreviewSchedule = \{[\s\S]{0,400}enabled:\s*true,[\s\S]{0,400}actualStatus:\s*\{\s*isOn:\s*true\s*\}/.test(popupJs)
+      && /async function refreshStatus\(\) \{[\s\S]{0,160}if \(IS_STATIC_PREVIEW\)/.test(popupJs)
+      && /async function updateSchedule\(enabled, restart = false\) \{[\s\S]{0,900}if \(IS_STATIC_PREVIEW\)/.test(popupJs),
+    '静态网页预览使用可交互的 PWM 开启演示状态，不依赖扩展 API');
+  assertPass(popupHtml.includes('class="app-shell" id="appShell"')
+      && popupJs.includes('function fitStaticPreviewToViewport()')
+      && popupJs.includes('const currentScale = Number(document.documentElement.dataset.previewScale) || 1;')
+      && popupJs.includes('const naturalWidth = renderedRect.width / currentScale;')
+      && popupJs.includes('const scale = Math.min(1, availableWidth / naturalWidth);')
+      && popupJs.includes('new ResizeObserver(fitStaticPreviewToViewport).observe(appShell);')
+      && popupJs.includes('startup().then(setupStaticPreviewFit);'),
+    '窄窗口按插件自然宽度整体缩放，宽窗口保持 1:1 且内容变化后自动重算');
+  assertPass(popupJs.includes("t('countdownCaption'")
+      && !popupJs.includes("t('countdownInterval'")
+      && popupJs.includes('countdownNumber.textContent = String(minutes);'),
+    'popup.js 倒计时写入 hero 大数字与 countdownCaption，不再使用 countdownInterval');
+  assertPass(popupJs.includes('versionInfo.title = `AC-UST v${displayVersion} · ${BUILD_TIME}`')
+      && popupJs.includes('versionInfo.textContent = `v${displayVersion}`')
+      && !popupJs.includes('buildTimeShort'),
+    '头栏只显示版本号，完整构建时间保留在 title tooltip');
 
   const sourceLocaleResources = manifest.web_accessible_resources || [];
   const distLocaleResources = distManifest.web_accessible_resources || [];
@@ -448,6 +505,7 @@ async function runTests() {
     'manifest.json', 'background.js', 'content.js', 'page-confirm.js',
     'popup.html', 'popup.js', 'i18n.js', 'sync-helpers.js',
     'offscreen.html', 'offscreen.js',
+    'popup.css',
     '_locales/zh_CN/messages.json', '_locales/en/messages.json',
     ...new Set([
       ...Object.values(expectedActionIcons),
@@ -947,6 +1005,8 @@ async function runTests() {
   const i18nSource = fs.readFileSync(path.join(ROOT, 'i18n.js'), 'utf8');
   assertPass(i18nSource.includes("querySelectorAll('[data-i18n-title]')"),
     '9R: i18n 加载器会翻译 data-i18n-title 属性');
+  assertPass(i18nSource.includes("if (/^en(?:_|$)/i.test(normalized)) return 'en';"),
+    '9S: en-US/en-GB 浏览器语言会映射到作者维护的 _locales/en');
 
   // ===== 用例 10: v0.5.13 关机不可漏契约 =====
   // 防止 v0.5.12 "OFF 零点击" 策略下的「忘记关机」回归：ON 路径推进 pwmState
@@ -1172,13 +1232,34 @@ async function runTests() {
       && popupHtml.includes('for="onMinutes"')
       && popupHtml.includes('for="offMinutes"'),
     '12F: 帮助、开关和分钟输入均有程序化可访问名称');
-  // 桌面 popup 以鼠标为主：图标按钮 26px（macOS 惯例），行级主控件保留 44px；
-  // 键盘焦点环与 aria 名称是全量保留的无障碍底线。
-  assertPass(/\.header-help\s*\{[\s\S]{0,400}width:\s*26px;[\s\S]{0,80}height:\s*26px;/.test(popupHtml)
-      && popupHtml.includes('min-height: 44px;')
-      && popupHtml.includes('.header-help:focus-visible')
-      && popupHtml.includes('.toggle-switch input:focus-visible + .toggle-slider'),
-    '12G: 帮助按钮 26px、行高 44px，键盘焦点环均可见');
+  assertPass(/id="helpLink"[^>]*href="https:\/\/github\.com\/BelugaRex\/ac-ust\/issues\/new\/choose"[^>]*target="_blank"[^>]*rel="noopener"/.test(popupHtml),
+    '12F-1: 顶部问号打开 GitHub Issue 模板选择页，并保留安全的新标签页行为');
+  const bugIssueForm = fs.readFileSync(path.join(ROOT, '.github', 'ISSUE_TEMPLATE', 'bug_report.yml'), 'utf8');
+  const featureIssueForm = fs.readFileSync(path.join(ROOT, '.github', 'ISSUE_TEMPLATE', 'feature_request.yml'), 'utf8');
+  assertPass(bugIssueForm.includes('name: Bug 报告')
+      && bugIssueForm.includes('title: "[Bug] "')
+      && bugIssueForm.includes('id: reproduction')
+      && bugIssueForm.includes('id: browser-version')
+      && bugIssueForm.includes('id: extension-version')
+      && bugIssueForm.includes('id: diagnostics')
+      && bugIssueForm.includes('id: duplicate-check'),
+    '12F-2: Bug Issue Form 收集复现、环境、诊断信息并要求重复检查');
+  assertPass(featureIssueForm.includes('name: 功能建议')
+      && featureIssueForm.includes('title: "[Feature] "')
+      && featureIssueForm.includes('id: motivation')
+      && featureIssueForm.includes('id: proposal')
+      && featureIssueForm.includes('id: expected-behavior')
+      && featureIssueForm.includes('id: contribution')
+      && featureIssueForm.includes('id: duplicate-check'),
+    '12F-3: 功能建议 Issue Form 收集场景、方案、期望行为和贡献意愿');
+  // 桌面 popup 以鼠标为主：帮助按钮和拨杆均超过 WCAG 24px 最低目标；
+  // 拨杆再通过绝对定位伪元素扩大命中区，不参与可见布局。
+    assertPass(/\.header-help\s*\{[^}]*?width:\s*26px;[^}]*?height:\s*26px;/.test(popupCssNoComments)
+      && /\.toggle-switch::after\s*\{[^}]*?inset:\s*-11px\s+-4px/.test(popupCssNoComments)
+      && /\.btn-diagnose\s*\{[^}]*?width:\s*100%[^}]*?height:\s*30px/.test(popupCssNoComments)
+      && popupCss.includes('.header-help:focus-visible')
+      && popupCss.includes('.toggle-switch input:focus-visible + .toggle-slider'),
+    '12G: 帮助、拨杆和诊断按钮满足桌面目标尺寸，且键盘焦点环均可见');
 
   const releaseWorkflow = fs.readFileSync(path.join(ROOT, '.github', 'workflows', 'release.yml'), 'utf8');
   assertPass(/fetch-depth:\s*0/.test(releaseWorkflow)
@@ -1248,16 +1329,17 @@ async function runTests() {
       && !popupHtml.includes('class="comfort-card"')
       && !popupSource.includes('ac_accessibility_preferences'),
     '14B: 弹窗已移除易读模式、专属卡片和本地偏好分支');
-  assertPass(!popupHtml.includes('@keyframes pulse')
-      && !popupHtml.includes('animation: pulse')
-      && popupHtml.includes('@media (prefers-reduced-motion: reduce)')
-      && popupHtml.includes('@media (prefers-contrast: more)')
-      && popupHtml.includes('@media (prefers-color-scheme: dark)'),
-    '14C: 弹窗移除持续闪烁，并适配减弱动态、高对比度和深色外观');
-  // 基准字号 16px（与 16px 头栏 icon 同尺寸，2026-07-30 用户拍板）
-  assertPass(popupHtml.includes('html { -webkit-text-size-adjust: 100%; }')
-      && /body\s*\{[\s\S]{0,400}font-size:\s*16px;[\s\S]{0,120}line-height:\s*1\.5;/.test(popupHtml),
-    '14D: 默认排版 16px 清晰，并允许浏览器文字缩放');
+    assertPass(!popupCss.includes('@keyframes pulse')
+      && !popupCss.includes('animation: pulse')
+      && popupCss.includes('@media (prefers-reduced-motion: reduce)')
+        && /@media \(prefers-reduced-motion: reduce\)[\s\S]*?animation:\s*none !important;[\s\S]*?transition:\s*none !important;/.test(popupCss)
+      && popupCss.includes('@media (prefers-contrast: more)')
+      && popupCss.includes('@media (prefers-color-scheme: dark)'),
+      '14C: 弹窗移除持续闪烁，在减弱动态模式彻底停用动画/过渡，并适配高对比度和深色外观');
+  // 紧凑桌面面板使用 14px 正文，通过浏览器文字缩放保留可读性。
+  assertPass(/html\s*\{[^}]*?-webkit-text-size-adjust:\s*100%/.test(popupCssNoComments)
+      && /body\s*\{[^}]*?font-size:\s*13px;[^}]*?line-height:\s*1\.45/.test(popupCssNoComments),
+    '14D: 默认排版为 13px/1.45 的紧凑桌面层级，并允许浏览器文字缩放');
   assertPass(popupSource.includes('function announceState(message)')
       && popupSource.includes('if (!message || message === lastAnnouncedState) return;')
       && !popupSource.includes("statusDiv.textContent = '';"),

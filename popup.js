@@ -2,10 +2,48 @@
 // Popup 脚本 - 设置界面逻辑 + 实时倒计时
 // ============================================================
 
-// 普通 HTTP 预览没有 chrome.runtime.id；只给预览页加响应式标记，
-// 扩展 popup 继续使用固定宽度，避免初始布局竞态再次塌陷。
-if (!globalThis.chrome?.runtime?.id) {
+// 普通 HTTP 预览没有 chrome.runtime.id；使用独立演示状态，方便调整开启态界面。
+// 真实扩展环境仍只读取 chrome.storage / background 的权威数据。
+const IS_STATIC_PREVIEW = !globalThis.chrome?.runtime?.id;
+const staticPreviewSchedule = {
+  enabled: true,
+  mode: 'pwm',
+  clockMode: false,
+  onMinutes: 30,
+  offMinutes: 30,
+  activeHours: { enabled: true, start: '08:00', end: '23:00' },
+  pwmState: 'off',
+  actualStatus: { isOn: true },
+  nextTriggerAt: Date.now() + 30 * 60 * 1000
+};
+
+if (IS_STATIC_PREVIEW) {
   document.documentElement.classList.add('static-preview');
+}
+
+const appShell = document.getElementById('appShell');
+
+function fitStaticPreviewToViewport() {
+  if (!IS_STATIC_PREVIEW || !appShell) return;
+  const currentScale = Number(document.documentElement.dataset.previewScale) || 1;
+  const renderedRect = appShell.getBoundingClientRect();
+  const naturalWidth = renderedRect.width / currentScale;
+  const naturalHeight = renderedRect.height / currentScale;
+  const availableWidth = document.documentElement.clientWidth || window.innerWidth;
+  if (!naturalWidth || !availableWidth) return;
+
+  const scale = Math.min(1, availableWidth / naturalWidth);
+  appShell.style.transform = `scale(${scale})`;
+  document.body.style.width = `${naturalWidth * scale}px`;
+  document.body.style.height = `${naturalHeight * scale}px`;
+  document.documentElement.dataset.previewScale = String(scale);
+}
+
+function setupStaticPreviewFit() {
+  if (!IS_STATIC_PREVIEW || !appShell) return;
+  fitStaticPreviewToViewport();
+  new ResizeObserver(fitStaticPreviewToViewport).observe(appShell);
+  window.addEventListener('resize', fitStaticPreviewToViewport);
 }
 
 // i18n 辅助函数 — 委托给 I18n 模块（fetch-based，绕过 chrome.i18n 不可靠性）
@@ -16,7 +54,6 @@ const offMinutesInput = document.getElementById('offMinutes');
 const activeHoursToggle = document.getElementById('activeHoursToggle');
 const activeHoursStart = document.getElementById('activeHoursStart');
 const activeHoursEnd = document.getElementById('activeHoursEnd');
-const activeHoursStatus = document.getElementById('activeHoursStatus');
 const timerToggle = document.getElementById('timerToggle');
 const timerToggleState = document.getElementById('timerToggleState');
 const statusDiv = document.getElementById('status');
@@ -25,6 +62,7 @@ const acDot = document.getElementById('acDot');
 const acStateText = document.getElementById('acStateText');
 const countdownDisplay = document.getElementById('countdownDisplay');
 const idleDisplay = document.getElementById('idleDisplay');
+const countdownNumber = document.getElementById('countdownNumber');
 const countdownText = document.getElementById('countdownText');
 const safetynetWarning = document.getElementById('safetynetWarning');
 
@@ -46,8 +84,9 @@ let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
 let lastAnnouncedState = '';
 
 async function loadSettings() {
-  const result = await chrome.storage.local.get('ac_schedule');
-  const schedule = result.ac_schedule || {};
+  const schedule = IS_STATIC_PREVIEW
+    ? staticPreviewSchedule
+    : (await chrome.storage.local.get('ac_schedule')).ac_schedule || {};
   currentScheduleEnabled = !!schedule.enabled;
   onMinutesInput.value = schedule.onMinutes ?? 60;
   offMinutesInput.value = schedule.offMinutes ?? 60;
@@ -67,24 +106,6 @@ function syncActiveHoursUI() {
   activeHoursEnd.value = currentActiveHours.end;
   activeHoursStart.disabled = !currentActiveHours.enabled;
   activeHoursEnd.disabled = !currentActiveHours.enabled;
-  updateActiveHoursStatusBadge();
-}
-
-function updateActiveHoursStatusBadge() {
-  if (!currentActiveHours.enabled) {
-    activeHoursStatus.style.display = 'none';
-    return;
-  }
-  activeHoursStatus.style.display = '';
-  const cur = new Date();
-  const curMin = cur.getHours() * 60 + cur.getMinutes();
-  const [sh, sm] = currentActiveHours.start.split(':').map(Number);
-  const [eh, em] = currentActiveHours.end.split(':').map(Number);
-  const start = sh * 60 + sm;
-  const end = eh * 60 + em;
-  const inside = start < end && curMin >= start && curMin < end;
-  activeHoursStatus.textContent = inside ? t('activeHoursWithin') : t('activeHoursOutside');
-  activeHoursStatus.className = 'ah-status ' + (inside ? 'active' : 'idle');
 }
 
 function commitActiveHours() {
@@ -111,6 +132,13 @@ let pollCount = 0;
 let cachedActualStatus = null;
 
 async function refreshStatus() {
+  if (IS_STATIC_PREVIEW) {
+    updateCountdownDisplay(staticPreviewSchedule, {
+      scheduledTime: staticPreviewSchedule.nextTriggerAt
+    });
+    return;
+  }
+
   try {
     const useLite = pollCount++ % 10 !== 0;
     const msgType = useLite ? 'getScheduleLite' : 'getSchedule';
@@ -214,9 +242,13 @@ function updateCountdownDisplay(schedule, alarm) {
 
   if (remainingMs > 0) {
     const minutes = Math.ceil(remainingMs / 60000);
-    countdownText.innerHTML = t('countdownInterval', t(nextAction === 'on' ? 'actionOn' : 'actionOff'), String(minutes));
+    // hero 结构：大数字独立元素，下方 caption 说明动作；文本节点写入不带 HTML
+    countdownNumber.textContent = String(minutes);
+    countdownNumber.style.display = '';
+    countdownText.textContent = t('countdownCaption', t(nextAction === 'on' ? 'actionOn' : 'actionOff'));
   } else {
-    countdownText.innerHTML = t('countdownSoon', t(nextAction === 'on' ? 'actionOn' : 'actionOff'));
+    countdownNumber.style.display = 'none';
+    countdownText.textContent = t('countdownSoon', t(nextAction === 'on' ? 'actionOn' : 'actionOff'));
   }
 }
 
@@ -239,6 +271,20 @@ async function updateSchedule(enabled, restart = false) {
 
   onMinutesInput.value = data.onMinutes;
   offMinutesInput.value = data.offMinutes;
+
+  if (IS_STATIC_PREVIEW) {
+    Object.assign(staticPreviewSchedule, data, {
+      actualStatus: { isOn: enabled },
+      pwmState: enabled ? 'off' : 'on',
+      nextTriggerAt: enabled ? Date.now() + data.onMinutes * 60 * 1000 : 0
+    });
+    currentScheduleEnabled = enabled;
+    updateCountdownDisplay(staticPreviewSchedule, {
+      scheduledTime: staticPreviewSchedule.nextTriggerAt
+    });
+    showStatus(enabled ? t('statusOnOK') : t('statusClosedOK'), 'success');
+    return;
+  }
   
   const response = await chrome.runtime.sendMessage({
     type: 'updateSchedule',
@@ -290,11 +336,6 @@ function syncToggleState(enabled) {
   _toggleProgrammatic = false;
 }
 
-// refreshStatus 每秒调用：刷新 active hours 状态徽章（时间会变）
-function tickActiveHoursBadge() {
-  if (currentActiveHours.enabled) updateActiveHoursStatusBadge();
-}
-
 // ----- 已启用时修改分钟数自动重启 -----
 for (const input of [onMinutesInput, offMinutesInput]) {
   input.addEventListener('change', () => {
@@ -317,9 +358,8 @@ async function startup() {
   await refreshStatus();
 }
 
-startup();
+startup().then(setupStaticPreviewFit);
 setInterval(refreshStatus, 1000);
-setInterval(tickActiveHoursBadge, 10000);  // 每 10 秒刷新 active hours 状态徽章
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
 const APP_VERSION = '0.6.1';
@@ -340,7 +380,9 @@ if (versionInfo) {
   } catch (_) {
     displayVersion = APP_VERSION;
   }
-  versionInfo.textContent = `AC-UST v${displayVersion} · ${BUILD_TIME}`;
+  // 头栏只显示用户需要识别的版本号；构建时间留在 tooltip 供排障。
+  versionInfo.textContent = `v${displayVersion}`;
+  versionInfo.title = `AC-UST v${displayVersion} · ${BUILD_TIME}`;
   document.title = `AC-UST v${displayVersion}`;
 }
 
