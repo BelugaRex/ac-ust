@@ -52,7 +52,7 @@
     "description": "当前处于运行时段外的状态微标"
   },
   "helpTooltip": {
-    "message": "帮助 / 反馈",
+    "message": "提交 Issue / 反馈",
     "description": "header 右侧问号图标悬停提示"
   },
   "activeHoursStartLabel": {
@@ -63,13 +63,25 @@
     "message": "运行时段结束时间",
     "description": "运行时段结束时间输入框的无障碍标签"
   },
+  "activeHoursStartShort": {
+    "message": "开始时间",
+    "description": "运行时段开始时间行的可见标签"
+  },
+  "activeHoursEndShort": {
+    "message": "结束时间",
+    "description": "运行时段结束时间行的可见标签"
+  },
   "onMinutesLabel": {
-    "message": "开启时长（分钟）",
+    "message": "开启时长",
     "description": "开启分钟数输入框标签"
   },
   "offMinutesLabel": {
-    "message": "关闭时长（分钟）",
+    "message": "关闭时长",
     "description": "关闭分钟数输入框标签"
+  },
+  "unitMinutes": {
+    "message": "分钟",
+    "description": "时长输入框内嵌的单位文字"
   },
   "diagnoseResultLabel": {
     "message": "诊断结果",
@@ -92,19 +104,19 @@
     "description": "诊断按钮文字"
   },
   "timerEnabled": {
-    "message": "循环定时已开启",
-    "description": "定时 toggle 打开时的标签"
+    "message": "已开启",
+    "description": "定时 toggle 打开时的标签（语境由同行标题提供）"
   },
   "timerDisabled": {
-    "message": "循环定时已关闭",
-    "description": "定时 toggle 关闭时的标签"
+    "message": "已关闭",
+    "description": "定时 toggle 关闭时的标签（语境由同行标题提供）"
   },
   "timerEnabling": {
-    "message": "正在开启循环定时…",
+    "message": "正在开启…",
     "description": "定时 toggle 开启中过渡文字"
   },
   "timerDisabling": {
-    "message": "正在关闭循环定时…",
+    "message": "正在关闭…",
     "description": "定时 toggle 关闭中过渡文字"
   },
   "safetynetNotSet": {
@@ -127,9 +139,9 @@
     "message": "下次 <strong>$1:00</strong> → $2",
     "description": "时钟模式倒计时显示。HTML格式。$1=小时数(两位数)，$2=动作(开启/关闭)"
   },
-  "countdownInterval": {
-    "message": "距离自动$1还有&nbsp;<strong>$2</strong>&nbsp;分钟",
-    "description": "间隔模式倒计时显示。HTML格式。$1=动作(开启/关闭)，$2=剩余分钟数"
+  "countdownCaption": {
+    "message": "分钟后自动$1",
+    "description": "hero 大数字下方的说明文字。$1=动作(开启/关闭)"
   },
   "countdownSoon": {
     "message": "即将自动$1",
