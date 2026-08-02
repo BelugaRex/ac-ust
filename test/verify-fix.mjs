@@ -463,10 +463,12 @@ async function runTests() {
       && !popupJs.includes("t('countdownInterval'")
       && popupJs.includes('countdownNumber.textContent = String(minutes);'),
     'popup.js 倒计时写入 hero 大数字与 countdownCaption，不再使用 countdownInterval');
-  assertPass(popupJs.includes('versionInfo.title = `AC-UST v${displayVersion} · ${BUILD_TIME}`')
-      && popupJs.includes('versionInfo.textContent = `v${displayVersion}`')
-      && !popupJs.includes('buildTimeShort'),
-    '头栏只显示版本号，完整构建时间保留在 title tooltip');
+  assertPass(popupJs.includes('function formatBuildTimeShort(buildTime)')
+      && popupJs.includes('return `${Number(month)}/${Number(day)} ${hour}:${minute}`;')
+      && popupJs.includes('versionInfo.textContent = `v${displayVersion} · ${formatBuildTimeShort(BUILD_TIME)}`')
+      && popupJs.includes("versionInfo.setAttribute('aria-label', buildInfo)")
+      && popupJs.includes('versionInfo.title = buildInfo;'),
+    '头栏显示版本号与分钟级短构建时间，完整秒级时间保留在 tooltip 和无障碍名称');
   assertPass(popupHtml.includes('class="balance-estimate" id="balanceEstimate"')
       && !popupHtml.includes('id="balanceSummary"')
       && !popupHtml.includes('id="balanceMinutesValue"')

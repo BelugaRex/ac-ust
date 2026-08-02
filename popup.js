@@ -403,6 +403,14 @@ const APP_VERSION = '0.6.2';
 // BUILD_TIME 由 build.sh 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
+
+function formatBuildTimeShort(buildTime) {
+  const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):\d{2}$/.exec(buildTime);
+  if (!match) return buildTime;
+  const [, , month, day, hour, minute] = match;
+  return `${Number(month)}/${Number(day)} ${hour}:${minute}`;
+}
+
 const versionInfo = document.getElementById('versionInfo');
 if (versionInfo) {
   let displayVersion;
@@ -417,9 +425,11 @@ if (versionInfo) {
   } catch (_) {
     displayVersion = APP_VERSION;
   }
-  // 头栏只显示用户需要识别的版本号；构建时间留在 tooltip 供排障。
-  versionInfo.textContent = `v${displayVersion}`;
-  versionInfo.title = `AC-UST v${displayVersion} · ${BUILD_TIME}`;
+  // 同一版本可能有多次构建：头栏显示分钟级短时间，tooltip 保留完整秒级时间。
+  const buildInfo = `AC-UST v${displayVersion} · ${BUILD_TIME}`;
+  versionInfo.textContent = `v${displayVersion} · ${formatBuildTimeShort(BUILD_TIME)}`;
+  versionInfo.title = buildInfo;
+  versionInfo.setAttribute('aria-label', buildInfo);
   document.title = `AC-UST v${displayVersion}`;
 }
 

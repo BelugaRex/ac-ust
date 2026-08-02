@@ -93,6 +93,6 @@ node test/e2e-verify.cjs
 每次代码改动后,用户在 Edge 中:
 
 1. `edge://extensions/` → 找到 AC-UST → 点"重新加载"按钮
-2. 打开 popup → 看标题行,确认 BUILD_TIME 是最新的(同名版本号下唯一可区分标志)
+2. 打开 popup → 看标题行中的版本号与构建时间,确认当前加载的是最新构建
 3. 点诊断按钮 → 检查所有 ✅/❌
-4. 如果有红灯,先看 BUILD_TIME 是否最新;最新则报 bug,不是最新则重新 reload 扩展
+4. 如果有红灯,先看头栏构建时间是否最新;最新则报 bug,不是最新则重新 reload 扩展
