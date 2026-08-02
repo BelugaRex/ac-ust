@@ -148,7 +148,7 @@
     "description": "倒计时即将到时的显示。$1=动作(开启/关闭)"
   },
   "balanceEstimateShort": {
-    "message": "预计 $1",
+    "message": "预计可用至$1",
     "description": "冷气状态同行的预计可用时刻短文案。$1=本地化短时间"
   },
   "balanceEstimateTitle": {
