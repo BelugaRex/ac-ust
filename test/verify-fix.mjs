@@ -467,11 +467,16 @@ async function runTests() {
       && popupJs.includes('versionInfo.textContent = `v${displayVersion}`')
       && !popupJs.includes('buildTimeShort'),
     '头栏只显示版本号，完整构建时间保留在 title tooltip');
-  assertPass(popupHtml.includes('id="balanceSummary"')
+  assertPass(popupHtml.includes('class="balance-estimate" id="balanceEstimate"')
+      && !popupHtml.includes('id="balanceSummary"')
+      && !popupHtml.includes('id="balanceMinutesValue"')
       && popupJs.includes('schedule?.actualStatus?.balanceMinutes')
       && popupJs.includes('estimateBalanceExhaustion({')
-      && popupJs.includes("t('balanceMinutesValue'"),
-    '余额摘要读取完整状态缓存，并按当前 PWM 时长即时估算');
+      && popupJs.includes("t('balanceEstimateShort', shortAt)")
+      && popupJs.includes("t('balanceEstimateTitle', fullAt)")
+      && popupJs.includes("padStart(2, '0')")
+      && /\.balance-estimate\s*\{[^}]*?margin-left:\s*auto[^}]*?font-size:\s*11px/.test(popupCssNoComments),
+    '预计时刻读取完整状态缓存，并以二级短标签显示在冷气状态同行右侧');
 
   const sourceLocaleResources = manifest.web_accessible_resources || [];
   const distLocaleResources = distManifest.web_accessible_resources || [];

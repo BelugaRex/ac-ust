@@ -66,9 +66,7 @@ const idleDisplay = document.getElementById('idleDisplay');
 const countdownNumber = document.getElementById('countdownNumber');
 const countdownText = document.getElementById('countdownText');
 const safetynetWarning = document.getElementById('safetynetWarning');
-const balanceSummary = document.getElementById('balanceSummary');
-const balanceMinutesValue = document.getElementById('balanceMinutesValue');
-const balanceEstimatedAt = document.getElementById('balanceEstimatedAt');
+const balanceEstimate = document.getElementById('balanceEstimate');
 
 // popup 打开期间保持与 Service Worker 的长连接。
 // 这样用户盯着弹窗时，后台不会只靠一次性 sendMessage 存活。
@@ -188,7 +186,7 @@ function updateSafetynetWarning(message) {
   if (changed && message) announceState(message);
 }
 
-function renderBalanceSummary(schedule) {
+function renderBalanceEstimate(schedule) {
   const rawBalance = schedule?.balanceMinutes ?? schedule?.actualStatus?.balanceMinutes;
   const balance = rawBalance === null || rawBalance === '' ? NaN : Number(rawBalance);
   const estimate = estimateBalanceExhaustion({
@@ -199,25 +197,31 @@ function renderBalanceSummary(schedule) {
   const displayAt = Number(estimate?.displayAt);
   if (!schedule?.enabled || !Number.isFinite(balance) || balance < 0
       || !Number.isFinite(displayAt)) {
-    balanceSummary.hidden = true;
+    balanceEstimate.hidden = true;
     return;
   }
 
   const locale = I18n.getLang().replace('_', '-');
-  const estimatedAt = new Intl.DateTimeFormat(locale, {
-    month: 'short',
-    day: 'numeric',
-    hour: 'numeric',
+  const target = new Date(displayAt);
+  const sameDay = target.toDateString() === new Date().toDateString();
+  const clockAt = `${String(target.getHours()).padStart(2, '0')}:${String(target.getMinutes()).padStart(2, '0')}`;
+  const shortDate = sameDay
+    ? ''
+    : new Intl.DateTimeFormat(locale, { month: 'numeric', day: 'numeric' }).format(target);
+  const shortAt = shortDate ? `${shortDate} ${clockAt}` : clockAt;
+  const fullAt = new Intl.DateTimeFormat(locale, {
+    dateStyle: 'medium',
+    timeStyle: 'short',
     hourCycle: 'h23'
-  }).format(new Date(displayAt));
+  }).format(target);
 
-  balanceMinutesValue.textContent = t('balanceMinutesValue', String(Math.floor(balance)));
-  balanceEstimatedAt.textContent = estimatedAt;
-  balanceSummary.hidden = false;
+  balanceEstimate.textContent = t('balanceEstimateShort', shortAt);
+  balanceEstimate.title = t('balanceEstimateTitle', fullAt);
+  balanceEstimate.hidden = false;
 }
 
 function updateCountdownDisplay(schedule, alarm) {
-  renderBalanceSummary(schedule);
+  renderBalanceEstimate(schedule);
   if (!schedule || !schedule.enabled) {
     currentScheduleEnabled = false;
     syncToggleState(false);

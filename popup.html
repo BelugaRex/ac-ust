@@ -1211,6 +1211,7 @@
       <div class="ac-indicator">
         <span class="ac-dot unknown" id="acDot" aria-hidden="true"></span>
         <span id="acStateText" data-i18n="acLoading"></span>
+        <span class="balance-estimate" id="balanceEstimate" aria-live="polite" aria-atomic="true" hidden></span>
       </div>
       <div class="hero-countdown" id="countdownDisplay" style="display:none">
         <span class="hero-number" id="countdownNumber">--</span>
@@ -1220,16 +1221,6 @@
         <span data-i18n="acIdle"></span>
       </div>
       <div class="safetynet-warning" id="safetynetWarning" role="status" aria-live="polite" aria-atomic="true" style="display:none"></div>
-      <div class="balance-summary" id="balanceSummary" aria-live="polite" aria-atomic="true" hidden>
-        <div class="balance-metric">
-          <span class="balance-label" data-i18n="balanceLabel"></span>
-          <strong class="balance-value" id="balanceMinutesValue">--</strong>
-        </div>
-        <div class="balance-metric">
-          <span class="balance-label" data-i18n="balanceEstimatedLabel"></span>
-          <strong class="balance-value" id="balanceEstimatedAt">--</strong>
-        </div>
-      </div>
     </div>
     <p class="visually-hidden" id="statusAnnouncement" role="status" aria-live="polite" aria-atomic="true"></p>
 
