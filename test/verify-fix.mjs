@@ -475,6 +475,10 @@ async function runTests() {
       && popupJs.includes("t('balanceEstimateShort', shortAt)")
       && popupJs.includes("t('balanceEstimateTitle', fullAt)")
       && popupJs.includes("padStart(2, '0')")
+      && zhCN.balanceEstimateShort?.message === '预计可用至$1'
+      && en.balanceEstimateShort?.message === 'Est. until $1'
+      && t(zhCN, 'balanceEstimateShort', '12/31 23:00') === '预计可用至12/31 23:00'
+      && t(en, 'balanceEstimateShort', '12/31 23:00') === 'Est. until 12/31 23:00'
       && /\.balance-estimate\s*\{[^}]*?margin-left:\s*auto[^}]*?font-size:\s*11px/.test(popupCssNoComments),
     '预计时刻读取完整状态缓存，并以二级短标签显示在冷气状态同行右侧');
 
