@@ -36,7 +36,7 @@ AC-UST 是一款为香港科技大学 Smart Power Meter 系统设计的自动冷
 • 页面定时关机：使用 UST 页面自带的 Power-off after 定时器执行关机；写入页保持不刷新，扩展以独立新鲜页按 3/5/10 秒退避回读确认，失败自动重试且绝不重复点击 OFF 开关
 • 跨设备相位对齐：同浏览器生态通过浏览器同步补充对齐，UST 页面定时器负责跨浏览器关机相位校验
 • 看门狗与自愈：自动恢复缺失的后台闹钟，并提供一键诊断
-• 清晰与低干扰：默认提供清晰文字与语义状态反馈，移除持续闪烁，并适配系统减弱动态效果、高对比度和深色外观
+• 清晰与低干扰：固定使用与 UST 页面一致的浅色外观，提供清晰文字与语义状态反馈，并适配系统减弱动态效果和高对比度
 • 中英双语：支持中文和英文界面，并接入 Crowdin 社区本地化
 
 请勿同时在 Chrome 与 Edge 两个浏览器生态中运行不同配置的 AC-UST。
@@ -57,7 +57,7 @@ Features:
 • Timer-based shutdown through the portal's Power-off after control, preserving the write page while independently verifying persistence after 3/5/10-second backoff windows and retrying failures without repeated OFF clicks
 • Cross-device phase alignment using browser sync plus the UST page timer
 • Watchdog recovery and a built-in diagnostics panel
-• Clear, low-distraction UI with semantic status feedback and support for system reduced-motion, high-contrast, and dark-mode preferences
+• Clear, low-distraction light appearance matching the UST page, with semantic status feedback and support for system reduced-motion and high-contrast preferences
 • Chinese and English UI with Crowdin-based community localization
 
 Do not run independently configured copies in both Chrome and Edge at the same time.

@@ -1380,8 +1380,9 @@ async function runTests() {
       && popupCss.includes('@media (prefers-reduced-motion: reduce)')
         && /@media \(prefers-reduced-motion: reduce\)[\s\S]*?animation:\s*none !important;[\s\S]*?transition:\s*none !important;/.test(popupCss)
       && popupCss.includes('@media (prefers-contrast: more)')
-      && popupCss.includes('@media (prefers-color-scheme: dark)'),
-      '14C: 弹窗移除持续闪烁，在减弱动态模式彻底停用动画/过渡，并适配高对比度和深色外观');
+      && /color-scheme:\s*light;/.test(popupCssNoComments)
+      && !popupCss.includes('prefers-color-scheme'),
+      '14C: 弹窗固定使用浅色外观，同时保留减弱动态效果与高对比度适配');
   // 紧凑桌面面板使用 14px 正文，通过浏览器文字缩放保留可读性。
   assertPass(/html\s*\{[^}]*?-webkit-text-size-adjust:\s*100%/.test(popupCssNoComments)
       && /body\s*\{[^}]*?font-size:\s*13px;[^}]*?line-height:\s*1\.45/.test(popupCssNoComments),

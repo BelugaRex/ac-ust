@@ -1,6 +1,6 @@
 /* AC-UST popup: restrained pre-Liquid-Glass macOS settings language. */
 :root {
-  color-scheme: light dark;
+  color-scheme: light;
   --popup-width: 250px;
   --bg: #f2f2f4;
   --surface: #ffffff;
@@ -567,38 +567,6 @@ a:focus-visible,
   outline-offset: 2px;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --bg: #242428;
-    --surface: #303034;
-    --surface-secondary: #29292d;
-    --field: #3a3a3e;
-    --text: #e5e5e7;
-    --text-secondary: #b5b5ba;
-    --text-tertiary: #99999f;
-    --border: #4b4b50;
-    --separator: #414146;
-    --accent: #0a84ff;
-    --accent-hover: #409cff;
-    --focus: rgba(10, 132, 255, 0.3);
-    --switch-off: #66666c;
-    --success: #67c779;
-    --warning: #f2b45f;
-    --warning-bg: #3a2d19;
-    --warning-border: #6c5128;
-    --danger: #ff6961;
-  }
-
-  .header-help:hover {
-    background: #3c3c41;
-  }
-
-  .field input:not(:disabled):hover:not(:focus),
-  .btn-diagnose:hover {
-    border-color: #69696f;
-  }
-}
-
 @media (prefers-contrast: more) {
   :root {
     --text-secondary: #3f3f43;
@@ -606,15 +574,6 @@ a:focus-visible,
     --border: #69696e;
     --separator: #7a7a80;
     --switch-off: #737378;
-  }
-}
-
-@media (prefers-color-scheme: dark) and (prefers-contrast: more) {
-  :root {
-    --text-secondary: #f2f2f3;
-    --text-tertiary: #d7d7da;
-    --border: #b7b7bc;
-    --separator: #99999f;
   }
 }
 
