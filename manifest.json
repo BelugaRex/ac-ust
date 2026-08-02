@@ -41,11 +41,7 @@
   "action": {
     "default_popup": "popup.html",
     "default_title": "AC-UST",
-    "default_icon": {
-      "16": "icons/ac-ust_16.png",
-      "24": "icons/ac-ust_24.png",
-      "32": "icons/ac-ust_32.png"
-    }
+    "default_icon": "icons/ac-ust_16.png"
   },
   "icons": {
      "16": "icons/ac-ust_16.png",

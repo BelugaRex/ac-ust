@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Derive the 48/128px extension icons from the hand-drawn Pixilart masters.
 
-The toolbar icons (16/24/32) are pixel art drawn natively at each size on
-pixilart.com — they are the masters and must never be overwritten with
-scaled output. This tool only derives the two larger icons used by the
-extensions management page and the Chrome Web Store:
+The 16px toolbar/popup icon and the 24/32px derivation masters are pixel art
+drawn natively on pixilart.com and must never be overwritten with scaled
+output. This tool only derives the two larger icons used by the extensions
+management page and the Chrome Web Store:
 
 - icons/ac-ust_48.png  — ac-ust_24.png upscaled x2, full-bleed transparent
 - icons/ac-ust_128.png — ac-ust_32.png upscaled x3 (96px), centered on a

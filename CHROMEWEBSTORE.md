@@ -32,7 +32,7 @@ AC-UST 是一款为香港科技大学 Smart Power Meter 系统设计的自动冷
 主要功能：
 • PWM 循环定时：分别设置冷气开启与关闭分钟数，自动持续循环
 • PWM 运行时段：只在每天指定时段运行，时段外自动停用并请求页面定时关机
-• 可用时刻预计：只读读取页面提供的冷气余额，并在运行状态旁按 PWM 开启／关闭时长显示预计可用时刻
+• 可用时刻预计：只读读取页面提供的冷气余额，并在运行状态旁按 PWM 开启／关闭时长显示精确到分钟的预计可用时刻
 • 页面定时关机：使用 UST 页面自带的 Power-off after 定时器执行关机；写入页保持不刷新，扩展以独立新鲜页按 3/5/10 秒退避回读确认，失败自动重试且绝不重复点击 OFF 开关
 • 跨设备相位对齐：同浏览器生态通过浏览器同步补充对齐，UST 页面定时器负责跨浏览器关机相位校验
 • 看门狗与自愈：自动恢复缺失的后台闹钟，并提供一键诊断
@@ -53,7 +53,7 @@ AC-UST is an automatic air-conditioning controller for the HKUST Smart Power Met
 Features:
 • PWM cycle scheduling with independently configurable ON and OFF durations
 • Active hours that limit PWM operation to a daily time window
-• A compact estimated availability time beside the AC status, calculated from the read-only balance and configured PWM ON/OFF durations
+• A compact estimated availability time to the minute beside the AC status, calculated from the read-only balance and configured PWM ON/OFF durations
 • Timer-based shutdown through the portal's Power-off after control, preserving the write page while independently verifying persistence after 3/5/10-second backoff windows and retrying failures without repeated OFF clicks
 • Cross-device phase alignment using browser sync plus the UST page timer
 • Watchdog recovery and a built-in diagnostics panel

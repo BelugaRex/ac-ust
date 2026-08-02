@@ -496,17 +496,11 @@ async function runTests() {
       && manifest.host_permissions[0] === 'https://w5.ab.ust.hk/*',
     'manifest 仅请求自动调度所需的 UST 单一来源 host permission');
 
-  const expectedActionIcons = {
-    16: 'icons/ac-ust_16.png',
-    24: 'icons/ac-ust_24.png',
-    32: 'icons/ac-ust_32.png'
-  };
-  assertPass(Object.entries(expectedActionIcons).every(([size, iconPath]) =>
-      manifest.action?.default_icon?.[size] === iconPath),
-    'manifest 为工具栏提供原生 16/24/32px 图标');
-  assertPass(Object.entries(expectedActionIcons).every(([size, iconPath]) =>
-      distManifest.action?.default_icon?.[size] === iconPath),
-    'dist/manifest.json 保留全部工具栏图标映射');
+  const expectedToolbarIcon = 'icons/ac-ust_16.png';
+  assertPass(manifest.action?.default_icon === expectedToolbarIcon,
+    'manifest 工具栏在所有 DPI 复用 popup 的 16px 图标');
+  assertPass(distManifest.action?.default_icon === expectedToolbarIcon,
+    'dist/manifest.json 保留统一的 16px 工具栏图标');
   const expectedExtensionIcons = {
     16: 'icons/ac-ust_16.png',
     48: 'icons/ac-ust_48.png',
@@ -526,7 +520,7 @@ async function runTests() {
     'popup.css',
     '_locales/zh_CN/messages.json', '_locales/en/messages.json',
     ...new Set([
-      ...Object.values(expectedActionIcons),
+      expectedToolbarIcon,
       ...Object.values(expectedExtensionIcons)
     ])
   ];
@@ -571,9 +565,9 @@ async function runTests() {
       && balanceEstimate?.usableWallMinutes === 240
       && balanceEstimate?.estimatedAt === estimateNow + 240 * 60000,
     '5i: 余额按 PWM 占空比折算为墙钟可用时间');
-  assertPass(balanceEstimate?.displayAt === new Date(2026, 7, 2, 14, 0, 0, 0).getTime()
+  assertPass(balanceEstimate?.displayAt === new Date(2026, 7, 2, 14, 30, 0, 0).getTime()
       && estimateBalanceExhaustion({ balanceMinutes: 60, onMinutes: 0, offMinutes: 45 }) === null,
-    '5i: 估算展示到小时，并拒绝无效 PWM 配置');
+    '5i: 估算展示到分钟，并拒绝无效 PWM 配置');
 
   // ===== 用例 6: v0.5.6 sync-helpers 跨设备同步纯函数 =====
   console.log('\n\n=== 用例 6: sync-helpers 跨设备同步纯函数 (v0.5.6) ===\n');

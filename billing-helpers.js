@@ -34,7 +34,7 @@
     const usableWallMinutes = balance / dutyCycle;
     const estimatedAt = nowMs + usableWallMinutes * 60000;
     const displayDate = new Date(estimatedAt);
-    displayDate.setMinutes(0, 0, 0);
+    displayDate.setSeconds(0, 0);
 
     return {
       estimated: true,
