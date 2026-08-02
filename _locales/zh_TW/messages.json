@@ -147,6 +147,18 @@
     "message": "即将自动$1",
     "description": "倒计时即将到时的显示。$1=动作(开启/关闭)"
   },
+  "balanceLabel": {
+    "message": "当前余额",
+    "description": "余额预计摘要中的当前余额标签"
+  },
+  "balanceEstimatedLabel": {
+    "message": "预计可用至",
+    "description": "余额预计摘要中的耗尽时间标签，明确结果只是预计"
+  },
+  "balanceMinutesValue": {
+    "message": "$1 分钟",
+    "description": "当前冷气余额。$1=向下取整后的分钟数"
+  },
   "statusClosing": {
     "message": "正在关闭冷气…",
     "description": "定时关操作中状态提示"
