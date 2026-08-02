@@ -233,6 +233,43 @@ input {
   line-height: 17px;
 }
 
+.balance-summary {
+  display: grid;
+  grid-template-columns: minmax(0, 4fr) minmax(0, 6fr);
+  gap: 12px;
+  margin-top: 7px;
+  padding-top: 7px;
+  border-top: 1px solid var(--separator);
+}
+
+.balance-summary[hidden] {
+  display: none;
+}
+
+.balance-metric {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 1px;
+}
+
+.balance-label {
+  color: var(--text-tertiary);
+  font-size: 10px;
+  line-height: 14px;
+}
+
+.balance-value {
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 17px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .settings-card {
   margin-bottom: 0;
 }

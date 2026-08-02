@@ -8,7 +8,7 @@
 | 字段 | 值 |
 |------|-----|
 | 名称 | AC-UST |
-| 版本 | 0.6.1 |
+| 版本 | 0.6.2 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率 (Productivity) |
 | 语言 | 中文（简体）、English |
@@ -32,6 +32,7 @@ AC-UST 是一款为香港科技大学 Smart Power Meter 系统设计的自动冷
 主要功能：
 • PWM 循环定时：分别设置冷气开启与关闭分钟数，自动持续循环
 • PWM 运行时段：只在每天指定时段运行，时段外自动停用并请求页面定时关机
+• 余额摘要：只读显示页面提供的当前冷气余额，并按 PWM 开启／关闭时长估算可用至何时
 • 页面定时关机：使用 UST 页面自带的 Power-off after 定时器执行关机；写入页保持不刷新，扩展以独立新鲜页按 3/5/10 秒退避回读确认，失败自动重试且绝不重复点击 OFF 开关
 • 跨设备相位对齐：同浏览器生态通过浏览器同步补充对齐，UST 页面定时器负责跨浏览器关机相位校验
 • 看门狗与自愈：自动恢复缺失的后台闹钟，并提供一键诊断
@@ -52,6 +53,7 @@ AC-UST is an automatic air-conditioning controller for the HKUST Smart Power Met
 Features:
 • PWM cycle scheduling with independently configurable ON and OFF durations
 • Active hours that limit PWM operation to a daily time window
+• A read-only balance summary with an estimated availability time based on the configured PWM ON/OFF durations
 • Timer-based shutdown through the portal's Power-off after control, preserving the write page while independently verifying persistence after 3/5/10-second backoff windows and retrying failures without repeated OFF clicks
 • Cross-device phase alignment using browser sync plus the UST page timer
 • Watchdog recovery and a built-in diagnostics panel
@@ -68,7 +70,7 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 | 字段 | 值 |
 |------|-----|
-| 单一用途说明 | 自动控制 HKUST Smart Power Meter 冷气，提供 PWM 循环、运行时段、页面定时关机和状态诊断 |
+| 单一用途说明 | 自动控制 HKUST Smart Power Meter 冷气，提供 PWM 循环、运行时段、只读余额摘要、页面定时关机和状态诊断 |
 | 远程代码 | 否，不加载或执行远程代码 |
 | 隐私政策 URL | https://github.com/BelugaRex/ac-ust/blob/main/PRIVACY.md |
 | 数据收集 | 不收集、出售或传输个人数据；设置仅保存在浏览器 `storage.local` / `storage.sync` |
@@ -83,7 +85,7 @@ Open source: https://github.com/BelugaRex/ac-ust
 | `tabs` | 查找或按需打开 HKUST 冷气页面，以读取状态、开机和设置页面关机定时器；代码只查询 `https://w5.ab.ust.hk/njggt/app/*`，不读取、记录或传输其他标签页信息 |
 | `offscreen` | 提供 Service Worker 冗余保活，提升后台调度可靠性 |
 | `scripting` | 页面脚本未就绪时兜底注入隔离世界与主世界脚本 |
-| `host_permissions: https://w5.ab.ust.hk/*` | 仅在 HKUST Smart Power Meter 页面读取冷气状态、执行开机和设置关机定时器 |
+| `host_permissions: https://w5.ab.ust.hk/*` | 仅在 HKUST Smart Power Meter 页面读取冷气状态与余额、执行开机和设置关机定时器 |
 
 ## 图片资源
 
@@ -123,12 +125,12 @@ AC-UST 的完整功能需要登录 HKUST Smart Power Meter。提交审核前，�
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.6.1.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.6.2.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP 内容和图标均通过验证。
-2. 在开发者信息中心上传 `releases/ac-ust-v0.6.1.zip`。
+2. 在开发者信息中心上传 `releases/ac-ust-v0.6.2.zip`。
 3. 填写商品详情、隐私声明、权限理由和 HKUST 登录所需的审核测试说明。
 4. 在“分发”页选择“私享（Private）”，配置受信任测试人员或 Google 群组，并将地区限制为香港。
 5. 提交审核时选择推迟发布；审核通过后在 30 天内手动发布并把商店链接发给测试人员。

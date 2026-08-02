@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import url from 'node:url';
 import syncHelpers from '../sync-helpers.js';
+import billingHelpers from '../billing-helpers.js';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -65,7 +66,7 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
         if (!handler) return undefined;
         return handler(msg);
       },
-      getManifest: () => ({ version: '0.6.1' }),
+      getManifest: () => ({ version: '0.6.2' }),
       getPlatformInfo: async () => ({ os: 'win' }),
       onConnect: { addListener() {} },
       onUpdateAvailable: { addListener() {} }
@@ -386,6 +387,9 @@ async function runTests() {
     `dist/manifest.json 版本与源码一致 (${manifest.version})`);
   assertPass(popupHtml.includes(`<script src="popup.js?v=${manifest.version}"></script>`),
     'popup 脚本资源版本参数与 manifest 同步，静态预览不会复用旧脚本缓存');
+  assertPass(popupHtml.indexOf('<script src="billing-helpers.js"></script>')
+      < popupHtml.indexOf(`<script src="popup.js?v=${manifest.version}"></script>`),
+    'popup 在主脚本前加载余额纯函数，避免初始化时缺少估算器');
 
   // 5h: popup 布局防回归 —— 固定桌面面板宽度，避免 intrinsic/vw 初始布局竞态。
   const popupCss = fs.readFileSync(path.join(ROOT, 'popup.css'), 'utf8');
@@ -463,6 +467,11 @@ async function runTests() {
       && popupJs.includes('versionInfo.textContent = `v${displayVersion}`')
       && !popupJs.includes('buildTimeShort'),
     '头栏只显示版本号，完整构建时间保留在 title tooltip');
+  assertPass(popupHtml.includes('id="balanceSummary"')
+      && popupJs.includes('schedule?.actualStatus?.balanceMinutes')
+      && popupJs.includes('estimateBalanceExhaustion({')
+      && popupJs.includes("t('balanceMinutesValue'"),
+    '余额摘要读取完整状态缓存，并按当前 PWM 时长即时估算');
 
   const sourceLocaleResources = manifest.web_accessible_resources || [];
   const distLocaleResources = distManifest.web_accessible_resources || [];
@@ -503,7 +512,7 @@ async function runTests() {
 
   const distRequiredFiles = [
     'manifest.json', 'background.js', 'content.js', 'page-confirm.js',
-    'popup.html', 'popup.js', 'i18n.js', 'sync-helpers.js',
+    'popup.html', 'popup.js', 'i18n.js', 'sync-helpers.js', 'billing-helpers.js',
     'offscreen.html', 'offscreen.js',
     'popup.css',
     '_locales/zh_CN/messages.json', '_locales/en/messages.json',
@@ -532,6 +541,30 @@ async function runTests() {
     'dist/popup.js 已注入版本号和非 dev 构建时间');
   assertPass(fs.existsSync(path.join(ROOT, 'releases', `ac-ust-v${manifest.version}.zip`)),
     `商店 ZIP 已生成: ac-ust-v${manifest.version}.zip`);
+
+  // ===== 用例 5i: 页面冷气余额解析与 PWM 可用时间估算 =====
+  const { parseBalanceMinutes, estimateBalanceExhaustion } = billingHelpers;
+  assertPass(parseBalanceMinutes('242 min') === 242
+      && parseBalanceMinutes('', '241 min') === 241
+      && parseBalanceMinutes('12.5 minutes') === 12.5,
+    '5i: 余额解析支持页面文本、title 回退与小数分钟');
+  assertPass(parseBalanceMinutes('left of 16100 min balance') === null
+      && parseBalanceMinutes('unknown') === null,
+    '5i: 余额解析拒绝周期总额和无关文本，避免误报当前余额');
+  const estimateNow = new Date(2026, 7, 2, 10, 30, 0, 0).getTime();
+  const balanceEstimate = estimateBalanceExhaustion({
+    balanceMinutes: 60,
+    onMinutes: 15,
+    offMinutes: 45,
+    now: estimateNow
+  });
+  assertPass(balanceEstimate?.dutyCycle === 0.25
+      && balanceEstimate?.usableWallMinutes === 240
+      && balanceEstimate?.estimatedAt === estimateNow + 240 * 60000,
+    '5i: 余额按 PWM 占空比折算为墙钟可用时间');
+  assertPass(balanceEstimate?.displayAt === new Date(2026, 7, 2, 14, 0, 0, 0).getTime()
+      && estimateBalanceExhaustion({ balanceMinutes: 60, onMinutes: 0, offMinutes: 45 }) === null,
+    '5i: 估算展示到小时，并拒绝无效 PWM 配置');
 
   // ===== 用例 6: v0.5.6 sync-helpers 跨设备同步纯函数 =====
   console.log('\n\n=== 用例 6: sync-helpers 跨设备同步纯函数 (v0.5.6) ===\n');
@@ -975,6 +1008,11 @@ async function runTests() {
   assertPass(!contentSource.includes('function dispatchUserClick(')
       && !contentSource.includes('async function clickConfirmDialog('),
     '9K: content 隔离世界不存在第二套开关/确认点击器');
+  assertPass(contentSource.includes("=== 'Air Conditioning Balance'")
+      && contentSource.includes("container.querySelector('.ant-progress-text')")
+      && contentSource.includes("parseBalanceMinutes(value.textContent, value.getAttribute('title'))")
+      && contentSource.includes('return withBalance({ ...mainWorldStatus'),
+    '9K-1: content 只从余额标题区块读取当前进度值，并随状态响应返回');
   assertPass(!backgroundSource.includes("toggleAC('off')")
       && pwmBody.includes('const timerArmed = isPageTimerProofFresh(schedule)'),
     '9L: 自动关机只检查页面定时器证明，生产代码不存在 toggleAC(off)');
@@ -994,6 +1032,9 @@ async function runTests() {
   assertPass(setTimerBody.includes('chrome.tabs.create({ url: AC_PAGE, active: false })')
       && setTimerBody.includes('restoreDiscardedACTab(tab)'),
     '9O: 页面定时器缺少可用标签时只创建隐藏 AC 页恢复，不刷新正常页面');
+  assertPass(manifest.content_scripts?.[1]?.js?.join(',') === 'billing-helpers.js,content.js'
+      && backgroundSource.includes("files: ['billing-helpers.js', 'content.js']"),
+    '9O-1: manifest 与兜底注入均保证余额 helper 先于 content script 执行');
   assertPass(pwmBody.includes('isPageTimerProofFresh(schedule)')
       && backgroundSource.includes('pageTimerTargetAt'),
     '9P: OFF 只接受带绝对到期时间且仍新鲜的页面定时器证明');

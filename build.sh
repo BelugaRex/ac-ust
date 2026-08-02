@@ -19,6 +19,7 @@ RUNTIME_FILES=(
   popup.css
   popup.js
   i18n.js
+  billing-helpers.js
   sync-helpers.js
   offscreen.html
   offscreen.js

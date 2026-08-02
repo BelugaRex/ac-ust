@@ -32,7 +32,7 @@ node test/verify-fix.mjs
 
 **验证内容**:
 - 用例 1–4：popup 诊断的 `nextTriggerAt` 自愈与 Service Worker 降级行为
-- 用例 5–8：i18n 包体、跨设备相位同步、页面定时器解析与采纳、popup 布局防回归（CSS 禁 vw/vh，popup 固定为 250px 并保留固定 gutter，静态网页预览在窄窗口整体等比缩放）
+- 用例 5–8：i18n 包体、冷气余额解析与 PWM 可用时间估算、跨设备相位同步、页面定时器解析与采纳、popup 布局防回归（CSS 禁 vw/vh，popup 固定为 250px 并保留固定 gutter，静态网页预览在窄窗口整体等比缩放）
 - popup 的界面字号限制在 8–16px：主界面为 16px，固定标签页提醒为 12px，版本元信息为 10px；元素间距统一收敛为可见边界之间的 8px 或 16px；1px 边框组件使用 7px/15px CSS padding 补偿，输入框外边距为 0，运行时段时钟指示器为 16px 且自身内边距为 0，运行时段和间隔时长输入框为 32px 标准高度，同一行文字与输入框垂直居中
 - 状态文字与倒计时、状态卡片与设置卡片、设置卡片与页脚边界均使用 8px 间距；页脚 8px 外间距叠加 8px 顶部内边距，使卡片边界到页脚内容保持 16px
 - 拨杆与诊断按钮的扩大命中区采用绝对定位伪元素，不参与布局；设置头、拨杆区域和运行时段标签不使用透明 `min-height` 撑开可见线框距离
@@ -45,6 +45,7 @@ node test/verify-fix.mjs
 - 开启/关闭时长每行的文字对齐运行时段文字（跳过拨杆占位），三个输入框统一为 5rem 并复用共享 Grid 列，时长输入框与结束时间框左对齐
 - 用例 9–10：单一 ON 点击链路、OFF 零点击以及 ON→OFF 前的定时器证明
 - 用例 11：`Power-off after` 必须在新鲜页面保留同一 `HH:MM`；失败重试、过期闹钟恢复、时钟修复与手动开机都不得绕过该确认
+- 余额链路：`billing-helpers.js` 先于 `content.js` 注入；内容脚本只从 `Air Conditioning Balance` 区块的 `.ant-progress-text` 读取当前分钟数，拒绝把周期总额当成余额，并随现有状态响应返回
 
 `test/fixtures/power-off-after-states.json` 是从真实页面 DOM 样本提取的脱敏 fixture：已设定时 `.ant-picker input` 的 `value/title` 都是 `HH:MM` 且 AC 为 ON；页面关机后两者清空且 AC 为 OFF。它锁定 content script 的读取依据，不含账号、房间或余额信息。
 

@@ -6,6 +6,7 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气开关，支持 PWM
 
 - **PWM 循环定时**：自定义"开 X 分钟 / 关 Y 分钟"持续循环，自动控制冷气开关
 - **运行时段**：设置每天运行时段（如 08:00-23:00），时段外自动停机省电
+- **余额摘要**：只读显示 Smart Power Meter 当前冷气余额，并按 PWM 开关时长估算可用至何时
 - **跨设备同步**：多台设备运行扩展时自动对齐 PWM 循环，不会同时反复开关同一台空调
 - **自动确认弹窗**：自动处理浏览器原生 `confirm` 和 Ant Design 确认框
 - **后台运行**：即使关闭弹窗，定时任务仍在 Service Worker 中执行
@@ -71,6 +72,7 @@ ac-ust/
 ├── popup.html         # 弹窗界面（Apple Design System CSS）
 ├── popup.js           # 弹窗逻辑 + 诊断 + 保活连接
 ├── i18n.js            # fetch-based 国际化加载器
+├── billing-helpers.js # 冷气余额解析与 PWM 可用时间估算纯函数
 ├── sync-helpers.js    # 跨设备同步纯函数（chrome.storage.sync + page timer 对齐）
 ├── offscreen.js       # 冗余保活心跳
 ├── offscreen.html     # offscreen 入口

@@ -1184,7 +1184,7 @@
     }
   }
 </style>
-<link rel="stylesheet" href="popup.css?v=0.6.1">
+<link rel="stylesheet" href="popup.css?v=0.6.2">
 </head>
 <body>
 
@@ -1220,6 +1220,16 @@
         <span data-i18n="acIdle"></span>
       </div>
       <div class="safetynet-warning" id="safetynetWarning" role="status" aria-live="polite" aria-atomic="true" style="display:none"></div>
+      <div class="balance-summary" id="balanceSummary" aria-live="polite" aria-atomic="true" hidden>
+        <div class="balance-metric">
+          <span class="balance-label" data-i18n="balanceLabel"></span>
+          <strong class="balance-value" id="balanceMinutesValue">--</strong>
+        </div>
+        <div class="balance-metric">
+          <span class="balance-label" data-i18n="balanceEstimatedLabel"></span>
+          <strong class="balance-value" id="balanceEstimatedAt">--</strong>
+        </div>
+      </div>
     </div>
     <p class="visually-hidden" id="statusAnnouncement" role="status" aria-live="polite" aria-atomic="true"></p>
 
@@ -1287,6 +1297,7 @@
 </div>
 
 <script src="i18n.js"></script>
-<script src="popup.js?v=0.6.1"></script>
+<script src="billing-helpers.js"></script>
+<script src="popup.js?v=0.6.2"></script>
 </body>
 </html>

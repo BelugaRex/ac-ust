@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "__MSG_extName__",
-  "version": "0.6.1",
+  "version": "0.6.2",
   "description": "__MSG_extDesc__",
   "default_locale": "zh_CN",
   "permissions": [
@@ -33,7 +33,7 @@
     },
     {
       "matches": ["https://w5.ab.ust.hk/njggt/app/*"],
-      "js": ["content.js"],
+      "js": ["billing-helpers.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": true
     }

@@ -1304,7 +1304,7 @@ async function ensureContentScriptLoaded(tabId, maxRetries = 2) {
     try {
       await chrome.scripting.executeScript({
         target: { tabId },
-        files: ['content.js'],
+        files: ['billing-helpers.js', 'content.js'],
         injectImmediately: true
       });
       await chrome.scripting.executeScript({

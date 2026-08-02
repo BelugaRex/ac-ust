@@ -106,21 +106,45 @@ function getACStatus() {
 }
 
 async function getAuthoritativeACStatus() {
+  const withBalance = (status) => {
+    const balanceMinutes = getACBalanceMinutes();
+    return balanceMinutes === null ? status : { ...status, balanceMinutes };
+  };
+
   const mainWorldStatus = await requestMainWorldStatus(3000);
   if (typeof mainWorldStatus?.isOn === 'boolean') {
-    return { ...mainWorldStatus, via: 'main-world' };
+    return withBalance({ ...mainWorldStatus, via: 'main-world' });
   }
 
   const isolatedStatus = getACStatus();
   if (typeof isolatedStatus?.isOn === 'boolean') {
-    return mainWorldStatus?.error
+    return withBalance(mainWorldStatus?.error
       ? { ...isolatedStatus, fallbackError: mainWorldStatus.error, via: 'isolated-fallback' }
-      : isolatedStatus;
+      : isolatedStatus);
   }
 
-  return mainWorldStatus?.error
+  return withBalance(mainWorldStatus?.error
     ? { ...isolatedStatus, fallbackError: mainWorldStatus.error }
-    : isolatedStatus;
+    : isolatedStatus);
+}
+
+// 页面余额环会同时显示当前剩余分钟数（如 "242 min"）和周期总额。
+// 只在 "Air Conditioning Balance" 标题所在区块读取 .ant-progress-text，
+// 避免误把下方 "16100 min balance" 的总额当成当前余额。
+function getACBalanceMinutes() {
+  const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'));
+  const heading = headings.find(el => (el.textContent || '').trim() === 'Air Conditioning Balance');
+  if (!heading) return null;
+
+  let container = heading.parentElement;
+  for (let depth = 0; depth < 8 && container; depth++) {
+    const value = container.querySelector('.ant-progress-text');
+    if (value) {
+      return parseBalanceMinutes(value.textContent, value.getAttribute('title'));
+    }
+    container = container.parentElement;
+  }
+  return null;
 }
 
 // ----- 切换 AC 开关 -----

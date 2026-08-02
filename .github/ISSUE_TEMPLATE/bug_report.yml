@@ -62,7 +62,7 @@ body:
     attributes:
       label: AC-UST 版本
       description: 可在弹窗右上角查看版本号。
-      placeholder: 例如 0.6.1
+      placeholder: 例如 0.6.2
     validations:
       required: true
 

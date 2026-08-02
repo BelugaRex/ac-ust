@@ -44,6 +44,9 @@
   "countdownClock": { "message": "Next <strong>$1:00</strong> → $2" },
   "countdownCaption": { "message": "min until auto $1" },
   "countdownSoon": { "message": "Auto $1 soon" },
+  "balanceLabel": { "message": "Current balance" },
+  "balanceEstimatedLabel": { "message": "Estimated until" },
+  "balanceMinutesValue": { "message": "$1 min" },
 
   "statusClosing": { "message": "Turning off AC…" },
   "statusClosedOK": { "message": "Timer stopped, AC turned off" },

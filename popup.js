@@ -9,11 +9,12 @@ const staticPreviewSchedule = {
   enabled: true,
   mode: 'pwm',
   clockMode: false,
-  onMinutes: 30,
-  offMinutes: 30,
+  onMinutes: 15,
+  offMinutes: 45,
   activeHours: { enabled: true, start: '08:00', end: '23:00' },
   pwmState: 'off',
   actualStatus: { isOn: true },
+  balanceMinutes: 60,
   nextTriggerAt: Date.now() + 30 * 60 * 1000
 };
 
@@ -65,6 +66,9 @@ const idleDisplay = document.getElementById('idleDisplay');
 const countdownNumber = document.getElementById('countdownNumber');
 const countdownText = document.getElementById('countdownText');
 const safetynetWarning = document.getElementById('safetynetWarning');
+const balanceSummary = document.getElementById('balanceSummary');
+const balanceMinutesValue = document.getElementById('balanceMinutesValue');
+const balanceEstimatedAt = document.getElementById('balanceEstimatedAt');
 
 // popup 打开期间保持与 Service Worker 的长连接。
 // 这样用户盯着弹窗时，后台不会只靠一次性 sendMessage 存活。
@@ -184,7 +188,36 @@ function updateSafetynetWarning(message) {
   if (changed && message) announceState(message);
 }
 
+function renderBalanceSummary(schedule) {
+  const rawBalance = schedule?.balanceMinutes ?? schedule?.actualStatus?.balanceMinutes;
+  const balance = rawBalance === null || rawBalance === '' ? NaN : Number(rawBalance);
+  const estimate = estimateBalanceExhaustion({
+    balanceMinutes: balance,
+    onMinutes: schedule?.onMinutes,
+    offMinutes: schedule?.offMinutes
+  });
+  const displayAt = Number(estimate?.displayAt);
+  if (!schedule?.enabled || !Number.isFinite(balance) || balance < 0
+      || !Number.isFinite(displayAt)) {
+    balanceSummary.hidden = true;
+    return;
+  }
+
+  const locale = I18n.getLang().replace('_', '-');
+  const estimatedAt = new Intl.DateTimeFormat(locale, {
+    month: 'short',
+    day: 'numeric',
+    hour: 'numeric',
+    hourCycle: 'h23'
+  }).format(new Date(displayAt));
+
+  balanceMinutesValue.textContent = t('balanceMinutesValue', String(Math.floor(balance)));
+  balanceEstimatedAt.textContent = estimatedAt;
+  balanceSummary.hidden = false;
+}
+
 function updateCountdownDisplay(schedule, alarm) {
+  renderBalanceSummary(schedule);
   if (!schedule || !schedule.enabled) {
     currentScheduleEnabled = false;
     syncToggleState(false);
@@ -362,7 +395,7 @@ startup().then(setupStaticPreviewFit);
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：版本号同时维护于 manifest.json 和此处）
-const APP_VERSION = '0.6.1';
+const APP_VERSION = '0.6.2';
 // BUILD_TIME 由 build.sh 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
