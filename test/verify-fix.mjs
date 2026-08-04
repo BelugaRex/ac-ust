@@ -463,6 +463,12 @@ async function runTests() {
       && !popupJs.includes("t('countdownInterval'")
       && popupJs.includes('countdownNumber.textContent = String(minutes);'),
     'popup.js 倒计时写入 hero 大数字与 countdownCaption，不再使用 countdownInterval');
+  assertPass(popupJs.includes("const nextAction = schedule._effectivePwmState")
+      && popupJs.includes("schedule._nextAction")
+      && popupJs.includes("typeof schedule.actualStatus?.isOn === 'boolean'")
+      && popupJs.includes("schedule.actualStatus.isOn ? 'off' : 'on'")
+      && popupJs.includes(": schedule.pwmState)"),
+    'popup.js nextAction fallback 链含 cached actualStatus 反推档——锁住 ON setPageTimer 失败 故障态 pwmState=on 时 popup 不再误显示"分钟后自动开启"（与状态行"冷气运行中"冲突的根因修复）');
   assertPass(popupJs.includes('function formatBuildTimeShort(buildTime)')
       && popupJs.includes('return `${Number(month)}/${Number(day)} ${hour}:${minute}`;')
       && popupJs.includes('versionInfo.textContent = `v${displayVersion} · ${formatBuildTimeShort(BUILD_TIME)}`')
@@ -474,15 +480,38 @@ async function runTests() {
       && !popupHtml.includes('id="balanceMinutesValue"')
       && popupJs.includes('schedule?.actualStatus?.balanceMinutes')
       && popupJs.includes('estimateBalanceExhaustion({')
-      && popupJs.includes("t('balanceEstimateShort', shortAt)")
-      && popupJs.includes("t('balanceEstimateTitle', fullAt)")
+      && popupJs.includes("estimatePrefix.textContent = t('balanceEstimatePrefix')")
+      && popupJs.includes('estimateTime.textContent = shortAt')
+      && popupJs.includes('balanceEstimate.replaceChildren(estimatePrefix, estimateTime)')
+      && popupJs.includes("urgent ? 'balanceEstimateUrgentTitle' : 'balanceEstimateTitle'")
+      && popupJs.includes("? t('balanceEstimateToday')")
+      && popupJs.includes("? t('balanceEstimateTomorrow')")
+      && popupJs.includes('tomorrow.setDate(today.getDate() + 1)')
+      && popupJs.includes("String(target.getMonth() + 1).padStart(2, '0')")
+      && popupJs.includes("String(target.getDate()).padStart(2, '0')")
+      && popupJs.includes('const monthDay = `${String(target.getMonth() + 1).padStart(2, \'0\')}-${String(target.getDate()).padStart(2, \'0\')}`;')
+      && !popupJs.includes("month: 'numeric', day: 'numeric'")
+      && popupJs.includes('isBalanceEstimateUrgent(estimate?.usableWallMinutes)')
+      && popupJs.includes("balanceEstimate.classList.toggle('is-urgent', urgent)")
+      && popupJs.includes("balanceEstimate.setAttribute('aria-label', estimateTitle)")
+      && popupJs.includes("balanceEstimate.classList.remove('is-urgent')")
       && popupJs.includes("padStart(2, '0')")
-      && zhCN.balanceEstimateShort?.message === '预计可用至$1'
-      && en.balanceEstimateShort?.message === 'Est. until $1'
-      && t(zhCN, 'balanceEstimateShort', '12/31 23:00') === '预计可用至12/31 23:00'
-      && t(en, 'balanceEstimateShort', '12/31 23:00') === 'Est. until 12/31 23:00'
-      && /\.balance-estimate\s*\{[^}]*?margin-left:\s*auto[^}]*?font-size:\s*11px/.test(popupCssNoComments),
-    '预计时刻读取完整状态缓存，并以二级短标签显示在冷气状态同行右侧');
+      && zhCN.balanceEstimatePrefix?.message === '预计可用至'
+      && zhCN.balanceEstimateToday?.message === '今天'
+      && zhCN.balanceEstimateTomorrow?.message === '明天'
+      && zhCN.balanceEstimateUrgentTitle?.message.includes('24 小时内用完')
+      && en.balanceEstimatePrefix?.message === 'Est. until'
+      && en.balanceEstimateToday?.message === 'Today'
+      && en.balanceEstimateTomorrow?.message === 'Tomorrow'
+      && en.balanceEstimateUrgentTitle?.message.includes('run out within 24 hours')
+      && /\.balance-estimate\s*\{[^}]*?margin-left:\s*auto[^}]*?font-size:\s*11px/.test(popupCssNoComments)
+      && /--warning-accent:\s*#b45309/.test(popupCssNoComments)
+      && /\.balance-estimate\.is-urgent::before\s*\{[^}]*?position:\s*absolute[^}]*?bottom:\s*3px[^}]*?background:\s*var\(--warning-accent\)[^}]*?content:\s*"!"/.test(popupCssNoComments)
+      && /\.balance-estimate-prefix\s*\{[^}]*?color:\s*var\(--text-tertiary\)[^}]*?font-size:\s*12px[^}]*?font-weight:\s*500[^}]*?line-height:\s*14px/.test(popupCssNoComments)
+      && /\.balance-estimate-time\s*\{[^}]*?color:\s*var\(--text-secondary\)[^}]*?font-weight:\s*600/.test(popupCssNoComments)
+      && /\.balance-estimate\.is-urgent \.balance-estimate-time\s*\{[^}]*?padding-left:\s*11px[^}]*?color:\s*var\(--warning-accent\)/.test(popupCssNoComments)
+      && /\.balance-estimate-prefix,[\s\S]*?\.balance-estimate-time\s*\{[^}]*?text-overflow:\s*ellipsis/.test(popupCssNoComments),
+    '预计时刻分为两行，以轻量符号和日期强调配合无障碍文案提醒24小时内余额耗尽');
 
   const sourceLocaleResources = manifest.web_accessible_resources || [];
   const distLocaleResources = distManifest.web_accessible_resources || [];
@@ -548,7 +577,7 @@ async function runTests() {
     `商店 ZIP 已生成: ac-ust-v${manifest.version}.zip`);
 
   // ===== 用例 5i: 页面冷气余额解析与 PWM 可用时间估算 =====
-  const { parseBalanceMinutes, estimateBalanceExhaustion } = billingHelpers;
+  const { parseBalanceMinutes, estimateBalanceExhaustion, isBalanceEstimateUrgent } = billingHelpers;
   assertPass(parseBalanceMinutes('242 min') === 242
       && parseBalanceMinutes('', '241 min') === 241
       && parseBalanceMinutes('12.5 minutes') === 12.5,
@@ -570,6 +599,12 @@ async function runTests() {
   assertPass(balanceEstimate?.displayAt === new Date(2026, 7, 2, 14, 30, 0, 0).getTime()
       && estimateBalanceExhaustion({ balanceMinutes: 60, onMinutes: 0, offMinutes: 45 }) === null,
     '5i: 估算展示到分钟，并拒绝无效 PWM 配置');
+  assertPass(isBalanceEstimateUrgent(0)
+      && isBalanceEstimateUrgent(1440)
+      && !isBalanceEstimateUrgent(1440.01)
+      && !isBalanceEstimateUrgent(-1)
+      && !isBalanceEstimateUrgent('unknown'),
+    '5i: 预计墙钟可用时间不超过24小时才触发余额提醒');
 
   // ===== 用例 6: v0.5.6 sync-helpers 跨设备同步纯函数 =====
   console.log('\n\n=== 用例 6: sync-helpers 跨设备同步纯函数 (v0.5.6) ===\n');
@@ -1008,8 +1043,11 @@ async function runTests() {
   assertPass(!backgroundSource.includes('retryExistingTabToggle')
       && !backgroundSource.includes('async function retryToggle'),
     '9I: background 已删除四次即时消息重试路径');
-  assertPass(countOccurrences(existingTabBody, 'chrome.tabs.sendMessage(tab.id, { action })') === 1,
-    '9J: 单个标签页切换请求只发送一次 on/off 消息');
+  assertPass(existingTabBody.includes('isClosedMessagePortError(e)')
+      && existingTabBody.includes('await chrome.tabs.reload(tab.id)')
+      && existingTabBody.includes('await waitForTabReady(tab.id, 30000)')
+      && existingTabBody.includes('recoveredByReload: true'),
+    '9J: 仅消息端口提前关闭时刷新原标签，并标记单次恢复结果');
   assertPass(!contentSource.includes('function dispatchUserClick(')
       && !contentSource.includes('async function clickConfirmDialog('),
     '9K: content 隔离世界不存在第二套开关/确认点击器');
@@ -1029,11 +1067,11 @@ async function runTests() {
   const verifySectionForReload = verificationStartForReload >= 0 && verificationEndForReload > verificationStartForReload
     ? backgroundSource.slice(verificationStartForReload, verificationEndForReload)
     : '';
-  assertPass(countOccurrences(backgroundSource, 'chrome.tabs.reload(') === 1
+  assertPass(countOccurrences(backgroundSource, 'chrome.tabs.reload(') === 2
       && backgroundSource.includes('async function restoreDiscardedACTab(tab)')
       && !verifySectionForReload.includes('chrome.tabs.reload(')
       && !verifySectionForReload.includes('sourceWasAutoCreated'),
-    '9N: 刷新只用于 discarded 恢复；页面定时器验证绝不刷新写入来源页');
+    '9N: 刷新只用于 discarded 恢复或消息端口提前关闭；页面定时器验证绝不刷新写入来源页');
   assertPass(setTimerBody.includes('chrome.tabs.create({ url: AC_PAGE, active: false })')
       && setTimerBody.includes('restoreDiscardedACTab(tab)'),
     '9O: 页面定时器缺少可用标签时只创建隐藏 AC 页恢复，不刷新正常页面');
@@ -1047,6 +1085,77 @@ async function runTests() {
       && newTabBody.includes('ac-close-tab-${tabId}')
       && !newTabBody.includes('if (result?.success)'),
     '9Q: 自动创建的开机标签无论成功失败都会安排回收');
+
+  const toggleRecoveryStart = backgroundSource.indexOf('async function _toggleOnExistingTab');
+  const toggleRecoveryEnd = backgroundSource.indexOf('\nasync function _toggleOnNewTab', toggleRecoveryStart);
+  const toggleRecoverySource = toggleRecoveryStart >= 0 && toggleRecoveryEnd > toggleRecoveryStart
+    ? backgroundSource.slice(toggleRecoveryStart, toggleRecoveryEnd)
+    : '';
+  const loadToggleRecovery = new Function(
+    'chrome',
+    'waitForTabReady',
+    'isACTab',
+    'ensureContentScriptLoaded',
+    'console',
+    `${toggleRecoverySource}; return { _toggleOnExistingTab, isClosedMessagePortError };`
+  );
+  const quietConsole = { log() {}, warn() {}, error() {} };
+  const recoveryCalls = { send: 0, reload: 0, get: 0, ready: 0, ensure: 0 };
+  const recoveryChrome = {
+    tabs: {
+      async sendMessage() {
+        recoveryCalls.send += 1;
+        if (recoveryCalls.send === 1) {
+          throw new Error('The message port closed before a response was received.');
+        }
+        return { success: true, state: 'on' };
+      },
+      async reload(tabId) {
+        recoveryCalls.reload += 1;
+        assertPass(tabId === 41, '9J-1: 恢复刷新沿用原 AC 标签页');
+      },
+      async get(tabId) {
+        recoveryCalls.get += 1;
+        return { id: tabId, url: 'https://w5.ab.ust.hk/njggt/app/home' };
+      }
+    }
+  };
+  const recoveryHarness = loadToggleRecovery(
+    recoveryChrome,
+    async () => { recoveryCalls.ready += 1; return true; },
+    tab => tab?.url?.startsWith('https://w5.ab.ust.hk/njggt/app/'),
+    async () => { recoveryCalls.ensure += 1; return true; },
+    quietConsole
+  );
+  const recoveredToggle = await recoveryHarness._toggleOnExistingTab({ id: 41 }, 'on');
+  assertPass(recoveredToggle.success === true && recoveredToggle.recoveredByReload === true,
+    '9J-2: 端口提前关闭后刷新并单次重试成功');
+  assertPass(recoveryCalls.send === 2 && recoveryCalls.reload === 1
+      && recoveryCalls.ready === 1 && recoveryCalls.get === 1 && recoveryCalls.ensure === 2,
+    '9J-3: 恢复链路恰好发送两次、刷新一次，并重新等待与注入');
+
+  const ordinaryCalls = { send: 0, reload: 0 };
+  const ordinaryChrome = {
+    tabs: {
+      async sendMessage() {
+        ordinaryCalls.send += 1;
+        throw new Error('Could not establish connection. Receiving end does not exist.');
+      },
+      async reload() { ordinaryCalls.reload += 1; },
+      async get() { return { id: 42, url: 'https://w5.ab.ust.hk/njggt/app/home' }; }
+    }
+  };
+  const ordinaryHarness = loadToggleRecovery(
+    ordinaryChrome,
+    async () => true,
+    () => true,
+    async () => true,
+    quietConsole
+  );
+  const ordinaryFailure = await ordinaryHarness._toggleOnExistingTab({ id: 42 }, 'on');
+  assertPass(ordinaryFailure.success === false
+      && ordinaryCalls.send === 1 && ordinaryCalls.reload === 0,
+    '9J-4: 非端口提前关闭错误不刷新、不重复发送');
 
   const i18nSource = fs.readFileSync(path.join(ROOT, 'i18n.js'), 'utf8');
   assertPass(i18nSource.includes("querySelectorAll('[data-i18n-title]')"),
@@ -1139,11 +1248,12 @@ async function runTests() {
       && verifyBody.includes('lastFailure = `第 ${attempt + 1} 次新鲜页读回不匹配')
       && verifyBody.includes('await chrome.tabs.remove(verifierTabId)'),
     '11B: 新鲜页必须读回同一 HH:MM，未匹配会记录失败并回收临时验证页');
-  assertPass(backgroundSource.includes('const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [3000, 5000, 10000];')
+  assertPass(backgroundSource.includes('const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [3000, 10000, 30000];')
       && verifyBody.includes('await sleep(PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS[attempt]);')
       && verifyBody.includes('attempts: attempt + 1')
-      && verifyBody.includes('attempts: PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length'),
-    '11B-1: 写入后按 3 秒、5 秒、10 秒退避进行新鲜页读回');
+      && verifyBody.includes('attempts: PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length')
+      && verifyBody.includes('次新鲜页验证后仍未持久化'),
+    '11B-1: 写入后按 3 秒、10 秒、30 秒退避，三次失败仍明确报告未持久化');
   assertPass(verifyBody.includes('let verifierTabId = null;')
       && verifyBody.includes('finally')
       && verifyBody.includes('await chrome.tabs.remove(verifierTabId);'),

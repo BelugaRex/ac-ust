@@ -44,8 +44,11 @@
   "countdownClock": { "message": "下次 <strong>$1:00</strong> → $2", "description": "时钟模式倒计时显示。HTML格式。$1=小时数(两位数)，$2=动作(开启/关闭)" },
   "countdownCaption": { "message": "分钟后自动$1", "description": "hero 大数字下方的说明文字。$1=动作(开启/关闭)" },
   "countdownSoon": { "message": "即将自动$1", "description": "倒计时即将到时的显示。$1=动作(开启/关闭)" },
-  "balanceEstimateShort": { "message": "预计可用至$1", "description": "冷气状态同行的预计可用时刻短文案。$1=本地化短时间" },
+  "balanceEstimatePrefix": { "message": "预计可用至", "description": "冷气状态同行预计时刻的第一行标签" },
+  "balanceEstimateToday": { "message": "今天", "description": "预计可用时刻与当前日期相同时使用的短日期" },
+  "balanceEstimateTomorrow": { "message": "明天", "description": "预计可用时刻为下一本地日历日时使用的短日期" },
   "balanceEstimateTitle": { "message": "按当前循环设置，预计可用至 $1", "description": "预计可用时刻的完整悬停说明。$1=本地化完整日期时间" },
+  "balanceEstimateUrgentTitle": { "message": "提醒：冷气余额预计会在 24 小时内用完；按当前循环设置，预计可用至 $1", "description": "预计可用时间不足24小时的悬停和无障碍提醒。$1=本地化完整日期时间" },
 
   "statusClosing": { "message": "正在关闭冷气…", "description": "定时关操作中状态提示" },
   "statusClosedOK": { "message": "定时已关闭，冷气已关机", "description": "定时关成功且关机确认成功的状态提示" },

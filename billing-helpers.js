@@ -45,5 +45,10 @@
     };
   }
 
-  return { parseBalanceMinutes, estimateBalanceExhaustion };
+  function isBalanceEstimateUrgent(usableWallMinutes) {
+    const minutes = Number(usableWallMinutes);
+    return Number.isFinite(minutes) && minutes >= 0 && minutes <= 24 * 60;
+  }
+
+  return { parseBalanceMinutes, estimateBalanceExhaustion, isBalanceEstimateUrgent };
 });

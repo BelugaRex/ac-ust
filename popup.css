@@ -4,7 +4,22 @@
   --popup-width: 250px;
   --bg: #f2f2f4;
   --surface: #ffffff;
-  --surface-secondary: #f7f7f8;
+  /* header 画布：阶段 54 拆分——header 单独走纯白 #ffffff，作为 logo 的画布。根因是
+     logo 内部浅灰 #eff0f0（L≈0.87）在所有候选浅底（纯白 / #f5f5f2 / body --bg #f2f2f4）
+     上对比比都 < 3:1 图形门限，纯白给出最大明度差（vs 纯白 ≈1.14、vs #f5f5f2 ≈1.04、
+     vs body ≈1.02），被吞得最轻；logo 边框深蓝 #0074bc 与浅灰、米色 #bab7a5 三个色
+     在纯白上均清晰，是真正最干净的画布（logo 内无纯白，纯白底不干扰任何内部色）。
+     header 与白卡 --surface #ffffff 同色，分层改由 1px --border 发丝线表达——
+     macOS 设置面板原生范式（HIG familiar / clean），不靠二级面色差堆层级。
+     仅 header 用纯白：按钮 hover 与底部 hint 仍走 --surface-secondary 保留 affordance
+     与反馈层级，避免全局纯白压平按压/hover 反馈。 */
+  --header-bg: #ffffff;
+  /* 底部 hint / 按钮 hover 的二级面（header 已剥离，见 --header-bg）。维持阶段 53 的
+     H≈60° 同暖系、S<6 极低饱、L=96 暖中性近白 #f5f5f2：(a) 与 logo 暖灰同色系，消除
+     补色冲突让暖灰溶入底色；(b) S<6 维持与 body --bg #f2f2f4 冷中性 popup 色温一致，
+     不泛米黄；(c) vs #0074bc 深蓝 contrast≈4.5（≥3:1）维持 logo 边框辨识，
+     vs #ffffff contrast≈1.09 让白/近白留白融入。 */
+  --surface-secondary: #f5f5f2;
   --field: #f2f2f4;
   --text: #1d1d1f;
   --text-secondary: #626267;
@@ -17,6 +32,7 @@
   --switch-off: #b7b7bc;
   --success: #248a3d;
   --warning: #8a4b08;
+  --warning-accent: #b45309;
   --warning-bg: #fff8eb;
   --warning-border: #edd7ae;
   --danger: #d70015;
@@ -75,7 +91,7 @@ input {
   justify-content: space-between;
   min-height: 40px;
   padding: 7px 12px 7px 14px;
-  background: var(--surface-secondary);
+  background: var(--header-bg);
   border-bottom: 1px solid var(--border);
 }
 
@@ -174,15 +190,62 @@ input {
 }
 
 .balance-estimate {
+  position: relative;
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-start;
   overflow: hidden;
   margin-left: auto;
   color: var(--text-tertiary);
   font-size: 11px;
   font-weight: 500;
   font-variant-numeric: tabular-nums;
-  line-height: 14px;
+  line-height: 13px;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.balance-estimate.is-urgent::before {
+  position: absolute;
+  right: auto;
+  bottom: 3px;
+  left: 0;
+  display: grid;
+  width: 8px;
+  height: 8px;
+  place-items: center;
+  color: #fff;
+  background: var(--warning-accent);
+  border-radius: 50%;
+  content: "!";
+  font-size: 7px;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.balance-estimate-prefix,
+.balance-estimate-time {
+  display: block;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.balance-estimate-prefix {
+  color: var(--text-tertiary);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 14px;
+}
+
+.balance-estimate-time {
+  color: var(--text-secondary);
+  font-weight: 600;
+}
+
+.balance-estimate.is-urgent .balance-estimate-time {
+  padding-left: 11px;
+  color: var(--warning-accent);
 }
 
 .balance-estimate[hidden] {
@@ -575,6 +638,7 @@ a:focus-visible,
     --separator: #7a7a80;
     --switch-off: #737378;
   }
+
 }
 
 @media (prefers-reduced-motion: reduce) {

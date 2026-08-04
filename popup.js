@@ -197,26 +197,49 @@ function renderBalanceEstimate(schedule) {
   const displayAt = Number(estimate?.displayAt);
   if (!schedule?.enabled || !Number.isFinite(balance) || balance < 0
       || !Number.isFinite(displayAt)) {
+    balanceEstimate.classList.remove('is-urgent');
+    balanceEstimate.removeAttribute('aria-label');
     balanceEstimate.hidden = true;
     return;
   }
 
   const locale = I18n.getLang().replace('_', '-');
   const target = new Date(displayAt);
-  const sameDay = target.toDateString() === new Date().toDateString();
+  const today = new Date();
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+  const sameDay = target.toDateString() === today.toDateString();
+  const nextDay = target.toDateString() === tomorrow.toDateString();
   const clockAt = `${String(target.getHours()).padStart(2, '0')}:${String(target.getMinutes()).padStart(2, '0')}`;
+  const monthDay = `${String(target.getMonth() + 1).padStart(2, '0')}-${String(target.getDate()).padStart(2, '0')}`;
   const shortDate = sameDay
-    ? ''
-    : new Intl.DateTimeFormat(locale, { month: 'numeric', day: 'numeric' }).format(target);
-  const shortAt = shortDate ? `${shortDate} ${clockAt}` : clockAt;
+    ? t('balanceEstimateToday')
+    : nextDay
+      ? t('balanceEstimateTomorrow')
+      : monthDay;
+  const shortAt = `${shortDate} ${clockAt}`;
   const fullAt = new Intl.DateTimeFormat(locale, {
     dateStyle: 'medium',
     timeStyle: 'short',
     hourCycle: 'h23'
   }).format(target);
 
-  balanceEstimate.textContent = t('balanceEstimateShort', shortAt);
-  balanceEstimate.title = t('balanceEstimateTitle', fullAt);
+  const urgent = isBalanceEstimateUrgent(estimate?.usableWallMinutes);
+  const estimateTitle = t(urgent ? 'balanceEstimateUrgentTitle' : 'balanceEstimateTitle', fullAt);
+  const estimatePrefix = document.createElement('span');
+  estimatePrefix.className = 'balance-estimate-prefix';
+  estimatePrefix.textContent = t('balanceEstimatePrefix');
+  const estimateTime = document.createElement('span');
+  estimateTime.className = 'balance-estimate-time';
+  estimateTime.textContent = shortAt;
+  balanceEstimate.replaceChildren(estimatePrefix, estimateTime);
+  balanceEstimate.classList.toggle('is-urgent', urgent);
+  balanceEstimate.title = estimateTitle;
+  if (urgent) {
+    balanceEstimate.setAttribute('aria-label', estimateTitle);
+  } else {
+    balanceEstimate.removeAttribute('aria-label');
+  }
   balanceEstimate.hidden = false;
 }
 
@@ -240,8 +263,19 @@ function updateCountdownDisplay(schedule, alarm) {
   idleDisplay.style.display = 'none';
   countdownDisplay.style.display = 'flex';
 
-  const nextAction = schedule._effectivePwmState || schedule._nextAction || schedule.pwmState;
-  // pwmState 是下一次闹钟要执行的动作；优先使用页面读取到的真实状态。
+  // 优先级：full 路径 _effectivePwmState（页面真实状态反推）> lite 路径合并的
+  // cached actualStatus 反推 > 兜底 pwmState。fallback 加 cached 反推是为了
+  // ON 路径 setPageTimer 失败的故障态：background.js 故意保持 pwmState='on' 让
+  // 1 分钟后整轮幂等 ON + 重试 setPageTimer（见 background.js runPwmStep 顶部
+  // "PWM ON 失败重试" 注释），此时 pwmState='on' 既不代表"AC 当前 OFF"也不代表
+  // "用户应看到分钟后自动开启"。状态行已通过 refreshStatus() 合并的 cached
+  // actualStatus 显示"冷气运行中"，hero caption 必须同源取 cached actualStatus
+  // 反推，否则会出现"运行中、分钟后自动开启"这种自相矛盾文案。
+  const nextAction = schedule._effectivePwmState
+    || schedule._nextAction
+    || (typeof schedule.actualStatus?.isOn === 'boolean'
+      ? (schedule.actualStatus.isOn ? 'off' : 'on')
+      : schedule.pwmState);
   const inferredACOn = nextAction !== 'on';
   const currentACOn = typeof schedule.actualStatus?.isOn === 'boolean'
     ? schedule.actualStatus.isOn

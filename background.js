@@ -8,7 +8,7 @@ importScripts('sync-helpers.js');  // 跨设备同步的纯函数（composeSyncP
 const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const AC_PAGE = 'https://w5.ab.ust.hk/njggt/app/home';
-const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [3000, 5000, 10000];
+const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [3000, 10000, 30000];
 const STORAGE_KEY = 'ac_schedule';
 
 // 跨设备同步：瘦化版 schedule 写到 chrome.storage.sync。详见 sync-helpers.js 注释。
@@ -1383,29 +1383,66 @@ async function toggleACOnce(action) {
 }
 
 async function _toggleOnExistingTab(tab, action) {
-  // 先探测 content script 是否就绪，未就绪则用 scripting 兜底注入
   const ready = await ensureContentScriptLoaded(tab.id);
   if (!ready) {
     return { success: false, error: 'content script 注入失败' };
   }
 
   try {
-    const result = await chrome.tabs.sendMessage(tab.id, { action });
-    console.log(`[AC扩展] ${action} 命令返回:`, result);
-    if (!result?.success) {
-      console.warn('[AC扩展] 页面返回未确认，本次不重复发送:', result);
+    return await sendACToggleMessage(tab.id, action);
+  } catch (e) {
+    if (!isClosedMessagePortError(e)) {
+      console.error('[AC扩展] 发送消息失败，本次不重复发送:', e?.message);
+      return { success: false, tabId: tab.id, error: e?.message || String(e) };
+    }
+
+    const initialError = e?.message || String(e);
+    console.warn('[AC扩展] 消息端口在响应前关闭，刷新页面后重试一次:', initialError);
+    try {
+      await chrome.tabs.reload(tab.id);
+      const pageReady = await waitForTabReady(tab.id, 30000);
+      if (!pageReady) throw new Error('消息端口恢复刷新超时');
+
+      const refreshedTab = await chrome.tabs.get(tab.id);
+      if (!isACTab(refreshedTab)) throw new Error('刷新后的标签页已离开 AC 页面');
+
+      const contentReady = await ensureContentScriptLoaded(tab.id);
+      if (!contentReady) throw new Error('刷新后 content script 注入失败');
+
+      const retryResult = await sendACToggleMessage(tab.id, action);
+      return { ...retryResult, recoveredByReload: true, initialError };
+    } catch (retryError) {
+      console.error('[AC扩展] 刷新后单次重试失败:', retryError?.message);
       return {
         success: false,
         tabId: tab.id,
-        result,
-        error: result?.error || `${action} 命令未确认`
+        recoveredByReload: true,
+        initialError,
+        error: retryError?.message || String(retryError)
       };
     }
-    return { success: true, tabId: tab.id, result };
-  } catch (e) {
-    console.error('[AC扩展] 发送消息失败，本次不重复发送:', e?.message);
-    return { success: false, tabId: tab.id, error: e?.message || String(e) };
   }
+}
+
+function isClosedMessagePortError(error) {
+  const message = String(error?.message || error || '').toLowerCase();
+  return message.includes('message port closed before a response was received')
+    || message.includes('message channel closed before a response was received');
+}
+
+async function sendACToggleMessage(tabId, action) {
+  const result = await chrome.tabs.sendMessage(tabId, { action });
+  console.log(`[AC扩展] ${action} 命令返回:`, result);
+  if (!result?.success) {
+    console.warn('[AC扩展] 页面返回未确认，本次不重复发送:', result);
+    return {
+      success: false,
+      tabId,
+      result,
+      error: result?.error || `${action} 命令未确认`
+    };
+  }
+  return { success: true, tabId, result };
 }
 
 async function _toggleOnNewTab(tabId, action) {

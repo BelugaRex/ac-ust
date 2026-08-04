@@ -44,8 +44,11 @@
   "countdownClock": { "message": "Next <strong>$1:00</strong> → $2" },
   "countdownCaption": { "message": "min until auto $1" },
   "countdownSoon": { "message": "Auto $1 soon" },
-  "balanceEstimateShort": { "message": "Est. until $1" },
+  "balanceEstimatePrefix": { "message": "Est. until" },
+  "balanceEstimateToday": { "message": "Today" },
+  "balanceEstimateTomorrow": { "message": "Tomorrow" },
   "balanceEstimateTitle": { "message": "Estimated availability with current cycle settings: $1" },
+  "balanceEstimateUrgentTitle": { "message": "Alert: The AC balance is estimated to run out within 24 hours. Estimated availability with current cycle settings: $1" },
 
   "statusClosing": { "message": "Turning off AC…" },
   "statusClosedOK": { "message": "Timer stopped, AC turned off" },
