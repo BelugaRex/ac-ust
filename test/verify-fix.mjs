@@ -66,7 +66,7 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
         if (!handler) return undefined;
         return handler(msg);
       },
-      getManifest: () => ({ version: '0.6.2' }),
+      getManifest: () => ({ version: '0.6.3' }),
       getPlatformInfo: async () => ({ os: 'win' }),
       onConnect: { addListener() {} },
       onUpdateAvailable: { addListener() {} }

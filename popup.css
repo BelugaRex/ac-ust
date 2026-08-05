@@ -2,35 +2,37 @@
 :root {
   color-scheme: light;
   --popup-width: 250px;
-  --bg: #f2f2f4;
+  /* ============================================================
+   * v0.6.3 设计转向：以 UST 页面色板为主、Apple HIG 为辅
+   * （2026-08-04 从 .vscode/开机+已设置好定时.md 与关机.md 两份
+   *  DOM 快照提取的硬编码色作权威依据，按出现频次排序）：
+   *   #075185 ×8   Welcome/Notices 标题深蓝 → 主强调色
+   *   #205181 ×8   Air Conditioning Balance h3 蓝 → hover 一阶
+   *   #f2f2f2  ×8   进度环外框 / 软分隔灰 → 背景软灰
+   *   #bababa  ×4   次要灰色文字（AA 不足，用 Tailwind 同系替代）
+   *   #52c41a  ×2   AntD 进度环 success 绿 → 状态点
+   *   #f9a425  ×2   AntD 进度环 amber 告警 → 警告装饰
+   *   + UST SVG 描边 #0f172a（slate-900）→ 主文本近黑
+   *   + Tailwind gray-500 #6b7280 → 次级文本（达 AA 4.5:1）
+   * HIG 角度：UTS 浅蓝 #93c5fd（vs #075185 同色系）不让其直接
+   * 争抢强调色，只在 inline SVG 内部装饰层使用；状态点 #52c41a
+   *  在 prefers-contrast:more 加深为 #15803d 防 AA 文本退化。
+   * ============================================================ */
+  --bg: #f2f2f2;
   --surface: #ffffff;
-  /* header 画布：阶段 54 拆分——header 单独走纯白 #ffffff，作为 logo 的画布。根因是
-     logo 内部浅灰 #eff0f0（L≈0.87）在所有候选浅底（纯白 / #f5f5f2 / body --bg #f2f2f4）
-     上对比比都 < 3:1 图形门限，纯白给出最大明度差（vs 纯白 ≈1.14、vs #f5f5f2 ≈1.04、
-     vs body ≈1.02），被吞得最轻；logo 边框深蓝 #0074bc 与浅灰、米色 #bab7a5 三个色
-     在纯白上均清晰，是真正最干净的画布（logo 内无纯白，纯白底不干扰任何内部色）。
-     header 与白卡 --surface #ffffff 同色，分层改由 1px --border 发丝线表达——
-     macOS 设置面板原生范式（HIG familiar / clean），不靠二级面色差堆层级。
-     仅 header 用纯白：按钮 hover 与底部 hint 仍走 --surface-secondary 保留 affordance
-     与反馈层级，避免全局纯白压平按压/hover 反馈。 */
   --header-bg: #ffffff;
-  /* 底部 hint / 按钮 hover 的二级面（header 已剥离，见 --header-bg）。维持阶段 53 的
-     H≈60° 同暖系、S<6 极低饱、L=96 暖中性近白 #f5f5f2：(a) 与 logo 暖灰同色系，消除
-     补色冲突让暖灰溶入底色；(b) S<6 维持与 body --bg #f2f2f4 冷中性 popup 色温一致，
-     不泛米黄；(c) vs #0074bc 深蓝 contrast≈4.5（≥3:1）维持 logo 边框辨识，
-     vs #ffffff contrast≈1.09 让白/近白留白融入。 */
-  --surface-secondary: #f5f5f2;
-  --field: #f2f2f4;
-  --text: #1d1d1f;
+  --surface-secondary: #f0f0f0;
+  --field: #f2f2f2;
+  --text: #0f172a;
   --text-secondary: #626267;
-  --text-tertiary: #77777d;
-  --border: #d9d9de;
-  --separator: #e8e8ec;
-  --accent: #007aff;
-  --accent-hover: #006ee6;
-  --focus: rgba(0, 122, 255, 0.22);
+  --text-tertiary: #6b7280;
+  --border: #e5e7eb;
+  --separator: #f2f2f2;
+  --accent: #075185;
+  --accent-hover: #205181;
+  --focus: rgba(7, 81, 133, 0.22);
   --switch-off: #b7b7bc;
-  --success: #248a3d;
+  --success: #52c41a;
   --warning: #8a4b08;
   --warning-accent: #b45309;
   --warning-bg: #fff8eb;
@@ -274,6 +276,50 @@ input {
 .ac-dot.unknown {
   background: transparent;
   border-color: var(--switch-off);
+}
+
+/* ===== UST 房控页内联 SVG 图标 (v0.6.3) =====
+ * 三个图标来自 .vscode/svg-refs/{Aircondition,Timer,Electric}.svg 直接内联到 popup.html；
+ * 原作者配色 #93c5fd(天窗蓝) / #fff(雪花) / #0f172a(slate-900 描边) / #fddd5a(雷电金)。
+ * 描边统一写入 var(--text)，复用 popup.css 当前唯一的浅色 --text: #0f172a，
+ * 与 UST 原 SVG 描边数值完全一致；未来若新增深色档分支，--text 随动后描边无需手改。
+ * 装饰 svg 全 aria-hidden，HIG 保底由同行文字承担。
+ */
+.ac-icon,
+.timer-icon,
+.electric-icon {
+  display: inline-block;
+  flex: 0 0 auto;
+  --ust-skylight: #93c5fd;
+  --ust-snow: #ffffff;
+  --ust-ink: var(--text);
+  --ust-bolt: #fddd5a;
+}
+.ac-icon {
+  width: 16px;
+  height: 16px;
+  align-self: center;
+}
+.timer-icon {
+  width: 16px;
+  height: 19px;
+  align-self: baseline;
+  flex: 0 0 16px;
+}
+.electric-icon {
+  width: 12px;
+  height: 12px;
+}
+.balance-cluster {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: auto;
+  /* cluster 接管右锚：原 .balance-estimate margin-left:auto 由 verify-fix.mjs 正则锁定保留，
+     进入 cluster 后变成 no-op，但 .balance-cluster 顶替执行相同锚定职责，视觉右对齐不变。 */
+}
+.balance-cluster .balance-estimate {
+  margin-left: 0;
 }
 
 .hero-countdown {
@@ -637,6 +683,9 @@ a:focus-visible,
     --border: #69696e;
     --separator: #7a7a80;
     --switch-off: #737378;
+    /* UST #52c41a AntD 进度环绿在白底 ~3.4:1，弱视用户接近 AA 4.5:1 阈值以下；
+       高对比模式加深到 Tailwind green-700 #15803d（~5.5:1） */
+    --success: #15803d;
   }
 
 }
