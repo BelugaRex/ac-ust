@@ -652,6 +652,46 @@ input {
   overflow-wrap: anywhere;
 }
 
+/* 诊断结果区顶部小工具条：可见标题 + 复制按钮（附属操作，默认随诊断完成显示） */
+.diag-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.diag-bar-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-tertiary);
+}
+.diag-content {
+  overflow-wrap: anywhere;
+}
+.diag-copy {
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 18px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  padding: 3px 9px;
+  cursor: pointer;
+  transition: background-color 120ms ease, color 120ms ease, transform 120ms ease;
+}
+.diag-copy:hover {
+  background: var(--surface-secondary);
+  color: var(--text);
+}
+.diag-copy:active {
+  transform: scale(0.98);
+}
+.diag-copy[hidden] {
+  display: none;
+}
+
 .visually-hidden {
   position: absolute;
   width: 1px;

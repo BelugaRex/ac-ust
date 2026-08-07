@@ -29,6 +29,10 @@
   "btnTimedOn": { "message": "⏰ Timed On" },
   "btnTimedOff": { "message": "⏹️ Timed Off" },
   "btnDiagnose": { "message": "Run diagnostics" },
+  "btnCopyDiag": { "message": "Copy results" },
+  "copyDiagDone": { "message": "Diagnostic results copied to clipboard" },
+  "copyDiagEmpty": { "message": "Run diagnostics first" },
+  "copyFailed": { "message": "Copy failed, select text manually" },
 
   "timerEnabled": { "message": "On" },
   "timerDisabled": { "message": "Off" },

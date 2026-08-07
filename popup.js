@@ -470,6 +470,37 @@ if (versionInfo) {
 // ----- 自诊断：检查 PWM 链路各环节状态 -----
 const btnDiagnose = document.getElementById('btnDiagnose');
 const diagnoseResult = document.getElementById('diagnoseResult');
+const btnCopyDiag = document.getElementById('btnCopyDiag');
+let lastDiagLines = [];
+
+// 复制诊断结果到剪贴板：Markdown 代码块格式，方便用户一键粘贴进 GitHub issue。
+// 兼容回退 execCommand，万一 clipboard API 在某些环境不可用（MV3 popup 在 secure context 通常正常）。
+if (btnCopyDiag) {
+  btnCopyDiag.addEventListener('click', async () => {
+    if (!lastDiagLines.length) {
+      showStatus(t('copyDiagEmpty'), 'error');
+      return;
+    }
+    const NL = String.fromCharCode(10);
+    const text = '```' + NL + lastDiagLines.join(NL) + NL + '```';
+    let ok;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch (_) {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'absolute';
+      ta.style.left = '-9999px';
+      document.body.append(ta);
+      ta.select();
+      ok = document.execCommand('copy');
+      ta.remove();
+    }
+    showStatus(ok ? t('copyDiagDone') : t('copyFailed'), ok ? 'success' : 'error');
+  });
+}
 
 function renderDiagnoseResult(lines) {
   const fragment = document.createDocumentFragment();
@@ -477,12 +508,14 @@ function renderDiagnoseResult(lines) {
     if (index > 0) fragment.append(document.createElement('br'));
     fragment.append(document.createTextNode(line));
   });
-  diagnoseResult.replaceChildren(fragment);
+  document.getElementById('diagContent').replaceChildren(fragment);
 }
 
 btnDiagnose.addEventListener('click', async () => {
   diagnoseResult.style.display = 'block';
-  diagnoseResult.textContent = t('diagnoseInProgress');
+  document.getElementById('diagContent').textContent = t('diagnoseInProgress');
+  if (btnCopyDiag) btnCopyDiag.hidden = true;
+  lastDiagLines = [];
   showStatus(t('diagnoseInProgress'), '');
   btnDiagnose.disabled = true;
   
@@ -699,6 +732,8 @@ btnDiagnose.addEventListener('click', async () => {
   }
   
   renderDiagnoseResult(lines);
+  lastDiagLines = lines.slice();
+  if (btnCopyDiag) btnCopyDiag.hidden = false;
   btnDiagnose.disabled = false;
   showStatus(t('diagnoseComplete'), 'success');
 });

@@ -29,6 +29,10 @@
   "btnTimedOn": { "message": "⏰ 定时开", "description": "定时开按钮文字（v0.5.0 后已弃用，保留兼容）" },
   "btnTimedOff": { "message": "⏹️ 定时关", "description": "定时关按钮文字（v0.5.0 后已弃用，保留兼容）" },
   "btnDiagnose": { "message": "运行诊断", "description": "诊断按钮文字" },
+  "btnCopyDiag": { "message": "复制诊断", "description": "复制诊断结果到剪贴板的按钮文字" },
+  "copyDiagDone": { "message": "诊断结果已复制到剪贴板", "description": "复制诊断成功的状态反馈" },
+  "copyDiagEmpty": { "message": "请先运行诊断", "description": "未运行诊断就点复制时的提示" },
+  "copyFailed": { "message": "复制失败，请手动选择文字", "description": "剪贴板写入失败时的提示" },
 
   "timerEnabled": { "message": "已开启", "description": "定时 toggle 打开时的标签（语境由同行标题提供）" },
   "timerDisabled": { "message": "已关闭", "description": "定时 toggle 关闭时的标签（语境由同行标题提供）" },

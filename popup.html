@@ -1295,7 +1295,13 @@
       <div class="status" id="status" role="status" aria-live="polite" aria-atomic="true"></div>
       <button class="btn-diagnose" id="btnDiagnose" data-i18n="btnDiagnose"></button>
     </div>
-    <div class="diagnose-result" id="diagnoseResult" role="region" tabindex="0" aria-live="off" data-i18n-aria-label="diagnoseResultLabel"></div>
+    <div class="diagnose-result" id="diagnoseResult" role="region" tabindex="0" aria-live="off" data-i18n-aria-label="diagnoseResultLabel">
+      <div class="diag-bar">
+        <span class="diag-bar-title" data-i18n="diagnoseResultLabel"></span>
+        <button class="diag-copy" id="btnCopyDiag" data-i18n="btnCopyDiag" hidden></button>
+      </div>
+      <div class="diag-content" id="diagContent"></div>
+    </div>
 
   </div>
 
