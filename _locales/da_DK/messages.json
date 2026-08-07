@@ -363,6 +363,10 @@
     "message": "BUILD_TIME: $1",
     "description": "诊断：构建时间戳。$1=时间字符串"
   },
+  "diagnoseVersion": {
+    "message": "版本 $1 (build $2)",
+    "description": "诊断：扩展版本+构建时间。$1=APP_VERSION,$2=BUILD_TIME"
+  },
   "diagnoseException": {
     "message": "诊断异常: ",
     "description": "诊断：异常前缀"
@@ -422,6 +426,10 @@
   "diagnoseOffscreenMissing": {
     "message": "offscreen 保活页缺失 — L2 长连接可能已失效",
     "description": "诊断：L2 长连接保活页缺失"
+  },
+  "diagnoseOffscreenUnknown": {
+    "message": "offscreen 状态未提供 (SW 可能跑旧版本)",
+    "description": "诊断：SW 未返回 offscreenAlive 字段,旧 SW 不支持"
   },
   "diagnoseActiveHoursOn": {
     "message": "运行时段已启用 ($1 → $2)",
