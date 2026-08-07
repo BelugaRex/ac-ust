@@ -1577,6 +1577,16 @@ async function runTests() {
       && popupSource.includes("diagnosePageTimerRetryNone")
       && popupSource.includes("diagnoseHeartbeatStale"),
     '14G: 诊断面板新增 5 闹钟中的 ac-active-boundary/ac-page-timer-retry 与 L2 offscreen 与 heartbeat 真状态读取');
+  assertPass(!popupSource.includes('const fmt2 =')
+      && popupSource.includes("const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';")
+      && /diagnoseTriMatch', fmt\(/.test(popupSource)
+      && /diagnoseTriMismatch', fmt\(/.test(popupSource),
+    '14H: 诊断 fmt 提升到顶层一次,不再重现 fmt2 typo 致 SW success 分支 ReferenceError (“fmt is not defined” v0.6.7 实测浮現)');
+  assertPass(popupSource.includes("sw.offscreenAlive === true")
+      && popupSource.includes("sw.offscreenAlive === false")
+      && popupSource.includes('diagnoseOffscreenUnknown')
+      && popupSource.includes('diagnoseVersion'),
+    '14I: offscreen 诊断行三态兼容(旧 SW undefined 不误红)+ 诊断面板末行显示扩展版本+build');
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;

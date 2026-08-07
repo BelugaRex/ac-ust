@@ -521,6 +521,9 @@ btnDiagnose.addEventListener('click', async () => {
   
   const lines = [];
   function add(ok, msg) { lines.push((ok ? '✅' : '❌') + ' ' + msg); }
+  // fmt 提升到顶层:此前 4.5 段局部 const fmt (if 块作用域) + 5 段 const fmt2 typo (调用写 fmt) 双声明
+  // 引致 SW success 分支 ReferenceError。手里 mock 没跑该分支,潜伏至 v0.6.7 实测。
+  const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';
 
   // B3: 浏览器版本信息 — 方便跨浏览器排障
   const ua = navigator.userAgent;
@@ -687,7 +690,6 @@ btnDiagnose.addEventListener('click', async () => {
         const pt = await chrome.tabs.sendMessage(tabs[0].id, { action: 'getPageTimer' });
         if (pt && pt.found && pt.value) {
           const localNext = effectiveNextTriggerAt || s.nextTriggerAt || 0;
-          const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';
           add(true, t('diagnosePageTimerExpr', pt.value, fmt(localNext), s.pwmState));
         } else {
           add(true, t('diagnosePageTimerEmpty'));
@@ -730,12 +732,14 @@ btnDiagnose.addEventListener('click', async () => {
       const initAgeSec = sw.initAgeMs >= 0 ? Math.round(sw.initAgeMs / 1000) : -1;
       add(sw.initCompleted, t('diagnoseSWInitDone', swAgeSec, initAgeSec));
       // L2 offscreen 长连接保活页(阶段58):每分钟 badge-tick 顺带 ensureOffscreen 重建。
-      // 新 SW 通过 hasDocument() 反馈真值;旧 SW 不返回该字段——按缺失红处理(等同于诊断面板拿不到状态信号)。
-      add(!!sw.offscreenAlive, sw.offscreenAlive ? t('diagnoseOffscreenPresent') : t('diagnoseOffscreenMissing'));
+      // 三态兼容:v0.6.7+ SW 返回 offscreenAlive 真值(true/false);旧 SW 不返回该字段(undefined),
+      // 视为 SW 跑旧代码,不打红灯避免误导用户以为 offscreen 失效。
+      add(sw.offscreenAlive !== false, sw.offscreenAlive === true
+        ? t('diagnoseOffscreenPresent')
+        : (sw.offscreenAlive === false ? t('diagnoseOffscreenMissing') : t('diagnoseOffscreenUnknown')));
       const memNext = sw.memorySchedule?.nextTriggerAt || 0;
       const storedNext = storedSchedule.nextTriggerAt || 0;
       const memLive = sw.liveAlarmScheduledTime || 0;
-      const fmt2 = (t2) => t2 ? new Date(t2).toLocaleTimeString() : '∅';
       if (memLive && memNext === memLive && storedNext === memLive) {
         add(true, t('diagnoseTriMatch', fmt(memLive)));
       } else {
@@ -755,7 +759,7 @@ btnDiagnose.addEventListener('click', async () => {
 
     // 6. 构建时间戳:让用户/诊断能直接判断扩展实际加载的是哪次 build
     //    (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
-    add(true, t('diagnoseBuildTime', BUILD_TIME));
+    add(true, t('diagnoseVersion', APP_VERSION, BUILD_TIME));
 
     // 7. i18n 系统状态诊断 — 显示 I18n 模块实际加载的语言和翻译测试结果
     const i18nLang = I18n.getLang();
