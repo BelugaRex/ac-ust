@@ -66,7 +66,7 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
         if (!handler) return undefined;
         return handler(msg);
       },
-      getManifest: () => ({ version: '0.6.3' }),
+      getManifest: () => ({ version: '0.6.4' }),
       getPlatformInfo: async () => ({ os: 'win' }),
       onConnect: { addListener() {} },
       onUpdateAvailable: { addListener() {} }
@@ -1044,10 +1044,10 @@ async function runTests() {
       && !backgroundSource.includes('async function retryToggle'),
     '9I: background 已删除四次即时消息重试路径');
   assertPass(existingTabBody.includes('isClosedMessagePortError(e)')
-      && existingTabBody.includes('await chrome.tabs.reload(tab.id)')
+      && existingTabBody.includes('await chrome.tabs.update(tab.id, { url: AC_PAGE })')
       && existingTabBody.includes('await waitForTabReady(tab.id, 30000)')
-      && existingTabBody.includes('recoveredByReload: true'),
-    '9J: 仅消息端口提前关闭时刷新原标签，并标记单次恢复结果');
+      && existingTabBody.includes('recoveredByNavigate: true'),
+    '9J: 仅消息端口提前关闭时导航到 AC 入口页 home，并标记单次恢复结果');
   assertPass(!contentSource.includes('function dispatchUserClick(')
       && !contentSource.includes('async function clickConfirmDialog('),
     '9K: content 隔离世界不存在第二套开关/确认点击器');
@@ -1067,11 +1067,13 @@ async function runTests() {
   const verifySectionForReload = verificationStartForReload >= 0 && verificationEndForReload > verificationStartForReload
     ? backgroundSource.slice(verificationStartForReload, verificationEndForReload)
     : '';
-  assertPass(countOccurrences(backgroundSource, 'chrome.tabs.reload(') === 2
+  assertPass(countOccurrences(backgroundSource, 'chrome.tabs.reload(') === 0
+      && countOccurrences(backgroundSource, 'chrome.tabs.update(') === 3
       && backgroundSource.includes('async function restoreDiscardedACTab(tab)')
       && !verifySectionForReload.includes('chrome.tabs.reload(')
+      && !verifySectionForReload.includes('chrome.tabs.update(')
       && !verifySectionForReload.includes('sourceWasAutoCreated'),
-    '9N: 刷新只用于 discarded 恢复或消息端口提前关闭；页面定时器验证绝不刷新写入来源页');
+    '9N: discarded 恢复与端口提前关闭均导航到 AC 入口页 home 而非刷新当前 URL；页面定时器验证绝不刷新/导航写入来源页');
   assertPass(setTimerBody.includes('chrome.tabs.create({ url: AC_PAGE, active: false })')
       && setTimerBody.includes('restoreDiscardedACTab(tab)'),
     '9O: 页面定时器缺少可用标签时只创建隐藏 AC 页恢复，不刷新正常页面');
@@ -1095,12 +1097,14 @@ async function runTests() {
     'chrome',
     'waitForTabReady',
     'isACTab',
+    'isACHomePageTab',
     'ensureContentScriptLoaded',
     'console',
+    'AC_PAGE',
     `${toggleRecoverySource}; return { _toggleOnExistingTab, isClosedMessagePortError };`
   );
   const quietConsole = { log() {}, warn() {}, error() {} };
-  const recoveryCalls = { send: 0, reload: 0, get: 0, ready: 0, ensure: 0 };
+  const recoveryCalls = { send: 0, update: 0, get: 0, ready: 0, ensure: 0 };
   const recoveryChrome = {
     tabs: {
       async sendMessage() {
@@ -1110,9 +1114,10 @@ async function runTests() {
         }
         return { success: true, state: 'on' };
       },
-      async reload(tabId) {
-        recoveryCalls.reload += 1;
-        assertPass(tabId === 41, '9J-1: 恢复刷新沿用原 AC 标签页');
+      async update(tabId, info) {
+        recoveryCalls.update += 1;
+        assertPass(tabId === 41 && info?.url === 'https://w5.ab.ust.hk/njggt/app/home',
+          '9J-1: 恢复导航沿用原 AC 标签页且目标为 AC 入口页 home');
       },
       async get(tabId) {
         recoveryCalls.get += 1;
@@ -1124,24 +1129,27 @@ async function runTests() {
     recoveryChrome,
     async () => { recoveryCalls.ready += 1; return true; },
     tab => tab?.url?.startsWith('https://w5.ab.ust.hk/njggt/app/'),
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
     async () => { recoveryCalls.ensure += 1; return true; },
-    quietConsole
+    quietConsole,
+    'https://w5.ab.ust.hk/njggt/app/home'
   );
-  const recoveredToggle = await recoveryHarness._toggleOnExistingTab({ id: 41 }, 'on');
-  assertPass(recoveredToggle.success === true && recoveredToggle.recoveredByReload === true,
-    '9J-2: 端口提前关闭后刷新并单次重试成功');
-  assertPass(recoveryCalls.send === 2 && recoveryCalls.reload === 1
+  const recoveredToggle = await recoveryHarness._toggleOnExistingTab(
+    { id: 41, url: 'https://w5.ab.ust.hk/njggt/app/home' }, 'on');
+  assertPass(recoveredToggle.success === true && recoveredToggle.recoveredByNavigate === true,
+    '9J-2: 端口提前关闭后导航到 AC 入口页 home 并单次重试成功');
+  assertPass(recoveryCalls.send === 2 && recoveryCalls.update === 1
       && recoveryCalls.ready === 1 && recoveryCalls.get === 1 && recoveryCalls.ensure === 2,
-    '9J-3: 恢复链路恰好发送两次、刷新一次，并重新等待与注入');
+    '9J-3: 恢复链路恰好发送两次、导航一次，并重新等待与注入');
 
-  const ordinaryCalls = { send: 0, reload: 0 };
+  const ordinaryCalls = { send: 0, update: 0 };
   const ordinaryChrome = {
     tabs: {
       async sendMessage() {
         ordinaryCalls.send += 1;
         throw new Error('Could not establish connection. Receiving end does not exist.');
       },
-      async reload() { ordinaryCalls.reload += 1; },
+      async update() { ordinaryCalls.update += 1; },
       async get() { return { id: 42, url: 'https://w5.ab.ust.hk/njggt/app/home' }; }
     }
   };
@@ -1149,13 +1157,64 @@ async function runTests() {
     ordinaryChrome,
     async () => true,
     () => true,
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
     async () => true,
-    quietConsole
+    quietConsole,
+    'https://w5.ab.ust.hk/njggt/app/home'
   );
-  const ordinaryFailure = await ordinaryHarness._toggleOnExistingTab({ id: 42 }, 'on');
+  const ordinaryFailure = await ordinaryHarness._toggleOnExistingTab(
+    { id: 42, url: 'https://w5.ab.ust.hk/njggt/app/home' }, 'on');
   assertPass(ordinaryFailure.success === false
-      && ordinaryCalls.send === 1 && ordinaryCalls.reload === 0,
-    '9J-4: 非端口提前关闭错误不刷新、不重复发送');
+      && ordinaryCalls.send === 1 && ordinaryCalls.update === 0,
+    '9J-4: 非端口提前关闭错误不导航、不重复发送');
+
+  // 9T: prioritively-navivgate-to-home: 初始 tab URL 偏离 home 时（典型为风控/警告态 app/warning）
+  //     proactively 先 navigate 到 AC_PAGE，再走正常发送流程；不靠“刷新式”重试。
+  const proactiveCalls = { send: 0, update: 0, get: 0, ready: 0, ensure: 0 };
+  const proactiveChrome = {
+    tabs: {
+      async sendMessage() {
+        proactiveCalls.send += 1;
+        return { success: true, state: 'on' };
+      },
+      async update(tabId, info) {
+        proactiveCalls.update += 1;
+        assertPass(tabId === 43
+            && info?.url === 'https://w5.ab.ust.hk/njggt/app/home',
+          '9T-1: proactive navigate 沿用原 AC 标签页且目标为 AC 入口页 home');
+      },
+      async get(tabId) {
+        proactiveCalls.get += 1;
+        return { id: tabId, url: 'https://w5.ab.ust.hk/njggt/app/home' };
+      }
+    }
+  };
+  const proactiveHarness = loadToggleRecovery(
+    proactiveChrome,
+    async () => { proactiveCalls.ready += 1; return true; },
+    () => true,
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
+    async () => { proactiveCalls.ensure += 1; return true; },
+    quietConsole,
+    'https://w5.ab.ust.hk/njggt/app/home'
+  );
+  const proactiveResult = await proactiveHarness._toggleOnExistingTab(
+    { id: 43, url: 'https://w5.ab.ust.hk/njggt/app/warning' }, 'on');
+  assertPass(proactiveResult.success === true
+      && proactiveCalls.update === 1 && proactiveCalls.send === 1
+      && proactiveCalls.ready === 1 && proactiveCalls.get === 1
+      && proactiveCalls.ensure === 1,
+    '9T-2: 初始 URL 偏离 home 时主动 navigate 回 home 再发送 toggle，调用次数不泄灗');
+  assertPass(!proactiveResult.recoveredByNavigate,
+    '9T-3: proactive 路径不附加 recoveredByNavigate（这是端口破裂恢复路径的专用标记）');
+
+  // 9U: 源码契约——isACHomePageTab 与 proactive-home-check 必须同时存在
+  assertPass(backgroundSource.includes('function isACHomePageTab(tab)')
+      && backgroundSource.includes(`const base = tab.url.split('#')[0].split('?')[0];`)
+      && existingTabBody.includes('if (!isACHomePageTab(tab))')
+      && existingTabBody.includes(`'从非 home 子页导航回 home 超时'`)
+      && existingTabBody.includes(`'导航后仍未到达 home'`),
+    '9U: _toggleOnExistingTab 进入时主动用 isACHomePageTab 探测偏离 home 的 tab，走 navigate 而非刷新');
 
   const i18nSource = fs.readFileSync(path.join(ROOT, 'i18n.js'), 'utf8');
   assertPass(i18nSource.includes("querySelectorAll('[data-i18n-title]')"),
@@ -1239,10 +1298,11 @@ async function runTests() {
     : '';
 
   assertPass(!verifyBody.includes('chrome.tabs.reload(')
+      && !verifyBody.includes('chrome.tabs.update(')
       && !verifyBody.includes('sourceWasAutoCreated')
       && verifyBody.includes('for (let attempt = 0; attempt < PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length; attempt++)')
       && verifyBody.includes("chrome.tabs.create({ url: AC_PAGE, active: false })"),
-    '11A: 写入来源页绝不刷新；每次验证均使用独立临时隐藏页');
+    '11A: 写入来源页绝不刷新/导航；每次验证均使用独立临时隐藏页');
   assertPass(verifyBody.includes("{ action: 'getPageTimer' }")
       && verifyBody.includes('actualValue === expectedValue')
       && verifyBody.includes('lastFailure = `第 ${attempt + 1} 次新鲜页读回不匹配')
@@ -1466,6 +1526,10 @@ async function runTests() {
   assertPass(alarmListenerBody13.includes("await persistSchedule('badge-tick-sync'")
       && alarmListenerBody13.includes("if (alarm.name === 'ac-badge-tick')"),
     '13D: 每分钟 badge tick 会把 live alarm 的相位写回 storage');
+  assertPass(alarmListenerBody13.includes("if (alarm.name === 'ac-badge-tick')")
+      && alarmListenerBody13.includes('await updateBadge();')
+      && alarmListenerBody13.includes('await ensureOffscreen();'),
+    '13F: 每分钟 badge-tick 顺带 ensureOffscreen()，守住 L2 长连接保活层');
   assertPass(initBody13.includes('const retryMinutes = Number(schedule.pageTimerRetryMinutes) || 0;')
       && initBody13.includes("createAlarm('ac-page-timer-retry', { when: retryAt })")
       && initBody13.includes("await schedulePageTimerRetry(retryMinutes, '启动恢复错过的页面定时器重试');")

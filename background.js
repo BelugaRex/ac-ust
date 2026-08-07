@@ -125,6 +125,10 @@ async function onActiveBoundaryCrossed() {
     await chrome.alarms.clear('ac-badge-tick');
     await chrome.alarms.clear('ac-watchdog');
     await updateBadge();
+    // B1（active-hours 离开）：先 persist 已停用状态再执行长流程关机 — 与
+    // updateSchedule、applySyncedPhase 同步停用路径保持顺序一致，避免 SW 在
+    // verifyPageTimerPersistence 长流程中被杀导致闹钟自愈"复活" PWM。
+    await persistSchedule('active-hours-leave-pre-shutdown', { syncFromLiveAlarm: false });
     const shutdownResult = await requestTimerBasedShutdown('active-hours-leave');
     if (!shutdownResult?.success) {
       schedule.pageTimerError = `退出运行时段后页面关机定时器未确认：${shutdownResult?.error || '未知错误'}`;
@@ -218,7 +222,13 @@ async function advanceExpiredAlarmToNextBoundary(expiredScheduledTime) {
 
   // 推进直到找到未来边界
   while (boundary <= Date.now()) {
-    const durationMs = (nextAction === 'on' ? schedule.onMinutes : schedule.offMinutes) * 60000;
+    // 防御 storage 损坏 / 远端采纳未 sanitize 的 0 或非数：0 → 死循环，undefined → NaN 传播
+    const minutes = Number(nextAction === 'on' ? schedule.onMinutes : schedule.offMinutes);
+    if (!Number.isFinite(minutes) || minutes <= 0) {
+      console.warn('[AC扩展] advanceExpiredAlarmToNextBoundary: 无效周期 minutes =', minutes, '(onMinutes=', schedule.onMinutes, ', offMinutes=', schedule.offMinutes, ')，放弃推进');
+      return false;
+    }
+    const durationMs = minutes * 60000;
     boundary += durationMs;
     nextAction = nextAction === 'on' ? 'off' : 'on';
   }
@@ -476,6 +486,10 @@ async function applySyncedPhase(remote, reason = '') {
       } else {
         // 无相位 → 本地全新起一轮 PWM（与 updateSchedule enabled→true 路径一致）
         schedule.pwmState = 'on';
+        // 先 persist 内存新状态（enabled=true、pwmState='on'），避免 setupAlarms(true)
+        // → runPwmStep() 顶部 loadScheduleFromStorage() 用 storage 旧值（enabled=false）
+        // 覆盖内存导致 runPwmStep 提前返回、闹钟基础设施丢失。
+        await persistSchedule('sync-enabled-pre-setup', { syncFromLiveAlarm: false });
         await setupAlarms(true);  // startImmediately → runPwmStep，内部建 ac-pwm + badge-tick
         await createAlarm('ac-watchdog', { periodInMinutes: 5 });
       }
@@ -490,6 +504,10 @@ async function applySyncedPhase(remote, reason = '') {
       await chrome.alarms.clear('ac-badge-tick');
       await chrome.alarms.clear('ac-watchdog');
       await updateBadge();
+      // B1（同步停用）：先 persist 停用状态再执行长流程关机 — 防止 SW 在
+      // verifyPageTimerPersistence 的 2 分钟+等待中被杀后，storage 仍是 enabled=true
+      // 导致重启后闹钟自愈"复活" PWM。末尾 `if (changed)` persist 仍处理相位/activeHours。
+      await persistSchedule('sync-disabled-pre-shutdown', { syncFromLiveAlarm: false });
       // 自动关机只依赖 UST 页面定时器，不再点击 AC 开关。
       const shutdownResult = await requestTimerBasedShutdown('sync-disabled');
       if (!shutdownResult?.success) {
@@ -1010,6 +1028,9 @@ async function verifyPageTimerPersistence(expectedValue) {
       const verifierTab = await chrome.tabs.create({ url: AC_PAGE, active: false });
       verifierTabId = verifierTab?.id || null;
       if (!verifierTabId) throw new Error('无法创建页面定时器验证标签页');
+      // 兜底回收闹钟：每轮验证页若 SW 在 sleep(30000) 窗口被杀导致 finally 不执行，
+      // 1 分钟后该闹钟兜底关闭隐藏标签，避免泄漏。与 setPageTimer / _toggleOnNewTab 同模式。
+      chrome.alarms.create(`ac-close-tab-${verifierTabId}`, { delayInMinutes: 1 });
 
       const pageReady = await waitForTabReady(verifierTabId, 30000);
       if (!pageReady) throw new Error('页面定时器验证页等待就绪超时');
@@ -1031,6 +1052,8 @@ async function verifyPageTimerPersistence(expectedValue) {
       // setPageTimer finally 中已有的 ac-close-tab-* 延迟回收逻辑统一处理。
       if (verifierTabId) {
         try { await chrome.tabs.remove(verifierTabId); } catch (_) { /* tab may already be closed */ }
+        // 标签已正常回收，清掉上面登记的兜底闹钟，避免误关后续重用同 id 的标签。
+        try { await chrome.alarms.clear(`ac-close-tab-${verifierTabId}`); } catch (_) { /* alarm may already fire or absent */ }
       }
     }
   }
@@ -1196,6 +1219,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   if (alarm.name === 'ac-badge-tick') {
     // 每分钟刷新角标
     await updateBadge();
+    // L2 长连接保活不变量:每分钟顺带确保 offscreen 文档仍在,
+    // 防止 Chrome/Edge 在长时间无活跃后回收 offscreen 文档导致端口失活。
+    await ensureOffscreen();
     // 间隔模式下的 storage 一致性校准:PWM 步骤漏写 storage 时,1 分钟内会被这里纠正。
     // 这样诊断面板看到的 storage.nextTriggerAt 永远不会落后 live ac-pwm 超过 1 分钟。
     if (schedule.enabled) {
@@ -1239,12 +1265,16 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 
   if (alarm.name === 'ac-watchdog') {
-    await watchdogCheck();
-    // v0.5.10：看门狗每 5 分钟尝试从打开的 AC 页面读取 page timer。
-    //         page timer 现为跨设备主同步通道——不再限制 pwmState='on'。
-    //         无 AC 页面则静默跳过；5 分钟间隔避免频繁读 DOM。
-    if (schedule.enabled) {
-      tryAdoptPageTimer('watchdog').catch(e => /* 不阻塞闹钟流程 */ {});
+    try {
+      await watchdogCheck();
+      // v0.5.10：看门狗每 5 分钟尝试从打开的 AC 页面读取 page timer。
+      //         page timer 现为跨设备主同步通道——不再限制 pwmState='on'。
+      //         无 AC 页面则静默跳过；5 分钟间隔避免频繁读 DOM。
+      if (schedule.enabled) {
+        tryAdoptPageTimer('watchdog').catch(e => /* 不阻塞闹钟流程 */ {});
+      }
+    } catch (e) {
+      console.error('[AC扩展] 看门狗执行失败:', e);
     }
   }
 
@@ -1327,8 +1357,10 @@ async function ensureContentScriptLoaded(tabId, maxRetries = 2) {
 async function restoreDiscardedACTab(tab) {
   if (!tab?.id || !tab.discarded) return tab;
 
-  console.log('[AC扩展] 标签页已被浏览器丢弃，正在恢复...');
-  await chrome.tabs.reload(tab.id);
+  // UST 频繁刷新会触发警告、且警告态下继续刷新回不了 home，故改用 chrome.tabs.update
+  // 直接导航回 AC 入口页 home；对 bfcache 故障态比 reload 当前 URL 更稳定。
+  console.log('[AC扩展] 标签页已被浏览器丢弃，正在恢复（导航回 AC 入口页 home）...');
+  await chrome.tabs.update(tab.id, { url: AC_PAGE });
   const ready = await waitForTabReady(tab.id, 30000);
   if (!ready) throw new Error('被丢弃的 AC 页面恢复超时');
   return chrome.tabs.get(tab.id);
@@ -1383,6 +1415,20 @@ async function toggleACOnce(action) {
 }
 
 async function _toggleOnExistingTab(tab, action) {
+  // E. tab 还活着但已被 SPA/风控/警告态推到 home 以外的 njggt/app/* 子页（如 app/warning）。
+  // 不再用刷新式重试——直接导航到 AC 入口页 home，与 restoreDiscardedACTab 和消息端口
+  // 破裂恢复路径统一为 navigate 而非 reload。
+  if (!isACHomePageTab(tab)) {
+    console.log(`[AC扩展] tab 已离开 home (当前 ${tab?.url})，导航回 AC 入口页后再操作`);
+    await chrome.tabs.update(tab.id, { url: AC_PAGE });
+    const homeReady = await waitForTabReady(tab.id, 30000);
+    if (!homeReady) return { success: false, error: '从非 home 子页导航回 home 超时' };
+    tab = await chrome.tabs.get(tab.id);
+    if (!isACHomePageTab(tab)) {
+      return { success: false, error: '导航后仍未到达 home', currentUrl: tab?.url };
+    }
+  }
+
   const ready = await ensureContentScriptLoaded(tab.id);
   if (!ready) {
     return { success: false, error: 'content script 注入失败' };
@@ -1397,26 +1443,28 @@ async function _toggleOnExistingTab(tab, action) {
     }
 
     const initialError = e?.message || String(e);
-    console.warn('[AC扩展] 消息端口在响应前关闭，刷新页面后重试一次:', initialError);
+    // UST 频繁刷新会触发警告、且警告态下继续刷新回不了 home，故改用 chrome.tabs.update
+    // 直接导航回 AC 入口页 home 进行恢复，比 reload 当前 URL 更稳。
+    console.warn('[AC扩展] 消息端口在响应前关闭，导航到 AC 入口页 home 后重试一次:', initialError);
     try {
-      await chrome.tabs.reload(tab.id);
+      await chrome.tabs.update(tab.id, { url: AC_PAGE });
       const pageReady = await waitForTabReady(tab.id, 30000);
-      if (!pageReady) throw new Error('消息端口恢复刷新超时');
+      if (!pageReady) throw new Error('消息端口恢复导航超时');
 
       const refreshedTab = await chrome.tabs.get(tab.id);
-      if (!isACTab(refreshedTab)) throw new Error('刷新后的标签页已离开 AC 页面');
+      if (!isACTab(refreshedTab)) throw new Error('导航后的标签页已离开 AC 页面');
 
       const contentReady = await ensureContentScriptLoaded(tab.id);
-      if (!contentReady) throw new Error('刷新后 content script 注入失败');
+      if (!contentReady) throw new Error('导航后 content script 注入失败');
 
       const retryResult = await sendACToggleMessage(tab.id, action);
-      return { ...retryResult, recoveredByReload: true, initialError };
+      return { ...retryResult, recoveredByNavigate: true, initialError };
     } catch (retryError) {
-      console.error('[AC扩展] 刷新后单次重试失败:', retryError?.message);
+      console.error('[AC扩展] 导航后单次重试失败:', retryError?.message);
       return {
         success: false,
         tabId: tab.id,
-        recoveredByReload: true,
+        recoveredByNavigate: true,
         initialError,
         error: retryError?.message || String(retryError)
       };
@@ -1509,6 +1557,16 @@ async function waitForTabReady(tabId, timeoutMs = 30000) {
 
 function isACTab(tab) {
   return !!tab?.url && tab.url.startsWith('https://w5.ab.ust.hk/njggt/app/');
+}
+
+// 与 isACTab 用宽匹配事实有别——这里要求 tab 真在 home 上才算可操作的 AC 目标页。
+// 风控/警告态 SPA 常把 tab 推到 home 以外的 njggt/app/* 子页（如 app/warning），
+// 此时 isACTab 仍返回 true；本函数拒绝把“已偏离 home 但仍在 app/* 内”的页当作 home。
+// 接受 home 上的 `'?'` query 与 `'#'` hash，但拒绝 `home/xxx` 子路径。
+function isACHomePageTab(tab) {
+  if (!tab?.url) return false;
+  const base = tab.url.split('#')[0].split('?')[0];
+  return base === AC_PAGE || base === AC_PAGE + '/';
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
