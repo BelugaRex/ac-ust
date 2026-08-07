@@ -103,6 +103,22 @@
     "message": "运行诊断",
     "description": "诊断按钮文字"
   },
+  "btnCopyDiag": {
+    "message": "复制诊断",
+    "description": "复制诊断结果到剪贴板的按钮文字"
+  },
+  "copyDiagDone": {
+    "message": "诊断结果已复制到剪贴板",
+    "description": "复制诊断成功的状态反馈"
+  },
+  "copyDiagEmpty": {
+    "message": "请先运行诊断",
+    "description": "未运行诊断就点复制时的提示"
+  },
+  "copyFailed": {
+    "message": "复制失败，请手动选择文字",
+    "description": "剪贴板写入失败时的提示"
+  },
   "timerEnabled": {
     "message": "已开启",
     "description": "定时 toggle 打开时的标签（语境由同行标题提供）"
@@ -147,13 +163,25 @@
     "message": "即将自动$1",
     "description": "倒计时即将到时的显示。$1=动作(开启/关闭)"
   },
-  "balanceEstimateShort": {
-    "message": "预计可用至$1",
-    "description": "冷气状态同行的预计可用时刻短文案。$1=本地化短时间"
+  "balanceEstimatePrefix": {
+    "message": "预计可用至",
+    "description": "冷气状态同行预计时刻的第一行标签"
+  },
+  "balanceEstimateToday": {
+    "message": "今天",
+    "description": "预计可用时刻与当前日期相同时使用的短日期"
+  },
+  "balanceEstimateTomorrow": {
+    "message": "明天",
+    "description": "预计可用时刻为下一本地日历日时使用的短日期"
   },
   "balanceEstimateTitle": {
     "message": "按当前循环设置，预计可用至 $1",
     "description": "预计可用时刻的完整悬停说明。$1=本地化完整日期时间"
+  },
+  "balanceEstimateUrgentTitle": {
+    "message": "提醒：冷气余额预计会在 24 小时内用完；按当前循环设置，预计可用至 $1",
+    "description": "预计可用时间不足24小时的悬停和无障碍提醒。$1=本地化完整日期时间"
   },
   "statusClosing": {
     "message": "正在关闭冷气…",
@@ -252,8 +280,8 @@
     "description": "诊断：看门狗闹钟"
   },
   "diagnoseHeartbeat": {
-    "message": "setInterval heartbeat（storage 每 20s）",
-    "description": "诊断：心跳"
+    "message": "heartbeat（storage 每 20s，上游写入 $1s 前）",
+    "description": "诊断：心跳新鲜度。$1=秒数"
   },
   "diagnoseAlarmNotExpired": {
     "message": "闹钟未过期 (到期: ",
@@ -308,12 +336,12 @@
     "description": "诊断：SW init 完成。$1=启动秒数，$2=init秒数"
   },
   "diagnoseTriMatch": {
-    "message": "三方一致: live ac-pwm = 内存 = storage = ",
-    "description": "诊断：三方一致前缀"
+    "message": "三方一致: live ac-pwm = 内存 = storage = $1",
+    "description": "诊断：三方一致。$1=触发时间"
   },
   "diagnoseTriMismatch": {
-    "message": "三方校验: live=",
-    "description": "诊断：三方校验前缀"
+    "message": "三方校验: live=$1 内存=$2 storage=$3",
+    "description": "诊断：三方校验。$1/$2/$3=live/内存/storage 触发时间"
   },
   "diagnosePopHealedSw": {
     "message": "popup 已接管 storage 自愈(SW 详细状态不可用,功能正常)",
@@ -338,6 +366,86 @@
   "diagnoseException": {
     "message": "诊断异常: ",
     "description": "诊断：异常前缀"
+  },
+  "diagnoseBrowser": {
+    "message": "ℹ️ 浏览器: ",
+    "description": "诊断：浏览器信息前缀"
+  },
+  "diagnoseSelfHealFail": {
+    "message": "popup 侧 storage 自愈失败: ",
+    "description": "诊断：popup 侧自愈失败前缀"
+  },
+  "diagnoseEnabledPrefix": {
+    "message": "schedule.enabled=",
+    "description": "诊断：enabled 显示前缀"
+  },
+  "diagnoseOn": {
+    "message": "定时已启用",
+    "description": "诊断：定时启用文案"
+  },
+  "diagnoseOff": {
+    "message": "定时未启用",
+    "description": "诊断：定时未启用文案"
+  },
+  "diagnosePageTimerExpr": {
+    "message": "page timer picker=\"$1\" ← $2 (pwmState=$3)",
+    "description": "诊断：page timer 跨设备同步通道。$1=picker 值，$2=本地下次触发，$3=pwmState"
+  },
+  "diagnosePageTimerEmpty": {
+    "message": "page timer picker 空/未设 (校验待 page timer 有值后自动生效)",
+    "description": "诊断：page timer 为空时的提示"
+  },
+  "diagnosePageTimerFail": {
+    "message": "page timer 读取失败: ",
+    "description": "诊断：page timer 读取失败前缀"
+  },
+  "diagnosePageTimerPending": {
+    "message": "page timer 校验待 AC 页面打开后生效",
+    "description": "诊断：page timer 待 AC 页打开后校验"
+  },
+  "diagnoseI18nOK": {
+    "message": "i18n OK (lang=$1, \"pwmSettings\"→\"$2\")",
+    "description": "诊断：i18n 系统正常。$1=语言，$2=测试译文"
+  },
+  "diagnoseI18nNoTrans": {
+    "message": "i18n 未加载翻译 (lang=$1, result=\"$2\")",
+    "description": "诊断：i18n 未加载翻译。$1=语言，$2=测试结果"
+  },
+  "diagnoseHeartbeatStale": {
+    "message": "心跳停止 (上次写入 $1s 前) — SW 可能被冻结",
+    "description": "诊断：心跳 stale。$1=秒数,-1=从未写入"
+  },
+  "diagnoseOffscreenPresent": {
+    "message": "offscreen 保活页存活",
+    "description": "诊断：L2 长连接保活页存活"
+  },
+  "diagnoseOffscreenMissing": {
+    "message": "offscreen 保活页缺失 — L2 长连接可能已失效",
+    "description": "诊断：L2 长连接保活页缺失"
+  },
+  "diagnoseActiveHoursOn": {
+    "message": "运行时段已启用 ($1 → $2)",
+    "description": "诊断：activeHours 已启用。$1=开始,$2=结束"
+  },
+  "diagnoseActiveHoursOff": {
+    "message": "运行时段已禁用 (全天运行)",
+    "description": "诊断：activeHours 已禁用"
+  },
+  "diagnoseActiveBoundary": {
+    "message": "ac-active-boundary 闹钟存在",
+    "description": "诊断：ac-active-boundary 闹钟存在"
+  },
+  "diagnoseActiveBoundaryMissing": {
+    "message": "ac-active-boundary 闹钟缺失 (运行时段边界不会自动触发)",
+    "description": "诊断：ac-active-boundary 闹钟缺失"
+  },
+  "diagnosePageTimerRetry": {
+    "message": "页面定时器重试中 (下次 $1，$2 分钟后)",
+    "description": "诊断：page timer 重试。$1=重试时刻,$2=重试分钟数"
+  },
+  "diagnosePageTimerRetryNone": {
+    "message": "页面定时器无重试 (pageTimerRetryMinutes=0)",
+    "description": "诊断：page timer 无重试"
   },
   "badgeDefault": {
     "message": "冷气定时控制",
