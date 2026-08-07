@@ -433,7 +433,7 @@ startup().then(setupStaticPreviewFit);
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：硬编码须与 manifest.json 版本同步，build.sh 会在 dist/ 中再次核对并注入）
-const APP_VERSION = '0.6.4';
+const APP_VERSION = '0.6.9';
 // BUILD_TIME 由 build.sh 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -451,10 +451,9 @@ if (versionInfo) {
   try {
     const manifest = chrome.runtime.getManifest();
     displayVersion = manifest.version;
-    // 交叉校验：如果 manifest 版本与硬编码不一致，说明浏览器加载了旧版扩展
+    // 交叉校验：硬编码与 manifest 不同步时提示作者 (manifest 是指北明令的单一版本真相源,此处胜出,硬编码仅作 chrome.runtime 不可用时的兜底)
     if (displayVersion !== APP_VERSION) {
       console.warn(t('versionMismatch', displayVersion, APP_VERSION));
-      displayVersion = APP_VERSION;
     }
   } catch (_) {
     displayVersion = APP_VERSION;
@@ -759,7 +758,13 @@ btnDiagnose.addEventListener('click', async () => {
 
     // 6. 构建时间戳:让用户/诊断能直接判断扩展实际加载的是哪次 build
     //    (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
-    add(true, t('diagnoseVersion', APP_VERSION, BUILD_TIME));
+    //    [v0.6.9] 治本:诊断末行优先读 manifest 真实版本号,APP_VERSION 仅在
+    //    chrome.runtime 不可用时兜底 — 彻底消除阶段 60/61/62 反复出现的"硬编码
+    //    APP_VERSION 过期 → 诊断末行误显示旧版本号"暴露面。即便作者手动同步
+    //    popup.js 第 436 行 APP_VERSION 失手漏一次,诊断仍永远显示真实版本。
+    let diagVersion;
+    try { diagVersion = chrome.runtime.getManifest().version; } catch (_) { diagVersion = APP_VERSION; }
+    add(true, t('diagnoseVersion', diagVersion, BUILD_TIME));
 
     // 7. i18n 系统状态诊断 — 显示 I18n 模块实际加载的语言和翻译测试结果
     const i18nLang = I18n.getLang();

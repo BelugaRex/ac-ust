@@ -66,7 +66,7 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
         if (!handler) return undefined;
         return handler(msg);
       },
-      getManifest: () => ({ version: '0.6.4' }),
+      getManifest: () => ({ version: manifest.version }),
       getPlatformInfo: async () => ({ os: 'win' }),
       onConnect: { addListener() {} },
       onUpdateAvailable: { addListener() {} }
@@ -1587,6 +1587,25 @@ async function runTests() {
       && popupSource.includes('diagnoseOffscreenUnknown')
       && popupSource.includes('diagnoseVersion'),
     '14I: offscreen 诊断行三态兼容(旧 SW undefined 不误红)+ 诊断面板末行显示扩展版本+build');
+  assertPass(popupSource.includes(`const APP_VERSION = '${manifest.version}'`),
+    `14J: 源码 popup.js APP_VERSION 硬编码与 manifest.json version (${manifest.version}) 同步 - 不再产出阶段 60/61/62 三次遗留的 APP_VERSION=0.6.4 vs manifest 不一致`);
+
+  // 14K: popup.html 两处 ?v= 缓存破坏参数与 manifest.version 同步(web 资源 cache busting 守门)
+  const popupHtmlV = [...popupHtml.matchAll(/\?v=([\d.]+)/g)].map(m => m[1]);
+  assertPass(popupHtmlV.length >= 2 && popupHtmlV.every(v => v === manifest.version),
+    `14K: popup.html ?v= 缓存破坏参数 (${popupHtmlV.join(', ') || 'none'}) 全部等于 manifest.json version (${manifest.version}) — bump manifest 时漏改 popup.html 将立即被守门`);
+
+  // 14L: CHROMEWEBSTORE.md 所有版本字符串与 manifest.version 同步(发布资产一致性守门)
+  //  使用 \d+\.\d+\.\d+ 而非 \b0\.\d+\.\d+\b，避免匹配 ac-ust-vX.Y.Z 时 vX 之间无词边界被 \b 截掉
+  const chwsVers = [...webStoreMetadata.matchAll(/\d+\.\d+\.\d+/g)].map(m => m[0]);
+  assertPass(chwsVers.length >= 2 && chwsVers.every(v => v === manifest.version),
+    `14L: CHROMEWEBSTORE.md 所有版本字段与 ZIP 文件名 (${chwsVers.join(', ') || 'none'}) 全部等于 manifest.json version (${manifest.version}) — 产线文档不会拖后腿`);
+
+  // 14M: 诊断末行优先读 chrome.runtime.getManifest().version 而非 APP_VERSION 硬编码 — 彻底消除硬编码版本号在诊断上的暴露面
+  assertPass(!popupSource.includes("t('diagnoseVersion', APP_VERSION,")
+      && popupSource.includes("t('diagnoseVersion',")
+      && /chrome\.runtime\.getManifest\(\)\.version/.test(popupSource),
+    `14M: 诊断末行 diagnoseVersion 不再直接传 APP_VERSION 硬编码,改为优先读 chrome.runtime.getManifest().version (治本 — 即便作者漏同步源码 APP_VERSION,诊断仍显示真实 manifest 版本)`);
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;
