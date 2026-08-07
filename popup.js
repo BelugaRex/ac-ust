@@ -528,7 +528,7 @@ btnDiagnose.addEventListener('click', async () => {
   const isChrome = /Chrome\//i.test(ua) && !isEdge;
   const browserName = isEdge ? 'Edge' : isChrome ? 'Chrome' : 'Unknown';
   const browserVer = ua.match(isEdge ? /Edg\/([\d.]+)/ : /Chrome\/([\d.]+)/)?.[1] || '?';
-  lines.push('ℹ️ 浏览器: ' + browserName + ' ' + browserVer);
+  lines.push(t('diagnoseBrowser') + browserName + ' ' + browserVer);
   
   try {
     const ensured = await chrome.runtime.sendMessage({ type: 'ensureDiagnostics' });
@@ -575,31 +575,31 @@ btnDiagnose.addEventListener('click', async () => {
         effectiveNextTriggerAt = s.nextTriggerAt || 0;
         selfHealed = true;
       } catch (e) {
-        add(false, 'popup 侧 storage 自愈失败: ' + (e.message||'').slice(0,60));
+        add(false, t('diagnoseSelfHealFail') + (e.message||'').slice(0,60));
       }
     }
 
-    add(!!storedSchedule, 'storage 可读写');
-    add(s.enabled === true, 'schedule.enabled=' + s.enabled + ' (' + (s.enabled ? '定时已启用' : '定时未启用') + ')');
-    add(!!s.mode, 'mode=' + (s.mode || '?'));
-    add(s.clockMode !== undefined, 'clockMode=' + (s.clockMode ? '时钟' : '间隔'));
+    add(!!storedSchedule, t('diagnoseStorageRW'));
+    add(s.enabled === true, t('diagnoseEnabledPrefix') + s.enabled + ' (' + (s.enabled ? t('diagnoseOn') : t('diagnoseOff')) + ')');
+    add(!!s.mode, t('diagnoseMode') + (s.mode || '?'));
+    add(s.clockMode !== undefined, t('diagnoseClockMode') + (s.clockMode ? t('diagnoseClock') : t('diagnoseInterval')));
     if (s.clockMode === false && s.enabled && !effectiveNextTriggerAt) {
-      add(false, 'storage 绝对触发时间缺失');
+      add(false, t('diagnoseMissingTrigger'));
     } else if (effectiveNextTriggerAt) {
       const repairedLabel = selfHealed
-        ? ' (popup 已自愈)'
-        : (storedSchedule.nextTriggerAt === effectiveNextTriggerAt ? '' : ' (后台已回写)');
-      add(true, 'storage 绝对触发时间: ' + new Date(effectiveNextTriggerAt).toLocaleTimeString() + repairedLabel);
+        ? t('diagnosePopHealed')
+        : (storedSchedule.nextTriggerAt === effectiveNextTriggerAt ? '' : t('diagnoseBgWriteback'));
+      add(true, t('diagnoseTriggerTime') + new Date(effectiveNextTriggerAt).toLocaleTimeString() + repairedLabel);
     }
 
     // 2. 检查闹钟 — 优先用后台自愈结果，若仍缺失则弹窗直接补建
     let alarms = await chrome.alarms.getAll();
     const pwmAlarm = ensured?.alarms?.pwm || alarms.find(a => a.name === 'ac-pwm');
-    add(!!pwmAlarm, 'ac-pwm 闹钟存在' + (pwmAlarm ? ' (触发: ' + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
+    add(!!pwmAlarm, t('diagnosePwmExists') + (pwmAlarm ? t('diagnosePwmTrigger') + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
     if (pwmAlarm && s.clockMode === false && !effectiveNextTriggerAt) {
-      add(false, 'ac-pwm 与 storage 触发时间同步');
+      add(false, t('diagnosePwmSync'));
     } else if (pwmAlarm && effectiveNextTriggerAt) {
-      add(Math.abs(pwmAlarm.scheduledTime - effectiveNextTriggerAt) < 1500, 'ac-pwm 与 storage 触发时间同步' + (selfHealed ? ' (popup 已自愈)' : ''));
+      add(Math.abs(pwmAlarm.scheduledTime - effectiveNextTriggerAt) < 1500, t('diagnosePwmSync') + (selfHealed ? t('diagnosePopHealed') : ''));
     }
 
     let badgeAlarm = ensured?.alarms?.badge || alarms.find(a => a.name === 'ac-badge-tick') || await chrome.alarms.get('ac-badge-tick');
@@ -610,7 +610,7 @@ btnDiagnose.addEventListener('click', async () => {
       await new Promise(r => setTimeout(r, 150)); // 等待 alarm 写入
       badgeAlarm = await chrome.alarms.get('ac-badge-tick');
     }
-    add(!!badgeAlarm, 'ac-badge-tick 角标刷新（每分钟）' + (badgeAlarm ? ' (已补建: ' + new Date(badgeAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
+    add(!!badgeAlarm, t('diagnoseBadgeAlarm') + (badgeAlarm ? t('diagnoseBadgeRebuilt') + new Date(badgeAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
 
     let watchdogAlarm = ensured?.alarms?.watchdog || alarms.find(a => a.name === 'ac-watchdog');
     if (!watchdogAlarm && s.enabled) {
@@ -619,43 +619,65 @@ btnDiagnose.addEventListener('click', async () => {
       await new Promise(r => setTimeout(r, 150));
       watchdogAlarm = await chrome.alarms.get('ac-watchdog');
     }
-    add(!!watchdogAlarm, 'ac-watchdog 看门狗（每5分钟）' + (watchdogAlarm ? ' (已补建: ' + new Date(watchdogAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
+    add(!!watchdogAlarm, t('diagnoseWatchdog') + (watchdogAlarm ? t('diagnoseBadgeRebuilt') + new Date(watchdogAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
 
-    add(true, 'setInterval heartbeat（storage 每 20s）');
+    // 2.1 PWM 运行时段(同日 white-list)与 ac-active-boundary 闹钟(指北固定 5 闹钟之一)。
+    // activeHours.enabled=false 表示全天运行,无边界闹钟是预期,显示透明绿。
+    if (s.activeHours?.enabled === true) {
+      add(true, t('diagnoseActiveHoursOn', s.activeHours.start || '?', s.activeHours.end || '?'));
+      const boundaryAlarm = alarms.find(a => a.name === 'ac-active-boundary') || await chrome.alarms.get('ac-active-boundary');
+      add(!!boundaryAlarm, t('diagnoseActiveBoundary') + (boundaryAlarm ? t('diagnoseBadgeRebuilt') + new Date(boundaryAlarm.scheduledTime).toLocaleTimeString() + ')' : ' ' + t('diagnoseActiveBoundaryMissing')));
+    } else {
+      add(true, t('diagnoseActiveHoursOff'));
+    }
+
+    // 2.2 heartbeat: storage __heartbeat 每 20s 写一次(background.js runHeartbeat)。
+    // 用真实新鲜度取代之前的硬绿。阈值 60s = 给 30s 周期 2x 宽容;
+    // -1 表示从未写入(SW 跑旧代码或刚装定未触发 first pulse),按 stale 红处理。
+    {
+      const hbRes = await chrome.storage.local.get('__heartbeat');
+      const hbAt = hbRes?.__heartbeat || 0;
+      const hbAge = hbAt ? Math.round((Date.now() - hbAt) / 1000) : -1;
+      if (hbAge >= 0 && hbAge < 60) {
+        add(true, t('diagnoseHeartbeat', hbAge));
+      } else {
+        add(false, t('diagnoseHeartbeatStale', hbAge));
+      }
+    }
 
     if (pwmAlarm && s.alarmCreatedAt && s.alarmDelayMinutes) {
       const dueAt = s.alarmCreatedAt + s.alarmDelayMinutes * 60000;
       const overdue = dueAt <= Date.now();
-      add(!overdue, '闹钟未过期 (到期: ' + new Date(dueAt).toLocaleTimeString() + ')');
+      add(!overdue, t('diagnoseAlarmNotExpired') + new Date(dueAt).toLocaleTimeString() + ')');
     }
 
     // 3. 检查 AC 页面
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-    add(tabs.length > 0, 'AC页面已打开 (' + tabs.length + '个标签页)');
+    add(tabs.length > 0, t('diagnoseTabOpen') + tabs.length + t('diagnoseTabCount'));
     if (tabs.length > 0) {
-      add(!tabs[0].discarded, '标签页未被浏览器丢弃');
+      add(!tabs[0].discarded, t('diagnoseTabNotDiscarded'));
       try {
         const status = await chrome.tabs.sendMessage(tabs[0].id, { action: 'status' });
-        add(!!status, 'content script 响应正常');
-        add(typeof status.isOn === 'boolean', 'AC状态可读: ' + (status.isOn ? 'ON' : 'OFF'));
+        add(!!status, t('diagnoseContentOK'));
+        add(typeof status.isOn === 'boolean', t('diagnoseAcReadable') + (status.isOn ? 'ON' : 'OFF'));
       } catch (e) {
-        add(false, 'content script 无响应: ' + (e.message||'').slice(0,60));
+        add(false, t('diagnoseContentNoResponse') + (e.message||'').slice(0,60));
       }
     }
 
     // 4. 后台状态
     try {
-      add(!!bg, '后台 SW 响应正常');
-      add(bg.clockMode !== undefined, 'clockMode 同步: ' + (bg.clockMode ? '时钟' : '间隔'));
+      add(!!bg, t('diagnoseSWOK'));
+      add(bg.clockMode !== undefined, t('diagnoseClockSync') + (bg.clockMode ? t('diagnoseClock') : t('diagnoseInterval')));
       // PWM 失败提示:runPwmStep 验证失败时会写 pageTimerError。
       // 主动展示在诊断面板,方便定位"到时间没关/没开"的根因。
       if (s.pageTimerError) {
-        add(false, 'PWM 上次失败: ' + String(s.pageTimerError).slice(0, 120));
+        add(false, t('diagnosePwmError') + String(s.pageTimerError).slice(0, 120));
       } else {
-        add(true, 'PWM 无错误状态(pageTimerError 空)');
+        add(true, t('diagnosePwmErrorEmpty'));
       }
     } catch (e) {
-      add(false, '后台 SW 无响应');
+      add(false, t('diagnoseSWNoResponse'));
     }
 
     // 4.5. v0.5.10 page timer 跨设备主同步通道诊断
@@ -666,15 +688,28 @@ btnDiagnose.addEventListener('click', async () => {
         if (pt && pt.found && pt.value) {
           const localNext = effectiveNextTriggerAt || s.nextTriggerAt || 0;
           const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';
-          add(true, `page timer picker="${pt.value}" ← ${fmt(localNext)} (pwmState=${s.pwmState})`);
+          add(true, t('diagnosePageTimerExpr', pt.value, fmt(localNext), s.pwmState));
         } else {
-          add(true, 'page timer picker 空/未设 (校验待 page timer 有值后自动生效)');
+          add(true, t('diagnosePageTimerEmpty'));
         }
       } catch (e) {
-        add(false, 'page timer 读取失败: ' + (e.message||'').slice(0,60));
+        add(false, t('diagnosePageTimerFail') + (e.message||'').slice(0,60));
       }
     } else if (s.enabled) {
-      add(true, 'page timer 校验待 AC 页面打开后生效');
+      add(true, t('diagnosePageTimerPending'));
+    }
+
+    // 4.6 ac-page-timer-retry 闹钟(指北固定 5 闹钟之一,此前诊断漏检)。
+    // PWM 验证 runPwmStep 失败或新鲜页 page timer 读不回时,持久化 pageTimerRetryMinutes 与
+    // ac-page-timer-retry 闹钟,1 分钟内自动重试 OFF 关机。诊断应显示这两者是否激活。
+    const retryMin = Number(s.pageTimerRetryMinutes) || 0;
+    if (retryMin > 0) {
+      const retryAlarm = alarms.find(a => a.name === 'ac-page-timer-retry') || await chrome.alarms.get('ac-page-timer-retry');
+      const retryAt = retryAlarm?.scheduledTime || 0;
+      const retryStr = retryAt ? new Date(retryAt).toLocaleTimeString() : '?';
+      add(!!retryAlarm, t('diagnosePageTimerRetry', retryStr, retryMin));
+    } else {
+      add(true, t('diagnosePageTimerRetryNone'));
     }
 
     // 5. SW 状态可观测性:启动时间 / init 完成时间 / 内存 schedule 与 storage 是否一致
@@ -693,42 +728,45 @@ btnDiagnose.addEventListener('click', async () => {
       // SW 响应成功:显示三方一致校验
       const swAgeSec = Math.round((sw.swAgeMs || 0) / 1000);
       const initAgeSec = sw.initAgeMs >= 0 ? Math.round(sw.initAgeMs / 1000) : -1;
-      add(sw.initCompleted, `SW init 已完成 (启动 ${swAgeSec}s 前，init ${initAgeSec}s 前)`);
+      add(sw.initCompleted, t('diagnoseSWInitDone', swAgeSec, initAgeSec));
+      // L2 offscreen 长连接保活页(阶段58):每分钟 badge-tick 顺带 ensureOffscreen 重建。
+      // 新 SW 通过 hasDocument() 反馈真值;旧 SW 不返回该字段——按缺失红处理(等同于诊断面板拿不到状态信号)。
+      add(!!sw.offscreenAlive, sw.offscreenAlive ? t('diagnoseOffscreenPresent') : t('diagnoseOffscreenMissing'));
       const memNext = sw.memorySchedule?.nextTriggerAt || 0;
       const storedNext = storedSchedule.nextTriggerAt || 0;
       const memLive = sw.liveAlarmScheduledTime || 0;
-      const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';
+      const fmt2 = (t2) => t2 ? new Date(t2).toLocaleTimeString() : '∅';
       if (memLive && memNext === memLive && storedNext === memLive) {
-        add(true, '三方一致: live ac-pwm = 内存 = storage = ' + fmt(memLive));
+        add(true, t('diagnoseTriMatch', fmt(memLive)));
       } else {
-        add(false, `三方校验: live=${fmt(memLive)} 内存=${fmt(memNext)} storage=${fmt(storedNext)}`);
+        add(false, t('diagnoseTriMismatch', fmt(memLive), fmt(memNext), fmt(storedNext)));
       }
     } else if (selfHealed) {
       // SW 没响应(可能跑旧代码),但 popup 已自愈 storage 接管 — 功能不受影响,显示绿灯
-      add(true, 'popup 已接管 storage 自愈(SW 详细状态不可用,功能正常)');
+      add(true, t('diagnosePopHealedSw'));
     } else if (sw && sw.success === false) {
-      add(false, 'getSwStatus 后台失败: ' + (sw.error||'?').slice(0,80));
+      add(false, t('diagnoseGetSwFailed') + (sw.error||'?').slice(0,80));
     } else if (sw) {
-      add(false, 'getSwStatus 异常响应: ' + JSON.stringify(sw).slice(0,80));
+      add(false, t('diagnoseGetSwAbnormal') + JSON.stringify(sw).slice(0,80));
     } else {
       // SW 完全无响应且 popup 未自愈 — 这是真问题
-      add(false, 'getSwStatus 无响应且 popup 未自愈 — 建议在 edge://extensions 重新加载扩展');
+      add(false, t('diagnoseGetSwNone'));
     }
 
     // 6. 构建时间戳:让用户/诊断能直接判断扩展实际加载的是哪次 build
     //    (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
-    add(true, `BUILD_TIME: ${BUILD_TIME}`);
+    add(true, t('diagnoseBuildTime', BUILD_TIME));
 
     // 7. i18n 系统状态诊断 — 显示 I18n 模块实际加载的语言和翻译测试结果
     const i18nLang = I18n.getLang();
     const testMsg = I18n.t('pwmSettings');
     if (testMsg && !testMsg.startsWith('pwmSettings')) {
-      add(true, `i18n OK (lang=${i18nLang}, "pwmSettings"→"${testMsg.slice(0,20)}")`);
+      add(true, t('diagnoseI18nOK', i18nLang, testMsg.slice(0,20)));
     } else {
-      add(false, `i18n 未加载翻译 (lang=${i18nLang}, result="${testMsg}")`);
+      add(false, t('diagnoseI18nNoTrans', i18nLang, testMsg));
     }
   } catch (e) {
-    lines.push('❌ 诊断异常: ' + (e.message||'').slice(0,80));
+    lines.push('❌ ' + t('diagnoseException') + (e.message||'').slice(0,80));
   }
   
   renderDiagnoseResult(lines);

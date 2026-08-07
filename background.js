@@ -1853,7 +1853,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // 不依赖 init 完成。放在 await initReady 之前响应,防止 init 卡住时诊断面板拿不到 SW 状态。
   if (msg.type === 'getSwStatus') {
     const now = Date.now();
-    chrome.alarms.get('ac-pwm').then((liveAlarm) => {
+    // L2 offscreen 长连接保活页(阶段58)存活状态:Chrome 110+ 支持 chrome.offscreen API,
+    // 早期 Edge 可能抛异常,catch 后 false 兼容老版本。
+    Promise.all([
+      chrome.alarms.get('ac-pwm'),
+      chrome.offscreen.hasDocument().catch(() => false)
+    ]).then(([liveAlarm, offscreenAlive]) => {
       sendResponse({
         success: true,
         swStartupTime,
@@ -1862,7 +1867,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         initCompleted: !!initCompletedAt,
         initAgeMs: initCompletedAt ? (now - initCompletedAt) : -1,
         memorySchedule: { ...schedule },
-        liveAlarmScheduledTime: liveAlarm?.scheduledTime || 0
+        liveAlarmScheduledTime: liveAlarm?.scheduledTime || 0,
+        offscreenAlive: !!offscreenAlive
       });
     }).catch((e) => {
       sendResponse({ success: false, error: e?.message || String(e), swStartupTime, initCompletedAt });

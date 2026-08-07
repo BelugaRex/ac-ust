@@ -102,7 +102,8 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
     initAgeMs: 9000,
     initCompleted: true,
     memorySchedule: { ...storage.ac_schedule },
-    liveAlarmScheduledTime: alarms['ac-pwm']?.scheduledTime || 0
+    liveAlarmScheduledTime: alarms['ac-pwm']?.scheduledTime || 0,
+    offscreenAlive: true
   });
 
   return { chrome, _storage: storage, _alarms: alarms };
@@ -1530,6 +1531,8 @@ async function runTests() {
       && alarmListenerBody13.includes('await updateBadge();')
       && alarmListenerBody13.includes('await ensureOffscreen();'),
     '13F: 每分钟 badge-tick 顺带 ensureOffscreen()，守住 L2 长连接保活层');
+  assertPass(backgroundSource.includes('offscreenAlive: !!offscreenAlive'),
+    '13G: getSwStatus 返回 offscreenAlive 真值(L2 长连接保活层状态经 chrome.offscreen.hasDocument 真检)');
   assertPass(initBody13.includes('const retryMinutes = Number(schedule.pageTimerRetryMinutes) || 0;')
       && initBody13.includes("createAlarm('ac-page-timer-retry', { when: retryAt })")
       && initBody13.includes("await schedulePageTimerRetry(retryMinutes, '启动恢复错过的页面定时器重试');")
@@ -1569,6 +1572,11 @@ async function runTests() {
       && popupSource.includes('function renderDiagnoseResult(lines)')
       && !popupSource.includes("diagnoseResult.innerHTML = lines.join('<br>')"),
     '14F: popup 语言随界面语言更新，诊断结果以安全、可导航的文本节点呈现');
+  assertPass(popupSource.includes("diagnoseActiveBoundary")
+      && popupSource.includes("diagnoseOffscreenPresent")
+      && popupSource.includes("diagnosePageTimerRetryNone")
+      && popupSource.includes("diagnoseHeartbeatStale"),
+    '14G: 诊断面板新增 5 闹钟中的 ac-active-boundary/ac-page-timer-retry 与 L2 offscreen 与 heartbeat 真状态读取');
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;
