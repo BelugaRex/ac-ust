@@ -1102,7 +1102,7 @@ async function setPageTimer(minutes, { retryOnFailure = true } = {}) {
 
   try {
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-    let tab = tabs[0] || null;
+    let tab = tabs.find(isACHomePageTab) || tabs[0] || null;
 
     if (!tab?.id) {
       tab = await chrome.tabs.create({ url: AC_PAGE, active: false });
@@ -1112,8 +1112,14 @@ async function setPageTimer(minutes, { retryOnFailure = true } = {}) {
     }
 
     tab = await restoreDiscardedACTab(tab);
+    if (!isACHomePageTab(tab)) {
+      console.log(`[AC扩展] 页面定时器目标页已离开 home (当前 ${tab?.url})，导航回 AC 入口页`);
+      await chrome.tabs.update(tab.id, { url: AC_PAGE });
+    }
     const pageReady = await waitForTabReady(tab.id, 30000);
     if (!pageReady) throw new Error('AC 页面等待就绪超时');
+    tab = await chrome.tabs.get(tab.id);
+    if (!isACHomePageTab(tab)) throw new Error('页面定时器目标页导航后仍未到达 home');
     const contentReady = await ensureContentScriptLoaded(tab.id);
     if (!contentReady) throw new Error('AC 页面 content script 未就绪');
 

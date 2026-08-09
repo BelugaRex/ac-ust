@@ -13,10 +13,15 @@ self.__AC_CONTENT_LOADED__ = true;
 // i18n — content script 运行在隔离世界，不能 importScripts，用内联 fetch loader
 const _i18nCache = {};
 let _i18nReady = false;
+function normalizeContentLocale(raw) {
+  const normalized = String(raw || 'zh_CN').replace('-', '_');
+  if (/^en(?:_|$)/i.test(normalized)) return 'en';
+  return normalized;
+}
 async function _i18nLoad() {
   if (_i18nReady) return;
   try {
-    const ui = (chrome.i18n?.getUILanguage?.() || 'zh_CN').replace('-', '_');
+    const ui = normalizeContentLocale(chrome.i18n?.getUILanguage?.());
     const tryLoad = async (lang) => {
       const res = await fetch(chrome.runtime.getURL(`_locales/${lang}/messages.json`));
       return res.ok ? res.json() : null;

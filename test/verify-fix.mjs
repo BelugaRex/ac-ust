@@ -1038,6 +1038,11 @@ async function runTests() {
   assertPass(pageConfirmSource.includes('acStateRequestInFlight')
       && pageConfirmSource.includes('合并重复的'),
     '9G: 主世界同目标并发请求复用 single-flight Promise');
+  assertPass(pageConfirmSource.includes('__AC_EXTENSION_DIALOG_PATCHED__')
+      && pageConfirmSource.includes('window.confirm = function(message)')
+      && pageConfirmSource.includes('window.alert = function(message)')
+      && pageConfirmSource.includes('window.prompt = function(message, defaultValue'),
+    '9G-1: 主世界保留原生 confirm/alert/prompt 自动接管与幂等守卫');
   assertPass(countOccurrences(pwmBody, "toggleAC('on')") === 1
       && !pwmBody.includes('for (let retry'),
     '9H: 每个 PWM 开机步骤只调用一次 toggleAC(on)，无外围点击重试循环');
@@ -1069,18 +1074,38 @@ async function runTests() {
     ? backgroundSource.slice(verificationStartForReload, verificationEndForReload)
     : '';
   assertPass(countOccurrences(backgroundSource, 'chrome.tabs.reload(') === 0
-      && countOccurrences(backgroundSource, 'chrome.tabs.update(') === 3
+      && countOccurrences(backgroundSource, 'chrome.tabs.update(') === 4
       && backgroundSource.includes('async function restoreDiscardedACTab(tab)')
       && !verifySectionForReload.includes('chrome.tabs.reload(')
       && !verifySectionForReload.includes('chrome.tabs.update(')
       && !verifySectionForReload.includes('sourceWasAutoCreated'),
-    '9N: discarded 恢复与端口提前关闭均导航到 AC 入口页 home 而非刷新当前 URL；页面定时器验证绝不刷新/导航写入来源页');
+    '9N: discarded、端口恢复与页面定时器写入均导航到 AC 入口页 home 而非刷新；新鲜页验证绝不刷新/导航写入来源页');
   assertPass(setTimerBody.includes('chrome.tabs.create({ url: AC_PAGE, active: false })')
       && setTimerBody.includes('restoreDiscardedACTab(tab)'),
     '9O: 页面定时器缺少可用标签时只创建隐藏 AC 页恢复，不刷新正常页面');
+  assertPass(setTimerBody.includes('tabs.find(isACHomePageTab) || tabs[0] || null')
+      && setTimerBody.includes('if (!isACHomePageTab(tab))')
+      && setTimerBody.includes('await chrome.tabs.update(tab.id, { url: AC_PAGE })')
+      && setTimerBody.includes('tab = await chrome.tabs.get(tab.id)')
+      && setTimerBody.includes(`'页面定时器目标页导航后仍未到达 home'`),
+    '9O-1: 页面定时器优先复用 home 标签；只有全部偏离时才导航并复核最终 home URL');
+  assertPass(contentSource.includes('function normalizeContentLocale(raw)')
+      && contentSource.includes("if (/^en(?:_|$)/i.test(normalized)) return 'en';")
+      && contentSource.includes('const ui = normalizeContentLocale(chrome.i18n?.getUILanguage?.());'),
+    '9O-2: content 内联 i18n 与共享加载器一致，将 en-US/en-GB 映射到 _locales/en');
+  const normalizeLocaleStart = contentSource.indexOf('function normalizeContentLocale(raw)');
+  const normalizeLocaleEnd = contentSource.indexOf('\nasync function _i18nLoad()', normalizeLocaleStart);
+  const normalizeContentLocale = new Function(
+    `${contentSource.slice(normalizeLocaleStart, normalizeLocaleEnd)}; return normalizeContentLocale;`
+  )();
+  assertPass(normalizeContentLocale('en-US') === 'en'
+      && normalizeContentLocale('en-GB') === 'en'
+      && normalizeContentLocale('zh-CN') === 'zh_CN'
+      && normalizeContentLocale() === 'zh_CN',
+    '9O-3: content locale 语义验证覆盖 en-US/en-GB、zh-CN 与空语言兜底');
   assertPass(manifest.content_scripts?.[1]?.js?.join(',') === 'billing-helpers.js,content.js'
       && backgroundSource.includes("files: ['billing-helpers.js', 'content.js']"),
-    '9O-1: manifest 与兜底注入均保证余额 helper 先于 content script 执行');
+    '9O-4: manifest 与兜底注入均保证余额 helper 先于 content script 执行');
   assertPass(pwmBody.includes('isPageTimerProofFresh(schedule)')
       && backgroundSource.includes('pageTimerTargetAt'),
     '9P: OFF 只接受带绝对到期时间且仍新鲜的页面定时器证明');
