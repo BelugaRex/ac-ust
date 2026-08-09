@@ -136,6 +136,12 @@ async function getAuthoritativeACStatus() {
 // 页面余额环会同时显示当前剩余分钟数（如 "242 min"）和周期总额。
 // 只在 "Air Conditioning Balance" 标题所在区块读取 .ant-progress-text，
 // 避免误把下方 "16100 min balance" 的总额当成当前余额。
+function hasChargeModeLabel(elements) {
+  return Array.from(elements || []).some(
+    element => (element.textContent || '').trim() === 'Charge Mode'
+  );
+}
+
 function getACBalanceMinutes() {
   const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'));
   const heading = headings.find(el => (el.textContent || '').trim() === 'Air Conditioning Balance');
@@ -145,7 +151,8 @@ function getACBalanceMinutes() {
   for (let depth = 0; depth < 8 && container; depth++) {
     const value = container.querySelector('.ant-progress-text');
     if (value) {
-      return parseBalanceMinutes(value.textContent, value.getAttribute('title'));
+      const chargeMode = hasChargeModeLabel(container.querySelectorAll('small'));
+      return chargeMode ? parseBalanceMinutes(value.textContent, value.getAttribute('title')) : null;
     }
     container = container.parentElement;
   }

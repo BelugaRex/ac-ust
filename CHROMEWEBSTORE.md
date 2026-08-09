@@ -8,7 +8,7 @@
 | 字段 | 值 |
 |------|-----|
 | 名称 | AC-UST |
-| 版本 | 0.6.10 |
+| 版本 | 0.6.11 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率 (Productivity) |
 | 语言 | 中文（简体）、English |
@@ -32,7 +32,7 @@ AC-UST 是一款为香港科技大学 Smart Power Meter 系统设计的自动冷
 主要功能：
 • PWM 循环定时：分别设置冷气开启与关闭分钟数，自动持续循环
 • PWM 运行时段：只在每天指定时段运行，时段外自动停用并请求页面定时关机
-• 可用时刻预计：只读读取页面提供的冷气余额，并在运行状态旁分两行显示标签与精确到分钟的预计时刻；今明两日显示“今天／明天”，之后显示月日，预计 24 小时内用完时以轻量警示突出
+• 可用时刻预计：仅在页面显示 Charge Mode 时只读读取冷气余额并计算精确到分钟的预计时刻；其他计费模式不显示估算，避免误导。今明两日显示“今天／明天”，之后显示月日，预计 24 小时内用完时以轻量警示突出
 • 页面定时关机：使用 UST 页面自带的 Power-off after 定时器执行关机；扩展优先复用 home 页，必要时从 warning 等子页导航回入口，写入后以独立新鲜页按 3/10/30 秒退避回读确认，失败自动重试且绝不重复点击 OFF 开关
 • 跨设备相位对齐：同浏览器生态通过浏览器同步补充对齐，UST 页面定时器负责跨浏览器关机相位校验
 • 看门狗与自愈：自动恢复缺失的后台闹钟，并提供一键诊断
@@ -53,8 +53,8 @@ AC-UST is an automatic air-conditioning controller for the HKUST Smart Power Met
 Features:
 • PWM cycle scheduling with independently configurable ON and OFF durations
 • Active hours that limit PWM operation to a daily time window
-• A compact two-line estimated availability label and time beside the AC status, calculated from the read-only balance and configured PWM ON/OFF durations, labeled Today or Tomorrow when applicable, with month/day for later dates, and subtly highlighted when less than 24 hours remain
-• Timer-based shutdown through the portal's Power-off after control, preserving the write page while independently verifying persistence after 3/5/10-second backoff windows and retrying failures without repeated OFF clicks
+• A compact two-line estimated availability label and time beside the AC status, calculated only when the portal displays Charge Mode; estimates stay hidden in other billing modes to avoid misleading results, with Today/Tomorrow labels, month/day for later dates, and a subtle highlight when less than 24 hours remain
+• Timer-based shutdown through the portal's Power-off after control, preserving the write page while independently verifying persistence after 3/10/30-second backoff windows and retrying failures without repeated OFF clicks
 • Cross-device phase alignment using browser sync plus the UST page timer
 • Watchdog recovery and a built-in diagnostics panel
 • Clear, low-distraction light appearance matching the UST page, with semantic status feedback and support for system reduced-motion and high-contrast preferences
@@ -125,12 +125,12 @@ AC-UST 的完整功能需要登录 HKUST Smart Power Meter。提交审核前，�
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.6.10.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.6.11.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP 内容和图标均通过验证。
-2. 在开发者信息中心上传 `releases/ac-ust-v0.6.10.zip`。
+2. 在开发者信息中心上传 `releases/ac-ust-v0.6.11.zip`。
 3. 填写商品详情、隐私声明、权限理由和 HKUST 登录所需的审核测试说明。
 4. 在“分发”页选择“私享（Private）”，配置受信任测试人员或 Google 群组，并将地区限制为香港。
 5. 提交审核时选择推迟发布；审核通过后在 30 天内手动发布并把商店链接发给测试人员。

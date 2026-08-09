@@ -1059,9 +1059,23 @@ async function runTests() {
     '9K: content 隔离世界不存在第二套开关/确认点击器');
   assertPass(contentSource.includes("=== 'Air Conditioning Balance'")
       && contentSource.includes("container.querySelector('.ant-progress-text')")
+      && contentSource.includes("container.querySelectorAll('small')")
+      && contentSource.includes('hasChargeModeLabel')
+      && contentSource.includes('return chargeMode ? parseBalanceMinutes')
       && contentSource.includes("parseBalanceMinutes(value.textContent, value.getAttribute('title'))")
       && contentSource.includes('return withBalance({ ...mainWorldStatus'),
-    '9K-1: content 只从余额标题区块读取当前进度值，并随状态响应返回');
+    '9K-1: content 只在余额标题区块精确显示 Charge Mode 时读取当前进度值并随状态响应返回');
+  const chargeModeLabelStart = contentSource.indexOf('function hasChargeModeLabel(elements)');
+  const chargeModeLabelEnd = contentSource.indexOf('\nfunction getACBalanceMinutes()', chargeModeLabelStart);
+  const hasChargeModeLabel = new Function(
+    `${contentSource.slice(chargeModeLabelStart, chargeModeLabelEnd)}; return hasChargeModeLabel;`
+  )();
+  assertPass(hasChargeModeLabel([{ textContent: 'Charge Mode' }])
+      && hasChargeModeLabel([{ textContent: '  Charge Mode  ' }])
+      && !hasChargeModeLabel([{ textContent: 'Normal Mode' }])
+      && !hasChargeModeLabel([{ textContent: 'Charge Mode Active' }])
+      && !hasChargeModeLabel([]),
+    '9K-2: Charge Mode 标签判定接受精确文本与空白，拒绝其他模式和相似文本');
   assertPass(!backgroundSource.includes("toggleAC('off')")
       && pwmBody.includes('const timerArmed = isPageTimerProofFresh(schedule)'),
     '9L: 自动关机只检查页面定时器证明，生产代码不存在 toggleAC(off)');
