@@ -8,8 +8,57 @@ importScripts('sync-helpers.js');  // 跨设备同步的纯函数（composeSyncP
 const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const AC_PAGE = 'https://w5.ab.ust.hk/njggt/app/home';
-const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [3000, 10000, 30000];
+const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [10000, 15000, 20000];
 const STORAGE_KEY = 'ac_schedule';
+const DIAGNOSTIC_LOG_KEY = 'ac_diagnostic_log';
+const DIAGNOSTIC_LOG_MAX_ENTRIES = 50;
+const DIAGNOSTIC_LOG_MAX_MESSAGE_LENGTH = 300;
+
+let diagnosticLogWriteChain = Promise.resolve();
+
+function normalizeDiagnosticMessage(error) {
+  let message;
+  if (error && typeof error === 'object' && typeof error.message === 'string') {
+    message = error.message;
+  } else {
+    message = String(error ?? '未知错误');
+  }
+  return message
+    .replace(/(?:https?|chrome-extension):\/\/\S+/gi, '[url]')
+    .replace(/[\w.+-]+@[\w.-]+\.[a-z]{2,}/gi, '[email]')
+    .slice(0, DIAGNOSTIC_LOG_MAX_MESSAGE_LENGTH);
+}
+
+function appendDiagnosticLog(level, source, error) {
+  const entry = {
+    timestamp: Date.now(),
+    level: level === 'warn' ? 'warn' : 'error',
+    source: String(source || 'unknown').slice(0, 80),
+    message: normalizeDiagnosticMessage(error)
+  };
+
+  diagnosticLogWriteChain = diagnosticLogWriteChain
+    .catch(() => {})
+    .then(async () => {
+      const stored = await chrome.storage.local.get(DIAGNOSTIC_LOG_KEY);
+      const previous = Array.isArray(stored?.[DIAGNOSTIC_LOG_KEY])
+        ? stored[DIAGNOSTIC_LOG_KEY]
+        : [];
+      const next = [...previous, entry].slice(-DIAGNOSTIC_LOG_MAX_ENTRIES);
+      await chrome.storage.local.set({ [DIAGNOSTIC_LOG_KEY]: next });
+    })
+    .catch(() => {});
+
+  return diagnosticLogWriteChain;
+}
+
+self.addEventListener('error', (event) => {
+  void appendDiagnosticLog('error', 'service-worker-error', event?.error || event?.message);
+});
+
+self.addEventListener('unhandledrejection', (event) => {
+  void appendDiagnosticLog('error', 'service-worker-unhandledrejection', event?.reason);
+});
 
 // 跨设备同步：瘦化版 schedule 写到 chrome.storage.sync。详见 sync-helpers.js 注释。
 // 同步对象在 sync 区存储键名，由 background.js 独立维护（与 local.ac_schedule 解耦）。
@@ -336,6 +385,7 @@ async function createAlarm(name, info) {
     if (!verify) console.error('[AC扩展] createAlarm 失败: ' + name + ' ' + JSON.stringify(safeInfo));
   } catch (e) {
     console.error('[AC扩展] createAlarm 异常: ' + name, e?.message);
+    void appendDiagnosticLog('error', 'create-alarm', e);
   }
 }
 
@@ -417,6 +467,7 @@ async function syncScheduleToSync(reason = '') {
     }
   } catch (e) {
     console.warn('[AC扩展] sync 写入失败（未登录浏览器同步 / 配额超限？）:', e?.message);
+    void appendDiagnosticLog('warn', 'sync-write', e);
   }
 }
 
@@ -621,6 +672,7 @@ async function tryAdoptPageTimer(reason = '') {
   } catch (e) {
     // AC 页面可能尚未完全加载 / content script 未就绪——静默降级
     console.warn(`[AC扩展] page-timer ${reason} 读取失败（可能页面未就绪）:`, e?.message);
+    void appendDiagnosticLog('warn', 'page-timer-adopt', e);
     return false;
   }
 }
@@ -757,6 +809,7 @@ async function init() {
     console.log('[AC扩展] 初始化完成', schedule);
   } catch (e) {
     console.error('[AC扩展] 初始化失败，但仍允许消息处理:', e);
+    void appendDiagnosticLog('error', 'init', e);
   } finally {
     initResolve();
   }
@@ -1243,6 +1296,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
         }
       } catch (e) {
         console.warn('[AC扩展] badge-tick 同步失败:', e?.message);
+        void appendDiagnosticLog('warn', 'alarm-badge-tick', e);
       }
     }
     // delayInMinutes 是一次性的，触发后重新创建
@@ -1259,6 +1313,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       await runPwmStep();
     } catch (e) {
       console.error('[AC扩展] PWM 步骤执行失败:', e);
+      void appendDiagnosticLog('error', 'alarm-ac-pwm', e);
       if (schedule.enabled) {
         const delay = Math.max(1, schedule.pwmState === 'on' ? schedule.onMinutes : schedule.offMinutes);
         await createAlarm('ac-pwm', { delayInMinutes: delay });
@@ -1281,6 +1336,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       }
     } catch (e) {
       console.error('[AC扩展] 看门狗执行失败:', e);
+      void appendDiagnosticLog('error', 'alarm-watchdog', e);
     }
   }
 
@@ -1289,6 +1345,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       await onActiveBoundaryCrossed();
     } catch (e) {
       console.warn('[AC扩展] active hours boundary 处理失败:', e?.message);
+      void appendDiagnosticLog('warn', 'alarm-active-boundary', e);
       rescheduleActiveBoundary();  // 出错也重新调度，避免漏掉下次
     }
   }
@@ -1354,6 +1411,7 @@ async function ensureContentScriptLoaded(tabId, maxRetries = 2) {
       return true;
     } catch (e2) {
       console.error('[AC扩展] scripting.executeScript 兜底注入失败:', e2?.message);
+      void appendDiagnosticLog('error', 'content-script-injection', e2);
       return false;
     }
   }
@@ -1445,6 +1503,7 @@ async function _toggleOnExistingTab(tab, action) {
   } catch (e) {
     if (!isClosedMessagePortError(e)) {
       console.error('[AC扩展] 发送消息失败，本次不重复发送:', e?.message);
+      void appendDiagnosticLog('error', 'toggle-message', e);
       return { success: false, tabId: tab.id, error: e?.message || String(e) };
     }
 
@@ -1467,6 +1526,7 @@ async function _toggleOnExistingTab(tab, action) {
       return { ...retryResult, recoveredByNavigate: true, initialError };
     } catch (retryError) {
       console.error('[AC扩展] 导航后单次重试失败:', retryError?.message);
+      void appendDiagnosticLog('error', 'toggle-navigation-recovery', retryError);
       return {
         success: false,
         tabId: tab.id,
@@ -1971,6 +2031,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
   })().catch((e) => {
     console.error('[AC扩展] 消息处理失败:', msg?.type, e);
+    void appendDiagnosticLog('error', `message-${msg?.type || 'unknown'}`, e);
     sendResponse({ success: false, error: e?.message || String(e), schedule });
   });
   return true;
@@ -2003,7 +2064,10 @@ chrome.runtime.onConnect.addListener((port) => {
 // ----- 启动/恢复兜底 -----
 chrome.runtime.onStartup.addListener(() => {
   console.log('[AC扩展] 浏览器启动，恢复 PWM 闹钟');
-  initReady.then(() => setupAlarms()).catch(e => console.error('[AC扩展] onStartup 恢复失败:', e));
+  initReady.then(() => setupAlarms()).catch((e) => {
+    console.error('[AC扩展] onStartup 恢复失败:', e);
+    void appendDiagnosticLog('error', 'on-startup', e);
+  });
 });
 
 // ----- 官方推荐：首次安装/更新时初始化 -----

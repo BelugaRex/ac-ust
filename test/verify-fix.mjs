@@ -1147,11 +1147,13 @@ async function runTests() {
     'isACTab',
     'isACHomePageTab',
     'ensureContentScriptLoaded',
+    'appendDiagnosticLog',
     'console',
     'AC_PAGE',
     `${toggleRecoverySource}; return { _toggleOnExistingTab, isClosedMessagePortError };`
   );
   const quietConsole = { log() {}, warn() {}, error() {} };
+  const ignoreDiagnosticLog = async () => {};
   const recoveryCalls = { send: 0, update: 0, get: 0, ready: 0, ensure: 0 };
   const recoveryChrome = {
     tabs: {
@@ -1179,6 +1181,7 @@ async function runTests() {
     tab => tab?.url?.startsWith('https://w5.ab.ust.hk/njggt/app/'),
     tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
     async () => { recoveryCalls.ensure += 1; return true; },
+    ignoreDiagnosticLog,
     quietConsole,
     'https://w5.ab.ust.hk/njggt/app/home'
   );
@@ -1207,6 +1210,7 @@ async function runTests() {
     () => true,
     tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
     async () => true,
+    ignoreDiagnosticLog,
     quietConsole,
     'https://w5.ab.ust.hk/njggt/app/home'
   );
@@ -1243,6 +1247,7 @@ async function runTests() {
     () => true,
     tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
     async () => { proactiveCalls.ensure += 1; return true; },
+    ignoreDiagnosticLog,
     quietConsole,
     'https://w5.ab.ust.hk/njggt/app/home'
   );
@@ -1356,12 +1361,12 @@ async function runTests() {
       && verifyBody.includes('lastFailure = `第 ${attempt + 1} 次新鲜页读回不匹配')
       && verifyBody.includes('await chrome.tabs.remove(verifierTabId)'),
     '11B: 新鲜页必须读回同一 HH:MM，未匹配会记录失败并回收临时验证页');
-  assertPass(backgroundSource.includes('const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [3000, 10000, 30000];')
+  assertPass(backgroundSource.includes('const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [10000, 15000, 20000];')
       && verifyBody.includes('await sleep(PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS[attempt]);')
       && verifyBody.includes('attempts: attempt + 1')
       && verifyBody.includes('attempts: PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length')
       && verifyBody.includes('次新鲜页验证后仍未持久化'),
-    '11B-1: 写入后按 3 秒、10 秒、30 秒退避，三次失败仍明确报告未持久化');
+    '11B-1: 写入后按 10 秒、15 秒、20 秒间隔验证，避免首轮过早加载新页面，同时三次失败仍明确报告未持久化');
   assertPass(verifyBody.includes('let verifierTabId = null;')
       && verifyBody.includes('finally')
       && verifyBody.includes('await chrome.tabs.remove(verifierTabId);'),
@@ -1653,6 +1658,142 @@ async function runTests() {
       && popupSource.includes("t('diagnoseVersion',")
       && /chrome\.runtime\.getManifest\(\)\.version/.test(popupSource),
     `14M: 诊断末行 diagnoseVersion 不再直接传 APP_VERSION 硬编码,改为优先读 chrome.runtime.getManifest().version (治本 — 即便作者漏同步源码 APP_VERSION,诊断仍显示真实 manifest 版本)`);
+
+  // ===== 用例 15: 持久化脱敏诊断日志 =====
+  console.log('\n\n=== 用例 15: 持久化脱敏诊断日志 ===\n');
+
+  const diagnosticLogStart = backgroundSource.indexOf("const DIAGNOSTIC_LOG_KEY = 'ac_diagnostic_log';");
+  const diagnosticLogEnd = backgroundSource.indexOf('\n// 跨设备同步：', diagnosticLogStart);
+  const diagnosticLogBody = diagnosticLogStart >= 0 && diagnosticLogEnd > diagnosticLogStart
+    ? backgroundSource.slice(diagnosticLogStart, diagnosticLogEnd)
+    : '';
+  const createDiagnosticLogHarness = new Function('chrome', 'self', `
+    ${diagnosticLogBody}
+    return {
+      appendDiagnosticLog,
+      normalizeDiagnosticMessage,
+      flush: () => diagnosticLogWriteChain
+    };
+  `);
+
+  function createDiagnosticStorage(options = {}) {
+    let storedEntries = [];
+    let setCount = 0;
+    const listeners = {};
+    return {
+      chrome: {
+        storage: {
+          local: {
+            async get(key) {
+              return key === 'ac_diagnostic_log'
+                ? { ac_diagnostic_log: storedEntries.map(entry => ({ ...entry })) }
+                : {};
+            },
+            async set(value) {
+              setCount += 1;
+              if (options.failSet) throw new Error('diagnostic storage unavailable');
+              storedEntries = value.ac_diagnostic_log.map(entry => ({ ...entry }));
+            }
+          }
+        }
+      },
+      self: {
+        addEventListener(type, listener) { listeners[type] = listener; }
+      },
+      listeners,
+      getEntries: () => storedEntries.map(entry => ({ ...entry })),
+      getSetCount: () => setCount
+    };
+  }
+
+  const diagnosticMock = createDiagnosticStorage();
+  const diagnosticHarness = createDiagnosticLogHarness(diagnosticMock.chrome, diagnosticMock.self);
+  await Promise.all(Array.from({ length: 60 }, (_, index) =>
+    diagnosticHarness.appendDiagnosticLog('error', `source-${index}`, `failure-${index}`)
+  ));
+  await diagnosticHarness.flush();
+  const diagnosticEntries = diagnosticMock.getEntries();
+  assertPass(diagnosticEntries.length === 50
+      && diagnosticEntries[0].source === 'source-10'
+      && diagnosticEntries[49].source === 'source-59'
+      && diagnosticMock.getSetCount() === 60,
+    '15A: 并发追加经串行写链不丢失，并将环形日志裁剪为最新 50 条');
+
+  const privateMessage = `request https://w5.ab.ust.hk/njggt/app/home?token=secret from user@example.com ${'x'.repeat(400)}`;
+  await diagnosticHarness.appendDiagnosticLog('warn', 'privacy-check', privateMessage);
+  const privateEntry = diagnosticMock.getEntries().at(-1);
+  assertPass(privateEntry.level === 'warn'
+      && privateEntry.message.length <= 300
+      && privateEntry.message.includes('[url]')
+      && privateEntry.message.includes('[email]')
+      && !privateEntry.message.includes('token=secret')
+      && !privateEntry.message.includes('user@example.com')
+      && Object.keys(privateEntry).sort().join(',') === 'level,message,source,timestamp',
+    '15B: 日志仅保留白名单字段，URL/邮箱被脱敏且消息限制为 300 字符');
+
+  const failingDiagnosticMock = createDiagnosticStorage({ failSet: true });
+  const failingDiagnosticHarness = createDiagnosticLogHarness(failingDiagnosticMock.chrome, failingDiagnosticMock.self);
+  await failingDiagnosticHarness.appendDiagnosticLog('error', 'storage-failure', new Error('write failed'));
+  await failingDiagnosticHarness.flush();
+  assertPass(failingDiagnosticMock.getSetCount() === 1 && failingDiagnosticMock.getEntries().length === 0,
+    '15C: 日志 storage 写入失败被内部吞掉，不递归记录或制造未处理 rejection');
+
+  const listenerDiagnosticMock = createDiagnosticStorage();
+  const listenerDiagnosticHarness = createDiagnosticLogHarness(listenerDiagnosticMock.chrome, listenerDiagnosticMock.self);
+  listenerDiagnosticMock.listeners.error({ message: 'global worker error' });
+  listenerDiagnosticMock.listeners.unhandledrejection({ reason: new Error('global rejected promise') });
+  await listenerDiagnosticHarness.flush();
+  const listenerEntries = listenerDiagnosticMock.getEntries();
+  assertPass(listenerEntries.length === 2
+      && listenerEntries[0].source === 'service-worker-error'
+      && listenerEntries[1].source === 'service-worker-unhandledrejection',
+    '15D: Service Worker error 与 unhandledrejection 会写入持久诊断日志');
+
+  assertPass(!diagnosticLogBody.includes('chrome.storage.sync')
+      && backgroundSource.includes("appendDiagnosticLog('error', 'init', e)")
+      && backgroundSource.includes("appendDiagnosticLog('error', 'alarm-ac-pwm', e)")
+      && backgroundSource.includes("appendDiagnosticLog('error', `message-${msg?.type || 'unknown'}`, e)")
+      && backgroundSource.includes("appendDiagnosticLog('error', 'toggle-navigation-recovery', retryError)"),
+    '15E: 日志只进 local，并覆盖 init、PWM、消息汇聚与导航恢复关键错误链');
+
+  const recentLogStart = popupSource.indexOf('function appendRecentDiagnosticLogLines(lines, entries) {');
+  const recentLogEnd = popupSource.indexOf('\nbtnDiagnose.addEventListener', recentLogStart);
+  const recentLogBody = recentLogStart >= 0 && recentLogEnd > recentLogStart
+    ? popupSource.slice(recentLogStart, recentLogEnd)
+    : '';
+  const createRecentLogHarness = new Function('t', `
+    ${recentLogBody}
+    return appendRecentDiagnosticLogLines;
+  `);
+  const recentLogHarness = createRecentLogHarness((key, ...subs) => {
+    if (key === 'diagnoseRecentErrorsEmpty') return 'NO RECENT ERRORS';
+    if (key === 'diagnoseRecentErrors') return `RECENT ERRORS ${subs[0]}/${subs[1]}`;
+    return key;
+  });
+  const recentLines = [];
+  recentLogHarness(recentLines, Array.from({ length: 12 }, (_, index) => ({
+    timestamp: 1700000000000 + index,
+    level: index % 2 ? 'warn' : 'error',
+    source: `source-${index}`,
+    message: `message-${index}`
+  })));
+  const emptyRecentLines = [];
+  recentLogHarness(emptyRecentLines, []);
+  assertPass(recentLines.length === 11
+      && recentLines[0] === 'RECENT ERRORS 12/10'
+      && !recentLines.some(line => line.includes('/source-0]') || line.includes('/source-1]'))
+      && recentLines.some(line => line.includes('source-11'))
+      && emptyRecentLines[0] === '✅ NO RECENT ERRORS'
+      && popupSource.includes("chrome.storage.local.get('ac_diagnostic_log')"),
+    '15F: popup 诊断并入最近 10 条持久异常，无日志时显示明确空状态');
+
+  const diagnosticLocaleKeys = [
+    'diagnoseRecentErrors',
+    'diagnoseRecentErrorsEmpty',
+    'diagnoseRecentErrorsReadFailed'
+  ];
+  assertPass(diagnosticLocaleKeys.every(key => zhCN[key]?.message && en[key]?.message),
+    '15G: 持久诊断日志的摘要、空状态与读取失败文案均有中英文');
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;

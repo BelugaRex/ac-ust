@@ -123,6 +123,9 @@
   "diagnoseActiveBoundaryMissing": { "message": "ac-active-boundary alarm missing (active-hours boundary won't auto-trigger)" },
   "diagnosePageTimerRetry": { "message": "page timer retrying (next $1, in $2 min)" },
   "diagnosePageTimerRetryNone": { "message": "page timer no retry (pageTimerRetryMinutes=0)" },
+  "diagnoseRecentErrors": { "message": "ℹ️ Recent background errors: $1 total, showing latest $2" },
+  "diagnoseRecentErrorsEmpty": { "message": "No recent background errors" },
+  "diagnoseRecentErrorsReadFailed": { "message": "Failed to read recent background errors: " },
 
   "badgeDefault": { "message": "AC Timer Control" },
   "badgeClockSoon": { "message": "AC switching soon" },

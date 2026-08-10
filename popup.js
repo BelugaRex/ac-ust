@@ -433,7 +433,7 @@ startup().then(setupStaticPreviewFit);
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：硬编码须与 manifest.json 版本同步，build.sh 会在 dist/ 中再次核对并注入）
-const APP_VERSION = '0.6.12';
+const APP_VERSION = '0.6.13';
 // BUILD_TIME 由 build.sh 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -508,6 +508,27 @@ function renderDiagnoseResult(lines) {
     fragment.append(document.createTextNode(line));
   });
   document.getElementById('diagContent').replaceChildren(fragment);
+}
+
+function appendRecentDiagnosticLogLines(lines, entries) {
+  const validEntries = Array.isArray(entries)
+    ? entries.filter(entry => entry && typeof entry === 'object')
+    : [];
+  if (!validEntries.length) {
+    lines.push('✅ ' + t('diagnoseRecentErrorsEmpty'));
+    return;
+  }
+
+  const recentEntries = validEntries.slice(-10);
+  lines.push(t('diagnoseRecentErrors', validEntries.length, recentEntries.length));
+  recentEntries.forEach((entry) => {
+    const timestamp = Number(entry.timestamp);
+    const time = Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : '?';
+    const level = entry.level === 'warn' ? 'WARN' : 'ERROR';
+    const source = String(entry.source || 'unknown').slice(0, 80);
+    const message = String(entry.message || '').slice(0, 300);
+    lines.push(`⚠️ ${time} [${level}/${source}] ${message}`);
+  });
 }
 
 btnDiagnose.addEventListener('click', async () => {
@@ -773,6 +794,15 @@ btnDiagnose.addEventListener('click', async () => {
       add(true, t('diagnoseI18nOK', i18nLang, testMsg.slice(0,20)));
     } else {
       add(false, t('diagnoseI18nNoTrans', i18nLang, testMsg));
+    }
+
+    // 8. 最近后台异常：只读本机有界环形日志，并入现有复制诊断报告。
+    // 日志不含 URL、tabId、DOM、余额或账号信息，也不会进入 chrome.storage.sync。
+    try {
+      const diagnosticStorage = await chrome.storage.local.get('ac_diagnostic_log');
+      appendRecentDiagnosticLogLines(lines, diagnosticStorage?.ac_diagnostic_log);
+    } catch (e) {
+      add(false, t('diagnoseRecentErrorsReadFailed') + (e.message || '').slice(0, 80));
     }
   } catch (e) {
     lines.push('❌ ' + t('diagnoseException') + (e.message||'').slice(0,80));

@@ -8,7 +8,7 @@
 | 字段 | 值 |
 |------|-----|
 | 名称 | AC-UST |
-| 版本 | 0.6.12 |
+| 版本 | 0.6.13 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率 (Productivity) |
 | 语言 | 中文（简体）、English |
@@ -33,9 +33,10 @@ AC-UST 是一款为香港科技大学 Smart Power Meter 系统设计的自动冷
 • PWM 循环定时：分别设置冷气开启与关闭分钟数，自动持续循环
 • PWM 运行时段：只在每天指定时段运行，时段外自动停用并请求页面定时关机
 • 可用时刻预计：仅在页面显示 Charge Mode 时只读读取冷气余额并计算精确到分钟的预计时刻；其他计费模式不显示估算，避免误导。今明两日显示“今天／明天”，之后显示月日，预计 24 小时内用完时以轻量警示突出
-• 页面定时关机：使用 UST 页面自带的 Power-off after 定时器执行关机；扩展优先复用 home 页，必要时从 warning 等子页导航回入口，写入后以独立新鲜页按 3/10/30 秒退避回读确认，失败自动重试且绝不重复点击 OFF 开关
+• 页面定时关机：使用 UST 页面自带的 Power-off after 定时器执行关机；扩展优先复用 home 页，必要时从 warning 等子页导航回入口，写入后以独立新鲜页按 10/15/20 秒退避回读确认，失败自动重试且绝不重复点击 OFF 开关
+• AC home 导航恢复：开关前确认标签位于 AC home；标签偏离或消息端口提前关闭时，导航原标签回 home、等待脚本就绪并仅重试一次
 • 跨设备相位对齐：同浏览器生态通过浏览器同步补充对齐，UST 页面定时器负责跨浏览器关机相位校验
-• 看门狗与自愈：自动恢复缺失的后台闹钟，并提供一键诊断
+• 看门狗与自愈：自动恢复缺失的后台闹钟；一键诊断可复制本机最近的脱敏后台异常，不上传、不跨设备同步
 • 清晰与低干扰：固定使用与 UST 页面一致的浅色外观，提供清晰文字与语义状态反馈，并适配系统减弱动态效果和高对比度
 • 中英双语：支持中文和英文界面，并接入 Crowdin 社区本地化
 
@@ -54,9 +55,10 @@ Features:
 • PWM cycle scheduling with independently configurable ON and OFF durations
 • Active hours that limit PWM operation to a daily time window
 • A compact two-line estimated availability label and time beside the AC status, calculated only when the portal displays Charge Mode; estimates stay hidden in other billing modes to avoid misleading results, with Today/Tomorrow labels, month/day for later dates, and a subtle highlight when less than 24 hours remain
-• Timer-based shutdown through the portal's Power-off after control, preserving the write page while independently verifying persistence after 3/10/30-second backoff windows and retrying failures without repeated OFF clicks
+• Timer-based shutdown through the portal's Power-off after control, preserving the write page while independently verifying persistence after 10/15/20-second backoff windows and retrying failures without repeated OFF clicks
+• AC home navigation recovery that checks the tab before switching and, when the tab has drifted or the message port closes early, navigates the same tab home, waits for scripts, and retries only once
 • Cross-device phase alignment using browser sync plus the UST page timer
-• Watchdog recovery and a built-in diagnostics panel
+• Watchdog recovery and a built-in diagnostics panel that can copy recent redacted local background errors without uploading or syncing them
 • Clear, low-distraction light appearance matching the UST page, with semantic status feedback and support for system reduced-motion and high-contrast preferences
 • Chinese and English UI with Crowdin-based community localization
 
@@ -73,7 +75,7 @@ Open source: https://github.com/BelugaRex/ac-ust
 | 单一用途说明 | 自动控制 HKUST Smart Power Meter 冷气，提供 PWM 循环、运行时段、余额可用时刻预计、页面定时关机和状态诊断 |
 | 远程代码 | 否，不加载或执行远程代码 |
 | 隐私政策 URL | https://github.com/BelugaRex/ac-ust/blob/main/PRIVACY.md |
-| 数据收集 | 不收集、出售或传输个人数据；设置仅保存在浏览器 `storage.local` / `storage.sync` |
+| 数据收集 | 不收集、出售或传输个人数据；设置保存在浏览器 `storage.local` / `storage.sync`，最多 50 条脱敏后台异常仅保存在本机 `storage.local` |
 | 外部网络 | 仅访问用户主动登录的 HKUST Smart Power Meter 页面 |
 
 ## 权限理由
@@ -125,12 +127,12 @@ AC-UST 的完整功能需要登录 HKUST Smart Power Meter。提交审核前，�
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.6.12.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.6.13.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP 内容和图标均通过验证。
-2. 在开发者信息中心上传 `releases/ac-ust-v0.6.12.zip`。
+2. 在开发者信息中心上传 `releases/ac-ust-v0.6.13.zip`。
 3. 填写商品详情、隐私声明、权限理由和 HKUST 登录所需的审核测试说明。
 4. 在“分发”页选择“私享（Private）”，配置受信任测试人员或 Google 群组，并将地区限制为香港。
 5. 提交审核时选择推迟发布；审核通过后在 30 天内手动发布并把商店链接发给测试人员。
