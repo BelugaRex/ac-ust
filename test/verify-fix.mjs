@@ -471,11 +471,19 @@ async function runTests() {
       && popupJs.includes(": schedule.pwmState)"),
     'popup.js nextAction fallback 链含 cached actualStatus 反推档——锁住 ON setPageTimer 失败 故障态 pwmState=on 时 popup 不再误显示"分钟后自动开启"（与状态行"冷气运行中"冲突的根因修复）');
   assertPass(popupJs.includes('function formatBuildTimeShort(buildTime)')
-      && popupJs.includes('return `${Number(month)}/${Number(day)} ${hour}:${minute}`;')
+      && popupJs.includes('return `${month}/${day} ${hour}:${minute}`;')
       && popupJs.includes('versionInfo.textContent = `v${displayVersion} · ${formatBuildTimeShort(BUILD_TIME)}`')
       && popupJs.includes("versionInfo.setAttribute('aria-label', buildInfo)")
       && popupJs.includes('versionInfo.title = buildInfo;'),
-    '头栏显示版本号与分钟级短构建时间，完整秒级时间保留在 tooltip 和无障碍名称');
+    '头栏显示版本号与 MM/DD 分钟级短构建时间，完整秒级时间保留在 tooltip 和无障碍名称');
+  const formatBuildTimeStart = popupJs.indexOf('function formatBuildTimeShort(buildTime)');
+  const formatBuildTimeEnd = popupJs.indexOf('\nconst versionInfo =', formatBuildTimeStart);
+  const formatBuildTimeShort = new Function(
+    `${popupJs.slice(formatBuildTimeStart, formatBuildTimeEnd)}; return formatBuildTimeShort;`
+  )();
+  assertPass(formatBuildTimeShort('2026-08-09 22:45:12') === '08/09 22:45'
+      && formatBuildTimeShort('dev') === 'dev',
+    '头栏短构建时间语义验证保留月日两位数，并原样返回非构建时间占位');
   assertPass(popupHtml.includes('class="balance-estimate" id="balanceEstimate"')
       && !popupHtml.includes('id="balanceSummary"')
       && !popupHtml.includes('id="balanceMinutesValue"')

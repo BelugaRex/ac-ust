@@ -433,7 +433,7 @@ startup().then(setupStaticPreviewFit);
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：硬编码须与 manifest.json 版本同步，build.sh 会在 dist/ 中再次核对并注入）
-const APP_VERSION = '0.6.11';
+const APP_VERSION = '0.6.12';
 // BUILD_TIME 由 build.sh 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -442,7 +442,7 @@ function formatBuildTimeShort(buildTime) {
   const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):\d{2}$/.exec(buildTime);
   if (!match) return buildTime;
   const [, , month, day, hour, minute] = match;
-  return `${Number(month)}/${Number(day)} ${hour}:${minute}`;
+  return `${month}/${day} ${hour}:${minute}`;
 }
 
 const versionInfo = document.getElementById('versionInfo');
