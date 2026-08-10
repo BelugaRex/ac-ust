@@ -455,6 +455,18 @@
     "message": "页面定时器无重试 (pageTimerRetryMinutes=0)",
     "description": "诊断：page timer 无重试"
   },
+  "diagnoseRecentErrors": {
+    "message": "ℹ️ 近期后台异常：共 $1 条，显示最近 $2 条",
+    "description": "诊断：本地持久化异常日志摘要。$1=总条数,$2=显示条数"
+  },
+  "diagnoseRecentErrorsEmpty": {
+    "message": "近期后台异常为空",
+    "description": "诊断：没有持久化后台异常"
+  },
+  "diagnoseRecentErrorsReadFailed": {
+    "message": "读取近期后台异常失败: ",
+    "description": "诊断：读取持久化异常日志失败前缀"
+  },
   "badgeDefault": {
     "message": "AC Timer Control",
     "description": "扩展图标默认标题"
