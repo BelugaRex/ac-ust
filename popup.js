@@ -433,7 +433,7 @@ startup().then(setupStaticPreviewFit);
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：硬编码须与 manifest.json 版本同步，build.sh 会在 dist/ 中再次核对并注入）
-const APP_VERSION = '0.6.13';
+const APP_VERSION = '0.6.14';
 // BUILD_TIME 由 build.sh 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -676,13 +676,16 @@ btnDiagnose.addEventListener('click', async () => {
 
     // 3. 检查 AC 页面
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-    add(tabs.length > 0, t('diagnoseTabOpen') + tabs.length + t('diagnoseTabCount'));
-    if (tabs.length > 0) {
-      add(!tabs[0].discarded, t('diagnoseTabNotDiscarded'));
+    const exactHomeTabs = tabs.filter(tab => tab.url === 'https://w5.ab.ust.hk/njggt/app/home');
+    const exactHomeTab = exactHomeTabs.find(tab => !tab.discarded) || null;
+    add(exactHomeTabs.length > 0, t('diagnoseTabOpen') + exactHomeTabs.length + t('diagnoseTabCount'));
+    if (exactHomeTab) {
+      add(true, t('diagnoseTabNotDiscarded'));
       try {
-        const status = await chrome.tabs.sendMessage(tabs[0].id, { action: 'status' });
-        add(!!status, t('diagnoseContentOK'));
-        add(typeof status.isOn === 'boolean', t('diagnoseAcReadable') + (status.isOn ? 'ON' : 'OFF'));
+        const status = await chrome.tabs.sendMessage(exactHomeTab.id, { action: 'status' });
+        const statusAccepted = !!status && status.success !== false && status.invalidTarget !== true;
+        add(statusAccepted, t('diagnoseContentOK'));
+        add(statusAccepted && typeof status.isOn === 'boolean', t('diagnoseAcReadable') + (status?.isOn ? 'ON' : 'OFF'));
       } catch (e) {
         add(false, t('diagnoseContentNoResponse') + (e.message||'').slice(0,60));
       }
@@ -705,12 +708,14 @@ btnDiagnose.addEventListener('click', async () => {
 
     // 4.5. v0.5.10 page timer 跨设备主同步通道诊断
     // page timer 两相位都对齐：pwmState='off'(AC 正开) 直接采纳；pwmState='on'(AC 正关) 掉算下一“开”。
-    if (tabs.length > 0 && s.enabled) {
+    if (exactHomeTab && s.enabled) {
       try {
-        const pt = await chrome.tabs.sendMessage(tabs[0].id, { action: 'getPageTimer' });
-        if (pt && pt.found && pt.value) {
+        const pt = await chrome.tabs.sendMessage(exactHomeTab.id, { action: 'getPageTimer' });
+        if (pt && pt.success !== false && pt.invalidTarget !== true && pt.found && pt.value) {
           const localNext = effectiveNextTriggerAt || s.nextTriggerAt || 0;
           add(true, t('diagnosePageTimerExpr', pt.value, fmt(localNext), s.pwmState));
+        } else if (pt?.success === false || pt?.invalidTarget === true) {
+          add(false, t('diagnosePageTimerFail') + String(pt.error || '').slice(0,60));
         } else {
           add(true, t('diagnosePageTimerEmpty'));
         }

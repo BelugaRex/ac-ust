@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.14
+
+- 冷气状态读取、开机和页面定时器读写现在只接受 URL 完整等于 `https://w5.ab.ust.hk/njggt/app/home` 的标签。
+- 没有精确 home 时，写操作会创建隐藏 home 标签，不再把 billing-cycle、warning、登录回调或其他 UST 页面导航到 home。
+- 新增精确 URL 回归覆盖，拒绝尾斜杠、查询串、哈希、相似路径、业务子页与登录后缀。
+
 ## 0.6.13
 
 - 开关冷气前先确认目标标签位于 AC home；若停在 warning 等子页，导航原标签回 home 后再执行。

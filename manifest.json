@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "__MSG_extName__",
-  "version": "0.6.13",
+  "version": "0.6.14",
   "description": "__MSG_extDesc__",
   "default_locale": "zh_CN",
   "permissions": [
@@ -25,17 +25,17 @@
   },
   "content_scripts": [
     {
-      "matches": ["https://w5.ab.ust.hk/njggt/app/*"],
+      "matches": ["https://w5.ab.ust.hk/njggt/app/home"],
       "js": ["page-confirm.js"],
       "run_at": "document_start",
       "world": "MAIN",
-      "all_frames": true
+      "all_frames": false
     },
     {
-      "matches": ["https://w5.ab.ust.hk/njggt/app/*"],
+      "matches": ["https://w5.ab.ust.hk/njggt/app/home"],
       "js": ["billing-helpers.js", "content.js"],
       "run_at": "document_idle",
-      "all_frames": true
+      "all_frames": false
     }
   ],
   "action": {

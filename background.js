@@ -638,9 +638,10 @@ async function tryAdoptPageTimer(reason = '') {
   if (!schedule.enabled) return false;
   try {
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-    if (!tabs.length) return false;
+    const tab = tabs.find(isACHomePageTab);
+    if (!tab?.id) return false;
 
-    const result = await chrome.tabs.sendMessage(tabs[0].id, { action: 'getPageTimer' });
+    const result = await sendMessageToExactACHome(tab.id, { action: 'getPageTimer' });
     if (!result || !result.found) return false;
 
     const adopt = computePageTimerAdoption(schedule, result, { now: Date.now() });
@@ -1087,10 +1088,12 @@ async function verifyPageTimerPersistence(expectedValue) {
 
       const pageReady = await waitForTabReady(verifierTabId, 30000);
       if (!pageReady) throw new Error('页面定时器验证页等待就绪超时');
+      const verifierTarget = await getExactACHomeTab(verifierTabId);
+      if (!verifierTarget) throw new Error('页面定时器验证页未停留在精确 home URL');
       const contentReady = await ensureContentScriptLoaded(verifierTabId);
       if (!contentReady) throw new Error('页面定时器验证页 content script 未就绪');
 
-      const readback = await chrome.tabs.sendMessage(verifierTabId, { action: 'getPageTimer' });
+      const readback = await sendMessageToExactACHome(verifierTabId, { action: 'getPageTimer' });
       const actualValue = String(readback?.value || readback?.title || '').trim();
       lastActualValue = actualValue;
       if (readback?.found && actualValue === expectedValue) {
@@ -1155,7 +1158,7 @@ async function setPageTimer(minutes, { retryOnFailure = true } = {}) {
 
   try {
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-    let tab = tabs.find(isACHomePageTab) || tabs[0] || null;
+    let tab = tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded) || null;
 
     if (!tab?.id) {
       tab = await chrome.tabs.create({ url: AC_PAGE, active: false });
@@ -1164,19 +1167,14 @@ async function setPageTimer(minutes, { retryOnFailure = true } = {}) {
       console.log('[AC扩展] 页面定时器：无现有 AC 页面，已创建隐藏标签页');
     }
 
-    tab = await restoreDiscardedACTab(tab);
-    if (!isACHomePageTab(tab)) {
-      console.log(`[AC扩展] 页面定时器目标页已离开 home (当前 ${tab?.url})，导航回 AC 入口页`);
-      await chrome.tabs.update(tab.id, { url: AC_PAGE });
-    }
     const pageReady = await waitForTabReady(tab.id, 30000);
     if (!pageReady) throw new Error('AC 页面等待就绪超时');
     tab = await chrome.tabs.get(tab.id);
-    if (!isACHomePageTab(tab)) throw new Error('页面定时器目标页导航后仍未到达 home');
+    if (!isACHomePageTab(tab)) throw new Error('页面定时器目标标签已离开精确 home URL');
     const contentReady = await ensureContentScriptLoaded(tab.id);
     if (!contentReady) throw new Error('AC 页面 content script 未就绪');
 
-    const result = await chrome.tabs.sendMessage(tab.id, {
+    const result = await sendMessageToExactACHome(tab.id, {
       action: 'setTimer',
       minutes
     });
@@ -1382,9 +1380,10 @@ async function waitUntil(promise) {
 // ----- 官方推荐：scripting.executeScript 兜底，当 content script 未加载时强制注入 -----
 async function ensureContentScriptLoaded(tabId, maxRetries = 2) {
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (!await getExactACHomeTab(tabId)) return false;
     try {
       // 尝试发一个轻量消息探测 content script 是否就绪
-      await chrome.tabs.sendMessage(tabId, { action: 'status' });
+      await sendMessageToExactACHome(tabId, { action: 'status' });
       return true;
     } catch (_) {
       if (attempt < maxRetries) {
@@ -1395,11 +1394,13 @@ async function ensureContentScriptLoaded(tabId, maxRetries = 2) {
     }
     // content script 未加载，用 scripting API 强制注入
     try {
+      if (!await getExactACHomeTab(tabId)) return false;
       await chrome.scripting.executeScript({
         target: { tabId },
         files: ['billing-helpers.js', 'content.js'],
         injectImmediately: true
       });
+      if (!await getExactACHomeTab(tabId)) return false;
       await chrome.scripting.executeScript({
         target: { tabId },
         files: ['page-confirm.js'],
@@ -1418,16 +1419,20 @@ async function ensureContentScriptLoaded(tabId, maxRetries = 2) {
   return false;
 }
 
-async function restoreDiscardedACTab(tab) {
-  if (!tab?.id || !tab.discarded) return tab;
+async function getExactACHomeTab(tabId) {
+  if (!Number.isInteger(tabId)) return null;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return isACHomePageTab(tab) ? tab : null;
+  } catch (_) {
+    return null;
+  }
+}
 
-  // UST 频繁刷新会触发警告、且警告态下继续刷新回不了 home，故改用 chrome.tabs.update
-  // 直接导航回 AC 入口页 home；对 bfcache 故障态比 reload 当前 URL 更稳定。
-  console.log('[AC扩展] 标签页已被浏览器丢弃，正在恢复（导航回 AC 入口页 home）...');
-  await chrome.tabs.update(tab.id, { url: AC_PAGE });
-  const ready = await waitForTabReady(tab.id, 30000);
-  if (!ready) throw new Error('被丢弃的 AC 页面恢复超时');
-  return chrome.tabs.get(tab.id);
+async function sendMessageToExactACHome(tabId, message) {
+  const tab = await getExactACHomeTab(tabId);
+  if (!tab) throw new Error('拒绝向非精确 AC home 标签发送消息');
+  return chrome.tabs.sendMessage(tabId, message);
 }
 
 // ----- 切换 AC 状态 -----
@@ -1466,31 +1471,26 @@ async function toggleACOnce(action) {
   } catch (_) { /* 预检失败不影响主流程 */ }
 
   const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-  
-  if (tabs.length > 0) {
-    // Edge/Chrome 可能丢弃后台标签页以节省内存；只有这种情况允许恢复性 reload。
-    const tab = await restoreDiscardedACTab(tabs[0]);
-    return waitUntil(_toggleOnExistingTab(tab, action));
+  const homeTab = tabs.find(tab => isACHomePageTab(tab) && !tab.discarded);
+
+  if (homeTab?.id) {
+    return waitUntil(_toggleOnExistingTab(homeTab, action));
   }
 
-  console.log('[AC扩展] 没有打开页面，创建新标签...');
+  console.log('[AC扩展] 没有精确 AC home 页面，创建隐藏标签...');
   const created = await chrome.tabs.create({ url: AC_PAGE, active: false });
   return waitUntil(_toggleOnNewTab(created?.id, action));
 }
 
 async function _toggleOnExistingTab(tab, action) {
-  // E. tab 还活着但已被 SPA/风控/警告态推到 home 以外的 njggt/app/* 子页（如 app/warning）。
-  // 不再用刷新式重试——直接导航到 AC 入口页 home，与 restoreDiscardedACTab 和消息端口
-  // 破裂恢复路径统一为 navigate 而非 reload。
+  // 操作目标必须从始至终精确等于 AC_PAGE。billing-cycle、warning、登录回调、
+  // query/hash 变体和相似路径都属于用户页面，禁止导航、注入或发送空调消息。
   if (!isACHomePageTab(tab)) {
-    console.log(`[AC扩展] tab 已离开 home (当前 ${tab?.url})，导航回 AC 入口页后再操作`);
-    await chrome.tabs.update(tab.id, { url: AC_PAGE });
-    const homeReady = await waitForTabReady(tab.id, 30000);
-    if (!homeReady) return { success: false, error: '从非 home 子页导航回 home 超时' };
-    tab = await chrome.tabs.get(tab.id);
-    if (!isACHomePageTab(tab)) {
-      return { success: false, error: '导航后仍未到达 home', currentUrl: tab?.url };
-    }
+    return {
+      success: false,
+      invalidTarget: true,
+      error: '拒绝在非精确 AC home 标签执行空调操作'
+    };
   }
 
   const ready = await ensureContentScriptLoaded(tab.id);
@@ -1508,32 +1508,34 @@ async function _toggleOnExistingTab(tab, action) {
     }
 
     const initialError = e?.message || String(e);
-    // UST 频繁刷新会触发警告、且警告态下继续刷新回不了 home，故改用 chrome.tabs.update
-    // 直接导航回 AC 入口页 home 进行恢复，比 reload 当前 URL 更稳。
-    console.warn('[AC扩展] 消息端口在响应前关闭，导航到 AC 入口页 home 后重试一次:', initialError);
+    console.warn('[AC扩展] 消息端口在响应前关闭，改用隐藏 AC home 重试一次:', initialError);
+    let recoveryTabId = null;
     try {
-      await chrome.tabs.update(tab.id, { url: AC_PAGE });
-      const pageReady = await waitForTabReady(tab.id, 30000);
-      if (!pageReady) throw new Error('消息端口恢复导航超时');
+      const recoveryTab = await chrome.tabs.create({ url: AC_PAGE, active: false });
+      recoveryTabId = recoveryTab?.id || null;
+      if (!recoveryTabId) throw new Error('无法创建消息端口恢复隐藏标签');
 
-      const refreshedTab = await chrome.tabs.get(tab.id);
-      if (!isACTab(refreshedTab)) throw new Error('导航后的标签页已离开 AC 页面');
+      const readyTab = await getReadyACTab(recoveryTabId, 30000);
+      if (!readyTab?.id) throw new Error('消息端口恢复隐藏标签未到达精确 home');
+      const contentReady = await ensureContentScriptLoaded(recoveryTabId);
+      if (!contentReady) throw new Error('恢复隐藏标签 content script 注入失败');
 
-      const contentReady = await ensureContentScriptLoaded(tab.id);
-      if (!contentReady) throw new Error('导航后 content script 注入失败');
-
-      const retryResult = await sendACToggleMessage(tab.id, action);
-      return { ...retryResult, recoveredByNavigate: true, initialError };
+      const retryResult = await sendACToggleMessage(recoveryTabId, action);
+      return { ...retryResult, recoveredByNewTab: true, initialError };
     } catch (retryError) {
-      console.error('[AC扩展] 导航后单次重试失败:', retryError?.message);
+      console.error('[AC扩展] 隐藏 home 单次重试失败:', retryError?.message);
       void appendDiagnosticLog('error', 'toggle-navigation-recovery', retryError);
       return {
         success: false,
-        tabId: tab.id,
-        recoveredByNavigate: true,
+        tabId: recoveryTabId || tab.id,
+        recoveredByNewTab: true,
         initialError,
         error: retryError?.message || String(retryError)
       };
+    } finally {
+      if (recoveryTabId) {
+        chrome.alarms.create(`ac-close-tab-${recoveryTabId}`, { delayInMinutes: 1 });
+      }
     }
   }
 }
@@ -1545,7 +1547,7 @@ function isClosedMessagePortError(error) {
 }
 
 async function sendACToggleMessage(tabId, action) {
-  const result = await chrome.tabs.sendMessage(tabId, { action });
+  const result = await sendMessageToExactACHome(tabId, { action });
   console.log(`[AC扩展] ${action} 命令返回:`, result);
   if (!result?.success) {
     console.warn('[AC扩展] 页面返回未确认，本次不重复发送:', result);
@@ -1578,10 +1580,11 @@ async function _toggleOnNewTab(tabId, action) {
 async function getReadyACTab(preferredTabId = null, timeoutMs = 30000) {
   if (preferredTabId) {
     try {
-      const tab = await chrome.tabs.get(preferredTabId);
-      if (isACTab(tab)) {
+      let tab = await chrome.tabs.get(preferredTabId);
+      if (isACHomePageTab(tab)) {
         await waitForTabReady(tab.id, timeoutMs);
-        return tab;
+        tab = await chrome.tabs.get(tab.id);
+        if (isACHomePageTab(tab)) return tab;
       }
     } catch (_) {
       // preferred tab 已关闭，回退到查询现有页面
@@ -1589,10 +1592,11 @@ async function getReadyACTab(preferredTabId = null, timeoutMs = 30000) {
   }
 
   const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-  const tab = tabs[0];
+  let tab = tabs.find(isACHomePageTab);
   if (!tab?.id) return null;
   await waitForTabReady(tab.id, timeoutMs);
-  return tab;
+  tab = await chrome.tabs.get(tab.id);
+  return isACHomePageTab(tab) ? tab : null;
 }
 
 async function waitForTabReady(tabId, timeoutMs = 30000) {
@@ -1625,25 +1629,22 @@ function isACTab(tab) {
   return !!tab?.url && tab.url.startsWith('https://w5.ab.ust.hk/njggt/app/');
 }
 
-// 与 isACTab 用宽匹配事实有别——这里要求 tab 真在 home 上才算可操作的 AC 目标页。
-// 风控/警告态 SPA 常把 tab 推到 home 以外的 njggt/app/* 子页（如 app/warning），
-// 此时 isACTab 仍返回 true；本函数拒绝把“已偏离 home 但仍在 app/* 内”的页当作 home。
-// 接受 home 上的 `'?'` query 与 `'#'` hash，但拒绝 `home/xxx` 子路径。
+// 与 isACTab 的宽匹配事实有别：所有 AC 读写只接受完整 URL 精确等于 AC_PAGE。
+// slash、query、hash、相似路径、业务子页与登录回调都不能被当作操作目标。
 function isACHomePageTab(tab) {
-  if (!tab?.url) return false;
-  const base = tab.url.split('#')[0].split('?')[0];
-  return base === AC_PAGE || base === AC_PAGE + '/';
+  return tab?.url === AC_PAGE;
 }
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
 async function getCurrentACStatus() {
   const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-  if (tabs.length === 0) {
-    return { isOn: null, error: 'AC 页面未打开' };
+  const tab = tabs.find(isACHomePageTab);
+  if (!tab?.id) {
+    return { isOn: null, error: '精确 AC home 页面未打开' };
   }
   try {
-    return await chrome.tabs.sendMessage(tabs[0].id, { action: 'status' });
+    return await sendMessageToExactACHome(tab.id, { action: 'status' });
   } catch (e) {
     return { isOn: null, error: 'AC 页面未就绪' };
   }

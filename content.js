@@ -43,10 +43,24 @@ const t = (key, ...subs) => {
 
 console.log('[AC扩展] Content script 已加载');
 
+const AC_HOME_URL = 'https://w5.ab.ust.hk/njggt/app/home';
+function isExactACHomeContext() {
+  return window.top === window && window.location.href === AC_HOME_URL;
+}
+
 // ----- 监听来自 background 的消息 -----
 // 触发 i18n 加载（不阻塞，翻译加载失败不影响核心功能）
 _i18nLoad();
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  const isACOperation = msg.action === 'on'
+    || msg.action === 'off'
+    || msg.action === 'status'
+    || msg.action === 'setTimer'
+    || msg.action === 'getPageTimer';
+  if (isACOperation && !isExactACHomeContext()) {
+    sendResponse({ success: false, invalidTarget: true, error: '拒绝在非精确 AC home 页面执行空调操作' });
+    return false;
+  }
   if (msg.action === 'on' || msg.action === 'off') {
     toggleACSwitch(msg.action).then(result => sendResponse(result));
     return true; // 异步响应
