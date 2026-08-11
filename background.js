@@ -1493,64 +1493,93 @@ async function _toggleOnExistingTab(tab, action) {
     };
   }
 
-  const ready = await ensureContentScriptLoaded(tab.id);
+  return attemptACToggleWithRecovery(tab.id, action, 1);
+}
+
+async function attemptACToggleOnExactHome(tabId, action) {
+  if (!await getExactACHomeTab(tabId)) {
+    return {
+      success: false,
+      invalidTarget: true,
+      tabId,
+      error: '拒绝在非精确 AC home 标签执行空调操作'
+    };
+  }
+
+  const ready = await ensureContentScriptLoaded(tabId);
   if (!ready) {
-    return { success: false, error: 'content script 注入失败' };
+    return { success: false, tabId, error: 'content script 注入失败' };
   }
 
   try {
-    return await sendACToggleMessage(tab.id, action);
-  } catch (e) {
-    if (!isClosedMessagePortError(e)) {
-      console.error('[AC扩展] 发送消息失败，本次不重复发送:', e?.message);
-      void appendDiagnosticLog('error', 'toggle-message', e);
-      return { success: false, tabId: tab.id, error: e?.message || String(e) };
-    }
-
-    const initialError = e?.message || String(e);
-    console.warn('[AC扩展] 消息端口在响应前关闭，改用隐藏 AC home 重试一次:', initialError);
-    let recoveryTabId = null;
-    try {
-      const recoveryTab = await chrome.tabs.create({ url: AC_PAGE, active: false });
-      recoveryTabId = recoveryTab?.id || null;
-      if (!recoveryTabId) throw new Error('无法创建消息端口恢复隐藏标签');
-
-      const readyTab = await getReadyACTab(recoveryTabId, 30000);
-      if (!readyTab?.id) throw new Error('消息端口恢复隐藏标签未到达精确 home');
-      const contentReady = await ensureContentScriptLoaded(recoveryTabId);
-      if (!contentReady) throw new Error('恢复隐藏标签 content script 注入失败');
-
-      const retryResult = await sendACToggleMessage(recoveryTabId, action);
-      return { ...retryResult, recoveredByNewTab: true, initialError };
-    } catch (retryError) {
-      console.error('[AC扩展] 隐藏 home 单次重试失败:', retryError?.message);
-      void appendDiagnosticLog('error', 'toggle-navigation-recovery', retryError);
-      return {
-        success: false,
-        tabId: recoveryTabId || tab.id,
-        recoveredByNewTab: true,
-        initialError,
-        error: retryError?.message || String(retryError)
-      };
-    } finally {
-      if (recoveryTabId) {
-        chrome.alarms.create(`ac-close-tab-${recoveryTabId}`, { delayInMinutes: 1 });
-      }
-    }
+    return await sendACToggleMessage(tabId, action);
+  } catch (error) {
+    console.error('[AC扩展] 发送消息失败:', error?.message);
+    void appendDiagnosticLog('error', 'toggle-message', error);
+    return { success: false, tabId, error: error?.message || String(error) };
   }
 }
 
-function isClosedMessagePortError(error) {
-  const message = String(error?.message || error || '').toLowerCase();
-  return message.includes('message port closed before a response was received')
-    || message.includes('message channel closed before a response was received');
+async function refreshACControlPage(tabId) {
+  try {
+    const currentTab = await chrome.tabs.get(tabId);
+    if (isACHomePageTab(currentTab)) {
+      await chrome.tabs.reload(tabId);
+    } else {
+      await chrome.tabs.update(tabId, { url: AC_PAGE });
+    }
+
+    const pageReady = await waitForTabReady(tabId, 30000);
+    if (!pageReady) throw new Error('刷新后的 AC home 未在 30 秒内就绪');
+    const readyTab = await getExactACHomeTab(tabId);
+    if (!readyTab) {
+      throw new Error('刷新后目标标签未停留在精确 AC home');
+    }
+    return readyTab;
+  } catch (error) {
+    console.error('[AC扩展] 恢复 AC 控制页面失败:', error?.message);
+    void appendDiagnosticLog('error', 'toggle-refresh-recovery', error);
+    return null;
+  }
+}
+
+async function attemptACToggleWithRecovery(tabId, action, refreshesRemaining = 1, initialError = '') {
+  const result = await attemptACToggleOnExactHome(tabId, action);
+  if (result.success || result.invalidTarget || refreshesRemaining <= 0) {
+    if (!result.success && initialError) {
+      void appendDiagnosticLog('error', 'toggle-refresh-recovery', new Error(result.error));
+    }
+    return initialError
+      ? { ...result, recoveredByPageRefresh: true, initialError }
+      : result;
+  }
+
+  const firstError = initialError || result.error || `${action} 首次操作未确认`;
+  console.warn('[AC扩展] 空调操作未成功，恢复 AC 控制页面后重试:', firstError);
+  const refreshedTab = await refreshACControlPage(tabId);
+  if (!refreshedTab) {
+    return {
+      success: false,
+      tabId,
+      recoveredByPageRefresh: true,
+      initialError: firstError,
+      error: 'AC 控制页面恢复失败'
+    };
+  }
+
+  return attemptACToggleWithRecovery(
+    tabId,
+    action,
+    refreshesRemaining - 1,
+    firstError
+  );
 }
 
 async function sendACToggleMessage(tabId, action) {
   const result = await sendMessageToExactACHome(tabId, { action });
   console.log(`[AC扩展] ${action} 命令返回:`, result);
   if (!result?.success) {
-    console.warn('[AC扩展] 页面返回未确认，本次不重复发送:', result);
+    console.warn('[AC扩展] 页面返回未确认:', result);
     return {
       success: false,
       tabId,
