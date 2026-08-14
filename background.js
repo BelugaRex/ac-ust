@@ -657,7 +657,7 @@ async function tryAdoptPageTimer(reason = '') {
     const tab = tabs.find(isACHomePageTab);
     if (!tab?.id) return false;
 
-    const result = await sendMessageToExactACHome(tab.id, { action: 'getPageTimer' });
+    const result = await sendReadMessageToExactACHome(tab.id, { action: 'getPageTimer' });
     if (!result || !result.found) return false;
 
     const adopt = computePageTimerAdoption(schedule, result, { now: Date.now() });
@@ -1095,10 +1095,10 @@ async function verifyPageTimerPersistence(expectedValue) {
       if (!pageReady) throw new Error('页面定时器验证页等待就绪超时');
       const verifierTarget = await getExactACHomeTab(verifierTabId);
       if (!verifierTarget) throw new Error('页面定时器验证页未停留在精确 home URL');
-      const contentReady = await ensureContentScriptLoaded(verifierTabId);
-      if (!contentReady) throw new Error('页面定时器验证页 content script 未就绪');
-
-      const readback = await sendMessageToExactACHome(verifierTabId, { action: 'getPageTimer' });
+      const readback = await sendReadMessageToExactACHome(
+        verifierTabId,
+        { action: 'getPageTimer' }
+      );
       const actualValue = String(readback?.value || readback?.title || '').trim();
       lastActualValue = actualValue;
       if (readback?.found && actualValue === expectedValue) {
@@ -1375,45 +1375,79 @@ async function waitUntil(promise) {
 }
 
 // ----- 官方推荐：scripting.executeScript 兜底，当 content script 未加载时强制注入 -----
-async function ensureContentScriptLoaded(tabId, maxRetries = 2) {
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (!await getExactACHomeTab(tabId)) return false;
-    try {
-      // 尝试发一个轻量消息探测 content script 是否就绪
-      await sendMessageToExactACHome(tabId, { action: 'status' });
-      return true;
-    } catch (_) {
-      if (attempt < maxRetries) {
-        console.log(`[AC扩展] content script 探测失败 (${attempt+1}/${maxRetries+1})，重试注入...`);
-        await sleep(1500);
-        continue;
-      }
-    }
-    // content script 未加载，用 scripting API 强制注入
-    try {
-      if (!await getExactACHomeTab(tabId)) return false;
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        files: ['billing-helpers.js', 'content.js'],
-        injectImmediately: true
-      });
-      if (!await getExactACHomeTab(tabId)) return false;
-      await chrome.scripting.executeScript({
-        target: { tabId },
-        files: ['page-confirm.js'],
-        world: 'MAIN',
-        injectImmediately: true
-      });
-      console.log('[AC扩展] scripting.executeScript 兜底注入完成 (ISOLATED + MAIN)');
-      await sleep(2000);
-      return true;
-    } catch (e2) {
-      console.error('[AC扩展] scripting.executeScript 兜底注入失败:', e2?.message);
-      void appendDiagnosticLog('error', 'content-script-injection', e2);
-      return false;
-    }
+const CONTENT_SCRIPT_PROBE_TIMEOUT_MS = 1000;
+const CONTENT_SCRIPT_READ_TIMEOUT_MS = 1000;
+
+async function ensureContentScriptLoaded(tabId) {
+  if (!await getExactACHomeTab(tabId)) return false;
+  try {
+    // 健康路径只探测一次；扩展 reload 后旧标签没有接收端时立即注入，
+    // 不再先空等多轮。注入不刷新、不导航用户页面。
+    const probe = await sendMessageToExactACHome(
+      tabId,
+      { action: 'ping' },
+      { timeoutMs: CONTENT_SCRIPT_PROBE_TIMEOUT_MS }
+    );
+    if (probe?.success !== true) throw new Error('content script 健康探测返回异常');
+    return true;
+  } catch (error) {
+    console.log('[AC扩展] content script 接收端缺失，尝试原页重新注入:', error?.message);
   }
-  return false;
+
+  return injectContentScriptsIntoExactHome(tabId);
+}
+
+async function injectContentScriptsIntoExactHome(tabId) {
+  try {
+    if (!await getExactACHomeTab(tabId)) return false;
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['billing-helpers.js', 'content.js'],
+      injectImmediately: true
+    });
+    if (!await getExactACHomeTab(tabId)) return false;
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['page-confirm.js'],
+      world: 'MAIN',
+      injectImmediately: true
+    });
+    if (!await getExactACHomeTab(tabId)) return false;
+    const probe = await sendMessageToExactACHome(
+      tabId,
+      { action: 'ping' },
+      { timeoutMs: CONTENT_SCRIPT_PROBE_TIMEOUT_MS }
+    );
+    if (probe?.success !== true) throw new Error('重注入后的 content script 健康探测返回异常');
+    console.log('[AC扩展] scripting.executeScript 兜底注入并复核完成 (ISOLATED + MAIN)');
+    return true;
+  } catch (error) {
+    console.error('[AC扩展] scripting.executeScript 兜底注入失败:', error?.message);
+    void appendDiagnosticLog('error', 'content-script-injection', error);
+    return false;
+  }
+}
+
+async function sendReadMessageToExactACHome(tabId, message) {
+  const contentReady = await ensureContentScriptLoaded(tabId);
+  if (!contentReady) throw new Error('AC 页面 content script 未就绪');
+
+  try {
+    return await sendMessageToExactACHome(
+      tabId,
+      message,
+      { timeoutMs: CONTENT_SCRIPT_READ_TIMEOUT_MS }
+    );
+  } catch (error) {
+    console.warn('[AC扩展] content script 只读消息无响应，强制原页重新注入:', error?.message);
+    const recovered = await injectContentScriptsIntoExactHome(tabId);
+    if (!recovered) throw error;
+    return sendMessageToExactACHome(
+      tabId,
+      message,
+      { timeoutMs: CONTENT_SCRIPT_READ_TIMEOUT_MS }
+    );
+  }
 }
 
 async function getExactACHomeTab(tabId) {
@@ -1426,10 +1460,26 @@ async function getExactACHomeTab(tabId) {
   }
 }
 
-async function sendMessageToExactACHome(tabId, message) {
+async function sendMessageToExactACHome(tabId, message, { timeoutMs = 0 } = {}) {
   const tab = await getExactACHomeTab(tabId);
   if (!tab) throw new Error('拒绝向非精确 AC home 标签发送消息');
-  return chrome.tabs.sendMessage(tabId, message);
+
+  const responsePromise = chrome.tabs.sendMessage(tabId, message);
+  if (!(timeoutMs > 0)) return responsePromise;
+
+  let timeoutId;
+  try {
+    return await Promise.race([
+      responsePromise,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`content script ${message?.action || 'unknown'} 探测超时`));
+        }, timeoutMs);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 // ----- 切换 AC 状态 -----
@@ -1670,9 +1720,22 @@ async function getCurrentACStatus() {
     return { isOn: null, error: '精确 AC home 页面未打开' };
   }
   try {
-    return await sendMessageToExactACHome(tab.id, { action: 'status' });
+    return await sendReadMessageToExactACHome(tab.id, { action: 'status' });
   } catch (e) {
     return { isOn: null, error: 'AC 页面未就绪' };
+  }
+}
+
+async function getCurrentPageTimer() {
+  const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
+  const tab = tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded);
+  if (!tab?.id) {
+    return { found: false, value: null, error: '精确 AC home 页面未打开' };
+  }
+  try {
+    return await sendReadMessageToExactACHome(tab.id, { action: 'getPageTimer' });
+  } catch (error) {
+    return { found: false, value: null, error: error?.message || 'AC 页面未就绪' };
   }
 }
 
@@ -1752,6 +1815,157 @@ async function repairScheduleClock() {
   return { success: true, schedule: { ...schedule, actualStatus: status } };
 }
 
+// 弹窗 est（Est. until）依赖 full 轮询带回的页面余额。页面重渲染、home
+// 暂不可读等瞬态只允许沿用最近有效值；明确离开 Charge Mode 才清除缓存。
+// storage.local 让缓存跨完整浏览器重启保留，storage.session 作为同会话热缓存
+// 和旧版本迁移源；popup 另有同语义内存缓存，覆盖 lite 轮询和单次消息异常。
+const BALANCE_CACHE_KEY = 'ac_balance_cache';
+let lastKnownBalanceMinutes = null;
+let persistedLocalBalanceMinutes = null;
+let persistedSessionBalanceMinutes = null;
+let balanceCacheLoaded = false;
+let localBalanceCacheStored = false;
+let sessionBalanceCacheStored = false;
+let balanceCacheLoadPromise = null;
+
+async function loadBalanceCache() {
+  if (balanceCacheLoaded) return lastKnownBalanceMinutes;
+  if (balanceCacheLoadPromise) return balanceCacheLoadPromise;
+
+  balanceCacheLoadPromise = (async () => {
+    const localStorage = chrome.storage?.local;
+    const sessionStorage = chrome.storage?.session;
+    let localStored = {};
+    let sessionStored = {};
+
+    if (localStorage) {
+      try {
+        localStored = await localStorage.get(BALANCE_CACHE_KEY);
+      } catch (error) {
+        console.warn('[AC扩展] 读取余额 local 缓存失败:', error?.message);
+      }
+    }
+    if (sessionStorage) {
+      try {
+        sessionStored = await sessionStorage.get(BALANCE_CACHE_KEY);
+      } catch (error) {
+        console.warn('[AC扩展] 读取余额 session 缓存失败:', error?.message);
+      }
+    }
+
+    localBalanceCacheStored = Object.prototype.hasOwnProperty.call(
+      localStored || {}, BALANCE_CACHE_KEY
+    );
+    sessionBalanceCacheStored = Object.prototype.hasOwnProperty.call(
+      sessionStored || {}, BALANCE_CACHE_KEY
+    );
+    const localBalance = localStored?.[BALANCE_CACHE_KEY];
+    const sessionBalance = sessionStored?.[BALANCE_CACHE_KEY];
+    persistedLocalBalanceMinutes = Number.isFinite(localBalance) ? localBalance : null;
+    persistedSessionBalanceMinutes = Number.isFinite(sessionBalance) ? sessionBalance : null;
+    lastKnownBalanceMinutes = Number.isFinite(persistedLocalBalanceMinutes)
+      ? persistedLocalBalanceMinutes
+      : persistedSessionBalanceMinutes;
+    balanceCacheLoaded = true;
+
+    if (Number.isFinite(lastKnownBalanceMinutes)) {
+      if (localStorage && persistedLocalBalanceMinutes !== lastKnownBalanceMinutes) {
+        try {
+          await localStorage.set({ [BALANCE_CACHE_KEY]: lastKnownBalanceMinutes });
+          persistedLocalBalanceMinutes = lastKnownBalanceMinutes;
+          localBalanceCacheStored = true;
+        } catch (error) {
+          console.warn('[AC扩展] 迁移余额到 local 缓存失败:', error?.message);
+        }
+      }
+      if (sessionStorage && persistedSessionBalanceMinutes !== lastKnownBalanceMinutes) {
+        try {
+          await sessionStorage.set({ [BALANCE_CACHE_KEY]: lastKnownBalanceMinutes });
+          persistedSessionBalanceMinutes = lastKnownBalanceMinutes;
+          sessionBalanceCacheStored = true;
+        } catch (error) {
+          console.warn('[AC扩展] 回填余额 session 缓存失败:', error?.message);
+        }
+      }
+    }
+    return lastKnownBalanceMinutes;
+  })();
+
+  try {
+    return await balanceCacheLoadPromise;
+  } finally {
+    balanceCacheLoadPromise = null;
+  }
+}
+
+async function rememberBalanceMinutes(balanceMinutes) {
+  lastKnownBalanceMinutes = balanceMinutes;
+  balanceCacheLoaded = true;
+
+  const localStorage = chrome.storage?.local;
+  const sessionStorage = chrome.storage?.session;
+  if (localStorage && (!localBalanceCacheStored || persistedLocalBalanceMinutes !== balanceMinutes)) {
+    try {
+      await localStorage.set({ [BALANCE_CACHE_KEY]: balanceMinutes });
+      persistedLocalBalanceMinutes = balanceMinutes;
+      localBalanceCacheStored = true;
+    } catch (error) {
+      console.warn('[AC扩展] 写入余额 local 缓存失败:', error?.message);
+    }
+  }
+  if (sessionStorage && (!sessionBalanceCacheStored || persistedSessionBalanceMinutes !== balanceMinutes)) {
+    try {
+      await sessionStorage.set({ [BALANCE_CACHE_KEY]: balanceMinutes });
+      persistedSessionBalanceMinutes = balanceMinutes;
+      sessionBalanceCacheStored = true;
+    } catch (error) {
+      console.warn('[AC扩展] 写入余额 session 缓存失败:', error?.message);
+    }
+  }
+}
+
+async function clearBalanceCache() {
+  lastKnownBalanceMinutes = null;
+  balanceCacheLoaded = true;
+
+  const localStorage = chrome.storage?.local;
+  const sessionStorage = chrome.storage?.session;
+  if (localStorage) {
+    try {
+      await localStorage.remove(BALANCE_CACHE_KEY);
+      persistedLocalBalanceMinutes = null;
+      localBalanceCacheStored = false;
+    } catch (error) {
+      console.warn('[AC扩展] 清除余额 local 缓存失败:', error?.message);
+    }
+  }
+  if (sessionStorage) {
+    try {
+      await sessionStorage.remove(BALANCE_CACHE_KEY);
+      persistedSessionBalanceMinutes = null;
+      sessionBalanceCacheStored = false;
+    } catch (error) {
+      console.warn('[AC扩展] 清除余额 session 缓存失败:', error?.message);
+    }
+  }
+}
+
+async function mergeBalanceReading(status) {
+  if (!status || typeof status !== 'object') return status;
+
+  await loadBalanceCache();
+  const merged = { ...status };
+  if (typeof merged.balanceMinutes === 'number' && Number.isFinite(merged.balanceMinutes)) {
+    await rememberBalanceMinutes(merged.balanceMinutes);
+  } else if (merged.balanceState === 'not-charge-mode') {
+    await clearBalanceCache();
+    delete merged.balanceMinutes;
+  } else if (Number.isFinite(lastKnownBalanceMinutes)) {
+    merged.balanceMinutes = lastKnownBalanceMinutes;
+  }
+  return merged;
+}
+
 async function getScheduleSnapshot(lite = false) {
   await loadScheduleFromStorage();
 
@@ -1793,7 +2007,7 @@ async function getScheduleSnapshot(lite = false) {
     return { ...snapshot, actualStatus: null };
   }
 
-  const status = await getCurrentACStatus();
+  const status = await mergeBalanceReading(await getCurrentACStatus());
   // 弹窗轮询只读展示，不在这里改写 storage 或重建闹钟，避免重新打开弹窗时漂移触发时间。
   if (typeof status?.isOn === 'boolean' && snapshot.enabled) {
     snapshot._effectivePwmState = status.isOn ? 'off' : 'on';
@@ -1930,7 +2144,20 @@ async function ensureDiagnosticAlarms() {
   };
 }
 
+const BACKGROUND_MESSAGE_TYPES = new Set([
+  'getSwStatus',
+  'updateSchedule',
+  'getSchedule',
+  'getScheduleLite',
+  'getPageTimer',
+  'repairSchedule',
+  'toggleNow',
+  'ensureDiagnostics'
+]);
+
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!BACKGROUND_MESSAGE_TYPES.has(msg?.type)) return false;
+
   // getSwStatus 是纯只读诊断接口(swStartupTime / initCompletedAt / schedule / live alarm),
   // 不依赖 init 完成。放在 await initReady 之前响应,防止 init 卡住时诊断面板拿不到 SW 状态。
   if (msg.type === 'getSwStatus') {
@@ -2020,6 +2247,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // 轻量轮询：跳过 getCurrentACStatus，降低 90% chrome.* I/O
       const snapshot = await getScheduleSnapshot(true);
       sendResponse(snapshot);
+      return;
+    }
+    if (msg.type === 'getPageTimer') {
+      const pageTimer = await getCurrentPageTimer();
+      sendResponse(pageTimer);
       return;
     }
     if (msg.type === 'repairSchedule') {

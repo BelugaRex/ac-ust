@@ -9,70 +9,108 @@
 // 3. 打开 chrome-extension://<id>/popup.html
 // 4. 点击 #btnDiagnose 按钮
 // 5. 读取 #diagnoseResult 的实际文本输出
-// 6. 断言两个红灯都已消除并显示"(popup 已自愈)"
+// 6. 断言两个红灯都已消除并显示对应绿灯；修复可由后台诊断或 popup 兜底完成
 
 const { chromium } = require('playwright');
+const crypto = require('crypto');
+const fs = require('fs');
 const path = require('path');
 const manifest = require('../manifest.json');
+const zhCN = require('../_locales/zh_CN/messages.json');
+const en = require('../_locales/en/messages.json');
 
 const EXT_PATH = path.resolve(__dirname, '..', 'dist');
-const PROFILE_DIR = path.resolve(__dirname, '..', '.test-profile');
+const PROFILE_ROOT = path.resolve(__dirname, '..', '.test-profile');
+fs.mkdirSync(PROFILE_ROOT, { recursive: true });
+const PROFILE_DIR = fs.mkdtempSync(path.join(PROFILE_ROOT, 'e2e-runtime-'));
+const LAUNCH_ARGS = [
+  `--disable-extensions-except=${EXT_PATH}`,
+  `--load-extension=${EXT_PATH}`,
+  '--no-first-run',
+  '--no-default-browser-check',
+  '--disable-features=Translate'
+];
+const LAUNCH_OPTIONS = [
+  { channel: 'msedge', headless: false },
+  { channel: 'chrome', headless: false },
+  { channel: 'msedge', headless: true },
+  { channel: 'chrome', headless: true },
+  { headless: false },
+  { headless: true }
+];
+
+async function launchExtensionContext(preferredOptions = null) {
+  let launchError = null;
+  const candidates = preferredOptions ? [preferredOptions] : LAUNCH_OPTIONS;
+  for (const launchOptions of candidates) {
+    try {
+      console.log('尝试启动浏览器:', JSON.stringify(launchOptions));
+      const context = await chromium.launchPersistentContext(PROFILE_DIR, {
+        ...launchOptions,
+        args: LAUNCH_ARGS
+      });
+      console.log('启动成功:', JSON.stringify(launchOptions), '\n');
+      return { context, launchOptions };
+    } catch (error) {
+      console.log('  失败:', error.message.split('\n')[0]);
+      launchError = error;
+    }
+  }
+
+  const error = new Error('所有浏览器启动方式都失败');
+  error.cause = launchError;
+  throw error;
+}
+
+async function waitForExtensionServiceWorker(context, extensionId = '') {
+  let serviceWorker = context.serviceWorkers()[0];
+  if (serviceWorker) return serviceWorker;
+
+  const workerPromise = context.waitForEvent('serviceworker', { timeout: 10000 })
+    .catch(() => null);
+  let wakePage = null;
+  if (extensionId) {
+    wakePage = await context.newPage();
+    await wakePage.goto(`chrome-extension://${extensionId}/popup.html`, {
+      timeout: 10000,
+      waitUntil: 'load'
+    }).catch(() => {});
+  }
+
+  serviceWorker = context.serviceWorkers()[0] || await workerPromise;
+  if (wakePage) await wakePage.close().catch(() => {});
+  if (!serviceWorker) {
+    throw new Error('未找到扩展 service worker,扩展可能未加载');
+  }
+  return serviceWorker;
+}
+
+async function readWorkerIdentity(serviceWorker) {
+  return serviceWorker.evaluate(async () => {
+    const source = await fetch(chrome.runtime.getURL('background.js')).then(response => response.text());
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
+    return {
+      version: chrome.runtime.getManifest().version,
+      backgroundHash: [...new Uint8Array(digest)]
+        .map(value => value.toString(16).padStart(2, '0'))
+        .join('')
+    };
+  });
+}
 
 async function run() {
   console.log('=== 端到端测试: 真实扩展中验证红灯转绿灯 ===\n');
   console.log('扩展路径:', EXT_PATH, '\n');
 
   let context;
-  let launchError = null;
-  const launchArgs = [
-    `--disable-extensions-except=${EXT_PATH}`,
-    `--load-extension=${EXT_PATH}`,
-    '--no-first-run',
-    '--no-default-browser-check',
-    '--disable-features=Translate'
-  ];
-
-  // 尝试系统已装的 Edge / Chrome,fallback 到 Playwright Chromium
-  for (const launchOpts of [
-    { channel: 'msedge', headless: false },
-    { channel: 'chrome', headless: false },
-    { channel: 'msedge', headless: true },
-    { channel: 'chrome', headless: true },
-    { headless: false },
-    { headless: true }
-  ]) {
-    try {
-      console.log('尝试启动浏览器:', JSON.stringify(launchOpts));
-      context = await chromium.launchPersistentContext(PROFILE_DIR, {
-        ...launchOpts,
-        args: launchArgs
-      });
-      console.log('启动成功:', JSON.stringify(launchOpts), '\n');
-      launchError = null;
-      break;
-    } catch (e) {
-      console.log('  失败:', e.message.split('\n')[0]);
-      launchError = e;
-    }
-  }
-  if (!context) {
-    console.error('❌ 所有浏览器启动方式都失败');
-    if (launchError) console.error('最后一次错误:', launchError.message);
-    process.exit(3);
-  }
+  let restartedContext;
+  const launched = await launchExtensionContext();
+  context = launched.context;
+  const successfulLaunchOptions = launched.launchOptions;
 
   try {
     // 等待 service worker 注册(扩展加载完成的信号)
-    let serviceWorker;
-    try {
-      serviceWorker = await context.waitForEvent('serviceworker', { timeout: 10000 });
-    } catch (e) {
-      // 已有 service worker 时从已存在列表中取
-      serviceWorker = context.serviceWorkers()[0];
-    }
-    if (!serviceWorker) {
-      throw new Error('未找到扩展 service worker,扩展可能未加载');
-    }
+    const serviceWorker = await waitForExtensionServiceWorker(context);
 
     // 等待扩展完成 init(给 SW 时间跑 init 流程,用 evaluate 轮询而非 waitForFunction)
     const initDeadline = Date.now() + 8000;
@@ -91,6 +129,11 @@ async function run() {
     const swUrl = serviceWorker.url();
     const extensionId = swUrl.split('/')[2];
     console.log('扩展已加载,ID:', extensionId, '\n');
+    const expectedBackgroundHash = crypto.createHash('sha256')
+      .update(fs.readFileSync(path.join(EXT_PATH, 'background.js')))
+      .digest('hex');
+    const initialWorkerIdentity = await readWorkerIdentity(serviceWorker);
+    console.log('Worker 身份:', JSON.stringify(initialWorkerIdentity), '\n');
 
     // === 模拟用户报告的场景 ===
     console.log('--- 步骤 1: 设置用户场景 ---');
@@ -113,22 +156,33 @@ async function run() {
           pageTimerRetryAt: 0
         }
       });
+      await chrome.storage.local.remove('ac_balance_cache');
+      await chrome.storage.sync.remove('ac_schedule_sync');
+      // 模拟上一个 Service Worker 保存的最近有效余额。当前 Worker 尚未在
+      // 模块内存中读取过余额，popup 首次 full 轮询必须从 session 恢复 Est.
+      // 并迁移到 local，才能跨越完整浏览器重启。
+      await chrome.storage.session.set({ ac_balance_cache: 156 });
       // 创建未来的 ac-pwm 闹钟(模拟"活闹钟在")
       await chrome.alarms.clear('ac-pwm');
       await chrome.alarms.create('ac-pwm', { when: schedTime });
     }, pwmScheduledTime);
 
-    // 等一下让 storage/alarms 写入完成
+    // 每次测试使用全新 profile，当前 Worker 尚未执行过生产余额读取；因此
+    // popup 首次 full 轮询只能从 storage.session 恢复，而非沿用模块内存。
     await new Promise(r => setTimeout(r, 500));
 
     // 验证场景已设置
     const sceneCheck = await serviceWorker.evaluate(async () => {
       const { ac_schedule } = await chrome.storage.local.get('ac_schedule');
+      const { ac_balance_cache: localBalance } = await chrome.storage.local.get('ac_balance_cache');
+      const { ac_balance_cache } = await chrome.storage.session.get('ac_balance_cache');
       const alarm = await chrome.alarms.get('ac-pwm');
       return {
         nextTriggerAt: ac_schedule.nextTriggerAt,
         enabled: ac_schedule.enabled,
         clockMode: ac_schedule.clockMode,
+        localBalance,
+        sessionBalance: ac_balance_cache,
         acPwmScheduledTime: alarm?.scheduledTime || 0
       };
     });
@@ -136,6 +190,8 @@ async function run() {
     console.log('  storage.nextTriggerAt =', sceneCheck.nextTriggerAt, '(应为 0)');
     console.log('  storage.enabled =', sceneCheck.enabled);
     console.log('  storage.clockMode =', sceneCheck.clockMode, '(false=间隔)');
+    console.log('  local.ac_balance_cache =', sceneCheck.localBalance);
+    console.log('  session.ac_balance_cache =', sceneCheck.sessionBalance);
     console.log('  ac-pwm.scheduledTime =', new Date(sceneCheck.acPwmScheduledTime).toLocaleTimeString(),
                 '(' + sceneCheck.acPwmScheduledTime + ')');
     console.log('');
@@ -143,6 +199,15 @@ async function run() {
     // === 打开 popup.html,点击诊断按钮 ===
     console.log('--- 步骤 2: 打开 popup.html,点击诊断按钮 ---\n');
     const popupPage = await context.newPage();
+    await popupPage.addInitScript(() => {
+      const nativeSetInterval = globalThis.setInterval.bind(globalThis);
+      globalThis.__AC_E2E_INTERVAL_IDS__ = [];
+      globalThis.setInterval = (...args) => {
+        const intervalId = nativeSetInterval(...args);
+        globalThis.__AC_E2E_INTERVAL_IDS__.push(intervalId);
+        return intervalId;
+      };
+    });
     popupPage.on('console', msg => {
       const t = msg.type();
       if (t === 'log' || t === 'warn' || t === 'error' || t === 'info') {
@@ -160,11 +225,15 @@ async function run() {
     await new Promise(r => setTimeout(r, 1500));
 
     // 检查 popup 是否正常加载
-    const popupState = await popupPage.evaluate(() => ({
+    const popupState = await popupPage.evaluate(async () => ({
       hasVersion: !!document.getElementById('versionInfo'),
       versionText: document.getElementById('versionInfo')?.textContent || '',
       hasBtn: !!document.getElementById('btnDiagnose'),
-      hasResult: !!document.getElementById('diagnoseResult')
+      hasResult: !!document.getElementById('diagnoseResult'),
+      balanceEstimateVisible: document.getElementById('balanceEstimate')?.hidden === false,
+      balanceEstimateText: document.getElementById('balanceEstimate')?.textContent || '',
+      fullSnapshot: await chrome.runtime.sendMessage({ type: 'getSchedule' }),
+      localBalance: (await chrome.storage.local.get('ac_balance_cache')).ac_balance_cache
     })).catch(e => ({ error: e.message }));
     console.log('  popup 状态:', JSON.stringify(popupState));
 
@@ -216,22 +285,296 @@ async function run() {
     };
 
     console.log('--- 断言 ---');
+    const hasDiagnosticLineIn = (text, marker, key) => [zhCN, en].some(messages => {
+      const message = messages[key]?.message;
+      return message && text.includes(`${marker} ${message}`);
+    });
+    const hasDiagnosticLine = (marker, key) => hasDiagnosticLineIn(diagnoseText, marker, key);
+    const hasDiagnosticLinePrefix = (text, marker, key) => [zhCN, en].some(messages => {
+      const message = messages[key]?.message;
+      const prefix = message?.split(/\$\d+/)[0];
+      return prefix && text.includes(`${marker} ${prefix}`);
+    });
     // 关键断言:两个红灯都消除
-    assert(!diagnoseText.includes('❌ storage 绝对触发时间缺失'),
-      '红灯 #1 已消除:诊断输出不再包含 "❌ storage 绝对触发时间缺失"');
-    assert(!diagnoseText.includes('❌ ac-pwm 与 storage 触发时间同步'),
-      '红灯 #2 已消除:诊断输出不再包含 "❌ ac-pwm 与 storage 触发时间同步"');
-    // 关键断言:出现绿灯带"已自愈"标签
-    assert(diagnoseText.includes('✅ storage 绝对触发时间') && diagnoseText.includes('(popup 已自愈)'),
-      '绿灯出现:✅ storage 绝对触发时间 ... (popup 已自愈)');
-    assert(diagnoseText.includes('✅ ac-pwm 与 storage 触发时间同步') && diagnoseText.includes('(popup 已自愈)'),
-      '绿灯出现:✅ ac-pwm 与 storage 触发时间同步 ... (popup 已自愈)');
+    assert(!hasDiagnosticLine('❌', 'diagnoseMissingTrigger'),
+      '红灯 #1 已消除:诊断输出不再报告 storage 绝对触发时间缺失');
+    assert(!hasDiagnosticLine('❌', 'diagnosePwmSync'),
+      '红灯 #2 已消除:诊断输出不再报告 ac-pwm 与 storage 不同步');
+    // 修复可能由 ensureDiagnostics 后台先行完成，也可能由 popup 兜底完成；
+    // 责任方不影响用户可见契约，关键是两条诊断均转绿且 storage 已真实写回。
+    assert(hasDiagnosticLine('✅', 'diagnoseTriggerTime'),
+      '绿灯出现:storage 绝对触发时间已恢复');
+    assert(hasDiagnosticLine('✅', 'diagnosePwmSync'),
+      '绿灯出现:ac-pwm 与 storage 触发时间已同步');
     // storage 实际被写入
     assert(finalStorage.nextTriggerAt === pwmScheduledTime,
       '真实 storage.nextTriggerAt 已修复为 ac-pwm.scheduledTime');
+    assert(!Object.hasOwn(finalStorage, 'actualStatus')
+        && !Object.hasOwn(finalStorage, 'balanceMinutes')
+        && !Object.keys(finalStorage).some(key => key.startsWith('_')),
+      '诊断自愈后的 ac_schedule 不包含余额或运行时快照字段');
+    assert(sceneCheck.localBalance === undefined
+        && sceneCheck.sessionBalance === 156
+        && popupState.fullSnapshot?.actualStatus?.balanceMinutes === 156
+        && popupState.balanceEstimateVisible
+        && popupState.balanceEstimateText.trim().length > 0,
+      '冷启动 Worker 从 storage.session 恢复余额，popup 的 Est. 保持显示');
+    assert(popupState.localBalance === 156,
+      '首次 full 快照把旧 session 余额迁移到 storage.local');
+    assert(initialWorkerIdentity.version === manifest.version
+        && initialWorkerIdentity.backgroundHash === expectedBackgroundHash,
+      '首次启动的 Service Worker 与 dist/background.js 版本及字节哈希一致');
     // BUILD_TIME 显示(证明扩展加载的是新代码)
     assert(versionLine.includes(manifest.version),
       `Popup 版本行显示 v${manifest.version}`);
+
+    // === 真实旧接收端吞包：listener 仍注册且返回 true，但永不 sendResponse ===
+    // 这确定性复现浏览器重启后旧 listener 冒充异步响应、诊断永久等待的现场。
+    // 先停掉 popup 的常规 1 秒轮询，确保旧 listener 安装后的第一次恢复动作
+    // 就是用户点击诊断，而不是测试预先调用 getSchedule/getPageTimer 把现场治好。
+    console.log('\n--- 步骤 2.5: 模拟旧 AC 标签 listener 吞消息 ---\n');
+    const popupPollingState = await popupPage.evaluate(() => {
+      const intervalIds = Array.isArray(globalThis.__AC_E2E_INTERVAL_IDS__)
+        ? globalThis.__AC_E2E_INTERVAL_IDS__
+        : [];
+      intervalIds.forEach(intervalId => clearInterval(intervalId));
+      return { stoppedIntervalCount: intervalIds.length };
+    });
+    const mockHomeHtml = `<!doctype html>
+      <html><head><meta charset="utf-8"><title>AC mock</title></head>
+      <body>
+        <section id="balance-card">
+          <h2>Air Conditioning Balance</h2>
+          <small>Charge Mode</small>
+          <span class="ant-progress-text" title="156 min">156 min</span>
+        </section>
+        <div class="status-row">
+          <small>Air Conditioning Status</small>
+          <button class="ant-switch" role="switch" aria-checked="true">ON</button>
+        </div>
+        <div class="timer-row">
+          <small>Power-off after</small>
+          <div class="ant-picker"><input readonly value="" title=""></div>
+        </div>
+        <script>globalThis.__acMockLoadToken = Math.random().toString(36).slice(2);</script>
+      </body></html>`;
+    await context.route('https://w5.ab.ust.hk/njggt/app/home', route => route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: mockHomeHtml
+    }));
+    const acPage = await context.newPage();
+    await acPage.goto('https://w5.ab.ust.hk/njggt/app/home', {
+      timeout: 10000,
+      waitUntil: 'load'
+    });
+    const acLoadTokenBefore = await acPage.evaluate(() => globalThis.__acMockLoadToken);
+
+    const initialContentDeadline = Date.now() + 8000;
+    let initialContentStatus = null;
+    while (Date.now() < initialContentDeadline) {
+      initialContentStatus = await serviceWorker.evaluate(async () => {
+        const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/home' });
+        const tab = tabs.find(candidate => !candidate.discarded);
+        if (!tab?.id) return null;
+        try {
+          return await chrome.tabs.sendMessage(tab.id, { action: 'status' });
+        } catch (_) {
+          return null;
+        }
+      });
+      if (initialContentStatus?.balanceMinutes === 156) break;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    const staleReceiverInstall = await serviceWorker.evaluate(async () => {
+      const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/home' });
+      const tab = tabs.find(candidate => !candidate.discarded);
+      if (!tab?.id) return { installed: false, error: 'mock home tab missing' };
+      const [execution] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: () => {
+          const listener = self.__AC_CONTENT_MESSAGE_LISTENER__;
+          const hadListener = typeof listener === 'function';
+          if (hadListener) chrome.runtime.onMessage.removeListener(listener);
+          self.__AC_E2E_STALE_MESSAGE_COUNT__ = 0;
+          const staleListener = (message, sender, sendResponse) => {
+            self.__AC_E2E_STALE_MESSAGE_COUNT__ += 1;
+            if (message?.action === 'ping') {
+              sendResponse({ success: true });
+              return false;
+            }
+            return true;
+          };
+          chrome.runtime.onMessage.addListener(staleListener);
+          self.__AC_CONTENT_MESSAGE_LISTENER__ = staleListener;
+          self.__AC_E2E_STALE_LISTENER__ = staleListener;
+          self.__AC_CONTENT_LOADED__ = true;
+          return {
+            loadedSentinel: self.__AC_CONTENT_LOADED__ === true,
+            hadListener,
+            staleListenerInstalled: self.__AC_CONTENT_MESSAGE_LISTENER__ === staleListener,
+            staleMessageCount: self.__AC_E2E_STALE_MESSAGE_COUNT__
+          };
+        }
+      });
+      return { installed: true, tabId: tab.id, ...execution?.result };
+    });
+    console.log('  popup 轮询已停止:', JSON.stringify(popupPollingState));
+    console.log('  旧 listener 安装结果:', JSON.stringify(staleReceiverInstall));
+
+    const recoveryStartedAt = Date.now();
+    await popupPage.click('#btnDiagnose', { timeout: 5000 });
+    const recoveryDiagDeadline = Date.now() + 20000;
+    let recoveryDiagnoseText = '';
+    while (Date.now() < recoveryDiagDeadline) {
+      recoveryDiagnoseText = await popupPage.$eval('#diagnoseResult', el => el.innerText).catch(() => '');
+      if (recoveryDiagnoseText.length > 100 && !recoveryDiagnoseText.includes('诊断中')) break;
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    const recoveryDiagnosticState = await popupPage.evaluate(() => ({
+      buttonDisabled: document.getElementById('btnDiagnose')?.disabled === true,
+      text: document.getElementById('diagnoseResult')?.innerText || ''
+    }));
+    const recoveryElapsedMs = Date.now() - recoveryStartedAt;
+    const recoveredReceiverState = await popupPage.evaluate(async () => ({
+      fullSnapshot: await chrome.runtime.sendMessage({ type: 'getSchedule' }),
+      pageTimer: await chrome.runtime.sendMessage({ type: 'getPageTimer' }),
+      localBalance: (await chrome.storage.local.get('ac_balance_cache')).ac_balance_cache
+    }));
+    const directProbeAfterRecovery = await serviceWorker.evaluate(async () => {
+      const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/home' });
+      const tab = tabs.find(candidate => !candidate.discarded);
+      if (!tab?.id) return { ok: false, error: 'mock home tab missing' };
+      try {
+        const [execution] = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          func: () => ({
+            staleMessageCount: self.__AC_E2E_STALE_MESSAGE_COUNT__ || 0,
+            listenerReplaced: self.__AC_CONTENT_MESSAGE_LISTENER__ !== self.__AC_E2E_STALE_LISTENER__
+          })
+        });
+        return {
+          ok: true,
+          status: await chrome.tabs.sendMessage(tab.id, { action: 'status' }),
+          ...execution?.result
+        };
+      } catch (error) {
+        return { ok: false, error: error?.message || String(error) };
+      }
+    });
+    const acLoadTokenAfter = await acPage.evaluate(() => globalThis.__acMockLoadToken);
+    console.log('  恢复后 full/pageTimer:', JSON.stringify(recoveredReceiverState));
+    console.log('  恢复后直接探测:', JSON.stringify(directProbeAfterRecovery));
+    console.log('  首次诊断恢复耗时:', recoveryElapsedMs, 'ms');
+
+    assert(initialContentStatus?.balanceMinutes === 156,
+      '真实精确 home 初始 content script 可读取 Charge Mode 余额');
+    assert(staleReceiverInstall.loadedSentinel === true
+        && staleReceiverInstall.hadListener === true
+        && staleReceiverInstall.staleListenerInstalled === true
+        && staleReceiverInstall.staleMessageCount === 0,
+      '模拟保留旧 content global，并登记只对 ping 响应、对业务读取吞包的旧 listener');
+    assert(directProbeAfterRecovery.staleMessageCount >= 2
+        && directProbeAfterRecovery.listenerReplaced === true,
+      '首次点击诊断先通过旧 ping、再撞上业务吞包，并在原页替换为新接收端');
+    assert(recoveredReceiverState.fullSnapshot?.actualStatus?.balanceMinutes === 156
+        && recoveredReceiverState.fullSnapshot?.actualStatus?.isOn === true
+        && recoveredReceiverState.localBalance === 156,
+      'full snapshot 在原页重注入接收端并恢复余额/状态');
+    assert(recoveredReceiverState.pageTimer?.found === true
+        && recoveredReceiverState.pageTimer?.value === null,
+      'page timer 诊断复用同一后台恢复入口并读取空定时器状态');
+    assert(directProbeAfterRecovery.ok === true
+        && directProbeAfterRecovery.status?.balanceMinutes === 156,
+      '恢复后真实 content script 接收端持续响应');
+    assert(acPage.url() === 'https://w5.ab.ust.hk/njggt/app/home'
+        && acLoadTokenAfter === acLoadTokenBefore,
+      '接收端恢复不刷新、不导航用户 AC 页面');
+    assert(hasDiagnosticLine('✅', 'diagnoseContentOK')
+        || [zhCN, en].some(messages => recoveryDiagnoseText.includes(`✅ ${messages.diagnoseContentOK?.message}`)),
+      '恢复后的 popup 诊断将 content script 标记为正常');
+    assert(recoveryDiagnosticState.buttonDisabled === false
+        && recoveryDiagnosticState.text.length > 100
+        && ![zhCN, en].some(messages => recoveryDiagnosticState.text.includes(messages.diagnoseInProgress?.message || ''))
+        && recoveryElapsedMs < 20000,
+      '旧 listener 吞包恢复后诊断在 20 秒内完成并重新启用按钮');
+
+    await acPage.close();
+
+    // === 完整关闭并重启浏览器：storage.session 会清空，local 必须承担常驻边界 ===
+    console.log('\n--- 步骤 3: 完整关闭并重启同一浏览器 profile ---\n');
+    await popupPage.close();
+    await context.close();
+    context = null;
+
+    const restarted = await launchExtensionContext(successfulLaunchOptions);
+    restartedContext = restarted.context;
+    const restartedWorker = await waitForExtensionServiceWorker(restartedContext, extensionId);
+    const restartedWorkerIdentity = await readWorkerIdentity(restartedWorker);
+    const restartedColdStorage = await restartedWorker.evaluate(async () => {
+      const local = await chrome.storage.local.get('ac_balance_cache');
+      const session = await chrome.storage.session.get('ac_balance_cache');
+      return {
+        localBalance: local.ac_balance_cache,
+        sessionBalance: session.ac_balance_cache
+      };
+    });
+    const restartedPopup = await restartedContext.newPage();
+    await restartedPopup.goto(`chrome-extension://${extensionId}/popup.html`, {
+      timeout: 10000,
+      waitUntil: 'load'
+    });
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    const restartedState = await restartedPopup.evaluate(async () => {
+      const local = await chrome.storage.local.get(['ac_schedule', 'ac_balance_cache']);
+      const session = await chrome.storage.session.get('ac_balance_cache');
+      return {
+        localBalance: local.ac_balance_cache,
+        sessionBalance: session.ac_balance_cache,
+        fullSnapshot: await chrome.runtime.sendMessage({ type: 'getSchedule' }),
+        balanceEstimateVisible: document.getElementById('balanceEstimate')?.hidden === false,
+        balanceEstimateText: document.getElementById('balanceEstimate')?.textContent || ''
+      };
+    });
+    console.log('  重启后状态:', JSON.stringify(restartedState));
+    console.log('  重启后、popup 启动前缓存:', JSON.stringify(restartedColdStorage));
+    console.log('  重启后 Worker 身份:', JSON.stringify(restartedWorkerIdentity));
+
+    await restartedPopup.click('#btnDiagnose', { timeout: 5000 });
+    const restartedDiagDeadline = Date.now() + 20000;
+    let restartedDiagnosticState = { buttonDisabled: true, text: '' };
+    while (Date.now() < restartedDiagDeadline) {
+      restartedDiagnosticState = await restartedPopup.evaluate(() => ({
+        buttonDisabled: document.getElementById('btnDiagnose')?.disabled === true,
+        text: document.getElementById('diagnoseResult')?.innerText || ''
+      }));
+      if (!restartedDiagnosticState.buttonDisabled && restartedDiagnosticState.text.length > 100) break;
+      await new Promise(resolve => setTimeout(resolve, 300));
+    }
+    console.log('  重启后诊断状态:', JSON.stringify(restartedDiagnosticState));
+
+    assert(restartedColdStorage.sessionBalance === undefined,
+      '完整浏览器重启会清空 storage.session（测试确实跨越了目标生命周期边界）');
+    assert(restartedColdStorage.localBalance === 156 && restartedState.localBalance === 156,
+      '完整浏览器重启后 storage.local 仍保留最近有效余额');
+    assert(restartedState.sessionBalance === 156,
+      '重启后首次 full 快照从 storage.local 回填 storage.session 热缓存');
+    assert(restartedWorkerIdentity.version === manifest.version
+        && restartedWorkerIdentity.backgroundHash === expectedBackgroundHash,
+      '重启后的 Service Worker 与 dist/background.js 版本及字节哈希一致');
+    assert(restartedState.fullSnapshot?.actualStatus?.balanceMinutes === 156
+        && restartedState.balanceEstimateVisible
+        && restartedState.balanceEstimateText.trim().length > 0,
+      '完整浏览器重启且尚无新页面读数时，popup 的 Est. 仍常驻显示');
+    assert(restartedDiagnosticState.buttonDisabled === false
+        && restartedDiagnosticState.text.length > 100
+        && ![zhCN, en].some(messages => restartedDiagnosticState.text.includes(messages.diagnoseInProgress?.message || '')),
+      '完整浏览器重启后诊断在 20 秒内完成，不再永久停在“诊断中”');
+    assert(hasDiagnosticLinePrefix(restartedDiagnosticState.text, '✅', 'diagnoseTriMatch')
+        && !hasDiagnosticLinePrefix(restartedDiagnosticState.text, '❌', 'diagnoseTriMismatch'),
+      '浏览器重建 alarm 引入毫秒小数时，三方时钟仍按 1500ms 容差显示绿灯');
 
     // 汇总
     const passCount = results.filter(r => r.pass).length;
@@ -244,7 +587,9 @@ async function run() {
       console.log(`\n✅ 所有断言通过 — v${manifest.version} 在真实扩展中把两个红灯转成绿灯,storage 已修复。`);
     }
   } finally {
-    await context.close();
+    if (context) await context.close();
+    if (restartedContext) await restartedContext.close();
+    fs.rmSync(PROFILE_DIR, { recursive: true, force: true });
   }
 }
 

@@ -111,7 +111,7 @@ function createMockChrome(initialSchedule, liveAcPwmScheduledTime, scheduleSnaps
       pwm: alarms['ac-pwm'] ? { scheduledTime: alarms['ac-pwm'].scheduledTime } : null
     }
   });
-  messageHandlers['getSchedule'] = () => ({ ...storage.ac_schedule });
+  messageHandlers['getSchedule'] = () => ({ ...storage.ac_schedule, ...scheduleSnapshotPatch });
   messageHandlers['getSwStatus'] = () => ({
     success: true,
     swStartupTime: Date.now() - 10000,
@@ -137,6 +137,13 @@ async function runDiagnosticSelfHeal(chrome, opts = {}) {
     fn();
     resolve();
   });
+  const projectPersistentSchedule = scheduleSnapshot => Object.fromEntries(
+    Object.entries(scheduleSnapshot || {}).filter(([key]) => (
+      key !== 'actualStatus'
+      && key !== 'balanceMinutes'
+      && !key.startsWith('_')
+    ))
+  );
 
   // 模拟 popup.js 中诊断函数开头读取的数据
   const ensured = await chrome.runtime.sendMessage({ type: 'ensureDiagnostics' });
@@ -161,17 +168,17 @@ async function runDiagnosticSelfHeal(chrome, opts = {}) {
       && pwmAlarmEarly?.scheduledTime
       && pwmAlarmEarly.scheduledTime > nowMs) {
     try {
-      const repairedSchedule = {
+      const repairedSchedule = projectPersistentSchedule({
         ...storedSchedule,
         ...s,
         nextTriggerAt: pwmAlarmEarly.scheduledTime,
         alarmCreatedAt: Date.now(),
         alarmDelayMinutes: Math.max(1, (pwmAlarmEarly.scheduledTime - Date.now()) / 60000)
-      };
+      });
       await chrome.storage.local.set({ ac_schedule: repairedSchedule });
       await new Promise(r => setTimeout(r, 200));
       // 自愈成功后直接用 repairedSchedule,不合并旧 ensured/bgSchedule(它们携带 nextTriggerAt=0/过期 会覆盖)
-      s = { ...repairedSchedule };
+      s = { ...s, ...repairedSchedule };
       effectiveNextTriggerAt = s.nextTriggerAt || 0;
       selfHealed = true;
     } catch (e) {
@@ -284,6 +291,44 @@ async function runTests() {
   assertPass(result.lines.some(l => l.includes('(popup 已自愈)')),
     '修复后显示"(popup 已自愈)"标签');
 
+  const runtimeSnapshotPatch = {
+    actualStatus: { isOn: true, balanceState: 'available', balanceMinutes: 156 },
+    balanceMinutes: 156,
+    _nextBoundary: pwmTime,
+    _effectivePwmState: 'off'
+  };
+  const pollutedSnapshotMock = createMockChrome(
+    initialSchedule,
+    pwmTime,
+    runtimeSnapshotPatch
+  );
+  const pollutionResult = await runDiagnosticSelfHeal(pollutedSnapshotMock.chrome);
+  const pollutionKeys = Object.keys(pollutionResult.storage_after);
+  assertPass(!pollutionKeys.includes('actualStatus')
+      && !pollutionKeys.includes('balanceMinutes')
+      && !pollutionKeys.some(key => key.startsWith('_')),
+    '诊断自愈只持久化 schedule 字段，不把 full snapshot 运行时字段写入 ac_schedule');
+  const popupProjectionSource = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
+  const projectPersistentScheduleSource = extractSourceSection(
+    popupProjectionSource,
+    'function projectPersistentSchedule(scheduleSnapshot) {',
+    'btnDiagnose.addEventListener',
+    'projectPersistentSchedule'
+  );
+  const projectPersistentSchedule = new Function(
+    `${projectPersistentScheduleSource}; return projectPersistentSchedule;`
+  )();
+  const projectedSchedule = projectPersistentSchedule({
+    ...initialSchedule,
+    ...runtimeSnapshotPatch
+  });
+  assertPass(projectedSchedule.enabled === true
+      && projectedSchedule.nextTriggerAt === staleTime
+      && !Object.hasOwn(projectedSchedule, 'actualStatus')
+      && !Object.hasOwn(projectedSchedule, 'balanceMinutes')
+      && !Object.keys(projectedSchedule).some(key => key.startsWith('_')),
+    'popup 真实持久化投影保留 schedule 数据并剥离余额与所有下划线运行态字段');
+
   // 用例 2:storage 已有正确 nextTriggerAt,不应触发自愈
   console.log('\n\n=== 用例 2:storage 已有正确值(不该触发自愈) ===\n');
   const initialSchedule2 = { ...initialSchedule, nextTriggerAt: pwmTime };
@@ -380,6 +425,7 @@ async function runTests() {
 
   // 5e: popup.html 中 data-i18n 属性与 messages.json key 完全对齐
   const popupHtml = fs.readFileSync(path.join(ROOT, 'popup.html'), 'utf8');
+  const distPopupHtml = fs.readFileSync(path.join(ROOT, 'dist', 'popup.html'), 'utf8');
   const dataI18nKeys = [...popupHtml.matchAll(/data-i18n="([^"]+)"/g)].map(m => m[1]);
   console.log('  popup.html data-i18n keys:', dataI18nKeys.join(', '));
   for (const key of dataI18nKeys) {
@@ -407,17 +453,17 @@ async function runTests() {
     'dist/manifest.json 也同步 default_locale=zh_CN');
   assertPass(distManifest.version === manifest.version,
     `dist/manifest.json 版本与源码一致 (${manifest.version})`);
-  assertPass(popupHtml.includes(`<script src="popup.js?v=${manifest.version}"></script>`),
-    'popup 脚本资源版本参数与 manifest 同步，静态预览不会复用旧脚本缓存');
+  assertPass(distPopupHtml.includes(`<script src="popup.js?v=${manifest.version}"></script>`),
+    'dist popup 脚本资源版本参数由构建注入并与 manifest 同步');
   assertPass(popupHtml.indexOf('<script src="billing-helpers.js"></script>')
-      < popupHtml.indexOf(`<script src="popup.js?v=${manifest.version}"></script>`),
+      < popupHtml.search(/<script src="popup\.js\?v=[^"]+"><\/script>/),
     'popup 在主脚本前加载余额纯函数，避免初始化时缺少估算器');
 
   // 5h: popup 布局防回归 —— 固定桌面面板宽度，避免 intrinsic/vw 初始布局竞态。
   const popupCss = fs.readFileSync(path.join(ROOT, 'popup.css'), 'utf8');
   const popupCssNoComments = popupCss.replace(/\/\*[\s\S]*?\*\//g, '');
   assertPass(popupHtml.includes('<style media="not all">')
-      && popupHtml.includes(`<link rel="stylesheet" href="popup.css?v=${manifest.version}">`),
+      && /<link rel="stylesheet" href="popup\.css\?v=[^"]+">/.test(popupHtml),
     'popup 停用遗留内联样式，并只加载新的实体 macOS 风格样式表');
   assertPass(!/\d\s*vw\b|\d\s*vh\b/.test(popupCssNoComments),
     'popup.html 的 CSS 不使用 vw/vh 视口单位（防窗口塌陷回归）');
@@ -589,7 +635,7 @@ async function runTests() {
   assertPass(missingDistFiles.length === 0,
     `dist 包含全部运行时文件${missingDistFiles.length ? `（缺少 ${missingDistFiles.join(', ')}）` : ''}`);
 
-  const verbatimDistFiles = distRequiredFiles.filter(file => file !== 'popup.js');
+  const verbatimDistFiles = distRequiredFiles.filter(file => !['popup.html', 'popup.js'].includes(file));
   const mismatchedDistFiles = verbatimDistFiles.filter(file => {
     const source = fs.readFileSync(path.join(ROOT, file));
     const built = fs.readFileSync(path.join(ROOT, 'dist', file));
@@ -1197,21 +1243,53 @@ async function runTests() {
       && contentSource.includes("container.querySelector('.ant-progress-text')")
       && contentSource.includes("container.querySelectorAll('small')")
       && contentSource.includes('hasChargeModeLabel')
-      && contentSource.includes('return chargeMode ? parseBalanceMinutes')
-      && contentSource.includes("parseBalanceMinutes(value.textContent, value.getAttribute('title'))")
+      && contentSource.includes('classifyACBalanceReading')
+      && contentSource.includes("'not-charge-mode'")
+      && contentSource.includes('value.getAttribute(\'title\')')
       && contentSource.includes('return withBalance({ ...mainWorldStatus'),
-    '9K-1: content 只在余额标题区块精确显示 Charge Mode 时读取当前进度值并随状态响应返回');
+    '9K-1: content 在余额标题区块读取当前进度值，并区分有效、暂不可读与明确非 Charge Mode');
   const chargeModeLabelStart = contentSource.indexOf('function hasChargeModeLabel(elements)');
-  const chargeModeLabelEnd = contentSource.indexOf('\nfunction getACBalanceMinutes()', chargeModeLabelStart);
-  const hasChargeModeLabel = new Function(
-    `${contentSource.slice(chargeModeLabelStart, chargeModeLabelEnd)}; return hasChargeModeLabel;`
-  )();
+  const chargeModeLabelEnd = contentSource.indexOf('\nfunction getACBalanceSnapshot()', chargeModeLabelStart);
+  const balanceClassifierSource = contentSource.slice(chargeModeLabelStart, chargeModeLabelEnd);
+  const { hasChargeModeLabel, classifyACBalanceReading } = new Function(
+    'parseBalanceMinutes',
+    `${balanceClassifierSource}; return { hasChargeModeLabel, classifyACBalanceReading };`
+  )(parseBalanceMinutes);
   assertPass(hasChargeModeLabel([{ textContent: 'Charge Mode' }])
       && hasChargeModeLabel([{ textContent: '  Charge Mode  ' }])
       && !hasChargeModeLabel([{ textContent: 'Normal Mode' }])
       && !hasChargeModeLabel([{ textContent: 'Charge Mode Active' }])
       && !hasChargeModeLabel([]),
     '9K-2: Charge Mode 标签判定接受精确文本与空白，拒绝其他模式和相似文本');
+  const availableBalance9K = classifyACBalanceReading(
+    [{ textContent: 'Charge Mode' }],
+    '156 min',
+    ''
+  );
+  const transientBalance9K = classifyACBalanceReading([], '156 min', '');
+  const partialRenderBalance9K = classifyACBalanceReading(
+    [
+      { textContent: 'No notices' },
+      { textContent: 'left of 22100 min balance' },
+      { textContent: 'Power-off after' }
+    ],
+    '156 min',
+    ''
+  );
+  const otherModeBalance9K = classifyACBalanceReading(
+    [{ textContent: 'Normal Mode' }],
+    '156 min',
+    ''
+  );
+  assertPass(availableBalance9K.state === 'available'
+      && availableBalance9K.balanceMinutes === 156
+      && transientBalance9K.state === 'unavailable'
+      && transientBalance9K.balanceMinutes === null
+      && partialRenderBalance9K.state === 'unavailable'
+      && partialRenderBalance9K.balanceMinutes === null
+      && otherModeBalance9K.state === 'not-charge-mode'
+      && otherModeBalance9K.balanceMinutes === null,
+    '9K-3: 余额读取把真实邻近说明文本视为半渲染态，仅明确其他 Mode 才清除 Est 缓存');
   const offProofPlan9L = pwmPhase.planPwmStep({
     enabled: true,
     pwmState: 'off',
@@ -1533,7 +1611,7 @@ async function runTests() {
       && adoptTimerBody.includes('tabs.find(isACHomePageTab)')
       && !adoptTimerBody.includes('tabs[0]'),
     '9W: toggle/status/page-timer adoption 只选择精确 home；写路径缺失时创建隐藏 home');
-  assertPass(backgroundSource.includes('async function sendMessageToExactACHome(tabId, message)')
+  assertPass(backgroundSource.includes('async function sendMessageToExactACHome(tabId, message, { timeoutMs = 0 } = {})')
       && backgroundSource.includes("throw new Error('拒绝向非精确 AC home 标签发送消息')")
       && backgroundSource.includes('if (!await getExactACHomeTab(tabId)) return false;')
       && countOccurrences(backgroundSource, 'sendMessageToExactACHome(') >= 7,
@@ -1541,9 +1619,294 @@ async function runTests() {
     const popupSourceForExactHome = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
     assertPass(!popupSourceForExactHome.includes('tabs[0]')
       && popupSourceForExactHome.includes("tabs.filter(tab => tab.url === 'https://w5.ab.ust.hk/njggt/app/home')")
+      && popupSourceForExactHome.includes('const status = bgSchedule.actualStatus;')
+      && popupSourceForExactHome.includes("sendDiagnosticRuntimeMessage({ type: 'getPageTimer' })")
+      && !popupSourceForExactHome.includes('chrome.tabs.sendMessage(')
       && popupSourceForExactHome.includes('status.invalidTarget !== true')
       && popupSourceForExactHome.includes('pt.invalidTarget !== true'),
-    '9Y: popup 诊断只读取精确 home，且不会把 content 的 invalidTarget 拒绝响应误报为正常/OFF');
+    '9Y: popup 诊断只识别精确 home，并复用后台接收端恢复链路读取 status/page timer');
+
+  const contentRuntimeListeners = new Set();
+  let contentListenerRemoveCount = 0;
+  const contentRuntimeChrome = {
+    i18n: { getUILanguage: () => 'zh_CN' },
+    runtime: {
+      getURL: resource => resource,
+      onMessage: {
+        addListener(listener) { contentRuntimeListeners.add(listener); },
+        removeListener(listener) {
+          contentListenerRemoveCount += 1;
+          contentRuntimeListeners.delete(listener);
+        }
+      }
+    }
+  };
+  const contentWindow = { location: { href: 'https://w5.ab.ust.hk/njggt/app/home' } };
+  contentWindow.top = contentWindow;
+  const contentWorld = {};
+  const executeContentScript = new Function(
+    'self',
+    'window',
+    'chrome',
+    'fetch',
+    'console',
+    'document',
+    contentSource
+  );
+  const runContentScript = () => executeContentScript(
+    contentWorld,
+    contentWindow,
+    contentRuntimeChrome,
+    async () => ({ ok: true, json: async () => ({}) }),
+    quietConsole,
+    {}
+  );
+  runContentScript();
+  const firstContentListenerCount = contentRuntimeListeners.size;
+  // 模拟扩展 reload：页面 JS 全局和旧哨兵仍在，但旧 extension runtime 的
+  // onMessage 接收端已经失效。新版本兜底注入必须重新登记监听器。
+  contentRuntimeListeners.clear();
+  runContentScript();
+  assertPass(firstContentListenerCount === 1
+      && contentRuntimeListeners.size === 1
+      && contentListenerRemoveCount === 1,
+    '9Z-1: content.js 重注入会替换旧监听器；扩展 reload 后旧哨兵不会阻止接收端恢复');
+
+  const currentContentListener = [...contentRuntimeListeners][0];
+  let pingResponse = null;
+  let unknownResponseCalled = false;
+  const pingListenerResult = currentContentListener(
+    { action: 'ping' },
+    {},
+    response => { pingResponse = response; }
+  );
+  const unknownListenerResult = currentContentListener(
+    { action: 'future-unknown-action' },
+    {},
+    () => { unknownResponseCalled = true; }
+  );
+  assertPass(pingListenerResult === false
+      && pingResponse?.success === true
+      && unknownListenerResult === false
+      && unknownResponseCalled === false,
+    '9Z-1A: content 健康探测同步应答；未知 action 不冒充异步响应并吞住消息通道');
+
+  const contentRecoverySource = extractSourceSection(
+    backgroundSource,
+    'const CONTENT_SCRIPT_PROBE_TIMEOUT_MS = 1000;',
+    '\n// ----- 切换 AC 状态 -----',
+    'content script recovery helpers'
+  );
+  const statusRecoverySource = extractSourceSection(
+    backgroundSource,
+    'async function getCurrentACStatus()',
+    '\nasync function ensureScheduleClock()',
+    'getCurrentACStatus recovery'
+  );
+  const loadStatusRecovery = new Function(
+    'chrome',
+    'isACHomePageTab',
+    'sleep',
+    'appendDiagnosticLog',
+    'console',
+    'AC_PAGE',
+    `${contentRecoverySource}\n${statusRecoverySource}; return { getCurrentACStatus };`
+  );
+  let staleReceiverReady = false;
+  let staleReceiverSendCount = 0;
+  const staleReceiverInjections = [];
+  const staleReceiverChrome = {
+    tabs: {
+      async query() {
+        return [{
+          id: 51,
+          url: 'https://w5.ab.ust.hk/njggt/app/home',
+          status: 'complete',
+          discarded: false
+        }];
+      },
+      async get(tabId) {
+        return {
+          id: tabId,
+          url: 'https://w5.ab.ust.hk/njggt/app/home',
+          status: 'complete',
+          discarded: false
+        };
+      },
+      async sendMessage(tabId, message) {
+        staleReceiverSendCount += 1;
+        if (!staleReceiverReady) {
+          throw new Error('Could not establish connection. Receiving end does not exist.');
+        }
+        if (message.action === 'ping') return { success: true };
+        return {
+          isOn: true,
+          balanceState: 'available',
+          balanceMinutes: 156,
+          action: message.action,
+          tabId
+        };
+      },
+      async reload() { throw new Error('只读状态恢复不得刷新用户页面'); },
+      async update() { throw new Error('只读状态恢复不得导航用户页面'); }
+    },
+    scripting: {
+      async executeScript(details) {
+        staleReceiverInjections.push(details);
+        if (details.files?.includes('content.js')) staleReceiverReady = true;
+      }
+    }
+  };
+  const statusRecoveryHarness = loadStatusRecovery(
+    staleReceiverChrome,
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
+    async () => {},
+    ignoreDiagnosticLog,
+    quietConsole,
+    'https://w5.ab.ust.hk/njggt/app/home'
+  );
+  const recoveredReadStatus = await statusRecoveryHarness.getCurrentACStatus();
+  assertPass(recoveredReadStatus?.isOn === true
+      && recoveredReadStatus.balanceMinutes === 156
+      && staleReceiverSendCount >= 2
+      && staleReceiverInjections.length === 2
+      && staleReceiverInjections[0]?.files?.join(',') === 'billing-helpers.js,content.js'
+      && staleReceiverInjections[1]?.files?.join(',') === 'page-confirm.js'
+      && staleReceiverInjections[1]?.world === 'MAIN',
+    '9Z-2: full 状态读取遇到 Receiving end 不存在时原页注入接收端并重试，且不刷新或导航');
+
+  let swallowedReceiverReady = false;
+  const swallowedReceiverActions = [];
+  const swallowedReceiverInjections = [];
+  const swallowedReceiverChrome = {
+    tabs: {
+      async query() {
+        return [{
+          id: 52,
+          url: 'https://w5.ab.ust.hk/njggt/app/home',
+          status: 'complete',
+          discarded: false
+        }];
+      },
+      async get(tabId) {
+        return {
+          id: tabId,
+          url: 'https://w5.ab.ust.hk/njggt/app/home',
+          status: 'complete',
+          discarded: false
+        };
+      },
+      async sendMessage(tabId, message) {
+        swallowedReceiverActions.push(message.action);
+        if (!swallowedReceiverReady) {
+          return new Promise(() => {});
+        }
+        if (message.action === 'ping') return { success: true };
+        return {
+          isOn: true,
+          balanceState: 'available',
+          balanceMinutes: 156,
+          action: message.action,
+          tabId
+        };
+      },
+      async reload() { throw new Error('吞包恢复不得刷新用户页面'); },
+      async update() { throw new Error('吞包恢复不得导航用户页面'); }
+    },
+    scripting: {
+      async executeScript(details) {
+        swallowedReceiverInjections.push(details);
+        if (details.files?.includes('content.js')) swallowedReceiverReady = true;
+      }
+    }
+  };
+  const swallowedReceiverHarness = loadStatusRecovery(
+    swallowedReceiverChrome,
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
+    async () => {},
+    ignoreDiagnosticLog,
+    quietConsole,
+    'https://w5.ab.ust.hk/njggt/app/home'
+  );
+  const swallowedReceiverOutcome = await Promise.race([
+    swallowedReceiverHarness.getCurrentACStatus().then(status => ({ settled: true, status })),
+    new Promise(resolve => setTimeout(() => resolve({ settled: false }), 2500))
+  ]);
+  assertPass(swallowedReceiverOutcome.settled === true
+      && swallowedReceiverOutcome.status?.balanceMinutes === 156
+      && swallowedReceiverActions.join(',') === 'ping,ping,status'
+      && swallowedReceiverInjections.length === 2,
+    '9Z-3: 旧 listener 宣称异步却不响应时，健康探测有界超时并在原页重注入后恢复');
+
+  let selectiveReceiverReady = false;
+  const selectiveReceiverActions = [];
+  const selectiveReceiverInjections = [];
+  const selectiveReceiverChrome = {
+    tabs: {
+      async query() {
+        return [{
+          id: 53,
+          url: 'https://w5.ab.ust.hk/njggt/app/home',
+          status: 'complete',
+          discarded: false
+        }];
+      },
+      async get(tabId) {
+        return {
+          id: tabId,
+          url: 'https://w5.ab.ust.hk/njggt/app/home',
+          status: 'complete',
+          discarded: false
+        };
+      },
+      async sendMessage(tabId, message) {
+        selectiveReceiverActions.push(message.action);
+        if (message.action === 'ping') return { success: true };
+        if (!selectiveReceiverReady) return new Promise(() => {});
+        return {
+          isOn: true,
+          balanceState: 'available',
+          balanceMinutes: 156,
+          action: message.action,
+          tabId
+        };
+      },
+      async reload() { throw new Error('选择性吞包恢复不得刷新用户页面'); },
+      async update() { throw new Error('选择性吞包恢复不得导航用户页面'); }
+    },
+    scripting: {
+      async executeScript(details) {
+        selectiveReceiverInjections.push(details);
+        if (details.files?.includes('content.js')) selectiveReceiverReady = true;
+      }
+    }
+  };
+  const selectiveReceiverHarness = loadStatusRecovery(
+    selectiveReceiverChrome,
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
+    async () => {},
+    ignoreDiagnosticLog,
+    quietConsole,
+    'https://w5.ab.ust.hk/njggt/app/home'
+  );
+  const selectiveReceiverOutcome = await Promise.race([
+    selectiveReceiverHarness.getCurrentACStatus().then(status => ({ settled: true, status })),
+    new Promise(resolve => setTimeout(() => resolve({ settled: false }), 3500))
+  ]);
+  assertPass(selectiveReceiverOutcome.settled === true
+      && selectiveReceiverOutcome.status?.balanceMinutes === 156
+      && selectiveReceiverActions.join(',') === 'ping,status,ping,status'
+      && selectiveReceiverInjections.length === 2,
+    '9Z-3A: ping 正常但 status 被吞时，业务读取超时后强制替换 listener 并只重试一次');
+  assertPass(countOccurrences(backgroundSource, 'sendReadMessageToExactACHome(') >= 5
+      && !backgroundSource.includes("sendMessageToExactACHome(tab.id, { action: 'status' })")
+      && !backgroundSource.includes("sendMessageToExactACHome(tab.id, { action: 'getPageTimer' })")
+      && !backgroundSource.includes("sendMessageToExactACHome(verifierTabId, { action: 'getPageTimer' })"),
+    '9Z-3B: status、page timer、跨设备采纳与新鲜页验证统一走有界只读恢复入口');
+
+  assertPass(backgroundSource.includes('const BACKGROUND_MESSAGE_TYPES = new Set([')
+      && backgroundSource.includes('if (!BACKGROUND_MESSAGE_TYPES.has(msg?.type)) return false;'),
+    '9Z-4: background 对未知 runtime message 同步放行，不留下永不应答的消息通道');
 
   const i18nSource = fs.readFileSync(path.join(ROOT, 'i18n.js'), 'utf8');
   assertPass(i18nSource.includes("querySelectorAll('[data-i18n-title]')"),
@@ -1795,7 +2158,7 @@ async function runTests() {
   // ===== 用例 12: 审计修复回归（只读轮询、HIG、发布与安装） =====
   console.log('\n\n=== 用例 12: 审计修复回归（只读轮询、HIG、发布与安装） ===\n');
 
-  const snapshotStart = backgroundSource.indexOf('async function getScheduleSnapshot(lite = false) {');
+  const snapshotStart = backgroundSource.indexOf('// 弹窗 est（Est. until）依赖 full 轮询带回的页面余额。');
   const snapshotEnd = backgroundSource.indexOf('\nasync function toggleNowAndSync', snapshotStart);
   const snapshotBody = snapshotStart >= 0 && snapshotEnd > snapshotStart
     ? backgroundSource.slice(snapshotStart, snapshotEnd)
@@ -1812,9 +2175,22 @@ async function runTests() {
     'initialSchedule',
     'liveAlarm',
     'actualStatus',
+    'initialSessionBalance',
+    'initialLocalBalance',
     `
     let schedule = { ...initialSchedule };
-    let storageWriteCount = 0;
+    let scheduleWriteCount = 0;
+    let localBalanceWriteCount = 0;
+    let sessionWriteCount = 0;
+    const localStorage = {
+      ac_schedule: { ...initialSchedule },
+      ...(Number.isFinite(initialLocalBalance)
+        ? { ac_balance_cache: initialLocalBalance }
+        : {})
+    };
+    const sessionStorage = Number.isFinite(initialSessionBalance)
+      ? { ac_balance_cache: initialSessionBalance }
+      : {};
     const PWM_TRIGGER_SNAPSHOT_OPTIONS = Object.freeze({
       nextTriggerToleranceMs: 1500,
       requireLegacyAlignment: false,
@@ -1823,8 +2199,46 @@ async function runTests() {
     const chrome = {
       storage: {
         local: {
-          async get() { return { ac_schedule: { ...schedule } }; },
-          async set() { storageWriteCount += 1; }
+          async get(key) {
+            if (key === 'ac_schedule') return { ac_schedule: { ...localStorage.ac_schedule } };
+            if (key === 'ac_balance_cache') {
+              return Object.hasOwn(localStorage, key)
+                ? { [key]: localStorage[key] }
+                : {};
+            }
+            return { ...localStorage };
+          },
+          async set(value) {
+            if (value.ac_schedule) {
+              scheduleWriteCount += 1;
+              localStorage.ac_schedule = { ...value.ac_schedule };
+            }
+            if (Object.hasOwn(value, 'ac_balance_cache')) {
+              localBalanceWriteCount += 1;
+              localStorage.ac_balance_cache = value.ac_balance_cache;
+            }
+          },
+          async remove(key) {
+            if (key === 'ac_balance_cache') {
+              localBalanceWriteCount += 1;
+              delete localStorage.ac_balance_cache;
+            }
+          }
+        },
+        session: {
+          async get(key) {
+            return Object.hasOwn(sessionStorage, key)
+              ? { [key]: sessionStorage[key] }
+              : {};
+          },
+          async set(value) {
+            sessionWriteCount += 1;
+            Object.assign(sessionStorage, value);
+          },
+          async remove(key) {
+            sessionWriteCount += 1;
+            delete sessionStorage[key];
+          }
         }
       },
       alarms: {
@@ -1843,14 +2257,20 @@ async function runTests() {
         ? schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000
         : 0;
     }
-    async function getCurrentACStatus() { return actualStatus; }
-    async function persistSchedule() { storageWriteCount += 1; }
-    async function backfillNextTriggerAt() { storageWriteCount += 1; }
+    let currentActualStatus = actualStatus;
+    async function getCurrentACStatus() { return currentActualStatus; }
+    async function persistSchedule() { scheduleWriteCount += 1; }
+    async function backfillNextTriggerAt() { scheduleWriteCount += 1; }
     ${snapshotBody}
     return {
       getScheduleSnapshot,
-      getStorageWriteCount: () => storageWriteCount,
-      getMemorySchedule: () => ({ ...schedule })
+      getStorageWriteCount: () => scheduleWriteCount,
+      getLocalBalanceWriteCount: () => localBalanceWriteCount,
+      getSessionWriteCount: () => sessionWriteCount,
+      getLocalBalance: () => localStorage.ac_balance_cache,
+      getSessionBalance: () => sessionStorage.ac_balance_cache,
+      getMemorySchedule: () => ({ ...schedule }),
+      setActualStatus: (nextStatus) => { currentActualStatus = nextStatus; }
     };
   `);
   const liveDueAt12 = Date.now() + 5 * 60 * 1000;
@@ -1878,6 +2298,103 @@ async function runTests() {
       && liteSnapshot12.nextTriggerAt === liveDueAt12
       && liteSnapshot12.actualStatus === null,
     '12E: full/lite 快照均投影 live alarm，lite 仍跳过 AC 状态查询');
+
+  const stickyHarness = createScheduleSnapshotHarness(
+    pwmPhase.reconcilePwmTrigger,
+    initialSchedule12,
+    { name: 'ac-pwm', scheduledTime: liveDueAt12 },
+    { isOn: true, balanceState: 'available', balanceMinutes: 156 }
+  );
+  const stickyFirst = await stickyHarness.getScheduleSnapshot();
+  stickyHarness.setActualStatus({ isOn: true, balanceState: 'unavailable' });
+  const stickyDegraded = await stickyHarness.getScheduleSnapshot();
+  stickyHarness.setActualStatus({ isOn: true, balanceState: 'not-charge-mode' });
+  const stickyCleared = await stickyHarness.getScheduleSnapshot();
+  stickyHarness.setActualStatus({ isOn: true, balanceState: 'available', balanceMinutes: 200 });
+  const stickyRefreshed = await stickyHarness.getScheduleSnapshot();
+  assertPass(stickyFirst.actualStatus?.balanceMinutes === 156
+      && stickyDegraded.actualStatus?.balanceMinutes === 156
+      && stickyCleared.actualStatus?.balanceMinutes === undefined
+      && stickyRefreshed.actualStatus?.balanceMinutes === 200,
+    '12F: full 快照仅对暂不可读粘住余额，明确非 Charge Mode 会清除，恢复读取后继续更新');
+
+  const persistedBalanceHarness = createScheduleSnapshotHarness(
+    pwmPhase.reconcilePwmTrigger,
+    initialSchedule12,
+    { name: 'ac-pwm', scheduledTime: liveDueAt12 },
+    { isOn: true, balanceState: 'available', balanceMinutes: 156 }
+  );
+  await persistedBalanceHarness.getScheduleSnapshot();
+  const restartedBalanceHarness = createScheduleSnapshotHarness(
+    pwmPhase.reconcilePwmTrigger,
+    initialSchedule12,
+    { name: 'ac-pwm', scheduledTime: liveDueAt12 },
+    { isOn: true, balanceState: 'unavailable' },
+    undefined,
+    persistedBalanceHarness.getLocalBalance()
+  );
+  const restartedBalanceSnapshot = await restartedBalanceHarness.getScheduleSnapshot();
+  restartedBalanceHarness.setActualStatus({ isOn: true, balanceState: 'not-charge-mode' });
+  const clearedRestartedBalance = await restartedBalanceHarness.getScheduleSnapshot();
+  assertPass(persistedBalanceHarness.getLocalBalance() === 156
+      && persistedBalanceHarness.getSessionBalance() === 156
+      && persistedBalanceHarness.getLocalBalanceWriteCount() === 1
+      && persistedBalanceHarness.getSessionWriteCount() === 1
+      && restartedBalanceSnapshot.actualStatus?.balanceMinutes === 156
+      && clearedRestartedBalance.actualStatus?.balanceMinutes === undefined
+      && restartedBalanceHarness.getLocalBalance() === undefined
+      && restartedBalanceHarness.getSessionBalance() === undefined,
+    '12F-3: 最近有效余额写入 local/session，完整浏览器重启从 local 恢复，明确非 Charge Mode 同步清除');
+
+  const migratedBalanceHarness = createScheduleSnapshotHarness(
+    pwmPhase.reconcilePwmTrigger,
+    initialSchedule12,
+    { name: 'ac-pwm', scheduledTime: liveDueAt12 },
+    { isOn: true, balanceState: 'unavailable' },
+    156
+  );
+  const migratedBalanceSnapshot = await migratedBalanceHarness.getScheduleSnapshot();
+  assertPass(migratedBalanceSnapshot.actualStatus?.balanceMinutes === 156
+      && migratedBalanceHarness.getLocalBalance() === 156
+      && migratedBalanceHarness.getLocalBalanceWriteCount() === 1,
+    '12F-4: 旧版本 session 余额在首次 full 快照时迁移到 local durable cache');
+
+  const popupBalanceMergeSource = extractSourceSection(
+    popupJs,
+    'function mergeActualStatusCache(cachedStatus, incomingStatus) {',
+    '\nasync function refreshStatus()',
+    'mergeActualStatusCache'
+  );
+  const mergeActualStatusCache = new Function(
+    `${popupBalanceMergeSource}; return mergeActualStatusCache;`
+  )();
+  const cachedBalance12 = { isOn: true, balanceState: 'available', balanceMinutes: 156 };
+  const mergedUnavailable12 = mergeActualStatusCache(
+    cachedBalance12,
+    { isOn: false, balanceState: 'unavailable' }
+  );
+  const mergedMissing12 = mergeActualStatusCache(cachedBalance12, null);
+  const mergedOtherMode12 = mergeActualStatusCache(
+    cachedBalance12,
+    { isOn: true, balanceState: 'not-charge-mode' }
+  );
+  const mergedFresh12 = mergeActualStatusCache(
+    cachedBalance12,
+    { isOn: true, balanceState: 'available', balanceMinutes: 200 }
+  );
+  assertPass(mergedUnavailable12.isOn === false
+      && mergedUnavailable12.balanceMinutes === 156
+      && mergedMissing12.balanceMinutes === 156
+      && mergedOtherMode12.balanceMinutes === undefined
+      && mergedFresh12.balanceMinutes === 200,
+    '12F-1: popup 缓存跨坏 full/lite 响应保留 Est，明确非 Charge Mode 清除且新余额可更新');
+  const refreshStatusStart12 = popupJs.indexOf('async function refreshStatus()');
+  const refreshStatusEnd12 = popupJs.indexOf('\nfunction announceState(', refreshStatusStart12);
+  const refreshStatusBody12 = popupJs.slice(refreshStatusStart12, refreshStatusEnd12);
+  assertPass(refreshStatusBody12.includes('attachCachedActualStatus(schedule);')
+      && refreshStatusBody12.includes("throw new Error('后台未返回有效 schedule')")
+      && refreshStatusBody12.includes('attachCachedActualStatus({ ...stored.ac_schedule })'),
+    '12F-2: popup 对 full、lite 与后台异常回退统一合并缓存，不再让单次响应隐藏 Est');
 
   assertPass(popupHtml.includes('data-i18n-aria-label="helpTooltip"')
       && popupHtml.includes('aria-labelledby="pwmSettingsTitle"')
@@ -2217,13 +2734,14 @@ async function runTests() {
       && popupSource.includes('diagnoseOffscreenUnknown')
       && popupSource.includes('diagnoseVersion'),
     '14I: offscreen 诊断行三态兼容(旧 SW undefined 不误红)+ 诊断面板末行显示扩展版本+build');
-  assertPass(popupSource.includes(`const APP_VERSION = '${manifest.version}'`),
-    `14J: 源码 popup.js APP_VERSION 硬编码与 manifest.json version (${manifest.version}) 同步 - 不再产出阶段 60/61/62 三次遗留的 APP_VERSION=0.6.4 vs manifest 不一致`);
+  assertPass(/const APP_VERSION = '\d+\.\d+\.\d+';/.test(popupSource)
+      && distPopupSource.includes(`const APP_VERSION = '${manifest.version}'`),
+    `14J: popup 源码保留合法兜底版本，dist 由构建注入 manifest version (${manifest.version})`);
 
-  // 14K: popup.html 两处 ?v= 缓存破坏参数与 manifest.version 同步(web 资源 cache busting 守门)
-  const popupHtmlV = [...popupHtml.matchAll(/\?v=([\d.]+)/g)].map(m => m[1]);
+  // 14K: dist/popup.html 两处 ?v= 由 build.sh 注入 manifest.version。
+  const popupHtmlV = [...distPopupHtml.matchAll(/\?v=([\d.]+)/g)].map(m => m[1]);
   assertPass(popupHtmlV.length >= 2 && popupHtmlV.every(v => v === manifest.version),
-    `14K: popup.html ?v= 缓存破坏参数 (${popupHtmlV.join(', ') || 'none'}) 全部等于 manifest.json version (${manifest.version}) — bump manifest 时漏改 popup.html 将立即被守门`);
+    `14K: dist/popup.html ?v= 缓存参数 (${popupHtmlV.join(', ') || 'none'}) 全部等于 manifest.json version (${manifest.version})`);
 
   // 14L: CHROMEWEBSTORE.md 所有版本字符串与 manifest.version 同步(发布资产一致性守门)
   //  使用 \d+\.\d+\.\d+ 而非 \b0\.\d+\.\d+\b，避免匹配 ac-ust-vX.Y.Z 时 vX 之间无词边界被 \b 截掉
@@ -2236,6 +2754,28 @@ async function runTests() {
       && popupSource.includes("t('diagnoseVersion',")
       && /chrome\.runtime\.getManifest\(\)\.version/.test(popupSource),
     `14M: 诊断末行 diagnoseVersion 不再直接传 APP_VERSION 硬编码,改为优先读 chrome.runtime.getManifest().version (治本 — 即便作者漏同步源码 APP_VERSION,诊断仍显示真实 manifest 版本)`);
+
+  const diagnoseHandlerSource = popupSource.slice(
+    popupSource.indexOf("btnDiagnose.addEventListener('click', async () => {")
+  );
+  assertPass(popupSource.includes('const DIAGNOSTIC_MESSAGE_TIMEOUT_MS = 10000;')
+      && popupSource.includes('async function sendDiagnosticRuntimeMessage(message)')
+      && countOccurrences(diagnoseHandlerSource, 'sendDiagnosticRuntimeMessage(') >= 4
+      && /finally\s*\{[\s\S]*btnDiagnose\.disabled = false;/.test(diagnoseHandlerSource),
+    '14N: 诊断后台往返有 10 秒边界，所有退出路径都恢复按钮并结束“诊断中”状态');
+
+  const diagnosticAlignmentStart = popupSource.indexOf('const DIAGNOSTIC_TRIGGER_TOLERANCE_MS = 1500;');
+  const diagnosticAlignmentEnd = popupSource.indexOf('\nasync function sendDiagnosticRuntimeMessage', diagnosticAlignmentStart);
+  const areDiagnosticTriggersAligned = new Function(`
+    ${popupSource.slice(diagnosticAlignmentStart, diagnosticAlignmentEnd)}
+    return areDiagnosticTriggersAligned;
+  `)();
+  assertPass(areDiagnosticTriggersAligned(10000, 10001.5, 9999)
+      && !areDiagnosticTriggersAligned(10000, 11500)
+      && !areDiagnosticTriggersAligned(10000, 0)
+      && countOccurrences(diagnoseHandlerSource, 'areDiagnosticTriggersAligned(') >= 2
+      && !diagnoseHandlerSource.includes('memNext === memLive'),
+    '14O: 两方与三方触发时间共用 1500ms 容差，浏览器毫秒小数不再误报时钟失步');
 
   // ===== 用例 15: 持久化脱敏诊断日志 =====
   console.log('\n\n=== 用例 15: 持久化脱敏诊断日志 ===\n');

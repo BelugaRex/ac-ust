@@ -132,7 +132,8 @@ cd ac-ust
 git checkout -b my-cool-feature
 
 # 4. 开发、测试
-#    （修完代码必须跑 node test/verify-fix.mjs）
+bash ./build.sh
+node test/verify-fix.mjs
 
 # 5. 提交并推送
 git add .
@@ -146,7 +147,7 @@ git push origin my-cool-feature
 
 - **不要直接推送到 `beta-rex` 或 `main`** — 这是作者的分支，请通过 PR 贡献
 - **一个 PR 做一件事**，方便 review
-- **先跑测试再 commit**：`node test/verify-fix.mjs`
+- **先构建并测试再 commit**：`bash ./build.sh && node test/verify-fix.mjs`
 - **翻译贡献**：其他语言通过 [Crowdin](https://crowdin.com/project/ac-ust) 或直接编辑 `_locales/` 下的 JSON 文件；`zh_CN` 与 `en` 由作者直接维护，请勿改动
 - **Crowdin 自动 PR**：如果内容全是源语言（未翻译），直接关闭即可；有真正翻译时再合并；若 PR 含 `_locales/zh_CN/` 或 `_locales/en/` 改动，一律关闭不合并
 

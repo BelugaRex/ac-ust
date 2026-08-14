@@ -4,6 +4,8 @@
 
 - 将 PWM 阶段推进、过期恢复与 live alarm 对齐提取为可由浏览器和 Node 共用的纯决策模块；Service Worker 只负责执行计划和 Chrome I/O。
 - 合并 content isolated world 的主世界事件握手实现，并让 PWM 回归直接测试生产 planner，不再依赖旧实现的源码形状。
+- 修复余额预计（Est. until）单次页面读取失败即从弹窗消失的问题：控制侧粘住最近一次有效余额，页面重渲染窗口、home 页暂不可读或标签
+页被浏览器丢弃时不再让 est 消失，恢复读取后继续更新。
 
 ## 0.6.15
 

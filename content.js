@@ -3,12 +3,11 @@
 // 负责隔离世界状态读取，并把开关目标委派给主世界 page-confirm.js
 // ============================================================
 
-// 幂等守卫：scripting.executeScript 兜底可能与 manifest content_scripts
-// 在同一隔离世界重复执行本文件，导致 onMessage 监听器重复注册或顶层 const
-// 重声明抖动。包进 IIFE + 哨兵，对齐 page-confirm.js 的 __AC_EXTENSION_TOGGLE_PATCHED__ 范式。
+// scripting.executeScript 兜底可能与 manifest content_scripts 在同一隔离世界
+// 重复执行本文件。IIFE 隔离顶层声明；消息监听器引用保存在 global 上，重注入时
+// 先移除旧监听器再登记新监听器。不能只看 loaded 哨兵提前 return：扩展 reload
+// 后旧页面可能保留 JS global，却已失去旧 extension runtime 的消息接收端。
 (() => {
-if (self.__AC_CONTENT_LOADED__) return;
-self.__AC_CONTENT_LOADED__ = true;
 
 // i18n — content script 运行在隔离世界，不能 importScripts，用内联 fetch loader
 const _i18nCache = {};
@@ -51,35 +50,51 @@ function isExactACHomeContext() {
 // ----- 监听来自 background 的消息 -----
 // 触发 i18n 加载（不阻塞，翻译加载失败不影响核心功能）
 _i18nLoad();
-chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  const isACOperation = msg.action === 'on'
-    || msg.action === 'off'
-    || msg.action === 'status'
-    || msg.action === 'setTimer'
-    || msg.action === 'getPageTimer';
+const previousContentMessageListener = self.__AC_CONTENT_MESSAGE_LISTENER__;
+if (typeof previousContentMessageListener === 'function') {
+  try {
+    chrome.runtime.onMessage.removeListener(previousContentMessageListener);
+  } catch (_) { /* 旧 extension context 已失效时直接登记新监听器 */ }
+}
+
+const contentMessageListener = (msg, sender, sendResponse) => {
+  const action = msg?.action;
+  if (action === 'ping') {
+    sendResponse({ success: true });
+    return false;
+  }
+
+  const isACOperation = action === 'on'
+    || action === 'off'
+    || action === 'status'
+    || action === 'setTimer'
+    || action === 'getPageTimer';
   if (isACOperation && !isExactACHomeContext()) {
     sendResponse({ success: false, invalidTarget: true, error: '拒绝在非精确 AC home 页面执行空调操作' });
     return false;
   }
-  if (msg.action === 'on' || msg.action === 'off') {
-    toggleACSwitch(msg.action).then(result => sendResponse(result));
+  if (action === 'on' || action === 'off') {
+    toggleACSwitch(action).then(result => sendResponse(result));
     return true; // 异步响应
   }
-  if (msg.action === 'status') {
+  if (action === 'status') {
     getAuthoritativeACStatus().then(result => sendResponse(result));
     return true;
   }
-  if (msg.action === 'setTimer') {
+  if (action === 'setTimer') {
     setPagePowerOffTimer(msg.minutes).then(result => sendResponse(result));
     return true;
   }
-  if (msg.action === 'getPageTimer') {
+  if (action === 'getPageTimer') {
     // v0.5.10：读 picker 当前值——跨设备主同步通道（UST 服务器同步给所有会话）
     sendResponse(getPagePowerOffTimer());
     return true;
   }
-  return true;
-});
+  return false;
+};
+chrome.runtime.onMessage.addListener(contentMessageListener);
+self.__AC_CONTENT_MESSAGE_LISTENER__ = contentMessageListener;
+self.__AC_CONTENT_LOADED__ = true;
 
 // ----- 获取当前 AC 状态 -----
 function getACStatus() {
@@ -126,8 +141,10 @@ function getACStatus() {
 
 async function getAuthoritativeACStatus() {
   const withBalance = (status) => {
-    const balanceMinutes = getACBalanceMinutes();
-    return balanceMinutes === null ? status : { ...status, balanceMinutes };
+    const balance = getACBalanceSnapshot();
+    return balance.state === 'available'
+      ? { ...status, balanceState: balance.state, balanceMinutes: balance.balanceMinutes }
+      : { ...status, balanceState: balance.state };
   };
 
   const mainWorldStatus = await requestMainWorldStatus(3000);
@@ -156,21 +173,45 @@ function hasChargeModeLabel(elements) {
   );
 }
 
-function getACBalanceMinutes() {
+function classifyACBalanceReading(elements, ...values) {
+  const labels = Array.from(elements || [])
+    .map(element => (element.textContent || '').trim())
+    .filter(Boolean);
+  const balanceMinutes = parseBalanceMinutes(...values);
+
+  if (hasChargeModeLabel(elements)) {
+    return Number.isFinite(balanceMinutes)
+      ? { state: 'available', balanceMinutes }
+      : { state: 'unavailable', balanceMinutes: null };
+  }
+
+  const hasExplicitOtherMode = labels.some(label =>
+    label !== 'Charge Mode' && /\S+\s+Mode$/i.test(label)
+  );
+  return {
+    state: hasExplicitOtherMode ? 'not-charge-mode' : 'unavailable',
+    balanceMinutes: null
+  };
+}
+
+function getACBalanceSnapshot() {
   const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, h5, h6'));
   const heading = headings.find(el => (el.textContent || '').trim() === 'Air Conditioning Balance');
-  if (!heading) return null;
+  if (!heading) return { state: 'unavailable', balanceMinutes: null };
 
   let container = heading.parentElement;
   for (let depth = 0; depth < 8 && container; depth++) {
     const value = container.querySelector('.ant-progress-text');
     if (value) {
-      const chargeMode = hasChargeModeLabel(container.querySelectorAll('small'));
-      return chargeMode ? parseBalanceMinutes(value.textContent, value.getAttribute('title')) : null;
+      return classifyACBalanceReading(
+        container.querySelectorAll('small'),
+        value.textContent,
+        value.getAttribute('title')
+      );
     }
     container = container.parentElement;
   }
-  return null;
+  return { state: 'unavailable', balanceMinutes: null };
 }
 
 // ----- 切换 AC 开关 -----

@@ -8,7 +8,7 @@
 | 字段 | 值 |
 |------|-----|
 | 名称 | AC-UST |
-| 版本 | 0.6.15 |
+| 版本 | 0.7.0 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率 (Productivity) |
 | 语言 | 中文（简体）、English |
@@ -127,12 +127,12 @@ AC-UST 的完整功能需要登录 HKUST Smart Power Meter。提交审核前，�
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.6.15.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.7.0.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP 内容和图标均通过验证。
-2. 在开发者信息中心上传 `releases/ac-ust-v0.6.15.zip`。
+2. 在开发者信息中心上传 `releases/ac-ust-v0.7.0.zip`。
 3. 填写商品详情、隐私声明、权限理由和 HKUST 登录所需的审核测试说明。
 4. 在“分发”页选择“私享（Private）”，配置受信任测试人员或 Google 群组，并将地区限制为香港。
 5. 提交审核时选择推迟发布；审核通过后在 30 天内手动发布并把商店链接发给测试人员。

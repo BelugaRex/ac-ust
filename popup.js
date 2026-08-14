@@ -133,6 +133,37 @@ activeHoursEnd.addEventListener('change', commitActiveHours);
 let pollCount = 0;
 let cachedActualStatus = null;
 
+function mergeActualStatusCache(cachedStatus, incomingStatus) {
+  const cached = cachedStatus && typeof cachedStatus === 'object'
+    ? cachedStatus
+    : null;
+  if (!incomingStatus || typeof incomingStatus !== 'object') {
+    return cached ? { ...cached } : null;
+  }
+
+  const merged = { ...incomingStatus };
+  if (merged.balanceState === 'not-charge-mode') {
+    delete merged.balanceMinutes;
+    return merged;
+  }
+
+  const hasIncomingBalance = typeof merged.balanceMinutes === 'number'
+    && Number.isFinite(merged.balanceMinutes);
+  if (!hasIncomingBalance
+      && typeof cached?.balanceMinutes === 'number'
+      && Number.isFinite(cached.balanceMinutes)) {
+    merged.balanceMinutes = cached.balanceMinutes;
+  }
+  return merged;
+}
+
+function attachCachedActualStatus(schedule) {
+  if (!schedule || typeof schedule !== 'object') return schedule;
+  cachedActualStatus = mergeActualStatusCache(cachedActualStatus, schedule.actualStatus);
+  if (cachedActualStatus) schedule.actualStatus = cachedActualStatus;
+  return schedule;
+}
+
 async function refreshStatus() {
   if (IS_STATIC_PREVIEW) {
     updateCountdownDisplay(staticPreviewSchedule, {
@@ -154,21 +185,21 @@ async function refreshStatus() {
     const schedule = response?.success === false && response?.schedule
       ? response.schedule
       : response;
+    if (!schedule || typeof schedule !== 'object') {
+      throw new Error('后台未返回有效 schedule');
+    }
 
-    // 缓存 AC 真实状态，lite 轮询时用缓存值补充
-    if (!useLite && schedule?.actualStatus) {
-      cachedActualStatus = schedule.actualStatus;
-    }
-    if (useLite && schedule && !schedule.actualStatus && cachedActualStatus) {
-      schedule.actualStatus = cachedActualStatus;
-    }
+    // full、lite 都走同一合并规则：暂不可读沿用最近有效余额，明确非
+    // Charge Mode 才清除。这样 SW 重启或单次消息异常不会让 Est 闪退。
+    attachCachedActualStatus(schedule);
 
     updateCountdownDisplay(schedule, alarm);
   } catch (e) {
     const stored = await chrome.storage.local.get("ac_schedule");
     if (stored.ac_schedule) {
       const alarm = await chrome.alarms.get("ac-pwm");
-      updateCountdownDisplay(stored.ac_schedule, alarm);
+      const fallbackSchedule = attachCachedActualStatus({ ...stored.ac_schedule });
+      updateCountdownDisplay(fallbackSchedule, alarm);
     }
   }
 }
@@ -376,7 +407,7 @@ async function updateSchedule(enabled, restart = false) {
     }
 
     const alarm = await chrome.alarms.get('ac-pwm');
-    updateCountdownDisplay(finalResponse.schedule, alarm);
+    updateCountdownDisplay(attachCachedActualStatus(finalResponse.schedule), alarm);
   } else {
     showStatus(t('statusError'), 'error');
   }
@@ -470,7 +501,33 @@ if (versionInfo) {
 const btnDiagnose = document.getElementById('btnDiagnose');
 const diagnoseResult = document.getElementById('diagnoseResult');
 const btnCopyDiag = document.getElementById('btnCopyDiag');
+const DIAGNOSTIC_MESSAGE_TIMEOUT_MS = 10000;
+const DIAGNOSTIC_TRIGGER_TOLERANCE_MS = 1500;
 let lastDiagLines = [];
+
+function areDiagnosticTriggersAligned(...triggerTimes) {
+  const times = triggerTimes.map(Number);
+  if (times.length < 2 || times.some(time => !Number.isFinite(time) || time <= 0)) {
+    return false;
+  }
+  return Math.max(...times) - Math.min(...times) < DIAGNOSTIC_TRIGGER_TOLERANCE_MS;
+}
+
+async function sendDiagnosticRuntimeMessage(message) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      chrome.runtime.sendMessage(message),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          reject(new Error(`${message?.type || 'unknown'} timeout`));
+        }, DIAGNOSTIC_MESSAGE_TIMEOUT_MS);
+      })
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
 
 // 复制诊断结果到剪贴板：Markdown 代码块格式，方便用户一键粘贴进 GitHub issue。
 // 兼容回退 execCommand，万一 clipboard API 在某些环境不可用（MV3 popup 在 secure context 通常正常）。
@@ -531,6 +588,16 @@ function appendRecentDiagnosticLogLines(lines, entries) {
   });
 }
 
+function projectPersistentSchedule(scheduleSnapshot) {
+  return Object.fromEntries(
+    Object.entries(scheduleSnapshot || {}).filter(([key]) => (
+      key !== 'actualStatus'
+      && key !== 'balanceMinutes'
+      && !key.startsWith('_')
+    ))
+  );
+}
+
 btnDiagnose.addEventListener('click', async () => {
   diagnoseResult.style.display = 'block';
   document.getElementById('diagContent').textContent = t('diagnoseInProgress');
@@ -554,8 +621,8 @@ btnDiagnose.addEventListener('click', async () => {
   lines.push(t('diagnoseBrowser') + browserName + ' ' + browserVer);
   
   try {
-    const ensured = await chrome.runtime.sendMessage({ type: 'ensureDiagnostics' });
-    const bg = await chrome.runtime.sendMessage({ type: 'getSchedule' });
+    const ensured = await sendDiagnosticRuntimeMessage({ type: 'ensureDiagnostics' });
+    const bg = await sendDiagnosticRuntimeMessage({ type: 'getSchedule' });
 
     // 1. 检查 storage / 后台权威快照
     const stored = await chrome.storage.local.get('ac_schedule');
@@ -581,20 +648,20 @@ btnDiagnose.addEventListener('click', async () => {
         && pwmAlarmEarly?.scheduledTime
         && pwmAlarmEarly.scheduledTime > nowMs) {
       try {
-        const repairedSchedule = {
+        const repairedSchedule = projectPersistentSchedule({
           ...storedSchedule,
           ...s,
           nextTriggerAt: pwmAlarmEarly.scheduledTime,
           alarmCreatedAt: Date.now(),
           alarmDelayMinutes: Math.max(1, (pwmAlarmEarly.scheduledTime - Date.now()) / 60000)
-        };
+        });
         await chrome.storage.local.set({ ac_schedule: repairedSchedule });
         // 等待 storage 写入完成
         await new Promise(r => setTimeout(r, 200));
         // 自愈成功后,直接使用 repairedSchedule 作为 s。
         // 不能再合并旧的 ensured/bgSchedule——它们携带诊断开始时的快照(nextTriggerAt=0),
         // 在合并时会把刚修复的值覆盖回 0(合并顺序 bug,Node 测试 verify-fix.mjs 发现)。
-        s = { ...repairedSchedule };
+        s = { ...s, ...repairedSchedule };
         effectiveNextTriggerAt = s.nextTriggerAt || 0;
         selfHealed = true;
       } catch (e) {
@@ -622,7 +689,7 @@ btnDiagnose.addEventListener('click', async () => {
     if (pwmAlarm && s.clockMode === false && !effectiveNextTriggerAt) {
       add(false, t('diagnosePwmSync'));
     } else if (pwmAlarm && effectiveNextTriggerAt) {
-      add(Math.abs(pwmAlarm.scheduledTime - effectiveNextTriggerAt) < 1500, t('diagnosePwmSync') + (selfHealed ? t('diagnosePopHealed') : ''));
+      add(areDiagnosticTriggersAligned(pwmAlarm.scheduledTime, effectiveNextTriggerAt), t('diagnosePwmSync') + (selfHealed ? t('diagnosePopHealed') : ''));
     }
 
     let badgeAlarm = ensured?.alarms?.badge || alarms.find(a => a.name === 'ac-badge-tick') || await chrome.alarms.get('ac-badge-tick');
@@ -682,7 +749,7 @@ btnDiagnose.addEventListener('click', async () => {
     if (exactHomeTab) {
       add(true, t('diagnoseTabNotDiscarded'));
       try {
-        const status = await chrome.tabs.sendMessage(exactHomeTab.id, { action: 'status' });
+        const status = bgSchedule.actualStatus;
         const statusAccepted = !!status && status.success !== false && status.invalidTarget !== true;
         add(statusAccepted, t('diagnoseContentOK'));
         add(statusAccepted && typeof status.isOn === 'boolean', t('diagnoseAcReadable') + (status?.isOn ? 'ON' : 'OFF'));
@@ -710,7 +777,7 @@ btnDiagnose.addEventListener('click', async () => {
     // page timer 两相位都对齐：pwmState='off'(AC 正开) 直接采纳；pwmState='on'(AC 正关) 掉算下一“开”。
     if (exactHomeTab && s.enabled) {
       try {
-        const pt = await chrome.tabs.sendMessage(exactHomeTab.id, { action: 'getPageTimer' });
+        const pt = await sendDiagnosticRuntimeMessage({ type: 'getPageTimer' });
         if (pt && pt.success !== false && pt.invalidTarget !== true && pt.found && pt.value) {
           const localNext = effectiveNextTriggerAt || s.nextTriggerAt || 0;
           add(true, t('diagnosePageTimerExpr', pt.value, fmt(localNext), s.pwmState));
@@ -746,7 +813,7 @@ btnDiagnose.addEventListener('click', async () => {
     // 即使 SW 没响应,功能上也是 OK 的,显示绿灯而非红灯。
     let sw = null;
     try {
-      sw = await chrome.runtime.sendMessage({ type: 'getSwStatus' });
+      sw = await sendDiagnosticRuntimeMessage({ type: 'getSwStatus' });
     } catch (e) {
       // sendResponse 异常,记录但不直接红灯
       console.warn('getSwStatus sendMessage 异常:', e?.message);
@@ -765,7 +832,7 @@ btnDiagnose.addEventListener('click', async () => {
       const memNext = sw.memorySchedule?.nextTriggerAt || 0;
       const storedNext = storedSchedule.nextTriggerAt || 0;
       const memLive = sw.liveAlarmScheduledTime || 0;
-      if (memLive && memNext === memLive && storedNext === memLive) {
+      if (areDiagnosticTriggersAligned(memLive, memNext, storedNext)) {
         add(true, t('diagnoseTriMatch', fmt(memLive)));
       } else {
         add(false, t('diagnoseTriMismatch', fmt(memLive), fmt(memNext), fmt(storedNext)));
@@ -811,12 +878,12 @@ btnDiagnose.addEventListener('click', async () => {
     }
   } catch (e) {
     lines.push('❌ ' + t('diagnoseException') + (e.message||'').slice(0,80));
+  } finally {
+    renderDiagnoseResult(lines);
+    lastDiagLines = lines.slice();
+    if (btnCopyDiag) btnCopyDiag.hidden = false;
+    btnDiagnose.disabled = false;
+    showStatus(t('diagnoseComplete'), 'success');
   }
-  
-  renderDiagnoseResult(lines);
-  lastDiagLines = lines.slice();
-  if (btnCopyDiag) btnCopyDiag.hidden = false;
-  btnDiagnose.disabled = false;
-  showStatus(t('diagnoseComplete'), 'success');
 });
 

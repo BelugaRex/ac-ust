@@ -58,11 +58,11 @@ for file in "${RUNTIME_FILES[@]}"; do
   fi
 done
 
-python3 - "$DIST/popup.js" "$VERSION" "$BUILD_TIME" <<'PY'
+python3 - "$DIST/popup.js" "$DIST/popup.html" "$VERSION" "$BUILD_TIME" <<'PY'
 import re
 import sys
 
-popup_path, version, build_time = sys.argv[1:]
+popup_path, popup_html_path, version, build_time = sys.argv[1:]
 with open(popup_path, encoding='utf-8') as popup_file:
     content = popup_file.read()
 
@@ -83,8 +83,22 @@ if version_replacements != 1 or build_time_replacements != 1:
 
 with open(popup_path, 'w', encoding='utf-8', newline='\n') as popup_file:
     popup_file.write(content)
+
+with open(popup_html_path, encoding='utf-8') as popup_html_file:
+  popup_html = popup_html_file.read()
+
+popup_html, cache_version_replacements = re.subn(
+  r'(popup\.(?:css|js)\?v=)[^"\s]+',
+  rf'\g<1>{version}',
+  popup_html,
+)
+if cache_version_replacements != 2:
+  raise SystemExit('Could not inject both popup asset cache versions into dist/popup.html.')
+
+with open(popup_html_path, 'w', encoding='utf-8', newline='\n') as popup_html_file:
+  popup_html_file.write(popup_html)
 PY
-echo "  OK  popup.js (version injected: $VERSION, build: $BUILD_TIME)"
+echo "  OK  popup assets (version injected: $VERSION, build: $BUILD_TIME)"
 
 ZIP_PATH="$RELEASES/ac-ust-v$VERSION.zip"
 rm -f "$ZIP_PATH"
