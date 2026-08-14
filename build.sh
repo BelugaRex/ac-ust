@@ -21,6 +21,7 @@ RUNTIME_FILES=(
   i18n.js
   billing-helpers.js
   sync-helpers.js
+  pwm-phase.js
   offscreen.html
   offscreen.js
   _locales

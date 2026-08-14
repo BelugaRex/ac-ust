@@ -7,12 +7,30 @@ import path from 'node:path';
 import url from 'node:url';
 import syncHelpers from '../sync-helpers.js';
 import billingHelpers from '../billing-helpers.js';
+import pwmPhase from '../pwm-phase.js';
+import { runPwmPhaseCases } from './pwm-phase-cases.mjs';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
 
+function extractSourceSection(source, startMarker, endMarker, label) {
+  const start = source.indexOf(startMarker);
+  if (start < 0) {
+    throw new Error(`${label}: 找不到起始标记 ${JSON.stringify(startMarker)}`);
+  }
+  const end = source.indexOf(endMarker, start);
+  if (end <= start) {
+    throw new Error(`${label}: 找不到结束标记 ${JSON.stringify(endMarker)}`);
+  }
+  const section = source.slice(start, end);
+  if (!section.trim()) {
+    throw new Error(`${label}: 提取到空源码区段`);
+  }
+  return section;
+}
+
 // ----- Mock chrome.* API -----
-function createMockChrome(initialSchedule, liveAcPwmScheduledTime) {
+function createMockChrome(initialSchedule, liveAcPwmScheduledTime, scheduleSnapshotPatch = {}) {
   let storage = {
     ac_schedule: { ...initialSchedule }
   };
@@ -250,6 +268,9 @@ async function runTests() {
     console.log(`${tag}  ${name}`);
     results.push({ name, pass: !!cond });
   };
+
+  console.log('\n\n=== PWM phase 纯决策接口 ===\n');
+  runPwmPhaseCases(assertPass);
 
   console.log('\n--- 断言 ---');
   assertPass(result.selfHealed === true, 'selfHealed 标志为 true(自愈触发)');
@@ -555,7 +576,7 @@ async function runTests() {
 
   const distRequiredFiles = [
     'manifest.json', 'background.js', 'content.js', 'page-confirm.js',
-    'popup.html', 'popup.js', 'i18n.js', 'sync-helpers.js', 'billing-helpers.js',
+    'popup.html', 'popup.js', 'i18n.js', 'sync-helpers.js', 'pwm-phase.js', 'billing-helpers.js',
     'offscreen.html', 'offscreen.js',
     'popup.css',
     '_locales/zh_CN/messages.json', '_locales/en/messages.json',
@@ -998,17 +1019,102 @@ async function runTests() {
   const pageConfirmSource = fs.readFileSync(path.join(ROOT, 'page-confirm.js'), 'utf8');
   const countOccurrences = (source, needle) => source.split(needle).length - 1;
 
+  const mainWorldBridgeStart = contentSource.indexOf('function requestMainWorldResult({');
+  const mainWorldBridgeEnd = contentSource.indexOf('\n// ----- 等待开关元素出现', mainWorldBridgeStart);
+  const mainWorldBridgeSource = mainWorldBridgeStart >= 0 && mainWorldBridgeEnd > mainWorldBridgeStart
+    ? contentSource.slice(mainWorldBridgeStart, mainWorldBridgeEnd)
+    : '';
+  const loadMainWorldBridge = new Function(
+    'window',
+    'CustomEvent',
+    'setTimeout',
+    `${mainWorldBridgeSource}; return { requestMainWorldToggle, requestMainWorldStatus };`
+  );
+  class TestCustomEvent {
+    constructor(type, options = {}) {
+      this.type = type;
+      this.detail = options.detail;
+    }
+  }
+  function createMainWorldBridge(responses = {}) {
+    const listeners = new Map();
+    const sentEvents = [];
+    const fakeWindow = {
+      addEventListener(type, listener) {
+        listeners.set(type, listener);
+      },
+      removeEventListener(type, listener) {
+        if (listeners.get(type) === listener) listeners.delete(type);
+      },
+      dispatchEvent(event) {
+        sentEvents.push(event);
+        const response = responses[event.type];
+        if (!response) return;
+        const resultEvent = event.type === '__AC_EXTENSION_TOGGLE_AC__'
+          ? '__AC_EXTENSION_TOGGLE_AC_RESULT__'
+          : '__AC_EXTENSION_GET_STATUS_RESULT__';
+        const responseDetail = typeof response === 'function'
+          ? response(event.detail)
+          : response;
+        listeners.get(resultEvent)?.({
+          detail: { requestId: event.detail.requestId, ...responseDetail }
+        });
+      }
+    };
+    const bridge = loadMainWorldBridge(
+      fakeWindow,
+      TestCustomEvent,
+      callback => { callback(); return 1; }
+    );
+    return { ...bridge, listeners, sentEvents };
+  }
+
+  const toggleBridge = createMainWorldBridge({
+    __AC_EXTENSION_TOGGLE_AC__: { success: true, action: 'on' }
+  });
+  const toggleBridgeResult = await toggleBridge.requestMainWorldToggle('on', 65000);
+  assertPass(toggleBridgeResult?.success === true
+      && toggleBridgeResult.action === 'on'
+      && !Object.hasOwn(toggleBridgeResult, 'requestId')
+      && toggleBridge.sentEvents[0]?.type === '__AC_EXTENSION_TOGGLE_AC__'
+      && toggleBridge.sentEvents[0]?.detail?.action === 'on'
+      && /^ac-\d+-/.test(toggleBridge.sentEvents[0]?.detail?.requestId || '')
+      && toggleBridge.listeners.size === 0,
+    '9Bridge-1: 主世界 toggle 握手保留事件、action、requestId 前缀与完成后监听器清理');
+
+  const statusBridge = createMainWorldBridge({
+    __AC_EXTENSION_GET_STATUS__: { isOn: false, source: 'main-world' }
+  });
+  const statusBridgeResult = await statusBridge.requestMainWorldStatus(3000);
+  assertPass(statusBridgeResult?.isOn === false
+      && statusBridgeResult.source === 'main-world'
+      && !Object.hasOwn(statusBridgeResult, 'requestId')
+      && statusBridge.sentEvents[0]?.type === '__AC_EXTENSION_GET_STATUS__'
+      && /^ac-status-\d+-/.test(statusBridge.sentEvents[0]?.detail?.requestId || '')
+      && statusBridge.listeners.size === 0,
+    '9Bridge-2: 主世界 status 握手保留独立事件、requestId 前缀与结果解包');
+
+  const timeoutBridge = createMainWorldBridge();
+  const toggleTimeoutResult = await timeoutBridge.requestMainWorldToggle('on', 65000);
+  const statusTimeoutResult = await timeoutBridge.requestMainWorldStatus(3000);
+  assertPass(toggleTimeoutResult === null
+      && statusTimeoutResult?.isOn === null
+      && statusTimeoutResult.error === '主世界状态读取超时'
+      && timeoutBridge.listeners.size === 0,
+    '9Bridge-3: 两条主世界通道保留各自的超时返回值并清理监听器');
+
   const ensureStart = pageConfirmSource.indexOf('async function ensureACState(targetState, clickCount = 0)');
   const ensureEnd = pageConfirmSource.indexOf('\n  function findACSwitchInPageWorld', ensureStart);
   const ensureBody = ensureStart >= 0 && ensureEnd > ensureStart
     ? pageConfirmSource.slice(ensureStart, ensureEnd)
     : '';
 
-  const pwmStart = backgroundSource.indexOf('async function runPwmStep()');
-  const pwmEnd = backgroundSource.indexOf('\n// ----- 设置页面自带定时器', pwmStart);
-  const pwmBody = pwmStart >= 0 && pwmEnd > pwmStart
-    ? backgroundSource.slice(pwmStart, pwmEnd)
-    : '';
+  const pwmBody = extractSourceSection(
+    backgroundSource,
+    'async function runPwmStep()',
+    '\n// ----- 设置页面自带定时器',
+    'runPwmStep'
+  );
 
   const existingTabStart = backgroundSource.indexOf('async function _toggleOnExistingTab');
   const existingTabEnd = backgroundSource.indexOf('\nasync function _toggleOnNewTab', existingTabStart);
@@ -1106,9 +1212,21 @@ async function runTests() {
       && !hasChargeModeLabel([{ textContent: 'Charge Mode Active' }])
       && !hasChargeModeLabel([]),
     '9K-2: Charge Mode 标签判定接受精确文本与空白，拒绝其他模式和相似文本');
+  const offProofPlan9L = pwmPhase.planPwmStep({
+    enabled: true,
+    pwmState: 'off',
+    onMinutes: 10,
+    offMinutes: 20
+  }, {
+    acIsOn: true,
+    proofFresh: true
+  }, { now: 1_700_000_000_000 });
   assertPass(!backgroundSource.includes("toggleAC('off')")
-      && pwmBody.includes('const timerArmed = isPageTimerProofFresh(schedule)'),
-    '9L: 自动关机只检查页面定时器证明，生产代码不存在 toggleAC(off)');
+      && pwmBody.includes('observations.proofFresh = isPageTimerProofFresh(schedule)')
+      && offProofPlan9L.kind === 'commit'
+      && offProofPlan9L.nextAction === 'on'
+      && !offProofPlan9L.prerequisite,
+    '9L: 自动关机只提交页面定时器证明，planner 与 adapter 均不存在 OFF 点击');
   assertPass(!contentSource.includes("error: t('contentCrossDayLimit')")
       && contentSource.includes('crossesMidnight,'),
     '9M: Power-off after 跨午夜时间直接输入，不再被代码拒绝');
@@ -1433,48 +1551,77 @@ async function runTests() {
   assertPass(i18nSource.includes("if (/^en(?:_|$)/i.test(normalized)) return 'en';"),
     '9S: en-US/en-GB 浏览器语言会映射到作者维护的 _locales/en');
 
-  // ===== 用例 10: v0.5.13 关机不可漏契约 =====
+  // ===== 用例 10: v0.7.0 关机不可漏接口契约 =====
   // 防止 v0.5.12 "OFF 零点击" 策略下的「忘记关机」回归：ON 路径推进 pwmState
   // 前 MUST 确认 setPageTimer 成功；失败时保持 pwmState='on' + 提前 return，
   // 不允许把未推进的相位 sync 给对端。pwmBody 在用例 9 中已读出。
-  console.log('\n\n=== 用例 10: 关机不可漏契约 (v0.5.13) ===\n');
+  console.log('\n\n=== 用例 10: 关机不可漏接口契约 (v0.7.0) ===\n');
 
-  // 10A: ON 路径在 runPwmStep 之内显式 await setPageTimer(schedule.onMinutes)
-  const setPageTimerCallIdx = pwmBody.indexOf('await setPageTimer(schedule.onMinutes');
-  assertPass(setPageTimerCallIdx > 0,
-    '10A: ON 路径在 runPwmStep 之内显式 await setPageTimer(schedule.onMinutes)');
+  const plannerNow10 = 1_700_000_000_000;
+  const plannerOnSchedule10 = {
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 12,
+    offMinutes: 8
+  };
+  const timerRequiredPlan10 = pwmPhase.planPwmStep(
+    plannerOnSchedule10,
+    { acIsOn: true },
+    { now: plannerNow10 }
+  );
+  const timerFailedPlan10 = pwmPhase.planPwmStep(
+    plannerOnSchedule10,
+    { acIsOn: true, pageTimerSucceeded: false },
+    { now: plannerNow10 }
+  );
+  const timerCommittedPlan10 = pwmPhase.planPwmStep(
+    plannerOnSchedule10,
+    { acIsOn: true, pageTimerSucceeded: true },
+    { now: plannerNow10 }
+  );
+  const setPageTimerCallIdx = pwmBody.indexOf('const pageTimerResult = await setPageTimer(plan.timerMinutes');
+  assertPass(timerRequiredPlan10.kind === 'hold'
+      && timerRequiredPlan10.prerequisite === 'set-page-timer'
+      && timerRequiredPlan10.timerMinutes === plannerOnSchedule10.onMinutes
+      && pwmBody.includes("plan.prerequisite === 'set-page-timer'")
+      && setPageTimerCallIdx > 0,
+    '10A: ON planner 要求 adapter 先按配置分钟确认页面定时器');
 
-  // 10B: 推进 schedule.pwmState = nextState 必须出现在 setPageTimer 调用之后
-  // 限字符距离 < 2000 是宽松上限——足够容纳现有失败分支的 if 块，又能在
-  // 旧代码回退（setPageTimer 在 pwmState 推进之后的尾部调用）时失败。
-  const pwmStateAssignIdx = pwmBody.indexOf('schedule.pwmState = nextState');
-  assertPass(pwmStateAssignIdx > 0
-      && setPageTimerCallIdx > 0
-      && setPageTimerCallIdx < pwmStateAssignIdx
-      && pwmStateAssignIdx - setPageTimerCallIdx < 2000,
-    '10B: ON 路径 setPageTimer 必须先于 schedule.pwmState = nextState（避免推进后 setPageTimer 静默失败的「忘记关机」）');
+  assertPass(timerFailedPlan10.kind === 'retry'
+      && timerFailedPlan10.phasePatch.pwmState === 'on'
+      && timerCommittedPlan10.kind === 'commit'
+      && timerCommittedPlan10.phasePatch.pwmState === 'off',
+    '10B: 页面定时器失败保持 ON，相位仅在确认成功后推进为 OFF');
 
-  // 10C: ON 路径显式用 pageTimerResult 检查 setPageTimer 成功
-  assertPass(pwmBody.includes('const pageTimerResult = await setPageTimer(schedule.onMinutes')
-      && pwmBody.includes('if (!pageTimerResult?.success)'),
-    '10C: ON 路径用 pageTimerResult 显式校验 setPageTimer 成功后才推进 pwmState');
+  const pageTimerObservationIdx = pwmBody.indexOf('observations.pageTimerSucceeded = !!pageTimerResult?.success', setPageTimerCallIdx);
+  const pageTimerReplanIdx = pwmBody.indexOf('plan = planPwmStep(schedule, observations);', pageTimerObservationIdx);
+  const finalPlanApplyIdx = pwmBody.lastIndexOf('applyPwmPlanState(plan);');
+  assertPass(setPageTimerCallIdx > 0
+      && pageTimerObservationIdx > setPageTimerCallIdx
+      && pageTimerReplanIdx > pageTimerObservationIdx
+      && finalPlanApplyIdx > pageTimerReplanIdx,
+    '10C: adapter 将页面结果回传 planner，重新规划后才应用最终相位');
 
-  // 10D: 失败分支用 PWM-pageTimer-failed 标签 + 1 分钟后整轮重试
-  assertPass(pwmBody.includes("createPwmAlarmWithVerify(1, 'PWM-pageTimer-failed')"),
-    '10D: setPageTimer 失败后用 PWM-pageTimer-failed 1 分钟后重试整轮 runPwmStep（下次 A1 预检跳过点击，只重试 setPageTimer）');
+  assertPass(timerFailedPlan10.reason === 'page-timer-failed'
+      && timerFailedPlan10.retryMinutes === 1
+      && timerFailedPlan10.nextTriggerAt === plannerNow10 + 60_000
+      && pwmBody.includes("plan.reason === 'page-timer-failed' ? 'PWM-pageTimer-failed'"),
+    '10D: 页面定时器失败由 planner 统一给出 1 分钟重试计划');
 
-  // 10E: 失败分支在 syncScheduleToSync('runPwmStep') 前提前 return
-  const setTimerFailIdx = pwmBody.indexOf('!pageTimerResult?.success');
-  const setTimerReturnIdx = pwmBody.indexOf('return;', setTimerFailIdx);
-  const syncRunAfterIdx = pwmBody.indexOf("syncScheduleToSync('runPwmStep')", setTimerFailIdx);
-  assertPass(setTimerFailIdx > 0
-      && setTimerReturnIdx > 0
-      && syncRunAfterIdx > 0
-      && setTimerReturnIdx < syncRunAfterIdx,
+  const retryBranchStart10 = pwmBody.indexOf("if (plan.kind === 'retry')");
+  const retryBranchEnd10 = pwmBody.indexOf("\n    if (plan.kind !== 'commit')", retryBranchStart10);
+  const retryBranch10 = retryBranchStart10 >= 0 && retryBranchEnd10 > retryBranchStart10
+    ? pwmBody.slice(retryBranchStart10, retryBranchEnd10)
+    : '';
+  const syncRunAfterIdx = pwmBody.indexOf("syncScheduleToSync('runPwmStep')", retryBranchEnd10);
+  assertPass(retryBranch10.includes('return;')
+      && !retryBranch10.includes("syncScheduleToSync('runPwmStep')")
+      && syncRunAfterIdx > retryBranchEnd10,
     '10E: setPageTimer 失败分支在 sync 前提前 return，避免把未推进的 pwmState 推给对端让对端帮自己推进相位');
 
   // 10F: 失败时 pageTimerError 写入明确的失败原因，便于诊断面板排障
-  assertPass(pwmBody.includes("pageTimerError = `开机已成功，但页面关机定时器未确认"),
+  assertPass(pwmBody.includes('observations.pageTimerError = pageTimerResult?.error')
+      && pwmBody.includes("pageTimerError = `开机已成功，但页面关机定时器未确认"),
     '10F: setPageTimer 失败时诊断 pageTimerError 写明确文案，便于排障');
 
   // ===== 用例 11: v0.5.13 新鲜页面定时器确认与旁路保护 =====
@@ -1551,10 +1698,20 @@ async function runTests() {
       && toggleOffIdx > toggleTimerIdx
       && toggleBody.includes("'toggle-pageTimer-failed'"),
     '11F: 手动开机仅在新鲜确认页面定时器后才进入 OFF 相位');
-  assertPass(advanceBody.includes("if (nextAction === 'off')")
-      && advanceBody.includes('await setPageTimer(Math.ceil(remainingMinutes)')
+  const recoveryNow11G = 1_700_000_000_000;
+  const recoveryPlan11G = pwmPhase.planPwmRecovery({
+    enabled: true,
+    pwmState: 'off',
+    onMinutes: 10,
+    offMinutes: 20
+  }, recoveryNow11G - 25 * 60_000, {}, { now: recoveryNow11G });
+  assertPass(recoveryPlan11G.kind === 'hold'
+      && recoveryPlan11G.prerequisite === 'set-page-timer'
+      && advanceBody.includes("plan.prerequisite === 'set-page-timer'")
+      && advanceBody.includes('await setPageTimer(plan.timerMinutes')
+      && advanceBody.includes('pageTimerSucceeded: !!timerResult?.success')
       && advanceBody.includes("'advance-pageTimer-failed'"),
-    '11G: 过期闹钟恢复到 ON 阶段时先重新武装页面关机定时器');
+    '11G: 过期闹钟恢复由 planner 要求先重新武装页面关机定时器');
   const powerOffAfterFixture = JSON.parse(fs.readFileSync(
     path.join(ROOT, 'test', 'fixtures', 'power-off-after-states.json'),
     'utf8'
@@ -1577,6 +1734,64 @@ async function runTests() {
       && contentSource.includes('const effectiveValue = value || title'),
     '11J: 内容脚本以用户实测的 title=HH:MM 作为 value 的刷新后兼容回退');
 
+  const clearPageTimerProofStart = backgroundSource.indexOf('function clearPageTimerProofState()');
+  const clearPageTimerProofEnd = backgroundSource.indexOf('\nasync function syncStoredTriggerFromAlarm', clearPageTimerProofStart);
+  const clearPageTimerProofSource = clearPageTimerProofStart >= 0
+      && clearPageTimerProofEnd > clearPageTimerProofStart
+    ? backgroundSource.slice(clearPageTimerProofStart, clearPageTimerProofEnd)
+    : '';
+  const proofState = {
+    pageTimerMinutes: 30,
+    pageTimerTargetAt: Date.now() + 30 * 60 * 1000,
+    pageTimerError: 'old error',
+    pageTimerRetryAt: Date.now() + 60 * 1000,
+    pageTimerRetryMinutes: 1,
+    pwmState: 'off'
+  };
+  const clearPageTimerProofState = new Function(
+    'schedule',
+    `${clearPageTimerProofSource}; return clearPageTimerProofState;`
+  )(proofState);
+  clearPageTimerProofState();
+  assertPass(proofState.pageTimerMinutes === null
+      && proofState.pageTimerTargetAt === 0
+      && proofState.pageTimerError === ''
+      && proofState.pageTimerRetryAt === 0
+      && proofState.pageTimerRetryMinutes === 0
+      && proofState.pwmState === 'off',
+    '11K: 页面定时器证明 helper 只清五个证明字段，不污染 PWM 相位');
+  const applyPwmPlanStart = backgroundSource.indexOf('function applyPwmPlanState(plan)');
+  const applyPwmPlanEnd = backgroundSource.indexOf('\nasync function syncStoredTriggerFromAlarm', applyPwmPlanStart);
+  const applyPwmPlanBody = applyPwmPlanStart >= 0 && applyPwmPlanEnd > applyPwmPlanStart
+    ? backgroundSource.slice(applyPwmPlanStart, applyPwmPlanEnd)
+    : '';
+  assertPass(applyPwmPlanBody.includes("if (plan?.proofAction === 'clear') clearPageTimerProofState();")
+      && countOccurrences(backgroundSource, 'clearPageTimerProofState();') === 3,
+    '11L: planner proofAction 与两条直接失效路径统一委派给 clearPageTimerProofState');
+
+  const reconciliationSites = [
+    ['persistSchedule', 'async function persistSchedule(', '\nconst _syncOpLock'],
+    ['watchdogCheck', 'async function watchdogCheck()', '\n// ----- 启动时加载设置并创建闹钟'],
+    ['init', 'async function init()', '\n// ----- 设置/更新 PWM 循环闹钟'],
+    ['badge-tick', "if (alarm.name === 'ac-badge-tick')", "\n  if (alarm.name === 'ac-pwm')"],
+    ['getScheduleSnapshot', 'async function getScheduleSnapshot(', '\nasync function toggleNowAndSync'],
+    ['ensureDiagnosticAlarms', 'async function ensureDiagnosticAlarms()', '\nchrome.runtime.onMessage.addListener']
+  ].map(([name, startMarker, endMarker]) => {
+    const start = backgroundSource.indexOf(startMarker);
+    const end = backgroundSource.indexOf(endMarker, start);
+    return [name, start >= 0 && end > start ? backgroundSource.slice(start, end) : ''];
+  });
+  assertPass(backgroundSource.includes('const PWM_TRIGGER_STRICT_OPTIONS = Object.freeze({')
+      && backgroundSource.includes('const PWM_TRIGGER_NEXT_ONLY_OPTIONS = Object.freeze({')
+      && backgroundSource.includes('const PWM_TRIGGER_SNAPSHOT_OPTIONS = Object.freeze({')
+      && backgroundSource.includes('persistReconciledPwmTrigger(alarm, reason, PWM_TRIGGER_STRICT_OPTIONS)')
+      && reconciliationSites.every(([, source]) => source.includes('reconcilePwmTrigger(')
+        || source.includes('persistReconciledPwmTrigger(')),
+    '11M: strict、next-only 与只读 snapshot profile 显式委派给 PWM trigger planner');
+  assertPass(reconciliationSites.every(([, source]) => !/Math\.abs\([^\n]*(?:scheduledTime|liveDueAt)/.test(source))
+      && !backgroundSource.includes('schedule.nextTriggerAt = liveDueAt;'),
+    '11N: 后台 live-alarm 校准点不再保留手写漂移判断或字段修正副本');
+
   // ===== 用例 12: 审计修复回归（只读轮询、HIG、发布与安装） =====
   console.log('\n\n=== 用例 12: 审计修复回归（只读轮询、HIG、发布与安装） ===\n');
 
@@ -1592,9 +1807,19 @@ async function runTests() {
       && /msg\.type === 'getScheduleLite'[\s\S]{0,220}getScheduleSnapshot\(true\)/.test(backgroundSource),
     '12B: getSchedule 与 getScheduleLite 都只委派给快照读取器');
 
-  const createScheduleSnapshotHarness = new Function('initialSchedule', 'liveAlarm', 'actualStatus', `
+  const createScheduleSnapshotHarness = new Function(
+    'reconcilePwmTrigger',
+    'initialSchedule',
+    'liveAlarm',
+    'actualStatus',
+    `
     let schedule = { ...initialSchedule };
     let storageWriteCount = 0;
+    const PWM_TRIGGER_SNAPSHOT_OPTIONS = Object.freeze({
+      nextTriggerToleranceMs: 1500,
+      requireLegacyAlignment: false,
+      allowDisabled: true
+    });
     const chrome = {
       storage: {
         local: {
@@ -1637,6 +1862,7 @@ async function runTests() {
     alarmDelayMinutes: 0
   };
   const snapshotHarness = createScheduleSnapshotHarness(
+    pwmPhase.reconcilePwmTrigger,
     initialSchedule12,
     { name: 'ac-pwm', scheduledTime: liveDueAt12 },
     { isOn: true }
@@ -1726,15 +1952,15 @@ async function runTests() {
     : '';
 
   assertPass(initBody13.includes('await backfillNextTriggerAt(true);')
-      && initBody13.includes("await persistSchedule('init-finalSync'"),
+      && initBody13.includes("persistReconciledPwmTrigger(finalLiveAlarm, 'init-finalSync', PWM_TRIGGER_NEXT_ONLY_OPTIONS)"),
     '13A: Service Worker 初始化会从 legacy/live alarm 回填并持久化 nextTriggerAt');
   assertPass(setupBody13.includes('await syncStoredTriggerFromAlarm(existingAlarm')
       && setupBody13.includes('await repairScheduleClock();'),
     '13B: 启动恢复会同步 live alarm；双重缺失时会安全重建 PWM');
-  assertPass(watchdogBody13.includes("await persistSchedule('watchdogCheck'")
+  assertPass(watchdogBody13.includes("persistReconciledPwmTrigger(alarm, 'watchdogCheck', PWM_TRIGGER_NEXT_ONLY_OPTIONS)")
       && watchdogBody13.includes('restoreIntervalAlarmFromStorage'),
     '13C: 5 分钟看门狗会校准 storage，并恢复缺失的 PWM alarm');
-  assertPass(alarmListenerBody13.includes("await persistSchedule('badge-tick-sync'")
+  assertPass(alarmListenerBody13.includes("persistReconciledPwmTrigger(liveAlarm, 'badge-tick-sync', PWM_TRIGGER_NEXT_ONLY_OPTIONS)")
       && alarmListenerBody13.includes("if (alarm.name === 'ac-badge-tick')"),
     '13D: 每分钟 badge tick 会把 live alarm 的相位写回 storage');
   assertPass(alarmListenerBody13.includes("if (alarm.name === 'ac-badge-tick')")
@@ -1748,6 +1974,200 @@ async function runTests() {
       && initBody13.includes("await schedulePageTimerRetry(retryMinutes, '启动恢复错过的页面定时器重试');")
       && initBody13.includes("persistSchedule('init-recover-overdue-page-timer-retry'"),
     '13E: 启动会重新排程浏览器关闭期间错过的页面定时器重试');
+
+  let extractionGuardMessage = '';
+  try {
+    extractSourceSection('const value = 1;', 'missing-start', 'missing-end', 'guard-sample');
+  } catch (error) {
+    extractionGuardMessage = error?.message || '';
+  }
+  assertPass(extractionGuardMessage.includes('guard-sample')
+      && extractionGuardMessage.includes('missing-start'),
+    '13H: 源码区段提取在标记漂移时 fail fast，并报告具体区段与标记');
+
+  const resetDisabledPwmRuntimeSource = extractSourceSection(
+    backgroundSource,
+    'async function resetDisabledPwmRuntime() {',
+    '\nasync function persistReconciledPwmTrigger(',
+    'resetDisabledPwmRuntime'
+  );
+  const loadResetDisabledPwmRuntime = new Function(
+    'schedule',
+    'setNextTriggerAt',
+    'chrome',
+    'updateBadge',
+    `${resetDisabledPwmRuntimeSource}; return resetDisabledPwmRuntime;`
+  );
+  const resetRuntimeCalls = [];
+  const resetRuntimeSchedule = {
+    enabled: true,
+    pwmState: 'on',
+    nextTriggerAt: Date.now() + 60_000,
+    alarmCreatedAt: Date.now(),
+    alarmDelayMinutes: 30,
+    pageTimerMinutes: 30,
+    pageTimerTargetAt: Date.now() + 30 * 60_000,
+    pageTimerError: 'keep',
+    pageTimerRetryAt: Date.now() + 60_000,
+    pageTimerRetryMinutes: 1
+  };
+  const resetDisabledPwmRuntime = loadResetDisabledPwmRuntime(
+    resetRuntimeSchedule,
+    value => {
+      resetRuntimeCalls.push(`next:${value}`);
+      resetRuntimeSchedule.nextTriggerAt = value;
+    },
+    {
+      alarms: {
+        async clear(name) { resetRuntimeCalls.push(`clear:${name}`); }
+      }
+    },
+    async () => { resetRuntimeCalls.push('updateBadge'); }
+  );
+  await resetDisabledPwmRuntime();
+  assertPass(resetRuntimeSchedule.enabled === true
+      && resetRuntimeSchedule.pwmState === 'off'
+      && resetRuntimeSchedule.nextTriggerAt === 0
+      && resetRuntimeSchedule.alarmCreatedAt === 0
+      && resetRuntimeSchedule.alarmDelayMinutes === 0
+      && resetRuntimeSchedule.pageTimerMinutes === 30
+      && resetRuntimeSchedule.pageTimerError === 'keep'
+      && resetRuntimeSchedule.pageTimerRetryMinutes === 1,
+    '13I: 停用运行态 helper 只重置 PWM 时钟字段，不改 enabled 或页面定时器证明');
+  assertPass(resetRuntimeCalls.join(',') === [
+    'next:0',
+    'clear:ac-pwm',
+    'clear:ac-page-timer-retry',
+    'clear:ac-badge-tick',
+    'clear:ac-watchdog',
+    'updateBadge'
+  ].join(','),
+  '13J: 停用运行态 helper 按既有顺序清四个固定闹钟并刷新 badge');
+
+  const activeBoundaryBody = extractSourceSection(
+    backgroundSource,
+    'async function onActiveBoundaryCrossed() {',
+    '\nfunction getLegacyAlarmEndMs()',
+    'onActiveBoundaryCrossed'
+  );
+  const applySyncedPhaseBody = extractSourceSection(
+    backgroundSource,
+    'async function applySyncedPhase(remote, reason = \'\') {',
+    '\n// 从 chrome.storage.sync 拉取并尝试合并。',
+    'applySyncedPhase'
+  );
+  const updateScheduleBody = extractSourceSection(
+    backgroundSource,
+    "if (msg.type === 'updateSchedule') {",
+    "\n    if (msg.type === 'getSchedule') {",
+    'updateSchedule message branch'
+  );
+  const activeResetIndex = activeBoundaryBody.indexOf('await resetDisabledPwmRuntime();');
+  const activePersistIndex = activeBoundaryBody.indexOf("persistSchedule('active-hours-leave-pre-shutdown'");
+  const activeShutdownIndex = activeBoundaryBody.indexOf("requestTimerBasedShutdown('active-hours-leave')");
+  const syncResetIndex = applySyncedPhaseBody.indexOf('await resetDisabledPwmRuntime();');
+  const syncPersistIndex = applySyncedPhaseBody.indexOf("persistSchedule('sync-disabled-pre-shutdown'");
+  const syncShutdownIndex = applySyncedPhaseBody.indexOf("requestTimerBasedShutdown('sync-disabled')");
+  const updateResetIndex = updateScheduleBody.indexOf('await resetDisabledPwmRuntime();');
+  const updatePersistIndex = updateScheduleBody.indexOf("persistSchedule('updateSchedule')");
+  const updateShutdownIndex = updateScheduleBody.indexOf("requestTimerBasedShutdown('schedule-disabled')");
+  assertPass(countOccurrences(backgroundSource, 'await resetDisabledPwmRuntime();') === 3
+      && activeResetIndex >= 0 && activePersistIndex > activeResetIndex && activeShutdownIndex > activePersistIndex
+      && syncResetIndex >= 0 && syncPersistIndex > syncResetIndex && syncShutdownIndex > syncPersistIndex
+      && updateResetIndex >= 0 && updatePersistIndex > updateResetIndex && updateShutdownIndex > updatePersistIndex,
+    '13K: 三条停用路径统一委派 helper，且均保持 B1 先持久化再页面定时器关机');
+
+  const persistReconciledPwmTriggerSource = extractSourceSection(
+    backgroundSource,
+    'async function persistReconciledPwmTrigger(alarm, reason, options) {',
+    '\nasync function syncStoredTriggerFromAlarm(',
+    'persistReconciledPwmTrigger'
+  );
+  const loadPersistReconciledPwmTrigger = new Function(
+    'schedule',
+    'reconcilePwmTrigger',
+    'applyPwmPlanState',
+    'persistSchedule',
+    `${persistReconciledPwmTriggerSource}; return persistReconciledPwmTrigger;`
+  );
+  const reconcileSchedule13L = { enabled: true, nextTriggerAt: 0 };
+  const reconcileAlarm13L = { name: 'ac-pwm', scheduledTime: Date.now() + 60_000 };
+  const reconcileOptions13L = { nextTriggerToleranceMs: 1500, requireLegacyAlignment: false };
+  const reconcilePlan13L = {
+    kind: 'sync-live',
+    liveScheduledTime: reconcileAlarm13L.scheduledTime,
+    phasePatch: { nextTriggerAt: reconcileAlarm13L.scheduledTime }
+  };
+  const reconcileCalls13L = [];
+  const persistReconciledPwmTrigger = loadPersistReconciledPwmTrigger(
+    reconcileSchedule13L,
+    (receivedSchedule, receivedAlarm, receivedOptions) => {
+      reconcileCalls13L.push('reconcile');
+      assertPass(receivedSchedule === reconcileSchedule13L
+          && receivedAlarm === reconcileAlarm13L
+          && receivedOptions === reconcileOptions13L,
+        '13L-1: live alarm helper 原样传递 schedule、alarm 与调用点 profile');
+      return reconcilePlan13L;
+    },
+    plan => {
+      reconcileCalls13L.push('apply');
+      Object.assign(reconcileSchedule13L, plan.phasePatch);
+    },
+    async (reason, options) => {
+      reconcileCalls13L.push(`persist:${reason}:${options?.syncFromLiveAlarm}`);
+    }
+  );
+  const reconciledPlan13L = await persistReconciledPwmTrigger(
+    reconcileAlarm13L,
+    'unit-reconcile',
+    reconcileOptions13L
+  );
+  assertPass(reconciledPlan13L === reconcilePlan13L
+      && reconcileSchedule13L.nextTriggerAt === reconcileAlarm13L.scheduledTime
+      && reconcileCalls13L.join(',') === 'reconcile,apply,persist:unit-reconcile:false',
+    '13L-2: sync-live 计划严格按 planner→apply→非递归持久化顺序执行并返回 plan');
+
+  let noopApplyCount13L = 0;
+  let noopPersistCount13L = 0;
+  const noopReconcile = loadPersistReconciledPwmTrigger(
+    { enabled: true },
+    () => ({ kind: 'noop', reason: 'aligned' }),
+    () => { noopApplyCount13L += 1; },
+    async () => { noopPersistCount13L += 1; }
+  );
+  const noopPlan13L = await noopReconcile(reconcileAlarm13L, 'noop', reconcileOptions13L);
+  assertPass(noopPlan13L === null && noopApplyCount13L === 0 && noopPersistCount13L === 0,
+    '13L-3: 非 sync-live 计划不应用状态、不写 storage，并返回 null');
+
+  const syncStoredTriggerBody = extractSourceSection(
+    backgroundSource,
+    'async function syncStoredTriggerFromAlarm(',
+    '\nfunction getLiveAlarmEndMs(',
+    'syncStoredTriggerFromAlarm'
+  );
+  const ensureDiagnosticAlarmsBody = extractSourceSection(
+    backgroundSource,
+    'async function ensureDiagnosticAlarms() {',
+    '\nchrome.runtime.onMessage.addListener',
+    'ensureDiagnosticAlarms'
+  );
+  const persistScheduleBody = extractSourceSection(
+    backgroundSource,
+    'async function persistSchedule(',
+    '\n// 跨设备同步 — chrome.storage.sync 集成层',
+    'persistSchedule'
+  );
+  assertPass(syncStoredTriggerBody.includes('persistReconciledPwmTrigger(alarm, reason, PWM_TRIGGER_STRICT_OPTIONS)')
+      && watchdogBody13.includes("persistReconciledPwmTrigger(alarm, 'watchdogCheck', PWM_TRIGGER_NEXT_ONLY_OPTIONS)")
+      && initBody13.includes("persistReconciledPwmTrigger(finalLiveAlarm, 'init-finalSync', PWM_TRIGGER_NEXT_ONLY_OPTIONS)")
+      && alarmListenerBody13.includes("persistReconciledPwmTrigger(liveAlarm, 'badge-tick-sync', PWM_TRIGGER_NEXT_ONLY_OPTIONS)")
+      && ensureDiagnosticAlarmsBody.includes("persistReconciledPwmTrigger(pwmAlarm, 'ensureDiagnosticAlarms', PWM_TRIGGER_NEXT_ONLY_OPTIONS)"),
+    '13M: strict wrapper 与四条副作用校准路径统一委派持久化 helper，并显式保留各自 profile');
+  assertPass(persistScheduleBody.includes('reconcilePwmTrigger(schedule, liveAlarm, PWM_TRIGGER_NEXT_ONLY_OPTIONS)')
+      && !persistScheduleBody.includes('persistReconciledPwmTrigger(')
+      && snapshotBody.includes('reconcilePwmTrigger(snapshot, alarm, PWM_TRIGGER_SNAPSHOT_OPTIONS)')
+      && !snapshotBody.includes('persistReconciledPwmTrigger('),
+    '13N: persistSchedule 防递归与 getScheduleSnapshot 只读路径继续直接调用 planner');
 
   // ===== 用例 14: 清晰与低干扰弹窗回归 =====
   console.log('\n\n=== 用例 14: 清晰与低干扰弹窗回归 ===\n');

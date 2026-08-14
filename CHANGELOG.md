@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.7.0
+
+- 将 PWM 阶段推进、过期恢复与 live alarm 对齐提取为可由浏览器和 Node 共用的纯决策模块；Service Worker 只负责执行计划和 Chrome I/O。
+- 合并 content isolated world 的主世界事件握手实现，并让 PWM 回归直接测试生产 planner，不再依赖旧实现的源码形状。
+
 ## 0.6.15
 
 - 开机操作收束为带明确次数上限的递归函数；首次未确认时由统一控制页恢复函数刷新当前精确 AC home，或把已偏离的控制标签带回 home，再递归重试一次。

@@ -203,13 +203,20 @@ function getACBalanceMinutes() {
   };
 }
 
-async function requestMainWorldToggle(targetAction, timeoutMs) {
+function requestMainWorldResult({
+  requestIdPrefix,
+  requestEvent,
+  resultEvent,
+  payload = {},
+  timeoutMs,
+  timeoutResult
+}) {
   return new Promise((resolve) => {
-    const requestId = `ac-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const requestId = `${requestIdPrefix}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     let done = false;
 
     const cleanup = () => {
-      window.removeEventListener('__AC_EXTENSION_TOGGLE_AC_RESULT__', onResult);
+      window.removeEventListener(resultEvent, onResult);
     };
 
     const finish = (result) => {
@@ -226,44 +233,33 @@ async function requestMainWorldToggle(targetAction, timeoutMs) {
       finish(result);
     };
 
-    window.addEventListener('__AC_EXTENSION_TOGGLE_AC_RESULT__', onResult);
-    window.dispatchEvent(new CustomEvent('__AC_EXTENSION_TOGGLE_AC__', {
-      detail: { requestId, action: targetAction }
+    window.addEventListener(resultEvent, onResult);
+    window.dispatchEvent(new CustomEvent(requestEvent, {
+      detail: { requestId, ...payload }
     }));
 
-    setTimeout(() => finish(null), timeoutMs);
+    setTimeout(() => finish(timeoutResult), timeoutMs);
+  });
+}
+
+async function requestMainWorldToggle(targetAction, timeoutMs) {
+  return requestMainWorldResult({
+    requestIdPrefix: 'ac',
+    requestEvent: '__AC_EXTENSION_TOGGLE_AC__',
+    resultEvent: '__AC_EXTENSION_TOGGLE_AC_RESULT__',
+    payload: { action: targetAction },
+    timeoutMs,
+    timeoutResult: null
   });
 }
 
 async function requestMainWorldStatus(timeoutMs) {
-  return new Promise((resolve) => {
-    const requestId = `ac-status-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    let done = false;
-
-    const cleanup = () => {
-      window.removeEventListener('__AC_EXTENSION_GET_STATUS_RESULT__', onResult);
-    };
-
-    const finish = (result) => {
-      if (done) return;
-      done = true;
-      cleanup();
-      resolve(result);
-    };
-
-    const onResult = (event) => {
-      const detail = event.detail || {};
-      if (detail.requestId !== requestId) return;
-      const { requestId: _requestId, ...result } = detail;
-      finish(result);
-    };
-
-    window.addEventListener('__AC_EXTENSION_GET_STATUS_RESULT__', onResult);
-    window.dispatchEvent(new CustomEvent('__AC_EXTENSION_GET_STATUS__', {
-      detail: { requestId }
-    }));
-
-    setTimeout(() => finish({ isOn: null, error: '主世界状态读取超时' }), timeoutMs);
+  return requestMainWorldResult({
+    requestIdPrefix: 'ac-status',
+    requestEvent: '__AC_EXTENSION_GET_STATUS__',
+    resultEvent: '__AC_EXTENSION_GET_STATUS_RESULT__',
+    timeoutMs,
+    timeoutResult: { isOn: null, error: '主世界状态读取超时' }
   });
 }
 

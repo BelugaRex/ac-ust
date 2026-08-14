@@ -76,11 +76,12 @@ ac-ust/
 ├── i18n.js            # fetch-based 国际化加载器
 ├── billing-helpers.js # 冷气余额解析与 PWM 可用时间估算纯函数
 ├── sync-helpers.js    # 跨设备同步纯函数（chrome.storage.sync + page timer 对齐）
+├── pwm-phase.js       # PWM 阶段推进、过期恢复与 live alarm 对齐纯函数
 ├── offscreen.js       # 冗余保活心跳
 ├── offscreen.html     # offscreen 入口
 ├── _locales/          # 翻译文件（zh_CN + en 作者直维护，其他语言 Crowdin 同步）
 ├── icons/             # 16px 工具栏/Popup logo + 手绘 24/32px 派生母版 + 派生的 48/128px 图标
-├── tools/             # 开发工具（scale-pixil-logo.py 派生 48/128 图标，纯标准库）
+├── tools/             # 图标派生工具（纯标准库）
 └── test/              # 单元测试 + e2e + 图标验证
 ```
 

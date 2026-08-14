@@ -1,0 +1,197 @@
+{
+  "schemaVersion": 1,
+  "entrypoints": {
+    "serviceWorker": {
+      "file": "background.js",
+      "imports": ["i18n.js", "sync-helpers.js", "pwm-phase.js"]
+    },
+    "contentScripts": [
+      {
+        "matches": ["https://w5.ab.ust.hk/njggt/app/home"],
+        "js": ["page-confirm.js"],
+        "run_at": "document_start",
+        "world": "MAIN",
+        "all_frames": false
+      },
+      {
+        "matches": ["https://w5.ab.ust.hk/njggt/app/home"],
+        "js": ["billing-helpers.js", "content.js"],
+        "run_at": "document_idle",
+        "all_frames": false
+      }
+    ],
+    "documents": [
+      {
+        "file": "popup.html",
+        "scripts": ["i18n.js", "billing-helpers.js", "popup.js"]
+      },
+      {
+        "file": "offscreen.html",
+        "scripts": ["offscreen.js"]
+      }
+    ],
+    "dynamicInjections": [
+      {
+        "source": "background.js",
+        "files": ["billing-helpers.js", "content.js"]
+      },
+      {
+        "source": "background.js",
+        "files": ["page-confirm.js"]
+      }
+    ]
+  },
+  "interfaces": [
+    {
+      "name": "translations",
+      "provider": {
+        "file": "i18n.js",
+        "symbols": ["I18n"]
+      },
+      "consumers": [
+        {
+          "file": "background.js",
+          "symbols": ["I18n"]
+        },
+        {
+          "file": "popup.js",
+          "symbols": ["I18n"]
+        }
+      ]
+    },
+    {
+      "name": "balance decisions",
+      "provider": {
+        "file": "billing-helpers.js",
+        "symbols": [
+          "parseBalanceMinutes",
+          "estimateBalanceExhaustion",
+          "isBalanceEstimateUrgent"
+        ]
+      },
+      "consumers": [
+        {
+          "file": "content.js",
+          "symbols": ["parseBalanceMinutes"]
+        },
+        {
+          "file": "popup.js",
+          "symbols": ["estimateBalanceExhaustion", "isBalanceEstimateUrgent"]
+        }
+      ]
+    },
+    {
+      "name": "schedule sync decisions",
+      "provider": {
+        "file": "sync-helpers.js",
+        "symbols": [
+          "composeSyncPayload",
+          "computePhaseAdoption",
+          "computeConfigDiff",
+          "parsePageTimerValue",
+          "isPageTimerProofFresh",
+          "computePageTimerAdoption"
+        ]
+      },
+      "consumers": [
+        {
+          "file": "background.js",
+          "symbols": [
+            "composeSyncPayload",
+            "computePhaseAdoption",
+            "computeConfigDiff",
+            "parsePageTimerValue",
+            "isPageTimerProofFresh",
+            "computePageTimerAdoption"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "PWM phase decisions",
+      "provider": {
+        "file": "pwm-phase.js",
+        "symbols": [
+          "planPwmStep",
+          "planPwmRecovery",
+          "reconcilePwmTrigger"
+        ]
+      },
+      "consumers": [
+        {
+          "file": "background.js",
+          "symbols": [
+            "planPwmStep",
+            "planPwmRecovery",
+            "reconcilePwmTrigger"
+          ]
+        }
+      ]
+    }
+  ],
+  "packaging": {
+    "source": "build.sh",
+    "runtimeFiles": [
+      "manifest.json",
+      "background.js",
+      "content.js",
+      "page-confirm.js",
+      "popup.html",
+      "popup.css",
+      "popup.js",
+      "i18n.js",
+      "billing-helpers.js",
+      "sync-helpers.js",
+      "pwm-phase.js",
+      "offscreen.html",
+      "offscreen.js",
+      "_locales",
+      "icons"
+    ]
+  },
+  "sourceRules": [
+    {
+      "name": "sync decisions remain browser independent",
+      "files": ["sync-helpers.js"],
+      "forbidPatterns": [
+        "\\bchrome\\s*\\.",
+        "\\bdocument\\s*\\.",
+        "\\bwindow\\s*\\.",
+        "\\blocalStorage\\b",
+        "\\bimportScripts\\s*\\("
+      ]
+    },
+    {
+      "name": "balance decisions remain browser independent",
+      "files": ["billing-helpers.js"],
+      "forbidPatterns": [
+        "\\bchrome\\s*\\.",
+        "\\bdocument\\s*\\.",
+        "\\bwindow\\s*\\.",
+        "\\blocalStorage\\b",
+        "\\bfetch\\s*\\("
+      ]
+    },
+    {
+      "name": "PWM phase decisions remain browser independent",
+      "files": ["pwm-phase.js"],
+      "forbidPatterns": [
+        "\\bchrome\\s*\\.",
+        "\\bdocument\\s*\\.",
+        "\\bwindow\\s*\\.",
+        "\\blocalStorage\\b",
+        "\\bimportScripts\\s*\\("
+      ]
+    },
+    {
+      "name": "main-world adapter has no extension privileges",
+      "files": ["page-confirm.js"],
+      "forbidPatterns": ["\\bchrome\\s*\\."]
+    },
+    {
+      "name": "service worker has no DOM dependency",
+      "files": ["background.js"],
+      "forbidPatterns": ["\\bdocument\\s*\\.", "\\bwindow\\s*\\."]
+    }
+  ]
+}
