@@ -113,7 +113,7 @@
     transform-origin: top left;
   }
 
-  /* ===== Header Bar (参考 sub-nav-frosted: 羊皮卷 80% + 模糊化) ===== */
+  /* ===== Header Bar (实色羊皮卷，无毛玻璃/backdrop 模糊) ===== */
   .header {
     display: flex;
     align-items: center;
@@ -121,9 +121,7 @@
     gap: 8px;
     flex-wrap: wrap;
     padding: 8px 16px 7px;
-    background: rgba(245, 245, 247, 0.86);
-    -webkit-backdrop-filter: saturate(180%) blur(20px);
-    backdrop-filter: saturate(180%) blur(20px);
+    background: var(--c-parchment);
     border-bottom: 1px solid rgba(0, 0, 0, 0.06);
     position: sticky;
     top: 0;
@@ -658,7 +656,7 @@
       --c-danger: #ff6961;
     }
     .header {
-      background: rgba(28, 28, 30, 0.9);
+      background: var(--c-canvas);
       border-bottom-color: rgba(255, 255, 255, 0.16);
     }
     /* 深色档跟随状态点 success 绿：避免 accent 蓝与交互信号重叠，与浅色档语义一致 */

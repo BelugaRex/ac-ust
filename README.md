@@ -155,7 +155,7 @@ git push origin my-cool-feature
 
 - Chrome Extension Manifest V3 · Vanilla JavaScript（零框架依赖）
 - Chrome Alarms API + Storage API + Scripting API
-- Apple Design System CSS（SF Pro / Inter 字体，毛玻璃 UI）
+- Apple Design System CSS（SF Pro / Inter 字体，扁平 UI，无毛玻璃）
 - fetch-based i18n（Crowdin 社区翻译）
 - 跨设备同步（chrome.storage.sync + UST 页面定时器服务器同步）
 - Service Worker 保活（heartbeat + offscreen + waitUntil）
