@@ -1182,6 +1182,21 @@ async function setPageTimer(minutes, { retryOnFailure = true } = {}) {
     return failure;
   };
 
+  // 提取（Fowler Extract Function）：页面定时器成功后的证明记录——解析目标时刻、清重试态、持久化并回传验证结果。
+  const recordPageTimerProof = async (result, minutes, verification) => {
+    const parsedTarget = parsePageTimerValue(result.value, Date.now());
+    schedule.pageTimerTargetAt = parsedTarget?.valid
+      ? parsedTarget.targetMs
+      : Date.now() + Math.max(1, Number(schedule.pageTimerMinutes) || 1) * 60000;
+    schedule.pageTimerError = '';
+    schedule.pageTimerRetryAt = 0;
+    schedule.pageTimerRetryMinutes = 0;
+    await chrome.alarms.clear('ac-page-timer-retry');
+    await persistSchedule('setPageTimer-success');
+    console.log(`[AC扩展] 页面定时器已由新鲜页面确认: ${verification.value} (安全网)`);
+    return { ...result, verified: true, verification };
+  };
+
   try {
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
     let tab = tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded) || null;
@@ -1222,17 +1237,7 @@ async function setPageTimer(minutes, { retryOnFailure = true } = {}) {
     }
 
     schedule.pageTimerMinutes = result.actualDelayMinutes || minutes;
-    const parsedTarget = parsePageTimerValue(result.value, Date.now());
-    schedule.pageTimerTargetAt = parsedTarget?.valid
-      ? parsedTarget.targetMs
-      : Date.now() + Math.max(1, Number(schedule.pageTimerMinutes) || 1) * 60000;
-    schedule.pageTimerError = '';
-    schedule.pageTimerRetryAt = 0;
-    schedule.pageTimerRetryMinutes = 0;
-    await chrome.alarms.clear('ac-page-timer-retry');
-    await persistSchedule('setPageTimer-success');
-    console.log(`[AC扩展] 页面定时器已由新鲜页面确认: ${verification.value} (安全网)`);
-    return { ...result, verified: true, verification };
+    return await recordPageTimerProof(result, minutes, verification);
   } catch (e) {
     return await finishFailure({ success: false, error: e?.message || String(e) }, 'exception');
   } finally {
