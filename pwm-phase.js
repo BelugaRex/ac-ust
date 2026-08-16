@@ -154,22 +154,10 @@ function planPwmRecovery(schedule, expiredScheduledTime, observations = {}, opts
   let nextAction = pwmPhaseTargetAction(schedule);
   if (!nextAction) return { kind: 'refuse', reason: 'invalid-state' };
 
-  const cycleMs = (durations.onMinutes + durations.offMinutes) * PWM_PHASE_MINUTE_MS;
-  let nextTriggerAt = expiredBoundary;
-  const fullCycles = Math.floor((now - nextTriggerAt) / cycleMs);
-  if (fullCycles > 0) nextTriggerAt += fullCycles * cycleMs;
-
-  while (nextTriggerAt <= now) {
-    const durationMinutes = nextAction === 'on'
-      ? durations.onMinutes
-      : durations.offMinutes;
-    const advancedTrigger = nextTriggerAt + durationMinutes * PWM_PHASE_MINUTE_MS;
-    if (!Number.isFinite(advancedTrigger) || advancedTrigger <= nextTriggerAt) {
-      return { kind: 'refuse', reason: 'invalid-duration' };
-    }
-    nextTriggerAt = advancedTrigger;
-    nextAction = nextAction === 'on' ? 'off' : 'on';
-  }
+  const advancedBoundary = advanceExpiredBoundary(nextAction, expiredBoundary, now, durations);
+  if (!advancedBoundary) return { kind: 'refuse', reason: 'invalid-duration' };
+  nextAction = advancedBoundary.nextAction;
+  const nextTriggerAt = advancedBoundary.nextTriggerAt;
 
   if (nextAction === 'on') {
     return pwmPhaseCommitPlan(
@@ -219,6 +207,27 @@ function planPwmRecovery(schedule, expiredScheduledTime, observations = {}, opts
     alignedTriggerAt,
     now
   );
+}
+
+// 提取（Fowler Extract Function）：从过期边界推进到下一个未来周期边界（跳过整周期、逐相位翻转与时长安全阀）。
+function advanceExpiredBoundary(nextAction, expiredBoundary, now, durations) {
+  const cycleMs = (durations.onMinutes + durations.offMinutes) * PWM_PHASE_MINUTE_MS;
+  let nextTriggerAt = expiredBoundary;
+  const fullCycles = Math.floor((now - nextTriggerAt) / cycleMs);
+  if (fullCycles > 0) nextTriggerAt += fullCycles * cycleMs;
+
+  while (nextTriggerAt <= now) {
+    const durationMinutes = nextAction === 'on'
+      ? durations.onMinutes
+      : durations.offMinutes;
+    const advancedTrigger = nextTriggerAt + durationMinutes * PWM_PHASE_MINUTE_MS;
+    if (!Number.isFinite(advancedTrigger) || advancedTrigger <= nextTriggerAt) {
+      return null;
+    }
+    nextTriggerAt = advancedTrigger;
+    nextAction = nextAction === 'on' ? 'off' : 'on';
+  }
+  return { nextAction, nextTriggerAt };
 }
 
 function reconcilePwmTrigger(schedule, liveAlarm, opts = {}) {
