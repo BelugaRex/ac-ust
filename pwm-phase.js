@@ -53,44 +53,7 @@ function pwmPhaseCommitPlan(reason, nextAction, nextTriggerAt, now, proofAction)
 
 function planPwmTargetStep(schedule, targetAction, observations, now, durations) {
   if (targetAction === 'on') {
-    const onConfirmed = observations?.acIsOn === true
-      || observations?.toggleSucceeded === true;
-    if (!onConfirmed) {
-      if (observations?.toggleSucceeded === false) {
-        return pwmPhaseRetryPlan('toggle-on-failed', 'on', now, 'clear');
-      }
-      return {
-        kind: 'hold',
-        reason: 'toggle-on-required',
-        nextAction: 'on',
-        proofAction: 'clear',
-        prerequisite: 'toggle-on',
-        phasePatch: { pwmState: 'on', nextTriggerAt: 0 }
-      };
-    }
-
-    if (typeof observations?.pageTimerSucceeded !== 'boolean') {
-      return {
-        kind: 'hold',
-        reason: 'page-timer-required',
-        nextAction: 'on',
-        proofAction: 'clear',
-        prerequisite: 'set-page-timer',
-        timerMinutes: durations.onMinutes,
-        phasePatch: { pwmState: 'on', nextTriggerAt: 0 }
-      };
-    }
-
-    if (!observations.pageTimerSucceeded) {
-      return pwmPhaseRetryPlan('page-timer-failed', 'on', now, 'clear');
-    }
-
-    return pwmPhaseCommitPlan(
-      'on-phase-committed',
-      'off',
-      now + durations.onMinutes * PWM_PHASE_MINUTE_MS,
-      now
-    );
+    return planPwmOnTargetStep(schedule, observations, now, durations);
   }
 
   if (observations?.acIsOn === false || observations?.proofFresh === true) {
@@ -115,6 +78,48 @@ function planPwmTargetStep(schedule, targetAction, observations, now, durations)
   }
 
   return pwmPhaseRetryPlan('off-proof-retry', 'off', now);
+}
+
+// 提取（Fowler Extract Function）：ON 相位目标步决策——开机确认链 → 页面定时器链 → 提交 OFF。
+function planPwmOnTargetStep(schedule, observations, now, durations) {
+  const onConfirmed = observations?.acIsOn === true
+    || observations?.toggleSucceeded === true;
+  if (!onConfirmed) {
+    if (observations?.toggleSucceeded === false) {
+      return pwmPhaseRetryPlan('toggle-on-failed', 'on', now, 'clear');
+    }
+    return {
+      kind: 'hold',
+      reason: 'toggle-on-required',
+      nextAction: 'on',
+      proofAction: 'clear',
+      prerequisite: 'toggle-on',
+      phasePatch: { pwmState: 'on', nextTriggerAt: 0 }
+    };
+  }
+
+  if (typeof observations?.pageTimerSucceeded !== 'boolean') {
+    return {
+      kind: 'hold',
+      reason: 'page-timer-required',
+      nextAction: 'on',
+      proofAction: 'clear',
+      prerequisite: 'set-page-timer',
+      timerMinutes: durations.onMinutes,
+      phasePatch: { pwmState: 'on', nextTriggerAt: 0 }
+    };
+  }
+
+  if (!observations.pageTimerSucceeded) {
+    return pwmPhaseRetryPlan('page-timer-failed', 'on', now, 'clear');
+  }
+
+  return pwmPhaseCommitPlan(
+    'on-phase-committed',
+    'off',
+    now + durations.onMinutes * PWM_PHASE_MINUTE_MS,
+    now
+  );
 }
 
 function planPwmStep(schedule, observations = {}, opts = {}) {
