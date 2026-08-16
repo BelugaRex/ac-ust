@@ -971,6 +971,19 @@ async function runPwmStep() {
     return planPwmStep(schedule, observations);
   }
 
+  // 提取（Fowler Extract Function）：PWM 关机补时 hold 分支——页面定时器证明缺失时补设 1 分钟定时器。
+  async function resolveShortTimerHold(plan, observations) {
+    applyPwmPlanState(plan);
+    const timerResult = await setPageTimer(plan.timerMinutes, { retryOnFailure: false });
+    observations.shortTimerAttempted = true;
+    observations.shortTimerSucceeded = !!timerResult?.success;
+    schedule.pageTimerError = timerResult?.success
+      ? '原页面关机定时器缺失，已补设 1 分钟定时器；本轮不推进且不点击开关'
+      : `页面关机定时器未正确设置：${timerResult?.error || '未知错误'}`;
+    console.warn('[AC扩展] PWM 关机边界：页面定时器证明缺失，已尝试补设 1 分钟定时器；不点击开关');
+    return planPwmStep(schedule, observations);
+  }
+
   return waitUntil((async () => {
   try {
     await loadScheduleFromStorage();
@@ -1021,15 +1034,7 @@ async function runPwmStep() {
     }
 
     if (plan.kind === 'hold' && plan.prerequisite === 'set-short-page-timer') {
-      applyPwmPlanState(plan);
-      const timerResult = await setPageTimer(plan.timerMinutes, { retryOnFailure: false });
-      observations.shortTimerAttempted = true;
-      observations.shortTimerSucceeded = !!timerResult?.success;
-      schedule.pageTimerError = timerResult?.success
-        ? '原页面关机定时器缺失，已补设 1 分钟定时器；本轮不推进且不点击开关'
-        : `页面关机定时器未正确设置：${timerResult?.error || '未知错误'}`;
-      console.warn('[AC扩展] PWM 关机边界：页面定时器证明缺失，已尝试补设 1 分钟定时器；不点击开关');
-      plan = planPwmStep(schedule, observations);
+      plan = await resolveShortTimerHold(plan, observations);
     }
 
     if (plan.kind === 'retry') {
