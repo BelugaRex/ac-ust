@@ -500,6 +500,20 @@ async function syncScheduleToSync(reason = '') {
 async function applySyncedPhase(remote, reason = '') {
   if (!remote || typeof remote !== 'object') return false;
 
+  // 提取（Fowler Extract Function）：同步停用路径——B1 顺序：先 persist 停用状态，再走页面定时器关机。
+  async function shutdownAfterSyncDisable() {
+    await resetDisabledPwmRuntime();
+    // B1（同步停用）：先 persist 停用状态再执行长流程关机 — 防止 SW 在
+    // verifyPageTimerPersistence 的 2 分钟+等待中被杀后，storage 仍是 enabled=true
+    // 导致重启后闹钟自愈"复活" PWM。末尾 `if (changed)` persist 仍处理相位/activeHours。
+    await persistSchedule('sync-disabled-pre-shutdown', { syncFromLiveAlarm: false });
+    // 自动关机只依赖 UST 页面定时器，不再点击 AC 开关。
+    const shutdownResult = await requestTimerBasedShutdown('sync-disabled');
+    if (!shutdownResult?.success) {
+      schedule.pageTimerError = `同步停用后页面关机定时器未确认：${shutdownResult?.error || '未知错误'}`;
+    }
+  }
+
   // 先记录 enabled 旧值——config 采纳后判断是否需要重建闹钟基础设施
   const wasEnabled = schedule.enabled;
 
@@ -570,16 +584,7 @@ async function applySyncedPhase(remote, reason = '') {
       }
     } else {
       // true → false：清所有 PWM 相关闹钟 + 停机（B1 顺序：先 persist 再关）
-      await resetDisabledPwmRuntime();
-      // B1（同步停用）：先 persist 停用状态再执行长流程关机 — 防止 SW 在
-      // verifyPageTimerPersistence 的 2 分钟+等待中被杀后，storage 仍是 enabled=true
-      // 导致重启后闹钟自愈"复活" PWM。末尾 `if (changed)` persist 仍处理相位/activeHours。
-      await persistSchedule('sync-disabled-pre-shutdown', { syncFromLiveAlarm: false });
-      // 自动关机只依赖 UST 页面定时器，不再点击 AC 开关。
-      const shutdownResult = await requestTimerBasedShutdown('sync-disabled');
-      if (!shutdownResult?.success) {
-        schedule.pageTimerError = `同步停用后页面关机定时器未确认：${shutdownResult?.error || '未知错误'}`;
-      }
+      await shutdownAfterSyncDisable();
     }
     didAlarmInfra = true;
   }
