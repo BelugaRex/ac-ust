@@ -1821,6 +1821,23 @@ async function ensureScheduleClock() {
 }
 
 async function repairScheduleClock() {
+  // 提取（Fowler Extract Function）：当前为 ON 时的关机过渡——先保留 ON 安全检查点，新鲜页确认定时器后才恢复 OFF。
+  async function tryArmOffTransition(status) {
+    // 先保留“下一步 ON”的安全检查点；只有新鲜页面确认关机定时器后，
+    // 才允许恢复为下一步 OFF。
+    schedule.pwmState = 'on';
+    const timerResult = await setPageTimer(schedule.onMinutes, { retryOnFailure: false });
+    if (!timerResult?.success) {
+      schedule.pageTimerError = `时钟修复时页面关机定时器未确认：${timerResult?.error || '未知错误'}；保持 on 相位，1 分钟后重试`;
+      await createPwmAlarmWithVerify(1, 'repair-pageTimer-failed');
+      await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+      await persistSchedule('repairScheduleClock-pageTimer-failed');
+      await updateBadge();
+      return { success: false, reason: schedule.pageTimerError, schedule: { ...schedule, actualStatus: status } };
+    }
+    return null;
+  }
+
   if (!schedule.enabled) {
     return { success: false, reason: '定时未启用', schedule };
   }
@@ -1840,18 +1857,8 @@ async function repairScheduleClock() {
   const delay = Math.max(1, currentOn ? schedule.onMinutes : schedule.offMinutes);
 
   if (currentOn) {
-    // 先保留“下一步 ON”的安全检查点；只有新鲜页面确认关机定时器后，
-    // 才允许恢复为下一步 OFF。
-    schedule.pwmState = 'on';
-    const timerResult = await setPageTimer(schedule.onMinutes, { retryOnFailure: false });
-    if (!timerResult?.success) {
-      schedule.pageTimerError = `时钟修复时页面关机定时器未确认：${timerResult?.error || '未知错误'}；保持 on 相位，1 分钟后重试`;
-      await createPwmAlarmWithVerify(1, 'repair-pageTimer-failed');
-      await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-      await persistSchedule('repairScheduleClock-pageTimer-failed');
-      await updateBadge();
-      return { success: false, reason: schedule.pageTimerError, schedule: { ...schedule, actualStatus: status } };
-    }
+    const failedResult = await tryArmOffTransition(status);
+    if (failedResult) return failedResult;
   }
 
   schedule.pwmState = currentOn ? 'off' : 'on';
