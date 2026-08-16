@@ -22,6 +22,7 @@ RUNTIME_FILES=(
   billing-helpers.js
   sync-helpers.js
   pwm-phase.js
+  smart-mode.js
   offscreen.html
   offscreen.js
   _locales

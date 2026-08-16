@@ -8,6 +8,7 @@ import url from 'node:url';
 import syncHelpers from '../sync-helpers.js';
 import billingHelpers from '../billing-helpers.js';
 import pwmPhase from '../pwm-phase.js';
+import smartMode from '../smart-mode.js';
 import { runPwmPhaseCases } from './pwm-phase-cases.mjs';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
@@ -279,6 +280,104 @@ async function runTests() {
   console.log('\n\n=== PWM phase 纯决策接口 ===\n');
   runPwmPhaseCases(assertPass);
 
+  console.log('\n\n=== 智能模式纯决策接口 (v0.8.0) ===\n');
+  // K 映射（0%→0.30，100%→1.00，线性无级）
+  assertPass(Math.abs(smartMode.sensitivityToK(0) - 0.30) < 1e-9, 'smart: K(0%)=0.30');
+  assertPass(Math.abs(smartMode.sensitivityToK(100) - 1.00) < 1e-9, 'smart: K(100%)=1.00');
+  assertPass(Math.abs(smartMode.sensitivityToK(50) - 0.65) < 1e-9, 'smart: K(50%)=0.65');
+  assertPass(smartMode.sensitivityToK(-10) === 0.30, 'smart: K 下限截断到 0.30');
+  assertPass(smartMode.sensitivityToK(120) === 1.00, 'smart: K 上限截断到 1.00');
+  assertPass(smartMode.sensitivityToK(undefined) === 0.30, 'smart: K 非法输入回退 0.30');
+
+  // 水汽压（Magnus 公式）
+  assertPass(Math.abs(smartMode.vaporPressureFromDewPoint(25) - 31.67) < 0.5,
+    'smart: 露点 25°C → 水汽压 ≈31.7 hPa');
+
+  // 等效室外温度 Teq
+  const smartTeq = smartMode.equivalentTemperature(30, 24, 1.5);
+  assertPass(Math.abs(smartTeq - 34.79) < 0.5, 'smart: Teq = T + 0.33e - 0.70Wind - 4');
+
+  // 主入口：默认场景
+  const smartDefault = smartMode.computeSmartOnMinutes({
+    sensitivity: 50, temperature: 30, dewPoint: 24, windSpeedMs: 1.5, rainMm: 0
+  });
+  assertPass(smartDefault.valid === true && smartDefault.onMinutes === 23 && smartDefault.offMinutes === 7,
+    'smart: 默认场景 on=23/off=7（30 分钟周期开关互补）');
+
+  // 降雨修正：Rain > 5.0 → t_raw *= 0.5
+  const smartRain = smartMode.computeSmartOnMinutes({
+    sensitivity: 50, temperature: 30, dewPoint: 24, windSpeedMs: 1.5, rainMm: 10
+  });
+  assertPass(smartRain.onMinutes === 11, 'smart: 降雨 > 5mm 减半后 on=11');
+
+  // 压缩机保护：1~4 分钟 → 强制 0
+  assertPass(smartMode.clampAndRoundOnMinutes(1.0) === 0, 'smart: 压缩机保护 1 → 0');
+  assertPass(smartMode.clampAndRoundOnMinutes(2.2) === 0, 'smart: 压缩机保护 2.2 → 0');
+  assertPass(smartMode.clampAndRoundOnMinutes(4.0) === 0, 'smart: 压缩机保护 4 → 0');
+  assertPass(smartMode.clampAndRoundOnMinutes(0.4) === 0, 'smart: 0.4 舍入 0');
+  assertPass(smartMode.clampAndRoundOnMinutes(5.2) === 5, 'smart: 5.2 舍入 5');
+  assertPass(smartMode.clampAndRoundOnMinutes(40) === 30, 'smart: 上限截断 30');
+  assertPass(smartMode.clampAndRoundOnMinutes(-5) === 0, 'smart: 下限截断 0');
+
+  // 冷天 → Teq 低 → 开启分钟数减少
+  const smartCold = smartMode.computeSmartOnMinutes({
+    sensitivity: 50, temperature: 18, dewPoint: 10, windSpeedMs: 3, rainMm: 0
+  });
+  assertPass(smartCold.valid === true && smartCold.onMinutes === 10,
+    'smart: 冷天 Teq 低 → on=10');
+
+  // 极热 + 满灵敏度 → 30（限幅）
+  const smartHot = smartMode.computeSmartOnMinutes({
+    sensitivity: 100, temperature: 33, dewPoint: 26, windSpeedMs: 0, rainMm: 0
+  });
+  assertPass(smartHot.onMinutes === 30 && smartHot.offMinutes === 0,
+    'smart: 极热满灵敏度 on=30/off=0');
+
+  // 非法天气 → valid=false（调用方退化为手动时长）
+  const smartBad = smartMode.computeSmartOnMinutes({
+    sensitivity: 50, temperature: null, dewPoint: 24, windSpeedMs: 1.5, rainMm: 0
+  });
+  assertPass(smartBad.valid === false, 'smart: 非法天气 valid=false');
+
+  // 露点逆推（Magnus）：由气温 + 湿度推导露点（HKO 开放数据不直接提供露点）
+  const smartDew = smartMode.deriveDewPoint(30, 80);
+  assertPass(smartDew !== null && Math.abs(smartDew - 26.2) < 0.5,
+    'smart: deriveDewPoint(30°C, 80%) ≈ 26.2°C');
+
+  // rhrread 解析：站点偏好（清水湾 CWB 优先）+ 露点推导 + 静风默认 + 分区雨量
+  const hkoWeather = smartMode.parseRhrreadWeather({
+    temperature: { data: [
+      { place: 'Hong Kong Observatory', value: 29, unit: 'C' },
+      { place: 'Clear Water Bay', value: 27, unit: 'C' },
+      { place: 'Sai Kung', value: 28, unit: 'C' },
+      { place: 'Tseung Kwan O', value: 28, unit: 'C' }
+    ] },
+    humidity: { data: [{ place: 'Hong Kong Observatory', value: 84, unit: 'percent' }] },
+    rainfall: { data: [{ place: 'Sai Kung', max: 2, main: 'FALSE', unit: 'mm' }] }
+  });
+  assertPass(hkoWeather !== null
+      && hkoWeather.temperature === 27   // 清水湾站（CWB）优先
+      && hkoWeather.windSpeedMs === 0
+      && hkoWeather.rainMm === 2
+      && Number.isFinite(hkoWeather.dewPoint),
+    'smart: parseRhrreadWeather 取清水湾站 + 静风默认 + 分区雨量 + 露点推导');
+
+  // rhrread 解析：无清水湾站 → 回退西贡站
+  const hkoFallback = smartMode.parseRhrreadWeather({
+    temperature: { data: [
+      { place: 'Sai Kung', value: 28, unit: 'C' },
+      { place: 'Tseung Kwan O', value: 28, unit: 'C' }
+    ] },
+    humidity: { data: [{ place: 'Hong Kong Observatory', value: 84, unit: 'percent' }] },
+    rainfall: { data: [{ place: 'Sai Kung', max: 0, main: 'FALSE', unit: 'mm' }] }
+  });
+  assertPass(hkoFallback !== null && hkoFallback.temperature === 28,
+    'smart: parseRhrreadWeather 无清水湾站时回退西贡站');
+
+  // rhrread 解析：气温缺失 → null
+  assertPass(smartMode.parseRhrreadWeather({ temperature: { data: [] } }) === null,
+    'smart: parseRhrreadWeather 气温缺失返回 null');
+
   console.log('\n--- 断言 ---');
   assertPass(result.selfHealed === true, 'selfHealed 标志为 true(自愈触发)');
   assertPass(after.nextTriggerAt === pwmTime, 'storage.nextTriggerAt 被修复为 ac-pwm.scheduledTime');
@@ -501,8 +600,8 @@ async function runTests() {
     '四个字段统一填满列宽，使用 32px 控件高度和 13px 数字');
   assertPass(/\.toggle-switch\s*\{[^}]*?width:\s*36px[^}]*?height:\s*20px/.test(popupCssNoComments)
       && /\.toggle-switch::after\s*\{[^}]*?inset:\s*-11px\s+-4px/.test(popupCssNoComments)
-      && (popupHtml.match(/class="toggle-switch"/g) || []).length === 2,
-    '两个拨杆统一为 36×20px，并通过绝对命中区达到桌面指针目标要求');
+      && (popupHtml.match(/class="toggle-switch"/g) || []).length === 3,
+    '三个拨杆（主开关/运行时段/智能模式）统一为 36×20px，并通过绝对命中区达到桌面指针目标要求');
   assertPass((popupHtml.match(/class="number-field"/g) || []).length === 2
       && (popupHtml.match(/class="field-unit" data-i18n="unitMinutes"/g) || []).length === 2
       && /\.field-unit\s*\{[^}]*?position:\s*absolute[^}]*?pointer-events:\s*none/.test(popupCssNoComments),
@@ -599,9 +698,11 @@ async function runTests() {
     'manifest 为 UST 页面内容脚本公开 locale JSON（fetch i18n）');
   assertPass(hasUstLocaleResourceRule(distLocaleResources),
     'dist/manifest.json 保留 locale JSON 的 web_accessible_resources 规则');
-  assertPass(manifest.host_permissions?.length === 1
-      && manifest.host_permissions[0] === 'https://w5.ab.ust.hk/*',
-    'manifest 仅请求自动调度所需的 UST 单一来源 host permission');
+  assertPass(Array.isArray(manifest.host_permissions)
+      && manifest.host_permissions.length === 2
+      && manifest.host_permissions.includes('https://w5.ab.ust.hk/*')
+      && manifest.host_permissions.includes('https://data.weather.gov.hk/*'),
+    'manifest 仅请求自动调度所需的两个最小来源 host permission（UST 页面 + 天文台开放数据天气源）');
 
   const expectedToolbarIcon = 'icons/ac-ust_16.png';
   assertPass(manifest.action?.default_icon === expectedToolbarIcon,

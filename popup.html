@@ -1285,6 +1285,37 @@
           </div>
         </div>
       </div>
+      <div class="setting-group" id="smartModeSection">
+        <div class="section-heading" id="smartModeRow">
+          <label class="section-title" for="smartModeToggle" data-i18n="smartModeLabel"></label>
+          <label class="toggle-switch">
+            <input type="checkbox" id="smartModeToggle">
+            <span class="toggle-slider"></span>
+          </label>
+        </div>
+        <div class="smart-body" id="smartModeBody">
+          <div class="smart-slider-row">
+            <span class="smart-end" data-i18n="smartModeWeak"></span>
+            <input type="range" id="smartSensitivity" min="0" max="100" step="1" value="50" data-i18n-aria-label="smartModeSensitivityLabel">
+            <span class="smart-end" data-i18n="smartModeStrong"></span>
+          </div>
+          <div class="smart-readout" id="smartReadout">
+            <div class="smart-readout-row">
+              <span class="smart-readout-label" data-i18n="smartModeSuggested"></span>
+              <span class="smart-readout-value" id="smartSuggested">--</span>
+            </div>
+            <div class="smart-readout-row">
+              <span class="smart-readout-label" data-i18n="smartModeTeq"></span>
+              <span class="smart-readout-value" id="smartTeq">--</span>
+            </div>
+            <div class="smart-readout-row">
+              <span class="smart-readout-label" data-i18n="smartModeUpdated"></span>
+              <span class="smart-readout-value" id="smartUpdated">--</span>
+            </div>
+          </div>
+          <div class="smart-hint" id="smartModeHint" data-i18n="smartModeHint"></div>
+        </div>
+      </div>
       <div class="settings-hint" id="scheduleHintPin" data-i18n="scheduleHintPinTab"></div>
     </div>
 
@@ -1307,6 +1338,7 @@
 
 <script src="i18n.js"></script>
 <script src="billing-helpers.js"></script>
+<script src="smart-mode.js"></script>
 <script src="popup.js?v=0.6.15"></script>
 </body>
 </html>

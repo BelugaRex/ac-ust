@@ -739,3 +739,113 @@ a:focus-visible,
     transition: none !important;
   }
 }
+
+/* ===== 智能模式 (v0.8.0) ===== */
+.smart-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.smart-body.is-disabled {
+  opacity: 0.5;
+}
+
+.smart-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.smart-end {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 15px;
+  white-space: nowrap;
+}
+
+.smart-slider-row input[type="range"] {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  margin: 0;
+  background: transparent;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.smart-slider-row input[type="range"]::-webkit-slider-runnable-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--switch-off);
+}
+
+.smart-slider-row input[type="range"]::-webkit-slider-thumb {
+  width: 16px;
+  height: 16px;
+  margin-top: -6px;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+  -webkit-appearance: none;
+}
+
+.smart-slider-row input[type="range"]::-moz-range-track {
+  height: 4px;
+  border-radius: 999px;
+  background: var(--switch-off);
+}
+
+.smart-slider-row input[type="range"]::-moz-range-thumb {
+  width: 16px;
+  height: 16px;
+  border: 0;
+  border-radius: 50%;
+  background: var(--accent);
+  cursor: pointer;
+}
+
+.smart-slider-row input[type="range"]:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.smart-readout {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.smart-readout-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.smart-readout-label {
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.smart-readout-value {
+  color: var(--text);
+  font-size: 12px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 15px;
+}
+
+.smart-readout-value.is-empty {
+  color: var(--text-tertiary);
+  font-weight: 400;
+}
+
+.smart-hint {
+  color: var(--text-tertiary);
+  font-size: 11px;
+  line-height: 15px;
+  overflow-wrap: anywhere;
+}

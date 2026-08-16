@@ -3,7 +3,7 @@
   "entrypoints": {
     "serviceWorker": {
       "file": "background.js",
-      "imports": ["i18n.js", "sync-helpers.js", "pwm-phase.js"]
+      "imports": ["i18n.js", "sync-helpers.js", "pwm-phase.js", "smart-mode.js"]
     },
     "contentScripts": [
       {
@@ -23,7 +23,7 @@
     "documents": [
       {
         "file": "popup.html",
-        "scripts": ["i18n.js", "billing-helpers.js", "popup.js"]
+        "scripts": ["i18n.js", "billing-helpers.js", "smart-mode.js", "popup.js"]
       },
       {
         "file": "offscreen.html",
@@ -127,6 +127,31 @@
           ]
         }
       ]
+    },
+    {
+      "name": "smart mode decisions",
+      "provider": {
+        "file": "smart-mode.js",
+        "symbols": [
+          "computeSmartOnMinutes",
+          "sensitivityToK",
+          "equivalentTemperature"
+        ]
+      },
+      "consumers": [
+        {
+          "file": "background.js",
+          "symbols": [
+            "computeSmartOnMinutes"
+          ]
+        },
+        {
+          "file": "popup.js",
+          "symbols": [
+            "computeSmartOnMinutes"
+          ]
+        }
+      ]
     }
   ],
   "packaging": {
@@ -143,6 +168,7 @@
       "billing-helpers.js",
       "sync-helpers.js",
       "pwm-phase.js",
+      "smart-mode.js",
       "offscreen.html",
       "offscreen.js",
       "_locales",
@@ -180,6 +206,18 @@
         "\\bdocument\\s*\\.",
         "\\bwindow\\s*\\.",
         "\\blocalStorage\\b",
+        "\\bimportScripts\\s*\\("
+      ]
+    },
+    {
+      "name": "smart mode decisions remain browser independent",
+      "files": ["smart-mode.js"],
+      "forbidPatterns": [
+        "\\bchrome\\s*\\.",
+        "\\bdocument\\s*\\.",
+        "\\bwindow\\s*\\.",
+        "\\blocalStorage\\b",
+        "\\bfetch\\s*\\(",
         "\\bimportScripts\\s*\\("
       ]
     },

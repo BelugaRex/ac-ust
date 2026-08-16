@@ -12,6 +12,7 @@ const staticPreviewSchedule = {
   onMinutes: 15,
   offMinutes: 45,
   activeHours: { enabled: true, start: '08:00', end: '23:00' },
+  smartMode: { enabled: false, sensitivity: 50 },
   pwmState: 'off',
   actualStatus: { isOn: true },
   balanceMinutes: 60,
@@ -67,6 +68,12 @@ const countdownNumber = document.getElementById('countdownNumber');
 const countdownText = document.getElementById('countdownText');
 const safetynetWarning = document.getElementById('safetynetWarning');
 const balanceEstimate = document.getElementById('balanceEstimate');
+const smartModeToggle = document.getElementById('smartModeToggle');
+const smartSensitivity = document.getElementById('smartSensitivity');
+const smartModeBody = document.getElementById('smartModeBody');
+const smartSuggested = document.getElementById('smartSuggested');
+const smartTeq = document.getElementById('smartTeq');
+const smartUpdated = document.getElementById('smartUpdated');
 
 // popup 打开期间保持与 Service Worker 的长连接。
 // 这样用户盯着弹窗时，后台不会只靠一次性 sendMessage 存活。
@@ -83,7 +90,14 @@ try {
 // ----- 加载已保存的设置 -----
 let currentScheduleEnabled = false;
 let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
+let currentSmartMode = { enabled: false, sensitivity: 50 };
 let lastAnnouncedState = '';
+
+function clampSmartSensitivityLocal(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 50;
+  return Math.round(Math.min(100, Math.max(0, n)));
+}
 
 async function loadSettings() {
   const schedule = IS_STATIC_PREVIEW
@@ -100,6 +114,13 @@ async function loadSettings() {
     end: typeof ah.end === 'string' ? ah.end : '23:00'
   };
   syncActiveHoursUI();
+  // smartMode
+  const sm = schedule.smartMode || {};
+  currentSmartMode = {
+    enabled: !!sm.enabled,
+    sensitivity: clampSmartSensitivityLocal(sm.sensitivity ?? 50)
+  };
+  syncSmartModeUI();
 }
 
 function syncActiveHoursUI() {
@@ -108,6 +129,16 @@ function syncActiveHoursUI() {
   activeHoursEnd.value = currentActiveHours.end;
   activeHoursStart.disabled = !currentActiveHours.enabled;
   activeHoursEnd.disabled = !currentActiveHours.enabled;
+}
+
+function syncSmartModeUI() {
+  smartModeToggle.checked = currentSmartMode.enabled;
+  smartSensitivity.value = String(currentSmartMode.sensitivity);
+  smartSensitivity.disabled = !currentSmartMode.enabled;
+  smartModeBody.classList.toggle('is-disabled', !currentSmartMode.enabled);
+  // 智能模式覆盖手动时长：开启时禁用 on/off 输入，关闭时恢复
+  onMinutesInput.disabled = currentSmartMode.enabled;
+  offMinutesInput.disabled = currentSmartMode.enabled;
 }
 
 function commitActiveHours() {
@@ -126,6 +157,102 @@ function commitActiveHours() {
 activeHoursToggle.addEventListener('change', commitActiveHours);
 activeHoursStart.addEventListener('change', commitActiveHours);
 activeHoursEnd.addEventListener('change', commitActiveHours);
+
+// ----- 智能模式：开关 + 灵敏度滑块 + 实时读数 -----
+let _smartProgrammatic = false;
+
+function renderSmartReadout(suggested, weather) {
+  const hasData = !!(suggested && suggested.valid);
+  // 建议开启分钟数
+  if (hasData) {
+    smartSuggested.textContent = `${suggested.onMinutes} ${t('unitMinutes')}`;
+    smartSuggested.classList.remove('is-empty');
+  } else {
+    smartSuggested.textContent = '--';
+    smartSuggested.classList.add('is-empty');
+  }
+  // 等效室外温度
+  if (hasData) {
+    smartTeq.textContent = `${suggested.teq.toFixed(1)} °C`;
+    smartTeq.classList.remove('is-empty');
+  } else {
+    smartTeq.textContent = '--';
+    smartTeq.classList.add('is-empty');
+  }
+  // 天气数据更新时间
+  const fetchedAt = Number(weather?.fetchedAt) || 0;
+  if (fetchedAt > 0) {
+    const d = new Date(fetchedAt);
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    let text = `${hh}:${mm}`;
+    if (weather?.stale) text += ` (${t('smartModeWeatherStale')})`;
+    smartUpdated.textContent = text;
+    smartUpdated.classList.remove('is-empty');
+  } else {
+    smartUpdated.textContent = weather?.error ? t('smartModeWeatherUnavailable') : '--';
+    smartUpdated.classList.add('is-empty');
+  }
+}
+
+async function updateSmartReadout() {
+  if (!currentSmartMode.enabled) {
+    renderSmartReadout(null, null);
+    return;
+  }
+
+  if (IS_STATIC_PREVIEW) {
+    renderSmartReadout(computeSmartOnMinutes({
+      sensitivity: currentSmartMode.sensitivity,
+      temperature: 30,
+      dewPoint: 24,
+      windSpeedMs: 1.5,
+      rainMm: 0
+    }), { fetchedAt: Date.now(), stale: false });
+    return;
+  }
+
+  try {
+    const stored = await chrome.storage.local.get('ac_smart_weather');
+    const weather = stored.ac_smart_weather;
+    if (!weather || !Number.isFinite(Number(weather.temperature))) {
+      renderSmartReadout(null, weather || null);
+      return;
+    }
+    const suggested = computeSmartOnMinutes({
+      sensitivity: currentSmartMode.sensitivity,
+      temperature: weather.temperature,
+      dewPoint: weather.dewPoint,
+      windSpeedMs: weather.windSpeedMs,
+      rainMm: weather.rainMm
+    });
+    renderSmartReadout(suggested, weather);
+  } catch (e) {
+    renderSmartReadout(null, null);
+  }
+}
+
+smartModeToggle.addEventListener('change', async () => {
+  if (_smartProgrammatic) return;
+  currentSmartMode.enabled = smartModeToggle.checked;
+  syncSmartModeUI();
+  // 主定时开启时重启周期以立即重算；关闭时仅持久化 smartMode（关机路径幂等）
+  await updateSchedule(currentScheduleEnabled, currentScheduleEnabled);
+  await updateSmartReadout();
+});
+
+smartSensitivity.addEventListener('input', () => {
+  // 平滑预览：滑动过程中即时更新建议分钟数，不触发后台写入
+  currentSmartMode.sensitivity = clampSmartSensitivityLocal(smartSensitivity.value);
+  void updateSmartReadout();
+});
+
+smartSensitivity.addEventListener('change', async () => {
+  // 释放滑块：仅持久化灵敏度，不重启当前 30 分钟周期（实际执行周期固定 30 分钟）
+  currentSmartMode.sensitivity = clampSmartSensitivityLocal(smartSensitivity.value);
+  syncSmartModeUI();
+  await updateSchedule(currentScheduleEnabled, false);
+});
 
 // ----- 从后台拉取当前状态 + 直接读真实 PWM 闹钟 -----
 // 性能优化：每 10 次轮询用 1 次完整 getSchedule（含 AC 真实状态），
@@ -169,6 +296,7 @@ async function refreshStatus() {
     updateCountdownDisplay(staticPreviewSchedule, {
       scheduledTime: staticPreviewSchedule.nextTriggerAt
     });
+    void updateSmartReadout();
     return;
   }
 
@@ -202,6 +330,8 @@ async function refreshStatus() {
       updateCountdownDisplay(fallbackSchedule, alarm);
     }
   }
+
+  void updateSmartReadout();
 }
 
 function announceState(message) {
@@ -391,6 +521,7 @@ async function updateSchedule(enabled, restart = false) {
     onMinutes: readPositiveMinutes(onMinutesInput, 30),
     offMinutes: readPositiveMinutes(offMinutesInput, 30),
     activeHours: { ...currentActiveHours },  // v0.5.x: PWM 运行时段
+    smartMode: { ...currentSmartMode },      // v0.8.0: 智能模式（灵敏度 + 开关）
     restart
   };
 

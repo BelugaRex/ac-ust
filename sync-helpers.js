@@ -26,7 +26,7 @@
 // alarmCreatedAt / alarmDelayMinutes）属于本机运行态，不应同步——
 // 特别是 __heartbeat 每 20s 写一次，会瞬间打爆 sync 写入配额
 // （8 写/分钟、100 写/小时、1200 写/天）。
-const SYNC_FIELDS = ['enabled', 'onMinutes', 'offMinutes', 'activeHours', 'pwmState', 'nextTriggerAt'];
+const SYNC_FIELDS = ['enabled', 'onMinutes', 'offMinutes', 'activeHours', 'smartMode', 'pwmState', 'nextTriggerAt'];
 
 // 把内存 schedule 组装成 push 到 chrome.storage.sync 的瘦化对象。
 // nextTriggerAt 若已是过去时戳则推 0——让接收方识别为"相位未定"，
@@ -39,6 +39,9 @@ function composeSyncPayload(schedule, now = Date.now()) {
     activeHours: schedule.activeHours
       ? { ...schedule.activeHours }
       : { enabled: false, start: '08:00', end: '23:00' },
+    smartMode: schedule.smartMode
+      ? { enabled: !!schedule.smartMode.enabled, sensitivity: schedule.smartMode.sensitivity }
+      : { enabled: false, sensitivity: 50 },
     pwmState: schedule.pwmState === 'on' ? 'on' : 'off',
     // 远端若拿到过去时戳：本端刚 toggle 完到-下一周期绝对时间，
     // 但 sync 传输有延迟，1 分钟内仍可采纳用于边界对齐；超过 1 分钟
@@ -115,6 +118,11 @@ function computeConfigDiff(localSchedule, remote) {
   if (remote.activeHours && typeof remote.activeHours === 'object'
       && JSON.stringify(remote.activeHours) !== JSON.stringify(localSchedule?.activeHours)) {
     out.activeHours = { ...remote.activeHours };
+    changed = true;
+  }
+  if (remote.smartMode && typeof remote.smartMode === 'object'
+      && JSON.stringify(remote.smartMode) !== JSON.stringify(localSchedule?.smartMode)) {
+    out.smartMode = { ...remote.smartMode };
     changed = true;
   }
 

@@ -6,6 +6,7 @@
 importScripts('i18n.js');
 importScripts('sync-helpers.js');  // 跨设备同步的纯函数（composeSyncPayload / computePhaseAdoption）
 importScripts('pwm-phase.js');  // PWM 阶段推进、恢复与 live alarm 对齐的纯决策
+importScripts('smart-mode.js');  // 智能模式纯决策（computeSmartOnMinutes 等，无 chrome.* 副作用）
 const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const AC_PAGE = 'https://w5.ab.ust.hk/njggt/app/home';
@@ -83,7 +84,8 @@ let schedule = {
   pageTimerError: '',
   pageTimerRetryAt: 0,
   pageTimerRetryMinutes: 0,
-  activeHours: { enabled: false, start: '08:00', end: '23:00' }  // v0.5.x: PWM 运行时段（白名单，同日）
+  activeHours: { enabled: false, start: '08:00', end: '23:00' },  // v0.5.x: PWM 运行时段（白名单，同日）
+  smartMode: { enabled: false, sensitivity: 50 }  // v0.8.0: 智能模式（天气驱动的开启时长，灵敏度 0~100）
 };
 
 let pwmStepRunning = false;
@@ -212,6 +214,108 @@ function getStoredAlarmEndMs() {
 
 function setNextTriggerAt(nextTriggerAt) {
   schedule.nextTriggerAt = nextTriggerAt > 0 ? nextTriggerAt : 0;
+}
+
+// ===== 智能模式：天气取数（天文台开放数据 rhrread）+ 动态时长 =====
+// 按需求使用香港天文台开放数据 API（weather.php?dataType=rhrread，Current Weather Report）。
+// 实测其提供：气温（多站）、湿度（仅天文台一站）、分区雨量；不含露点与风速，且无清水湾
+// 实时站。故由 smart-mode.js 的 parseRhrreadWeather 解析：气温取西贡/将军澳站，露点由
+// 气温 + 湿度 Magnus 逆推，风速取 0（静风）为保守默认（风项在算法中保留）。天气仅作为
+// 本机运行态缓存，不进入 sync。
+const SMART_WEATHER_KEY = 'ac_smart_weather';
+const SMART_WEATHER_URL = 'https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en';
+const SMART_WEATHER_TTL_MS = 10 * 60 * 1000;  // 天气缓存 10 分钟
+let smartWeatherInFlight = null;
+
+function clampSmartSensitivity(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return 50;
+  return Math.round(Math.min(100, Math.max(0, n)));
+}
+
+async function fetchSmartWeather() {
+  const res = await fetch(SMART_WEATHER_URL, { cache: 'no-store' });
+  if (!res.ok) throw new Error(`天气接口 HTTP ${res.status}`);
+  const data = await res.json();
+  const parsed = parseRhrreadWeather(data);
+  if (!parsed) throw new Error('天气数据缺失或格式异常');
+  return { fetchedAt: Date.now(), ...parsed };
+}
+
+// 读取天气观测：缓存未过期直接返回，否则单飞拉取。
+// 拉取失败回退旧缓存并标记 stale；无缓存则返回错误占位（调用方退化为手动时长）。
+async function getSmartWeather({ force = false } = {}) {
+  if (!force) {
+    const cached = (await chrome.storage.local.get(SMART_WEATHER_KEY))[SMART_WEATHER_KEY];
+    if (cached && cached.fetchedAt && (Date.now() - cached.fetchedAt) < SMART_WEATHER_TTL_MS) {
+      return { ...cached, stale: false, error: '' };
+    }
+  }
+  if (smartWeatherInFlight) return smartWeatherInFlight;
+
+  smartWeatherInFlight = (async () => {
+    try {
+      const weather = await fetchSmartWeather();
+      await chrome.storage.local.set({ [SMART_WEATHER_KEY]: weather });
+      return { ...weather, stale: false, error: '' };
+    } catch (e) {
+      console.warn('[AC扩展] 智能模式天气拉取失败:', e?.message);
+      void appendDiagnosticLog('warn', 'smart-weather', e);
+      const cached = (await chrome.storage.local.get(SMART_WEATHER_KEY))[SMART_WEATHER_KEY];
+      if (cached && cached.fetchedAt) {
+        return { ...cached, stale: true, error: e?.message || String(e) };
+      }
+      return {
+        fetchedAt: 0,
+        temperature: null,
+        dewPoint: null,
+        windSpeedMs: null,
+        rainMm: null,
+        relativeHumidity: null,
+        stale: true,
+        error: e?.message || String(e)
+      };
+    } finally {
+      smartWeatherInFlight = null;
+    }
+  })();
+  return smartWeatherInFlight;
+}
+
+// 智能模式启用时，重算本周期 on/off 时长并注入 schedule（在 runPwmStep 顶部调用）。
+// 天气不可用 → 沿用手动时长（优雅降级，不点击、不推进）。
+async function applySmartModeDurations() {
+  if (!schedule.enabled || !schedule.smartMode?.enabled) return;
+
+  const weather = await getSmartWeather({ force: true });
+  const suggested = computeSmartOnMinutes({
+    sensitivity: schedule.smartMode.sensitivity,
+    temperature: weather.temperature,
+    dewPoint: weather.dewPoint,
+    windSpeedMs: weather.windSpeedMs,
+    rainMm: weather.rainMm
+  });
+
+  if (!suggested.valid) {
+    console.warn('[AC扩展] 智能模式：天气不可用，本周期沿用手动时长');
+    return;
+  }
+
+  if (suggested.onMinutes === 0) {
+    // 建议 0 分钟（过冷/过湿/大风）→ 本周期保持关闭，30 分钟后重估。
+    // 置 pwmState='off' 让 OFF 相位确保关闭（零点击）；onMinutes 仅占位，不进入 ON 相位。
+    schedule.pwmState = 'off';
+    schedule.onMinutes = 30;
+    schedule.offMinutes = 30;
+  } else {
+    schedule.onMinutes = suggested.onMinutes;
+    schedule.offMinutes = Math.max(1, suggested.offMinutes);
+  }
+
+  console.log(
+    `[AC扩展] 智能模式: K=${suggested.k.toFixed(3)} Teq=${suggested.teq.toFixed(1)}°C`
+    + ` t_raw=${suggested.tRaw.toFixed(1)} → on=${suggested.onMinutes}min / off=${schedule.offMinutes}min`
+  );
 }
 
 function clearPageTimerProofState() {
@@ -1060,6 +1164,9 @@ async function runPwmStep() {
     await loadScheduleFromStorage();
     if (!schedule.enabled) return;
 
+    // 智能模式：启用时按天气重算本周期 on/off 时长（X=0 → 保持关闭 30 分钟）。
+    await applySmartModeDurations();
+
     const targetAction = schedule.pwmState === 'on' ? 'on' : 'off';
     const currentDuration = Number(
       targetAction === 'on' ? schedule.onMinutes : schedule.offMinutes
@@ -1358,6 +1465,10 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     // L2 长连接保活不变量:每分钟顺带确保 offscreen 文档仍在,
     // 防止 Chrome/Edge 在长时间无活跃后回收 offscreen 文档导致端口失活。
     await ensureOffscreen();
+    // 智能模式：每分钟顺带刷新天气缓存（TTL 内直接返回，实际约每 10 分钟拉取一次）。
+    if (schedule.smartMode?.enabled) {
+      getSmartWeather().catch(() => {});
+    }
     // 间隔模式下的 storage 一致性校准:PWM 步骤漏写 storage 时,1 分钟内会被这里纠正。
     // 这样诊断面板看到的 storage.nextTriggerAt 永远不会落后 live ac-pwm 超过 1 分钟。
     if (schedule.enabled) {
@@ -2317,6 +2428,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           end: typeof data.activeHours.end === 'string' ? data.activeHours.end : (schedule.activeHours?.end || '23:00')
         };
       }
+      // smartMode 单独 merge（嵌套对象，v0.8.0）
+      if (data.smartMode && typeof data.smartMode === 'object') {
+        schedule.smartMode = {
+          enabled: !!data.smartMode.enabled,
+          sensitivity: clampSmartSensitivity(data.smartMode.sensitivity)
+        };
+      }
 
       let offResult = null;
       if (!schedule.enabled) {
@@ -2434,7 +2552,9 @@ chrome.runtime.onInstalled.addListener(async (details) => {
           alarmCreatedAt: 0,
           alarmDelayMinutes: 0,
           pageTimerTargetAt: 0,
-          pageTimerRetryMinutes: 0
+          pageTimerRetryMinutes: 0,
+          activeHours: { enabled: false, start: '08:00', end: '23:00' },
+          smartMode: { enabled: false, sensitivity: 50 }
         }
       });
       console.log('[AC扩展] 首次安装，已设置默认值（间隔模式）');
