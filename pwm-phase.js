@@ -246,6 +246,33 @@ function reconcilePwmTrigger(schedule, liveAlarm, opts = {}) {
     return { kind: 'noop', reason: 'no-future-live-alarm' };
   }
 
+  const { nextAligned, legacyAligned, requireLegacyAlignment } = computeTriggerAlignment(
+    schedule,
+    liveScheduledTime,
+    opts
+  );
+
+  if (nextAligned && (!requireLegacyAlignment || legacyAligned)) {
+    return { kind: 'noop', reason: 'already-aligned' };
+  }
+
+  return {
+    kind: 'sync-live',
+    reason: 'live-alarm-drift',
+    liveScheduledTime,
+    phasePatch: {
+      nextTriggerAt: liveScheduledTime,
+      alarmCreatedAt: now,
+      alarmDelayMinutes: Math.max(
+        1,
+        (liveScheduledTime - now) / PWM_PHASE_MINUTE_MS
+      )
+    }
+  };
+}
+
+// 提取（Fowler Extract Function）：三方对齐判定——nextTriggerAt 与 legacy 推算值分别在容差内对齐 live 时间。
+function computeTriggerAlignment(schedule, liveScheduledTime, opts) {
   const nextTriggerToleranceMs = pwmPhaseTolerance(
     opts?.nextTriggerToleranceMs,
     1500
@@ -266,23 +293,7 @@ function reconcilePwmTrigger(schedule, liveAlarm, opts = {}) {
     && Number.isFinite(legacyTriggerAt)
     && Math.abs(legacyTriggerAt - liveScheduledTime) <= legacyTriggerToleranceMs;
 
-  if (nextAligned && (!requireLegacyAlignment || legacyAligned)) {
-    return { kind: 'noop', reason: 'already-aligned' };
-  }
-
-  return {
-    kind: 'sync-live',
-    reason: 'live-alarm-drift',
-    liveScheduledTime,
-    phasePatch: {
-      nextTriggerAt: liveScheduledTime,
-      alarmCreatedAt: now,
-      alarmDelayMinutes: Math.max(
-        1,
-        (liveScheduledTime - now) / PWM_PHASE_MINUTE_MS
-      )
-    }
-  };
+  return { nextAligned, legacyAligned, requireLegacyAlignment };
 }
 
 if (typeof module !== 'undefined' && module.exports) {
