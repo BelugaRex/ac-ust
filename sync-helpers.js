@@ -211,38 +211,9 @@ function computePageTimerAdoption(localSchedule, pageTimerInput, opts = {}) {
   const parsed = parsePageTimerValue(pageTimerInput.value, now);
   if (!parsed || !parsed.valid) return null;
 
-  const onMinutes = Math.max(1, localSchedule.onMinutes || 60);
-  const offMinutes = Math.max(1, localSchedule.offMinutes || 60);
-  const cycleMs = (onMinutes + offMinutes) * 60000;
   const pageOffAt = parsed.targetMs;     // 页面定时器说"这个时刻关空调"
-  const localTrigger = Number(localSchedule.nextTriggerAt) || 0;
 
-  // 根据 pwmState 决定 page timer 映射到什么
-  let expectedTrigger;
-  if (localSchedule.pwmState === 'off') {
-    // AC 正开（下一步关）→ page timer 直接给"关"时刻
-    // 按周期找最接近本地 nextTriggerAt 的"关"边界，避免 page timer 太远时跳到不合理的周期
-    if (!localTrigger) {
-      expectedTrigger = pageOffAt;
-    } else {
-      const k = Math.round((localTrigger - pageOffAt) / cycleMs);
-      expectedTrigger = pageOffAt + k * cycleMs;
-      if (expectedTrigger < now) expectedTrigger += cycleMs;
-    }
-  } else {
-    // pwmState='on'：AC 正关（下一步开）
-    // page timer "T关" → 之后的"OFF"持续 offMinutes → 下一轮"开"在 T + offMinutes
-    // 按周期找最接近本地 nextTriggerAt 的"开"边界（确保在未来）
-    const baseOnAt = pageOffAt + offMinutes * 60000;
-    if (!localTrigger) {
-      expectedTrigger = baseOnAt;
-      while (expectedTrigger < now) expectedTrigger += cycleMs;
-    } else {
-      const k = Math.round((localTrigger - baseOnAt) / cycleMs);
-      expectedTrigger = baseOnAt + k * cycleMs;
-      if (expectedTrigger < now) expectedTrigger += cycleMs;
-    }
-  }
+  const { localTrigger, expectedTrigger } = computeExpectedTriggerFromPageTimer(localSchedule, pageOffAt, now);
 
   // 无本地触发 → 直接采纳
   if (!localTrigger) {
@@ -254,6 +225,39 @@ function computePageTimerAdoption(localSchedule, pageTimerInput, opts = {}) {
   if (diff <= toleranceMs) return null;   // 已对齐
 
   return { adopt: true, nextTriggerAt: expectedTrigger, source: 'page-timer', reason: 'deviation' };
+}
+
+// 提取（Fowler Extract Function）：由页面关机时刻推导期望的 PWM 触发边界（按 pwmState 映射到最近周期的关/开边界）。
+function computeExpectedTriggerFromPageTimer(localSchedule, pageOffAt, now) {
+  const onMinutes = Math.max(1, localSchedule.onMinutes || 60);
+  const offMinutes = Math.max(1, localSchedule.offMinutes || 60);
+  const cycleMs = (onMinutes + offMinutes) * 60000;
+  const localTrigger = Number(localSchedule.nextTriggerAt) || 0;
+
+  // 根据 pwmState 决定 page timer 映射到什么
+  if (localSchedule.pwmState === 'off') {
+    // AC 正开（下一步关）→ page timer 直接给"关"时刻
+    // 按周期找最接近本地 nextTriggerAt 的"关"边界，避免 page timer 太远时跳到不合理的周期
+    if (!localTrigger) {
+      return { localTrigger, expectedTrigger: pageOffAt };
+    }
+    let expectedTrigger = pageOffAt + Math.round((localTrigger - pageOffAt) / cycleMs) * cycleMs;
+    if (expectedTrigger < now) expectedTrigger += cycleMs;
+    return { localTrigger, expectedTrigger };
+  }
+
+  // pwmState='on'：AC 正关（下一步开）
+  // page timer "T关" → 之后的"OFF"持续 offMinutes → 下一轮"开"在 T + offMinutes
+  // 按周期找最接近本地 nextTriggerAt 的"开"边界（确保在未来）
+  const baseOnAt = pageOffAt + offMinutes * 60000;
+  if (!localTrigger) {
+    let expectedTrigger = baseOnAt;
+    while (expectedTrigger < now) expectedTrigger += cycleMs;
+    return { localTrigger, expectedTrigger };
+  }
+  let expectedTrigger = baseOnAt + Math.round((localTrigger - baseOnAt) / cycleMs) * cycleMs;
+  if (expectedTrigger < now) expectedTrigger += cycleMs;
+  return { localTrigger, expectedTrigger };
 }
 
 // ---- CommonJS/Node 兼容（SW 上下文没有 module） ----
