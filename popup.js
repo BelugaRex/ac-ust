@@ -228,16 +228,19 @@ function renderBalanceEstimate(schedule) {
   const displayAt = Number(estimate?.displayAt);
   if (!schedule?.enabled || !Number.isFinite(balance) || balance < 0
       || !Number.isFinite(displayAt)) {
-    balanceEstimate.classList.remove('is-urgent');
-    balanceEstimate.removeAttribute('aria-label');
-    balanceEstimate.hidden = true;
+    hideBalanceEstimate();
     return;
   }
 
   const locale = I18n.getLang().replace('_', '-');
   const { shortAt, fullAt } = formatBalanceExhaustionAt(displayAt, locale);
-
   const urgent = isBalanceEstimateUrgent(estimate?.usableWallMinutes);
+
+  showBalanceEstimate(shortAt, fullAt, urgent);
+}
+
+// 提取（Fowler Extract Function）：余额预计 DOM 应用——前缀/时刻两段内容、警示态与无障碍标签。
+function showBalanceEstimate(shortAt, fullAt, urgent) {
   const estimateTitle = t(urgent ? 'balanceEstimateUrgentTitle' : 'balanceEstimateTitle', fullAt);
   const estimatePrefix = document.createElement('span');
   estimatePrefix.className = 'balance-estimate-prefix';
@@ -254,6 +257,13 @@ function renderBalanceEstimate(schedule) {
     balanceEstimate.removeAttribute('aria-label');
   }
   balanceEstimate.hidden = false;
+}
+
+// 提取（Fowler Extract Function）：余额预计隐藏路径——不可用时清警示态与无障碍标签。
+function hideBalanceEstimate() {
+  balanceEstimate.classList.remove('is-urgent');
+  balanceEstimate.removeAttribute('aria-label');
+  balanceEstimate.hidden = true;
 }
 
 // 提取（Fowler Extract Function）：余额耗尽时刻的本地化格式化（同日/次日/具体日期 + 时:分）。
