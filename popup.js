@@ -235,25 +235,7 @@ function renderBalanceEstimate(schedule) {
   }
 
   const locale = I18n.getLang().replace('_', '-');
-  const target = new Date(displayAt);
-  const today = new Date();
-  const tomorrow = new Date(today);
-  tomorrow.setDate(today.getDate() + 1);
-  const sameDay = target.toDateString() === today.toDateString();
-  const nextDay = target.toDateString() === tomorrow.toDateString();
-  const clockAt = `${String(target.getHours()).padStart(2, '0')}:${String(target.getMinutes()).padStart(2, '0')}`;
-  const monthDay = `${String(target.getMonth() + 1).padStart(2, '0')}-${String(target.getDate()).padStart(2, '0')}`;
-  const shortDate = sameDay
-    ? t('balanceEstimateToday')
-    : nextDay
-      ? t('balanceEstimateTomorrow')
-      : monthDay;
-  const shortAt = `${shortDate} ${clockAt}`;
-  const fullAt = new Intl.DateTimeFormat(locale, {
-    dateStyle: 'medium',
-    timeStyle: 'short',
-    hourCycle: 'h23'
-  }).format(target);
+  const { shortAt, fullAt } = formatBalanceExhaustionAt(displayAt, locale);
 
   const urgent = isBalanceEstimateUrgent(estimate?.usableWallMinutes);
   const estimateTitle = t(urgent ? 'balanceEstimateUrgentTitle' : 'balanceEstimateTitle', fullAt);
@@ -272,6 +254,31 @@ function renderBalanceEstimate(schedule) {
     balanceEstimate.removeAttribute('aria-label');
   }
   balanceEstimate.hidden = false;
+}
+
+// 提取（Fowler Extract Function）：余额耗尽时刻的本地化格式化（同日/次日/具体日期 + 时:分）。
+function formatBalanceExhaustionAt(displayAt, locale) {
+  const target = new Date(displayAt);
+  const today = new Date();
+  const tomorrow = new Date(today);
+  tomorrow.setDate(today.getDate() + 1);
+  const sameDay = target.toDateString() === today.toDateString();
+  const nextDay = target.toDateString() === tomorrow.toDateString();
+  const clockAt = `${String(target.getHours()).padStart(2, '0')}:${String(target.getMinutes()).padStart(2, '0')}`;
+  const monthDay = `${String(target.getMonth() + 1).padStart(2, '0')}-${String(target.getDate()).padStart(2, '0')}`;
+  const shortDate = sameDay
+    ? t('balanceEstimateToday')
+    : nextDay
+      ? t('balanceEstimateTomorrow')
+      : monthDay;
+  return {
+    shortAt: `${shortDate} ${clockAt}`,
+    fullAt: new Intl.DateTimeFormat(locale, {
+      dateStyle: 'medium',
+      timeStyle: 'short',
+      hourCycle: 'h23'
+    }).format(target)
+  };
 }
 
 function updateCountdownDisplay(schedule, alarm) {
