@@ -2043,38 +2043,43 @@ async function mergeBalanceReading(status) {
 async function getScheduleSnapshot(lite = false) {
   await loadScheduleFromStorage();
 
+  // 提取（Fowler Extract Function）：快照富化——legacy 回填 → live 对齐 → 边界与剩余分钟补丁（保持只读，不落盘）。
+  function enrichScheduleSnapshot(snapshot, alarm, liveAlarmEnd) {
+    // getSchedule/getScheduleLite 是 popup 的普通轮询入口，必须保持只读。
+    // live alarm 或旧相对字段只能补充本次返回快照；持久化自愈留给 init、
+    // watchdog 和用户主动触发的诊断，避免打开 popup 改变下一次 PWM 调度。
+    if (!snapshot.nextTriggerAt) {
+      const legacyEnd = getLegacyAlarmEndMs();
+      if (legacyEnd) snapshot.nextTriggerAt = legacyEnd;
+    }
+
+    const triggerPlan = reconcilePwmTrigger(snapshot, alarm, PWM_TRIGGER_SNAPSHOT_OPTIONS);
+    if (triggerPlan.kind === 'sync-live') {
+      Object.assign(snapshot, triggerPlan.phasePatch);
+    }
+
+    const storedAlarmEnd = snapshot.nextTriggerAt || (
+      snapshot.alarmCreatedAt && snapshot.alarmDelayMinutes
+        ? snapshot.alarmCreatedAt + snapshot.alarmDelayMinutes * 60000
+        : 0
+    );
+    const nextBoundary = liveAlarmEnd || (storedAlarmEnd > Date.now() ? storedAlarmEnd : 0);
+
+    if (snapshot.enabled && nextBoundary) {
+      const remainingMs = nextBoundary - Date.now();
+      if (remainingMs > 0) {
+        snapshot._nextBoundary = nextBoundary;
+        snapshot.alarmCreatedAt = Date.now();
+        snapshot.alarmDelayMinutes = remainingMs / 60000;
+      }
+    }
+  }
+
   const alarm = await chrome.alarms.get('ac-pwm');
   const liveAlarmEnd = getLiveAlarmEndMs(alarm);
   const snapshot = { ...schedule };
 
-  // getSchedule/getScheduleLite 是 popup 的普通轮询入口，必须保持只读。
-  // live alarm 或旧相对字段只能补充本次返回快照；持久化自愈留给 init、
-  // watchdog 和用户主动触发的诊断，避免打开 popup 改变下一次 PWM 调度。
-  if (!snapshot.nextTriggerAt) {
-    const legacyEnd = getLegacyAlarmEndMs();
-    if (legacyEnd) snapshot.nextTriggerAt = legacyEnd;
-  }
-
-  const triggerPlan = reconcilePwmTrigger(snapshot, alarm, PWM_TRIGGER_SNAPSHOT_OPTIONS);
-  if (triggerPlan.kind === 'sync-live') {
-    Object.assign(snapshot, triggerPlan.phasePatch);
-  }
-
-  const storedAlarmEnd = snapshot.nextTriggerAt || (
-    snapshot.alarmCreatedAt && snapshot.alarmDelayMinutes
-      ? snapshot.alarmCreatedAt + snapshot.alarmDelayMinutes * 60000
-      : 0
-  );
-  const nextBoundary = liveAlarmEnd || (storedAlarmEnd > Date.now() ? storedAlarmEnd : 0);
-
-  if (snapshot.enabled && nextBoundary) {
-    const remainingMs = nextBoundary - Date.now();
-    if (remainingMs > 0) {
-      snapshot._nextBoundary = nextBoundary;
-      snapshot.alarmCreatedAt = Date.now();
-      snapshot.alarmDelayMinutes = remainingMs / 60000;
-    }
-  }
+  enrichScheduleSnapshot(snapshot, alarm, liveAlarmEnd);
 
   if (lite) {
     // Lite 模式：跳过 getCurrentACStatus（tabs.query + sendMessage），仅返回调度快照
