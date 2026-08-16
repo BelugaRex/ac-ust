@@ -2358,6 +2358,7 @@ const BACKGROUND_MESSAGE_TYPES = new Set([
   'getSchedule',
   'getScheduleLite',
   'getPageTimer',
+  'refreshSmartWeather',
   'repairSchedule',
   'toggleNow',
   'ensureDiagnostics'
@@ -2435,6 +2436,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sensitivity: clampSmartSensitivity(data.smartMode.sensitivity)
         };
       }
+      // 智能模式开启时立即拉取天气（fire-and-forget），让 popup 读数即时可用；
+      // getSmartWeather 内部有 10 分钟 TTL 节流，缓存新鲜时不会重复请求。
+      if (schedule.smartMode?.enabled) {
+        getSmartWeather().catch(() => {});
+      }
 
       let offResult = null;
       if (!schedule.enabled) {
@@ -2473,6 +2479,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'getPageTimer') {
       const pageTimer = await getCurrentPageTimer();
       sendResponse(pageTimer);
+      return;
+    }
+    if (msg.type === 'refreshSmartWeather') {
+      // popup 主动触发天气拉取（天气缓存缺失/过期时）；getSmartWeather 内部有 TTL 节流。
+      const weather = await getSmartWeather();
+      sendResponse({ success: true, weather });
       return;
     }
     if (msg.type === 'repairSchedule') {

@@ -195,6 +195,9 @@ function renderSmartReadout(suggested, weather) {
   }
 }
 
+let smartWeatherRefreshAt = 0;
+const SMART_WEATHER_TTL_MS = 10 * 60 * 1000;
+
 async function updateSmartReadout() {
   if (!currentSmartMode.enabled) {
     renderSmartReadout(null, null);
@@ -214,7 +217,21 @@ async function updateSmartReadout() {
 
   try {
     const stored = await chrome.storage.local.get('ac_smart_weather');
-    const weather = stored.ac_smart_weather;
+    let weather = stored.ac_smart_weather;
+    const fetchedAt = Number(weather?.fetchedAt) || 0;
+    const isStale = !weather || fetchedAt === 0 || (Date.now() - fetchedAt) > SMART_WEATHER_TTL_MS;
+
+    // 天气缓存缺失/过期：主动触发后台拉取（节流 60s，后台另有 TTL 兜底）
+    if (isStale && (Date.now() - smartWeatherRefreshAt) > 60 * 1000) {
+      smartWeatherRefreshAt = Date.now();
+      try {
+        const resp = await chrome.runtime.sendMessage({ type: 'refreshSmartWeather' });
+        if (resp && resp.weather && Number.isFinite(Number(resp.weather.temperature))) {
+          weather = resp.weather;
+        }
+      } catch (_) { /* SW 未就绪，下轮重试 */ }
+    }
+
     if (!weather || !Number.isFinite(Number(weather.temperature))) {
       renderSmartReadout(null, weather || null);
       return;
