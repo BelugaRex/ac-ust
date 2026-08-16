@@ -332,6 +332,12 @@ function updateCountdownDisplay(schedule, alarm) {
     announceState(t('acStopped'));
   }
 
+  // 计算并渲染 hero 倒计时（提取自 updateCountdownDisplay，Fowler Extract Function）
+  renderCountdown(schedule, alarm, nextAction);
+}
+
+// 提取（Fowler Extract Function）：倒计时来源链（_nextBoundary → live alarm → alarmCreatedAt 推算）与 hero 渲染。
+function renderCountdown(schedule, alarm, nextAction) {
   // 计算倒计时（v0.5.x 起只保留间隔模式）
   let remainingMs = 0;
   if (schedule._nextBoundary) {
