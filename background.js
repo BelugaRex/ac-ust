@@ -537,16 +537,18 @@ async function applySyncedPhase(remote, reason = '') {
   const nowEnabled = schedule.enabled;
 
   // 2) 相位字段需通过严格守卫（陈旧/容忍/自回环），computePhaseAdoption 决策
-  const adopt = computePhaseAdoption(schedule, remote, { lastSyncedAt });
-  let phaseChanged = false;
-  if (adopt) {
+  // 提取（Fowler Extract Function）：相位采纳 + ac-pwm 重排；远端时戳过期则推进到下一未来边界。
+  async function adoptPhaseAndRearm(remote, nowEnabled) {
+    const adopt = computePhaseAdoption(schedule, remote, { lastSyncedAt });
+    if (!adopt) return false;
+
     const oldPwmState = schedule.pwmState;
     const oldTrigger = schedule.nextTriggerAt;
     schedule.pwmState = adopt.pwmState;
     setNextTriggerAt(adopt.nextTriggerAt);
     schedule.alarmCreatedAt = Date.now();
     schedule.alarmDelayMinutes = Math.max(1, (adopt.nextTriggerAt - Date.now()) / 60000);
-    phaseChanged = (oldPwmState !== schedule.pwmState || oldTrigger !== schedule.nextTriggerAt);
+    const phaseChanged = (oldPwmState !== schedule.pwmState || oldTrigger !== schedule.nextTriggerAt);
 
     if (phaseChanged && nowEnabled) {
       try {
@@ -563,7 +565,10 @@ async function applySyncedPhase(remote, reason = '') {
         console.warn('[AC扩展] sync 合并：重排 ac-pwm 闹钟失败:', e?.message);
       }
     }
+    return phaseChanged;
   }
+
+  const phaseChanged = await adoptPhaseAndRearm(remote, nowEnabled);
 
   // 3) 闹钟基础设施重建——只由 config 变更驱动（相位路径只管 ac-pwm）
   //    关键修复：若 enabled 在 sync 中翻为 true 但无相位（远端刚 enable 还没跑完第一步），
