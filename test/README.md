@@ -77,6 +77,11 @@ python3 test/verify-icon.py
 - `npm install playwright`(临时安装,不入 package.json)
 - 桌面环境(headed Chrome/Edge 可启动,headless 模式 MV3 行为异常)
 - 系统已装 Chrome 或 Edge
+- **WSL2 额外依赖**(2026-08-16 实证):系统缺 `libnspr4/libnss3/libasound` 时,
+把 noble 版 deb 提取出的库放 `.test-profile/libs/extracted/`(已忽略),运行时先
+`export LD_LIBRARY_PATH="$PWD/.test-profile/libs/extracted/usr/lib/x86_64-linux-
+gnu:$LD_LIBRARY_PATH"`;不装 questing 等更新版本包(报 `GLIBC_2.43 not found`)。
+缺库时运行可能无任何输出直接退出,先查库路径再怀疑脚本。
 
 **运行**:
 ```bash
