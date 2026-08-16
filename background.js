@@ -2071,6 +2071,34 @@ async function getScheduleSnapshot(lite = false) {
 }
 
 async function toggleNowAndSync(action) {
+  // 提取（Fowler Extract Function）：手动开机后的 ON 相位布防——清旧 alarm、新鲜页确认关机定时器，失败保持 on 相位 1 分钟重试。
+  async function armOnPhaseTimerAndAlarms() {
+    // 手动开机同样是一个新的 PWM ON 阶段。先清旧 alarm 以免验证期间旧的
+    // OFF 边界抢跑；新鲜页确认失败则保持 pwmState='on'，下一次不会再点击。
+    schedule.pwmState = 'on';
+    setNextTriggerAt(0);
+    schedule.alarmCreatedAt = 0;
+    schedule.alarmDelayMinutes = 0;
+    await chrome.alarms.clear('ac-pwm');
+
+    const timerResult = await setPageTimer(schedule.onMinutes, { retryOnFailure: false });
+    if (!timerResult?.success) {
+      schedule.pageTimerError = `手动开机后页面关机定时器未确认：${timerResult?.error || '未知错误'}；保持 on 相位，1 分钟后重试`;
+      await createPwmAlarmWithVerify(1, 'toggle-pageTimer-failed');
+      await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+      await persistSchedule('toggleNowAndSync-pageTimer-failed');
+      await updateBadge();
+      const status = await getCurrentACStatus();
+      return {
+        success: false,
+        error: schedule.pageTimerError,
+        result: timerResult,
+        schedule: { ...schedule, actualStatus: status }
+      };
+    }
+    return null;
+  }
+
   if (action === 'off') {
     const timerResult = await requestTimerBasedShutdown('toggle-now-off');
     const status = await getCurrentACStatus();
@@ -2105,29 +2133,8 @@ async function toggleNowAndSync(action) {
   await chrome.alarms.clear('ac-page-timer-retry');
 
   if (currentOn) {
-    // 手动开机同样是一个新的 PWM ON 阶段。先清旧 alarm 以免验证期间旧的
-    // OFF 边界抢跑；新鲜页确认失败则保持 pwmState='on'，下一次不会再点击。
-    schedule.pwmState = 'on';
-    setNextTriggerAt(0);
-    schedule.alarmCreatedAt = 0;
-    schedule.alarmDelayMinutes = 0;
-    await chrome.alarms.clear('ac-pwm');
-
-    const timerResult = await setPageTimer(schedule.onMinutes, { retryOnFailure: false });
-    if (!timerResult?.success) {
-      schedule.pageTimerError = `手动开机后页面关机定时器未确认：${timerResult?.error || '未知错误'}；保持 on 相位，1 分钟后重试`;
-      await createPwmAlarmWithVerify(1, 'toggle-pageTimer-failed');
-      await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-      await persistSchedule('toggleNowAndSync-pageTimer-failed');
-      await updateBadge();
-      const status = await getCurrentACStatus();
-      return {
-        success: false,
-        error: schedule.pageTimerError,
-        result: timerResult,
-        schedule: { ...schedule, actualStatus: status }
-      };
-    }
+    const failedResult = await armOnPhaseTimerAndAlarms();
+    if (failedResult) return failedResult;
   }
 
   schedule.pwmState = currentOn ? 'off' : 'on';
