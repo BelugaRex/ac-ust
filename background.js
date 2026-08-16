@@ -942,6 +942,35 @@ async function runPwmStep() {
   }
   pwmStepRunning = true;
 
+  // 提取（Fowler Extract Function）：PWM 开机 hold 分支——单次点击 + 只读复核，不在外围重试。
+  // 观察结果写回 observations，最终返回重新规划后的 plan。
+  async function resolveToggleOnHold(plan, observations) {
+    try {
+      const toggleResult = await toggleAC('on');
+      observations.toggleSucceeded = !!toggleResult?.success;
+      observations.toggleError = toggleResult?.error || '';
+      if (!observations.toggleSucceeded) {
+        schedule.pageTimerError = `自动开启未确认：${toggleResult?.error || '未知错误'}`;
+      }
+    } catch (e) {
+      observations.toggleSucceeded = false;
+      observations.toggleError = e?.message || String(e);
+      schedule.pageTimerError = `自动开启异常：${observations.toggleError}`;
+    }
+
+    if (!observations.toggleSucceeded) {
+      const actual = await getCurrentACStatus();
+      observations.acIsOn = actual?.isOn;
+      if (actual?.isOn === true) {
+        schedule.pageTimerError = '';
+        console.log('[AC扩展] PWM 开机只读复核通过：AC=ON');
+      } else {
+        console.warn(`[AC扩展] PWM 本轮未开机：实际=${actual?.isOn}；外围不重复点击，1分钟后重试`);
+      }
+    }
+    return planPwmStep(schedule, observations);
+  }
+
   return waitUntil((async () => {
   try {
     await loadScheduleFromStorage();
@@ -980,30 +1009,7 @@ async function runPwmStep() {
     }
 
     if (plan.kind === 'hold' && plan.prerequisite === 'toggle-on') {
-      try {
-        const toggleResult = await toggleAC('on');
-        observations.toggleSucceeded = !!toggleResult?.success;
-        observations.toggleError = toggleResult?.error || '';
-        if (!observations.toggleSucceeded) {
-          schedule.pageTimerError = `自动开启未确认：${toggleResult?.error || '未知错误'}`;
-        }
-      } catch (e) {
-        observations.toggleSucceeded = false;
-        observations.toggleError = e?.message || String(e);
-        schedule.pageTimerError = `自动开启异常：${observations.toggleError}`;
-      }
-
-      if (!observations.toggleSucceeded) {
-        const actual = await getCurrentACStatus();
-        observations.acIsOn = actual?.isOn;
-        if (actual?.isOn === true) {
-          schedule.pageTimerError = '';
-          console.log('[AC扩展] PWM 开机只读复核通过：AC=ON');
-        } else {
-          console.warn(`[AC扩展] PWM 本轮未开机：实际=${actual?.isOn}；外围不重复点击，1分钟后重试`);
-        }
-      }
-      plan = planPwmStep(schedule, observations);
+      plan = await resolveToggleOnHold(plan, observations);
     }
 
     if (plan.kind === 'hold' && plan.prerequisite === 'set-page-timer') {
