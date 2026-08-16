@@ -103,68 +103,54 @@
   // 所有物理开关尝试都集中在这里，content/background 不再叠加点击重试；
   // 当前生产调度仅传入 true（ON），OFF 完全由页面定时器执行。
   async function ensureACState(targetState, clickCount = 0) {
-    const current = getACStatusInPageWorld();
-    if (typeof current.isOn === 'boolean' && current.isOn === targetState) {
-      console.log(`[AC扩展] ensureACState: 已达到 ${targetState ? 'ON' : 'OFF'}，点击数=${clickCount}`);
+    // 提取（Fowler Extract Function）：统一结果形状——避免三处成功/四处失败对象重复构造。
+    function successResult(status, clickCount) {
       return {
         success: true,
         alreadyDone: clickCount === 0,
         verified: true,
         stable: true,
-        status: current,
+        status,
         clicks: clickCount,
         via: 'main-world-ensureACState'
       };
+    }
+    function failureResult(status, clickCount, error) {
+      return {
+        success: false,
+        verified: false,
+        status,
+        clicks: clickCount,
+        error,
+        via: 'main-world-ensureACState'
+      };
+    }
+
+    const current = getACStatusInPageWorld();
+    if (typeof current.isOn === 'boolean' && current.isOn === targetState) {
+      console.log(`[AC扩展] ensureACState: 已达到 ${targetState ? 'ON' : 'OFF'}，点击数=${clickCount}`);
+      return successResult(current, clickCount);
     }
 
     if (clickCount >= MAX_AC_SWITCH_CLICKS) {
       console.warn(`[AC扩展] ensureACState: ${MAX_AC_SWITCH_CLICKS} 次点击后仍未达到 ${targetState ? 'ON' : 'OFF'}`);
-      return {
-        success: false,
-        verified: false,
-        status: current,
-        clicks: clickCount,
-        error: `主世界已点击 ${MAX_AC_SWITCH_CLICKS} 次仍未达到 ${targetState ? 'ON' : 'OFF'}`,
-        via: 'main-world-ensureACState'
-      };
+      return failureResult(current, clickCount, `主世界已点击 ${MAX_AC_SWITCH_CLICKS} 次仍未达到 ${targetState ? 'ON' : 'OFF'}`);
     }
 
     const sw = await waitForACSwitchInPageWorld(5000);
     if (!sw) {
-      return {
-        success: false,
-        verified: false,
-        status: current,
-        clicks: clickCount,
-        error: '主世界等待 AC 开关超时',
-        via: 'main-world-ensureACState'
-      };
+      return failureResult(current, clickCount, '主世界等待 AC 开关超时');
     }
 
     // 等待 DOM 的过程中状态可能已被另一设备改变，点击前必须再检查一次。
     const beforeClick = getACStatusInPageWorld();
     if (typeof beforeClick.isOn === 'boolean' && beforeClick.isOn === targetState) {
-      return {
-        success: true,
-        alreadyDone: clickCount === 0,
-        verified: true,
-        stable: true,
-        status: beforeClick,
-        clicks: clickCount,
-        via: 'main-world-ensureACState'
-      };
+      return successResult(beforeClick, clickCount);
     }
 
     console.log(`[AC扩展] ensureACState: 当前=${beforeClick.isOn}，目标=${targetState}，执行第 ${clickCount + 1} 次单击`);
     if (!clickElementOnceInPageWorld(sw)) {
-      return {
-        success: false,
-        verified: false,
-        status: beforeClick,
-        clicks: clickCount,
-        error: '主世界 AC 开关 click() 调用失败',
-        via: 'main-world-ensureACState'
-      };
+      return failureResult(beforeClick, clickCount, '主世界 AC 开关 click() 调用失败');
     }
 
     await clickConfirmDialogInPageWorld(3000);
