@@ -110,6 +110,11 @@ function getACStatus() {
     if (text.includes('OFF')) return { isOn: false, source: 'ant-switch-text' };
   }
 
+  return getLegacyACStatus();
+}
+
+// 提取（Fowler Extract Function）：旧版页面 Semantic UI toggle 的状态扫描与兜底匹配。
+function getLegacyACStatus() {
   // 旧版页面: 通过 DOM 判断 Semantic UI toggle 状态
   const checkboxes = document.querySelectorAll('.ui.toggle.checkbox input[type="checkbox"]');
   for (const cb of checkboxes) {
