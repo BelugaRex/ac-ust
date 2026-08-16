@@ -165,6 +165,19 @@ async function onActiveBoundaryCrossed() {
   // 重新调度下一次边界（先调度，避免后续 await 抛出时漏掉）
   rescheduleActiveBoundary();
 
+  // 提取（Fowler Extract Function）：退出运行时段停用路径——B1 顺序：先 persist 已停用状态再执行长流程关机。
+  async function shutdownAfterActiveHoursLeave() {
+    await resetDisabledPwmRuntime();
+    // B1（active-hours 离开）：先 persist 已停用状态再执行长流程关机 — 与
+    // updateSchedule、applySyncedPhase 同步停用路径保持顺序一致，避免 SW 在
+    // verifyPageTimerPersistence 长流程中被杀导致闹钟自愈"复活" PWM。
+    await persistSchedule('active-hours-leave-pre-shutdown', { syncFromLiveAlarm: false });
+    const shutdownResult = await requestTimerBasedShutdown('active-hours-leave');
+    if (!shutdownResult?.success) {
+      schedule.pageTimerError = `退出运行时段后页面关机定时器未确认：${shutdownResult?.error || '未知错误'}`;
+    }
+  }
+
   const inside = isWithinActiveHours();
   if (inside && !schedule.enabled) {
     // 进入运行时段 → 自动启用 PWM
@@ -180,15 +193,7 @@ async function onActiveBoundaryCrossed() {
     // 退出运行时段 → 关闭 PWM 并停机（避免噪音）
     console.log('[ac-ust] active hours: leaving, auto-disable PWM');
     schedule.enabled = false;
-    await resetDisabledPwmRuntime();
-    // B1（active-hours 离开）：先 persist 已停用状态再执行长流程关机 — 与
-    // updateSchedule、applySyncedPhase 同步停用路径保持顺序一致，避免 SW 在
-    // verifyPageTimerPersistence 长流程中被杀导致闹钟自愈"复活" PWM。
-    await persistSchedule('active-hours-leave-pre-shutdown', { syncFromLiveAlarm: false });
-    const shutdownResult = await requestTimerBasedShutdown('active-hours-leave');
-    if (!shutdownResult?.success) {
-      schedule.pageTimerError = `退出运行时段后页面关机定时器未确认：${shutdownResult?.error || '未知错误'}`;
-    }
+    await shutdownAfterActiveHoursLeave();
     await persistSchedule('active-hours-leave');
     // [v0.5.6] 同步推送离开时段状态
     await syncScheduleToSync('active-hours-leave');
