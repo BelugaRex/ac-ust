@@ -1110,7 +1110,8 @@ async function verifyPageTimerPersistence(expectedValue) {
   let lastActualValue = '';
   let lastFailure = '';
 
-  for (let attempt = 0; attempt < PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length; attempt++) {
+  // 提取（Fowler Extract Function）：单次新鲜页读回尝试——建临时隐藏页、读回、比对、回收。
+  async function attemptPersistenceRead(expectedValue, attempt) {
     let verifierTabId = null;
     try {
       await sleep(PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS[attempt]);
@@ -1131,14 +1132,15 @@ async function verifyPageTimerPersistence(expectedValue) {
         { action: 'getPageTimer' }
       );
       const actualValue = String(readback?.value || readback?.title || '').trim();
-      lastActualValue = actualValue;
       if (readback?.found && actualValue === expectedValue) {
-        return { success: true, value: actualValue, attempts: attempt + 1 };
+        return { success: true, value: actualValue };
       }
 
       lastFailure = `第 ${attempt + 1} 次新鲜页读回不匹配（期望 ${expectedValue}，实际 ${actualValue || '空'}）`;
+      return { success: false, actualValue };
     } catch (e) {
       lastFailure = `第 ${attempt + 1} 次新鲜页验证异常：${e?.message || String(e)}`;
+      return { success: false };
     } finally {
       // 每个临时验证页只负责一次全新导航读回，立即回收；写入来源页仍由
       // setPageTimer finally 中已有的 ac-close-tab-* 延迟回收逻辑统一处理。
@@ -1147,6 +1149,16 @@ async function verifyPageTimerPersistence(expectedValue) {
         // 标签已正常回收，清掉上面登记的兜底闹钟，避免误关后续重用同 id 的标签。
         try { await chrome.alarms.clear(`ac-close-tab-${verifierTabId}`); } catch (_) { /* alarm may already fire or absent */ }
       }
+    }
+  }
+
+  for (let attempt = 0; attempt < PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length; attempt++) {
+    const attemptResult = await attemptPersistenceRead(expectedValue, attempt);
+    if (attemptResult.success) {
+      return { success: true, value: attemptResult.value, attempts: attempt + 1 };
+    }
+    if (attemptResult.actualValue !== undefined) {
+      lastActualValue = attemptResult.actualValue;
     }
   }
 
