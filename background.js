@@ -755,6 +755,26 @@ async function ensureOffscreen() {
 async function watchdogCheck() {
   await loadScheduleFromStorage();
   if (!schedule.enabled) return;
+
+  // 提取（Fowler Extract Function）：看门狗缺失闹钟恢复——按剩余时间补恢复，失败则补执行当前阶段动作。
+  async function recoverMissingPwmAlarm() {
+    const restored = await restoreIntervalAlarmFromStorage('看门狗：PWM 闹钟缺失，已按剩余时间补恢复');
+    if (restored) return;
+    console.warn('[AC扩展] 看门狗：PWM 闹钟缺失，补执行当前阶段动作');
+    try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
+  }
+
+  // 提取（Fowler Extract Function）：看门狗过期闹钟恢复——补恢复 → 推进下一周期边界 → 补执行。
+  async function recoverExpiredPwmAlarm(alarm) {
+    const restored = await restoreIntervalAlarmFromStorage('看门狗：PWM 闹钟过期，已按剩余时间补恢复');
+    if (restored) return;
+    // 尝试从已过期闹钟推进到下一周期边界，避免重置为整段 60 分钟
+    const advanced = await advanceExpiredAlarmToNextBoundary(alarm.scheduledTime);
+    if (advanced) return;
+    console.warn('[AC扩展] 看门狗：PWM 闹钟已过期，触发执行...');
+    try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
+  }
+
   const alarm = await chrome.alarms.get('ac-pwm');
 
   // 活闹钟存在 → 确保 storage 的 nextTriggerAt 与 alarm 同步（防止 SW 被 kill 后丢失）
@@ -764,18 +784,9 @@ async function watchdogCheck() {
   }
 
   if (!alarm) {
-    const restored = await restoreIntervalAlarmFromStorage('看门狗：PWM 闹钟缺失，已按剩余时间补恢复');
-    if (restored) return;
-    console.warn('[AC扩展] 看门狗：PWM 闹钟缺失，补执行当前阶段动作');
-    try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
+    await recoverMissingPwmAlarm();
   } else if (alarm.scheduledTime <= Date.now() - 60000) {
-    const restored = await restoreIntervalAlarmFromStorage('看门狗：PWM 闹钟过期，已按剩余时间补恢复');
-    if (restored) return;
-    // 尝试从已过期闹钟推进到下一周期边界，避免重置为整段 60 分钟
-    const advanced = await advanceExpiredAlarmToNextBoundary(alarm.scheduledTime);
-    if (advanced) return;
-    console.warn('[AC扩展] 看门狗：PWM 闹钟已过期，触发执行...');
-    try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
+    await recoverExpiredPwmAlarm(alarm);
   }
 }
 
