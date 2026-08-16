@@ -799,6 +799,20 @@ async function init() {
   }
 
   try {
+    // 提取（Fowler Extract Function）：init 终极防线——间隔模式下强制从 live ac-pwm 同步 nextTriggerAt 到 storage。
+    async function syncFinalLiveAlarmOnInit() {
+      // 终极防线：init 完成时，间隔模式下强制从 live ac-pwm 同步 nextTriggerAt 到 storage。
+      // 防止 SW 跑早期版本代码、setupAlarms 走重建路径、或某条 persist 漏 sync 时出现
+      // "活闹钟在但 storage 缺绝对触发时间" 的红灯。init 末尾是端到端最后一道闭环。
+      if (schedule.enabled) {
+        const finalLiveAlarm = await chrome.alarms.get('ac-pwm');
+        const triggerPlan = await persistReconciledPwmTrigger(finalLiveAlarm, 'init-finalSync', PWM_TRIGGER_NEXT_ONLY_OPTIONS);
+        if (triggerPlan) {
+          console.log(`[AC扩展] init 末尾: 已从 live alarm 强制同步 nextTriggerAt=${new Date(triggerPlan.liveScheduledTime).toLocaleTimeString()}`);
+        }
+      }
+    }
+
     // 加载 i18n 翻译（SW 上下文也需用 t() 做角标/标题）
     await I18n.load();
     // 最先确保 badge-tick alarm 存在（PWM 补检 + 角标 + SW 保活）
@@ -819,16 +833,7 @@ async function init() {
       await createAlarm('ac-watchdog', { periodInMinutes: 5 });
     }
     await recoverPageTimerRetryOnStartup();
-    // 终极防线：init 完成时，间隔模式下强制从 live ac-pwm 同步 nextTriggerAt 到 storage。
-    // 防止 SW 跑早期版本代码、setupAlarms 走重建路径、或某条 persist 漏 sync 时出现
-    // "活闹钟在但 storage 缺绝对触发时间" 的红灯。init 末尾是端到端最后一道闭环。
-    if (schedule.enabled) {
-      const finalLiveAlarm = await chrome.alarms.get('ac-pwm');
-      const triggerPlan = await persistReconciledPwmTrigger(finalLiveAlarm, 'init-finalSync', PWM_TRIGGER_NEXT_ONLY_OPTIONS);
-      if (triggerPlan) {
-        console.log(`[AC扩展] init 末尾: 已从 live alarm 强制同步 nextTriggerAt=${new Date(triggerPlan.liveScheduledTime).toLocaleTimeString()}`);
-      }
-    }
+    await syncFinalLiveAlarmOnInit();
     // init 完成:打开 SW 启动时间跟踪
     swStartupTime = Date.now();
     initCompletedAt = swStartupTime;
