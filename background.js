@@ -781,6 +781,23 @@ async function watchdogCheck() {
 
 // ----- 启动时加载设置并创建闹钟 -----
 async function init() {
+  // 提取（Fowler Extract Function）：启动时恢复页面定时器重试（不依赖 schedule.enabled）。
+  async function recoverPageTimerRetryOnStartup() {
+    // 关闭 PWM / 离开运行时段后也可能仍需补设 1 分钟关机定时器，
+    // 因此不以 schedule.enabled 为前提恢复该重试闹钟。浏览器关闭期间错过的
+    // retry 也必须重新排程，不能因原时间已经过去而静默放弃关机安全网。
+    const retryMinutes = Number(schedule.pageTimerRetryMinutes) || 0;
+    const retryAt = Number(schedule.pageTimerRetryAt) || 0;
+    if (retryMinutes > 0) {
+      if (retryAt > Date.now()) {
+        await createAlarm('ac-page-timer-retry', { when: retryAt });
+      } else {
+        await schedulePageTimerRetry(retryMinutes, '启动恢复错过的页面定时器重试');
+        await persistSchedule('init-recover-overdue-page-timer-retry', { syncFromLiveAlarm: false });
+      }
+    }
+  }
+
   try {
     // 加载 i18n 翻译（SW 上下文也需用 t() 做角标/标题）
     await I18n.load();
@@ -801,19 +818,7 @@ async function init() {
     if (schedule.enabled) {
       await createAlarm('ac-watchdog', { periodInMinutes: 5 });
     }
-    // 关闭 PWM / 离开运行时段后也可能仍需补设 1 分钟关机定时器，
-    // 因此不以 schedule.enabled 为前提恢复该重试闹钟。浏览器关闭期间错过的
-    // retry 也必须重新排程，不能因原时间已经过去而静默放弃关机安全网。
-    const retryMinutes = Number(schedule.pageTimerRetryMinutes) || 0;
-    const retryAt = Number(schedule.pageTimerRetryAt) || 0;
-    if (retryMinutes > 0) {
-      if (retryAt > Date.now()) {
-        await createAlarm('ac-page-timer-retry', { when: retryAt });
-      } else {
-        await schedulePageTimerRetry(retryMinutes, '启动恢复错过的页面定时器重试');
-        await persistSchedule('init-recover-overdue-page-timer-retry', { syncFromLiveAlarm: false });
-      }
-    }
+    await recoverPageTimerRetryOnStartup();
     // 终极防线：init 完成时，间隔模式下强制从 live ac-pwm 同步 nextTriggerAt 到 storage。
     // 防止 SW 跑早期版本代码、setupAlarms 走重建路径、或某条 persist 漏 sync 时出现
     // "活闹钟在但 storage 缺绝对触发时间" 的红灯。init 末尾是端到端最后一道闭环。
@@ -859,44 +864,49 @@ async function setupAlarms(startImmediately = false) {
   }
 
   // ----- 间隔模式 -----
-  const now = Date.now();
-  const existingAlarm = await chrome.alarms.get('ac-pwm');
-  const liveDueAt = getLiveAlarmEndMs(existingAlarm);
-  if (liveDueAt) {
-    await syncStoredTriggerFromAlarm(existingAlarm, 'setupAlarms: 沿用现有 PWM 闹钟');
-    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-    await updateBadge();
-    console.log('[AC扩展] 沿用浏览器中已有的 PWM 闹钟');
-    return;
-  }
-
-  const existingEnd = getStoredAlarmEndMs();
-  const remainingMinutes = existingEnd > now
-    ? Math.max(1, (existingEnd - now) / 60000)
-    : null;
-
-  if (remainingMinutes) {
-    const restored = await restoreIntervalAlarmFromStorage('PWM 闹钟已恢复');
-    if (restored) return;
-  }
-
-  // 闹钟和 storage 都不在将来 → 尝试从已过期的闹钟时间推进
-  if (existingAlarm?.scheduledTime && existingAlarm.scheduledTime <= now) {
-    const advanced = await advanceExpiredAlarmToNextBoundary(existingAlarm.scheduledTime);
-    if (advanced) {
-      console.log('[AC扩展] 已从过期闹钟推进到下一周期边界');
+  // 提取（Fowler Extract Function）：间隔模式下的闹钟恢复链——live 沿用 → storage 恢复 → 过期推进 → 立即补执行 → 重建。
+  async function recoverIntervalAlarm() {
+    const now = Date.now();
+    const existingAlarm = await chrome.alarms.get('ac-pwm');
+    const liveDueAt = getLiveAlarmEndMs(existingAlarm);
+    if (liveDueAt) {
+      await syncStoredTriggerFromAlarm(existingAlarm, 'setupAlarms: 沿用现有 PWM 闹钟');
+      await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+      await updateBadge();
+      console.log('[AC扩展] 沿用浏览器中已有的 PWM 闹钟');
       return;
     }
+
+    const existingEnd = getStoredAlarmEndMs();
+    const remainingMinutes = existingEnd > now
+      ? Math.max(1, (existingEnd - now) / 60000)
+      : null;
+
+    if (remainingMinutes) {
+      const restored = await restoreIntervalAlarmFromStorage('PWM 闹钟已恢复');
+      if (restored) return;
+    }
+
+    // 闹钟和 storage 都不在将来 → 尝试从已过期的闹钟时间推进
+    if (existingAlarm?.scheduledTime && existingAlarm.scheduledTime <= now) {
+      const advanced = await advanceExpiredAlarmToNextBoundary(existingAlarm.scheduledTime);
+      if (advanced) {
+        console.log('[AC扩展] 已从过期闹钟推进到下一周期边界');
+        return;
+      }
+    }
+
+    if (existingEnd && existingEnd <= now) {
+      console.warn('[AC扩展] PWM 计划时间已过，立即补执行到期动作');
+      await runPwmStep();
+      return;
+    }
+
+    await repairScheduleClock();
+    console.log('[AC扩展] PWM 闹钟缺失，已按当前状态重建');
   }
 
-  if (existingEnd && existingEnd <= now) {
-    console.warn('[AC扩展] PWM 计划时间已过，立即补执行到期动作');
-    await runPwmStep();
-    return;
-  }
-
-  await repairScheduleClock();
-  console.log('[AC扩展] PWM 闹钟缺失，已按当前状态重建');
+  await recoverIntervalAlarm();
 }
 
 function sanitizeMinutes(value, fallback) {
