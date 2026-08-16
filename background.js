@@ -922,8 +922,7 @@ function sanitizeMinutes(value, fallback) {
 
 async function updateBadge() {
   if (!schedule.enabled) {
-    await chrome.action.setBadgeText({ text: '' });
-    await chrome.action.setTitle({ title: t('badgeDefault') });
+    await clearBadge();
     return;
   }
 
@@ -933,8 +932,7 @@ async function updateBadge() {
   const storedAlarmEnd = getStoredAlarmEndMs();
   const nextBoundary = liveAlarmEnd || (storedAlarmEnd > Date.now() ? storedAlarmEnd : 0);
   if (!nextBoundary) {
-    await chrome.action.setBadgeText({ text: '' });
-    await chrome.action.setTitle({ title: t('badgeDefault') });
+    await clearBadge();
     return;
   }
 
@@ -957,6 +955,12 @@ async function updateBadge() {
   await chrome.action.setTitle({
     title: t('badgeIntervalCountdown', t(currentOn ? 'acRunning' : 'acStopped'), String(remainingMinutes), t(nextAction === 'on' ? 'actionOn' : 'actionOff'))
   });
+}
+
+// 提取（Fowler Extract Function）：清空角标文案与标题（禁用/无边界两条路径共用）。
+async function clearBadge() {
+  await chrome.action.setBadgeText({ text: '' });
+  await chrome.action.setTitle({ title: t('badgeDefault') });
 }
 
 async function runPwmStep() {
