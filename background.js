@@ -984,6 +984,32 @@ async function runPwmStep() {
     return planPwmStep(schedule, observations);
   }
 
+  // 提取（Fowler Extract Function）：PWM 失败重试分支——写失败诊断、排 1 分钟重试，调用点随后提前返回。
+  async function resolveRetryPlan(plan, observations, targetAction) {
+    const failureDetail = plan.reason === 'page-timer-failed'
+      ? observations.pageTimerError
+      : observations.toggleError;
+    applyPwmPlanState(plan);
+    if (plan.reason === 'page-timer-failed' && targetAction === 'on') {
+      schedule.pageTimerError = `开机已成功，但页面关机定时器未确认：${failureDetail || '未知错误'}；保持 on 相位，1 分钟后重试 setPageTimer`;
+    } else {
+      schedule.pageTimerError = failureDetail || schedule.pageTimerError
+        || `自动${targetAction === 'on' ? '开启' : '关闭'}验证失败，1分钟后重试`;
+    }
+    await createPwmAlarmFromPlan(
+      plan,
+      plan.reason === 'page-timer-failed' ? 'PWM-pageTimer-failed' : 'PWM失败重试'
+    );
+    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+    await persistSchedule(
+      plan.reason === 'page-timer-failed'
+        ? 'runPwmStep-on-pageTimer-failed'
+        : 'runPwmStep-interval'
+    );
+    await updateBadge();
+    console.warn(`[AC扩展] PWM 未提交，保持 pwmState=${schedule.pwmState}，1分钟后重试`);
+  }
+
   return waitUntil((async () => {
   try {
     await loadScheduleFromStorage();
@@ -1038,28 +1064,7 @@ async function runPwmStep() {
     }
 
     if (plan.kind === 'retry') {
-      const failureDetail = plan.reason === 'page-timer-failed'
-        ? observations.pageTimerError
-        : observations.toggleError;
-      applyPwmPlanState(plan);
-      if (plan.reason === 'page-timer-failed' && targetAction === 'on') {
-        schedule.pageTimerError = `开机已成功，但页面关机定时器未确认：${failureDetail || '未知错误'}；保持 on 相位，1 分钟后重试 setPageTimer`;
-      } else {
-        schedule.pageTimerError = failureDetail || schedule.pageTimerError
-          || `自动${targetAction === 'on' ? '开启' : '关闭'}验证失败，1分钟后重试`;
-      }
-      await createPwmAlarmFromPlan(
-        plan,
-        plan.reason === 'page-timer-failed' ? 'PWM-pageTimer-failed' : 'PWM失败重试'
-      );
-      await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-      await persistSchedule(
-        plan.reason === 'page-timer-failed'
-          ? 'runPwmStep-on-pageTimer-failed'
-          : 'runPwmStep-interval'
-      );
-      await updateBadge();
-      console.warn(`[AC扩展] PWM 未提交，保持 pwmState=${schedule.pwmState}，1分钟后重试`);
+      await resolveRetryPlan(plan, observations, targetAction);
       return;
     }
 
