@@ -410,15 +410,15 @@ async function updateSchedule(enabled, restart = false) {
     showStatus(enabled ? t('statusOnOK') : t('statusClosedOK'), 'success');
     return;
   }
-  
-  const response = await chrome.runtime.sendMessage({
-    type: 'updateSchedule',
-    data: data
-  });
-  
-  if (response && response.success) {
+
+  // 提取（Fowler Extract Function）：后台 updateSchedule 响应的本地应用——状态文案与倒计时刷新。
+  async function applyScheduleUpdateResponse(response) {
+    if (!response?.success) {
+      showStatus(t('statusError'), 'error');
+      return;
+    }
+
     currentScheduleEnabled = data.enabled;
-    let finalResponse = response;
 
     // 手动开关冷气（定时已关时会自动关机）
     if (!data.enabled) {
@@ -430,10 +430,14 @@ async function updateSchedule(enabled, restart = false) {
     }
 
     const alarm = await chrome.alarms.get('ac-pwm');
-    updateCountdownDisplay(attachCachedActualStatus(finalResponse.schedule), alarm);
-  } else {
-    showStatus(t('statusError'), 'error');
+    updateCountdownDisplay(attachCachedActualStatus(response.schedule), alarm);
   }
+
+  const response = await chrome.runtime.sendMessage({
+    type: 'updateSchedule',
+    data: data
+  });
+  await applyScheduleUpdateResponse(response);
 }
 
 // ----- 定时拨动开关（双向同步 toggle） -----
