@@ -2221,6 +2221,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     await initReady;
 
     if (msg.type === 'updateSchedule') {
+      // 提取（Fowler Extract Function）：用户停用路径——B1 顺序：先持久化"已关闭"状态再执行关机。
+      const shutdownAfterScheduleDisable = async () => {
+        await resetDisabledPwmRuntime();
+        // B1: 先持久化"已关闭"状态，再执行关机 — 确保即便 toggleAC 因 SW 终止而丢失，状态已写入 storage
+        await persistSchedule('updateSchedule');
+        const offResult = await requestTimerBasedShutdown('schedule-disabled');
+        if (!offResult?.success) {
+          schedule.pageTimerError = `定时已关闭，但页面关机定时器未确认：${offResult?.error || '未知错误'}`;
+        }
+        return offResult;
+      };
+
       const wasEnabled = schedule.enabled;
       const { restart, ...data } = msg.data;  // 防止 restart 泄漏到 schedule 对象中
       schedule = {
@@ -2242,13 +2254,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       let offResult = null;
       if (!schedule.enabled) {
-        await resetDisabledPwmRuntime();
-        // B1: 先持久化"已关闭"状态，再执行关机 — 确保即便 toggleAC 因 SW 终止而丢失，状态已写入 storage
-        await persistSchedule('updateSchedule');
-        offResult = await requestTimerBasedShutdown('schedule-disabled');
-        if (!offResult?.success) {
-          schedule.pageTimerError = `定时已关闭，但页面关机定时器未确认：${offResult?.error || '未知错误'}`;
-        }
+        offResult = await shutdownAfterScheduleDisable();
       } else if (!wasEnabled || restart) {
         schedule.pwmState = 'on';
         // 不在这里 clear nextTriggerAt——让接下来的 runPwmStep() 用正确值覆写。
