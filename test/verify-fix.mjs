@@ -1377,6 +1377,22 @@ async function runTests() {
       && disabledEnsureResult.error.includes('被禁用')
       && disabledEnsureClickCalls === 0,
     '9G-5: 禁用开关时 ensureACState 直接返回失败且零点击（不再徒劳点 3 次）');
+  // 9G-6: 反证——启用开关（free mode 下余额为 0 也不禁用）不被误判禁用，仍走完整点击链路。
+  let enabledEnsureClickCalls = 0;
+  const { ensureACState: ensureEnabled } = loadEnsure(
+    () => ({ isOn: false, disabled: false, source: 'main-world-ant-switch' }),
+    async () => ({}),
+    () => { enabledEnsureClickCalls += 1; return true; },
+    async () => false,
+    async () => {},
+    3,
+    10000
+  );
+  const enabledEnsureResult = await ensureEnabled(true);
+  assertPass(enabledEnsureResult.success === false
+      && enabledEnsureResult.clicks === 3
+      && enabledEnsureClickCalls === 3,
+    '9G-6: 启用开关（free mode）不判禁用，仍走 3 次点击链路后才失败');
   assertPass(countOccurrences(pwmBody, "toggleAC('on')") === 1
       && !pwmBody.includes('for (let retry'),
     '9H: 每个 PWM 开机步骤只调用一次 toggleAC(on)，无外围点击重试循环');

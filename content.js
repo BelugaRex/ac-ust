@@ -114,6 +114,7 @@ function getACStatus() {
   return getLegacyACStatus();
 }
 
+// 基于 DOM 的 disabled 状态判定，而非余额数值：free mode 下余额为 0 也不禁用。
 function isAntACSwitchDisabled(sw) {
   if (!sw) return false;
   return sw.disabled === true

@@ -76,6 +76,9 @@
     return { isOn: null, disabled, error: '主世界无法判断 AC 状态' };
   }
 
+  // 基于 DOM 的 disabled 状态判定，而非余额数值：free mode 下余额为 0 也不禁用。
+  // 页面把开关设 disabled 的条件 = (余额<=0 || 余额百分比<=0 || 加载中) && free_mode===null，
+  // free mode 时 DOM 无 disabled 标记，本函数返回 false，仍可正常点击开机。
   function isACSwitchDisabledInPageWorld(sw) {
     if (!sw) return false;
     return sw.disabled === true
