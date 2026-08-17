@@ -296,10 +296,38 @@ function computeTriggerAlignment(schedule, liveScheduledTime, opts) {
   return { nextAligned, legacyAligned, requireLegacyAlignment };
 }
 
+// 智能模式整点对齐：返回下一个整点（HH:00:00.000）的绝对毫秒时间。
+function nextHourBoundary(now = Date.now()) {
+  const d = new Date(now);
+  d.setMinutes(0, 0, 0);
+  d.setHours(d.getHours() + 1);
+  return d.getTime();
+}
+
+// 智能模式：把 OFF 提交的下一 ON 触发锚定到整点，使 60 分钟周期与整点对齐。
+// ON 提交（nextAction='off'）保持 now + onMinutes 不变——因 ON 相位已在整点开始，
+// 其结束时刻（整点 + onMinutes）天然落在整点节奏上。
+function alignSmartModeNextTrigger(plan, now = Date.now()) {
+  if (!plan || plan.nextAction !== 'on') return;
+  const currentTriggerAt = Number(plan.nextTriggerAt);
+  if (!Number.isFinite(currentTriggerAt) || currentTriggerAt <= now) return;
+  const nextHour = nextHourBoundary(now);
+  if (nextHour <= now) return;
+  plan.nextTriggerAt = nextHour;
+  if (typeof plan.delayMinutes === 'number') {
+    plan.delayMinutes = Math.max(1, (nextHour - now) / PWM_PHASE_MINUTE_MS);
+  }
+  if (plan.phasePatch) {
+    plan.phasePatch.nextTriggerAt = nextHour;
+  }
+}
+
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     planPwmStep,
     planPwmRecovery,
-    reconcilePwmTrigger
+    reconcilePwmTrigger,
+    nextHourBoundary,
+    alignSmartModeNextTrigger
   };
 }

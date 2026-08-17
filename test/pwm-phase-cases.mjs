@@ -4,7 +4,9 @@ const MINUTE_MS = 60_000;
 const {
   planPwmStep,
   planPwmRecovery,
-  reconcilePwmTrigger
+  reconcilePwmTrigger,
+  nextHourBoundary,
+  alignSmartModeNextTrigger
 } = pwmPhase;
 
 export function runPwmPhaseCases(assertPass) {
@@ -23,9 +25,39 @@ export function runPwmPhaseCases(assertPass) {
 
   assertPass(
     Object.keys(pwmPhase).sort().join(',')
-      === 'planPwmRecovery,planPwmStep,reconcilePwmTrigger',
-    'PWM phase module 仅导出三个规划函数'
+      === 'alignSmartModeNextTrigger,nextHourBoundary,planPwmRecovery,planPwmStep,reconcilePwmTrigger',
+    'PWM phase module 导出规划函数与整点对齐函数'
   );
+
+  // 智能模式整点对齐：nextHourBoundary 与 alignSmartModeNextTrigger
+  const hourTime = (h, m) => new Date(2026, 7, 17, h, m, 0).getTime();
+  assertPass(nextHourBoundary(hourTime(13, 20)) === hourTime(14, 0),
+    'nextHourBoundary: 13:20 → 14:00');
+  assertPass(nextHourBoundary(hourTime(14, 0)) === hourTime(15, 0),
+    'nextHourBoundary: 整点也进到下一小时');
+
+  const smartOffCommit = {
+    kind: 'commit',
+    nextAction: 'on',
+    nextTriggerAt: hourTime(14, 20),
+    delayMinutes: 37,
+    phasePatch: { pwmState: 'on', nextTriggerAt: hourTime(14, 20) }
+  };
+  alignSmartModeNextTrigger(smartOffCommit, hourTime(13, 43));
+  assertPass(smartOffCommit.nextTriggerAt === hourTime(14, 0)
+      && smartOffCommit.phasePatch.nextTriggerAt === hourTime(14, 0),
+    'alignSmartModeNextTrigger: OFF 提交的下一 ON 触发对齐到整点');
+
+  const smartOnCommit = {
+    kind: 'commit',
+    nextAction: 'off',
+    nextTriggerAt: hourTime(14, 23),
+    delayMinutes: 23,
+    phasePatch: { pwmState: 'off', nextTriggerAt: hourTime(14, 23) }
+  };
+  alignSmartModeNextTrigger(smartOnCommit, hourTime(14, 0));
+  assertPass(smartOnCommit.nextTriggerAt === hourTime(14, 23),
+    'alignSmartModeNextTrigger: ON 提交保持 now + onMinutes 不变');
 
   const immutableSchedule = { ...base, nested: { value: 1 } };
   const immutableAlarm = { scheduledTime: now + 10 * MINUTE_MS };
