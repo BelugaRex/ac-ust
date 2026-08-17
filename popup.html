@@ -1290,8 +1290,9 @@
       <div class="settings-header" id="smartSectionHeader">
         <h3 id="smartModeTitle" data-i18n="smartModeLabel"></h3>
         <div class="toggle-area">
+          <span class="visually-hidden" id="smartModeToggleState" data-i18n="timerDisabled" aria-live="polite" aria-atomic="true"></span>
           <label class="toggle-switch">
-            <input type="checkbox" id="smartModeToggle" aria-labelledby="smartModeTitle">
+            <input type="checkbox" id="smartModeToggle" aria-labelledby="smartModeTitle" aria-describedby="smartModeToggleState">
             <span class="toggle-slider"></span>
           </label>
         </div>

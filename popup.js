@@ -69,6 +69,7 @@ const countdownText = document.getElementById('countdownText');
 const safetynetWarning = document.getElementById('safetynetWarning');
 const balanceEstimate = document.getElementById('balanceEstimate');
 const smartModeToggle = document.getElementById('smartModeToggle');
+const smartModeToggleState = document.getElementById('smartModeToggleState');
 const smartSensitivity = document.getElementById('smartSensitivity');
 const timerBody = document.getElementById('timerBody');
 const smartBody = document.getElementById('smartBody');
@@ -145,6 +146,7 @@ function syncModeUI() {
 
   _smartProgrammatic = true;
   smartModeToggle.checked = smartOn;
+  smartModeToggleState.textContent = smartOn ? t('timerEnabled') : t('timerDisabled');
   _smartProgrammatic = false;
 
   // 灵敏度滑块始终可调，便于在开启智能控制前预设偏好
@@ -238,7 +240,8 @@ async function updateSmartReadout() {
       smartWeatherRefreshAt = Date.now();
       try {
         const resp = await chrome.runtime.sendMessage({ type: 'refreshSmartWeather' });
-        if (resp && resp.weather && Number.isFinite(Number(resp.weather.temperature))) {
+        if (resp && resp.weather) {
+          // 无论是否有效都更新，保留 error 以便在“数据更新”行显示“天气数据不可用”
           weather = resp.weather;
         }
       } catch (_) { /* SW 未就绪，下轮重试 */ }
