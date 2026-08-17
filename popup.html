@@ -1238,7 +1238,7 @@
 
     <!-- Settings card: toggle in header, clock/interval in body -->
     <div class="settings-card" role="group" aria-labelledby="pwmSettingsTitle">
-      <div class="settings-header">
+      <div class="settings-header" id="timerSectionHeader">
         <h3 id="pwmSettingsTitle" data-i18n="pwmSettings"></h3>
         <div class="toggle-area">
           <span class="visually-hidden" id="timerToggleState" data-i18n="timerDisabled" aria-live="polite" aria-atomic="true"></span>
@@ -1248,7 +1248,8 @@
           </label>
         </div>
       </div>
-      <div class="setting-group" id="activeHoursSection">
+      <div id="timerBody">
+        <div class="setting-group" id="activeHoursSection">
         <div class="section-heading" id="activeHoursRow">
           <label class="section-title" for="activeHoursToggle" data-i18n="activeHoursLabel"></label>
           <label class="toggle-switch">
@@ -1285,15 +1286,17 @@
           </div>
         </div>
       </div>
-      <div class="setting-group" id="smartModeSection">
-        <div class="section-heading" id="smartModeRow">
-          <label class="section-title" for="smartModeToggle" data-i18n="smartModeLabel"></label>
+      </div>
+      <div class="settings-header" id="smartSectionHeader">
+        <h3 id="smartModeTitle" data-i18n="smartModeLabel"></h3>
+        <div class="toggle-area">
           <label class="toggle-switch">
-            <input type="checkbox" id="smartModeToggle">
+            <input type="checkbox" id="smartModeToggle" aria-labelledby="smartModeTitle">
             <span class="toggle-slider"></span>
           </label>
         </div>
-        <div class="smart-body" id="smartModeBody">
+      </div>
+      <div class="setting-group smart-body" id="smartBody">
           <div class="smart-slider-row">
             <span class="smart-end" data-i18n="smartModeWeak"></span>
             <input type="range" id="smartSensitivity" min="0" max="100" step="1" value="50" data-i18n-aria-label="smartModeSensitivityLabel">
@@ -1314,7 +1317,6 @@
             </div>
           </div>
           <div class="smart-hint" id="smartModeHint" data-i18n="smartModeHint"></div>
-        </div>
       </div>
       <div class="settings-hint" id="scheduleHintPin" data-i18n="scheduleHintPinTab"></div>
     </div>

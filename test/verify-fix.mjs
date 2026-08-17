@@ -280,7 +280,7 @@ async function runTests() {
   console.log('\n\n=== PWM phase 纯决策接口 ===\n');
   runPwmPhaseCases(assertPass);
 
-  console.log('\n\n=== 智能模式纯决策接口 (v0.8.0) ===\n');
+  console.log('\n\n=== 智能控制纯决策接口 (v0.8.0) ===\n');
   // K 映射（0%→0.30，100%→1.00，线性无级）
   assertPass(Math.abs(smartMode.sensitivityToK(0) - 0.30) < 1e-9, 'smart: K(0%)=0.30');
   assertPass(Math.abs(smartMode.sensitivityToK(100) - 1.00) < 1e-9, 'smart: K(100%)=1.00');
@@ -601,7 +601,7 @@ async function runTests() {
   assertPass(/\.toggle-switch\s*\{[^}]*?width:\s*36px[^}]*?height:\s*20px/.test(popupCssNoComments)
       && /\.toggle-switch::after\s*\{[^}]*?inset:\s*-11px\s+-4px/.test(popupCssNoComments)
       && (popupHtml.match(/class="toggle-switch"/g) || []).length === 3,
-    '三个拨杆（主开关/运行时段/智能模式）统一为 36×20px，并通过绝对命中区达到桌面指针目标要求');
+    '三个拨杆（主开关/运行时段/智能控制）统一为 36×20px，并通过绝对命中区达到桌面指针目标要求');
   assertPass((popupHtml.match(/class="number-field"/g) || []).length === 2
       && (popupHtml.match(/class="field-unit" data-i18n="unitMinutes"/g) || []).length === 2
       && /\.field-unit\s*\{[^}]*?position:\s*absolute[^}]*?pointer-events:\s*none/.test(popupCssNoComments),

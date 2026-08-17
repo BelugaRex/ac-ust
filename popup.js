@@ -70,7 +70,8 @@ const safetynetWarning = document.getElementById('safetynetWarning');
 const balanceEstimate = document.getElementById('balanceEstimate');
 const smartModeToggle = document.getElementById('smartModeToggle');
 const smartSensitivity = document.getElementById('smartSensitivity');
-const smartModeBody = document.getElementById('smartModeBody');
+const timerBody = document.getElementById('timerBody');
+const smartBody = document.getElementById('smartBody');
 const smartSuggested = document.getElementById('smartSuggested');
 const smartTeq = document.getElementById('smartTeq');
 const smartUpdated = document.getElementById('smartUpdated');
@@ -92,6 +93,8 @@ let currentScheduleEnabled = false;
 let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
 let currentSmartMode = { enabled: false, sensitivity: 50 };
 let lastAnnouncedState = '';
+let _toggleProgrammatic = false; // 防止程序同步 timerToggle 时触发 onChange 循环
+let _smartProgrammatic = false;  // 防止程序同步 smartModeToggle 时触发 onChange 循环
 
 function clampSmartSensitivityLocal(value) {
   const n = Number(value);
@@ -120,7 +123,7 @@ async function loadSettings() {
     enabled: !!sm.enabled,
     sensitivity: clampSmartSensitivityLocal(sm.sensitivity ?? 50)
   };
-  syncSmartModeUI();
+  syncModeUI();
 }
 
 function syncActiveHoursUI() {
@@ -131,14 +134,25 @@ function syncActiveHoursUI() {
   activeHoursEnd.disabled = !currentActiveHours.enabled;
 }
 
-function syncSmartModeUI() {
-  smartModeToggle.checked = currentSmartMode.enabled;
+function syncModeUI() {
+  const smartOn = currentSmartMode.enabled;
+  const timerOn = currentScheduleEnabled && !smartOn;
+
+  _toggleProgrammatic = true;
+  timerToggle.checked = timerOn;
+  timerToggleState.textContent = timerOn ? t('timerEnabled') : t('timerDisabled');
+  _toggleProgrammatic = false;
+
+  _smartProgrammatic = true;
+  smartModeToggle.checked = smartOn;
+  _smartProgrammatic = false;
+
+  // 灵敏度滑块始终可调，便于在开启智能控制前预设偏好
   smartSensitivity.value = String(currentSmartMode.sensitivity);
-  smartSensitivity.disabled = !currentSmartMode.enabled;
-  smartModeBody.classList.toggle('is-disabled', !currentSmartMode.enabled);
-  // 智能模式覆盖手动时长：开启时禁用 on/off 输入，关闭时恢复
-  onMinutesInput.disabled = currentSmartMode.enabled;
-  offMinutesInput.disabled = currentSmartMode.enabled;
+
+  // 平级互斥折叠：智能控制开 → 折叠循环定时 body；循环定时开 → 折叠智能控制 body
+  timerBody.hidden = smartOn;
+  smartBody.hidden = timerOn;
 }
 
 function commitActiveHours() {
@@ -159,8 +173,6 @@ activeHoursStart.addEventListener('change', commitActiveHours);
 activeHoursEnd.addEventListener('change', commitActiveHours);
 
 // ----- 智能模式：开关 + 灵敏度滑块 + 实时读数 -----
-let _smartProgrammatic = false;
-
 function renderSmartReadout(suggested, weather) {
   const hasData = !!(suggested && suggested.valid);
   // 建议开启分钟数
@@ -251,10 +263,11 @@ async function updateSmartReadout() {
 
 smartModeToggle.addEventListener('change', async () => {
   if (_smartProgrammatic) return;
-  currentSmartMode.enabled = smartModeToggle.checked;
-  syncSmartModeUI();
-  // 主定时开启时重启周期以立即重算；关闭时仅持久化 smartMode（关机路径幂等）
-  await updateSchedule(currentScheduleEnabled, currentScheduleEnabled);
+  const enabled = smartModeToggle.checked;
+  currentSmartMode.enabled = enabled;
+  currentScheduleEnabled = enabled;  // 智能控制开 = 自动控制开；关 = 自动控制全关（与循环定时互斥）
+  syncModeUI();
+  await updateSchedule(enabled, true);
   await updateSmartReadout();
 });
 
@@ -267,7 +280,7 @@ smartSensitivity.addEventListener('input', () => {
 smartSensitivity.addEventListener('change', async () => {
   // 释放滑块：仅持久化灵敏度，不重启当前 30 分钟周期（实际执行周期固定 30 分钟）
   currentSmartMode.sensitivity = clampSmartSensitivityLocal(smartSensitivity.value);
-  syncSmartModeUI();
+  syncModeUI();
   await updateSchedule(currentScheduleEnabled, false);
 });
 
@@ -440,9 +453,13 @@ function formatBalanceExhaustionAt(displayAt, locale) {
 
 function updateCountdownDisplay(schedule, alarm) {
   renderBalanceEstimate(schedule);
+  // 同步智能模式启用状态（跨设备 sync / 后台变更后保持 UI 一致；不覆盖灵敏度，避免拖动滑块时跳回）
+  if (schedule && typeof schedule.smartMode === 'object') {
+    currentSmartMode.enabled = !!schedule.smartMode.enabled;
+  }
   if (!schedule || !schedule.enabled) {
     currentScheduleEnabled = false;
-    syncToggleState(false);
+    syncModeUI();
     // 定时未启用
     acDot.className = 'ac-dot off';
     acStateText.textContent = t('acOff');
@@ -454,7 +471,7 @@ function updateCountdownDisplay(schedule, alarm) {
   }
 
   currentScheduleEnabled = true;
-  syncToggleState(true);
+  syncModeUI();
   idleDisplay.style.display = 'none';
   countdownDisplay.style.display = 'flex';
 
@@ -589,11 +606,14 @@ async function updateSchedule(enabled, restart = false) {
 }
 
 // ----- 定时拨动开关（双向同步 toggle） -----
-let _toggleProgrammatic = false; // 防止程序同步时触发 onChange 循环
-
 timerToggle.addEventListener('change', async () => {
   if (_toggleProgrammatic) return; // 程序同步，不触发 updateSchedule
   const enabled = timerToggle.checked;
+  currentScheduleEnabled = enabled;
+  if (enabled) {
+    currentSmartMode.enabled = false;  // 平级互斥：开循环定时 → 关智能控制
+  }
+  syncModeUI();
   timerToggle.disabled = true; // 防止双击
   timerToggleState.textContent = enabled ? t('timerEnabling') : t('timerDisabling');
   timerToggle.setAttribute('aria-busy', 'true');
@@ -604,14 +624,6 @@ timerToggle.addEventListener('change', async () => {
     timerToggle.removeAttribute('aria-busy');
   }
 });
-
-// 供外部（refreshStatus）同步 toggle 状态时不触发 onChange
-function syncToggleState(enabled) {
-  _toggleProgrammatic = true;
-  timerToggle.checked = enabled;
-  timerToggleState.textContent = enabled ? t('timerEnabled') : t('timerDisabled');
-  _toggleProgrammatic = false;
-}
 
 // ----- 已启用时修改分钟数自动重启 -----
 for (const input of [onMinutesInput, offMinutesInput]) {
