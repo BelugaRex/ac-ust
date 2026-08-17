@@ -218,9 +218,9 @@ function setNextTriggerAt(nextTriggerAt) {
 
 // ===== 智能模式：天气取数（天文台开放数据 rhrread）+ 动态时长 =====
 // 按需求使用香港天文台开放数据 API（weather.php?dataType=rhrread，Current Weather Report）。
-// 实测其提供：气温（多站）、湿度（仅天文台一站）、分区雨量；不含露点与风速，且无清水湾
-// 实时站。故由 smart-mode.js 的 parseRhrreadWeather 解析：气温取西贡/将军澳站，露点由
-// 气温 + 湿度 Magnus 逆推，风速取 0（静风）为保守默认（风项在算法中保留）。天气仅作为
+// 实测其提供：气温（多站）、湿度（仅天文台一站）、分区雨量；不含露点与风速。故由
+// smart-mode.js 的 parseRhrreadWeather 解析：气温取将军澳站（Tseung Kwan O / JKB），
+// 露点由气温 + 湿度 Magnus 逆推，风速取 0（静风）为保守默认（风项在算法中保留）。天气仅作为
 // 本机运行态缓存，不进入 sync。
 const SMART_WEATHER_KEY = 'ac_smart_weather';
 const SMART_WEATHER_URL = 'https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en';

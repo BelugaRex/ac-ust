@@ -122,13 +122,12 @@
 
   // ---- 天文台开放数据（rhrread）解析 ----
   // 数据源：香港天文台开放数据 API `weather.php?dataType=rhrread`（Current Weather Report）。
-  // 实测其提供：气温（多站）、湿度（仅天文台一站）、分区雨量；**不提供露点与风速**，
-  // 且 rhrread 实时站列表当前不含清水湾站（Clear Water Bay，站号 CWB）。故：
-  //   - 气温：优先取清水湾站（CWB，未来 rhrread 收录后自动生效），回退到距 HKUST 最近的西贡/将军澳站
+  // 实测其提供：气温（多站）、湿度（仅天文台一站）、分区雨量；**不提供露点与风速**。故：
+  //   - 气温：优先取将军澳站（Tseung Kwan O，站号 JKB），回退到西贡/清水湾/天文台
   //   - 露点：由气温 + 湿度用 Magnus 逆推（deriveDewPoint，天文台开放数据不提供露点）
   //   - 风速：天文台开放数据不提供，取 0（静风）为保守默认（风项在算法中保留）
   //   - 雨量：取西贡区（HKUST 所在分区）过去 1 小时雨量
-  const HKO_TEMP_STATIONS = ['Clear Water Bay', 'Sai Kung', 'Tseung Kwan O', 'Hong Kong Observatory'];
+  const HKO_TEMP_STATIONS = ['Tseung Kwan O', 'Sai Kung', 'Clear Water Bay', 'Hong Kong Observatory'];
   const HKO_HUMIDITY_STATION = 'Hong Kong Observatory';
   const HKO_RAIN_DISTRICT = 'Sai Kung';
   const HKO_DEFAULT_WIND_MS = 0;

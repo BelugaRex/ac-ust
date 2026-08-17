@@ -344,35 +344,35 @@ async function runTests() {
   assertPass(smartDew !== null && Math.abs(smartDew - 26.2) < 0.5,
     'smart: deriveDewPoint(30°C, 80%) ≈ 26.2°C');
 
-  // rhrread 解析：站点偏好（清水湾 CWB 优先）+ 露点推导 + 静风默认 + 分区雨量
+  // rhrread 解析：站点偏好（将军澳 JKB 优先）+ 露点推导 + 静风默认 + 分区雨量
   const hkoWeather = smartMode.parseRhrreadWeather({
     temperature: { data: [
       { place: 'Hong Kong Observatory', value: 29, unit: 'C' },
       { place: 'Clear Water Bay', value: 27, unit: 'C' },
       { place: 'Sai Kung', value: 28, unit: 'C' },
-      { place: 'Tseung Kwan O', value: 28, unit: 'C' }
+      { place: 'Tseung Kwan O', value: 26, unit: 'C' }
     ] },
     humidity: { data: [{ place: 'Hong Kong Observatory', value: 84, unit: 'percent' }] },
     rainfall: { data: [{ place: 'Sai Kung', max: 2, main: 'FALSE', unit: 'mm' }] }
   });
   assertPass(hkoWeather !== null
-      && hkoWeather.temperature === 27   // 清水湾站（CWB）优先
+      && hkoWeather.temperature === 26   // 将军澳站（Tseung Kwan O / JKB）优先
       && hkoWeather.windSpeedMs === 0
       && hkoWeather.rainMm === 2
       && Number.isFinite(hkoWeather.dewPoint),
-    'smart: parseRhrreadWeather 取清水湾站 + 静风默认 + 分区雨量 + 露点推导');
+    'smart: parseRhrreadWeather 取将军澳站 + 静风默认 + 分区雨量 + 露点推导');
 
-  // rhrread 解析：无清水湾站 → 回退西贡站
+  // rhrread 解析：无将军澳站 → 回退西贡站
   const hkoFallback = smartMode.parseRhrreadWeather({
     temperature: { data: [
       { place: 'Sai Kung', value: 28, unit: 'C' },
-      { place: 'Tseung Kwan O', value: 28, unit: 'C' }
+      { place: 'Hong Kong Observatory', value: 29, unit: 'C' }
     ] },
     humidity: { data: [{ place: 'Hong Kong Observatory', value: 84, unit: 'percent' }] },
     rainfall: { data: [{ place: 'Sai Kung', max: 0, main: 'FALSE', unit: 'mm' }] }
   });
   assertPass(hkoFallback !== null && hkoFallback.temperature === 28,
-    'smart: parseRhrreadWeather 无清水湾站时回退西贡站');
+    'smart: parseRhrreadWeather 无将军澳站时回退西贡站');
 
   // rhrread 解析：气温缺失 → null
   assertPass(smartMode.parseRhrreadWeather({ temperature: { data: [] } }) === null,
