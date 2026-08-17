@@ -314,7 +314,11 @@ async function getSmartWeather({ force = false, readOnly = false } = {}) {
 async function applySmartModeDurations() {
   if (!schedule.enabled || !schedule.smartMode?.enabled) return;
 
-  const weather = await getSmartWeather({ readOnly: true });  // 只读整点缓存，不主动拉取
+  // 缓存新鲜时直接用；缓存为空（首次开启智能控制）或已过期时按需拉取。
+  // 若只读不拉取，首个 PWM 周期会因无天气数据退化为手动时长，错误沿用旧 onMinutes
+  // （如本次实测本应开 13 分钟却按手动 34 分钟写入页面定时器）。
+  // getSmartWeather 内部有单飞 + 1 小时 TTL，不会每个周期都打网络请求。
+  const weather = await getSmartWeather();
   const suggested = computeSmartOnMinutes({
     sensitivity: schedule.smartMode.sensitivity,
     temperature: weather.temperature,
