@@ -100,17 +100,26 @@ self.__AC_CONTENT_LOADED__ = true;
 function getACStatus() {
   const antSwitch = findAntACSwitch();
   if (antSwitch) {
+    const disabled = isAntACSwitchDisabled(antSwitch);
     const checked = antSwitch.getAttribute('aria-checked');
     if (checked === 'true' || checked === 'false') {
-      return { isOn: checked === 'true', source: 'ant-switch' };
+      return { isOn: checked === 'true', disabled, source: 'ant-switch' };
     }
 
     const text = (antSwitch.textContent || '').trim().toUpperCase();
-    if (text.includes('ON')) return { isOn: true, source: 'ant-switch-text' };
-    if (text.includes('OFF')) return { isOn: false, source: 'ant-switch-text' };
+    if (text.includes('ON')) return { isOn: true, disabled, source: 'ant-switch-text' };
+    if (text.includes('OFF')) return { isOn: false, disabled, source: 'ant-switch-text' };
   }
 
   return getLegacyACStatus();
+}
+
+function isAntACSwitchDisabled(sw) {
+  if (!sw) return false;
+  return sw.disabled === true
+    || sw.hasAttribute?.('disabled')
+    || sw.getAttribute?.('aria-disabled') === 'true'
+    || String(sw.className || '').includes('ant-switch-disabled');
 }
 
 // 提取（Fowler Extract Function）：旧版页面 Semantic UI toggle 的状态扫描与兜底匹配。

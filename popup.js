@@ -927,6 +927,9 @@ btnDiagnose.addEventListener('click', async () => {
         const statusAccepted = !!status && status.success !== false && status.invalidTarget !== true;
         add(statusAccepted, t('diagnoseContentOK'));
         add(statusAccepted && typeof status.isOn === 'boolean', t('diagnoseAcReadable') + (status?.isOn ? 'ON' : 'OFF'));
+        if (statusAccepted && status?.disabled) {
+          add(false, t('diagnoseAcDisabled'));
+        }
       } catch (e) {
         add(false, t('diagnoseContentNoResponse') + (e.message||'').slice(0,60));
       }

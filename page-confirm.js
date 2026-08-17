@@ -60,19 +60,28 @@
     const sw = findACSwitchInPageWorld();
     if (!sw) return { isOn: null, error: '主世界未找到 AC 开关' };
 
+    const disabled = isACSwitchDisabledInPageWorld(sw);
     const checked = sw.getAttribute('aria-checked');
     if (checked === 'true' || checked === 'false') {
-      return { isOn: checked === 'true', source: 'main-world-ant-switch' };
+      return { isOn: checked === 'true', disabled, source: 'main-world-ant-switch' };
     }
 
     const text = (sw.textContent || '').trim().toUpperCase();
-    if (text.includes('ON')) return { isOn: true, source: 'main-world-text' };
-    if (text.includes('OFF')) return { isOn: false, source: 'main-world-text' };
+    if (text.includes('ON')) return { isOn: true, disabled, source: 'main-world-text' };
+    if (text.includes('OFF')) return { isOn: false, disabled, source: 'main-world-text' };
 
     const input = sw.querySelector?.('input[type="checkbox"]');
-    if (input) return { isOn: !!input.checked, source: 'main-world-input' };
+    if (input) return { isOn: !!input.checked, disabled, source: 'main-world-input' };
 
-    return { isOn: null, error: '主世界无法判断 AC 状态' };
+    return { isOn: null, disabled, error: '主世界无法判断 AC 状态' };
+  }
+
+  function isACSwitchDisabledInPageWorld(sw) {
+    if (!sw) return false;
+    return sw.disabled === true
+      || sw.hasAttribute?.('disabled')
+      || sw.getAttribute?.('aria-disabled') === 'true'
+      || String(sw.className || '').includes('ant-switch-disabled');
   }
 
   async function requestACState(targetState) {
@@ -132,6 +141,11 @@
       return successResult(current, clickCount);
     }
 
+    if (current.disabled) {
+      console.warn(`[AC扩展] ensureACState: AC 开关被禁用（余额不足或页面加载中），无法切换到 ${targetState ? 'ON' : 'OFF'}`);
+      return failureResult(current, clickCount, 'AC 开关被禁用（余额不足或页面加载中），无法切换');
+    }
+
     if (clickCount >= MAX_AC_SWITCH_CLICKS) {
       console.warn(`[AC扩展] ensureACState: ${MAX_AC_SWITCH_CLICKS} 次点击后仍未达到 ${targetState ? 'ON' : 'OFF'}，最终状态=${JSON.stringify(current)}`);
       return failureResult(current, clickCount, `主世界已点击 ${MAX_AC_SWITCH_CLICKS} 次仍未达到 ${targetState ? 'ON' : 'OFF'}（状态=${JSON.stringify(current)}）`);
@@ -146,6 +160,10 @@
     const beforeClick = getACStatusInPageWorld();
     if (typeof beforeClick.isOn === 'boolean' && beforeClick.isOn === targetState) {
       return successResult(beforeClick, clickCount);
+    }
+    if (beforeClick.disabled) {
+      console.warn('[AC扩展] ensureACState: 点击前 AC 开关被禁用，无法切换');
+      return failureResult(beforeClick, clickCount, 'AC 开关被禁用（余额不足或页面加载中），无法切换');
     }
 
     console.log(`[AC扩展] ensureACState: 当前=${beforeClick.isOn}，目标=${targetState}，执行第 ${clickCount + 1} 次单击`);

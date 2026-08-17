@@ -95,6 +95,7 @@
   "diagnoseTabNotDiscarded": { "message": "tab not discarded" },
   "diagnoseContentOK": { "message": "content script responding" },
   "diagnoseAcReadable": { "message": "AC status readable: " },
+  "diagnoseAcDisabled": { "message": "AC switch is disabled (insufficient balance or loading) — cannot turn on" },
   "diagnoseContentNoResponse": { "message": "content script no response: " },
   "diagnoseSWOK": { "message": "background SW responding" },
   "diagnoseClockSync": { "message": "clockMode sync: " },

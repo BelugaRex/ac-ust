@@ -1322,6 +1322,35 @@ async function runTests() {
       && pageConfirmSource.includes('window.alert = function(message)')
       && pageConfirmSource.includes('window.prompt = function(message, defaultValue'),
     '9G-1: 主世界保留原生 confirm/alert/prompt 自动接管与幂等守卫');
+  // 9G-2/3/4: 识别禁用开关——真实页面 onSwitchChange 的 disabled 门控
+  // disabled=(remaining_balance_in_percentage<=0 || loading || balance<=0) && !free_mode。
+  // 禁用时 button 不触发 click，主世界若继续点 3 次只会徒劳失败，须在点击前拦截并给出明确错误。
+  assertPass(pageConfirmSource.includes('isACSwitchDisabledInPageWorld')
+      && ensureBody.includes('current.disabled')
+      && ensureBody.includes('beforeClick.disabled')
+      && pageConfirmSource.includes('ant-switch-disabled'),
+    '9G-2: 主世界识别禁用开关（disabled 属性 / ant-switch-disabled 类），点击前拦截而非徒劳点击');
+  assertPass(contentSource.includes('isAntACSwitchDisabled')
+      && contentSource.includes("disabled, source: 'ant-switch'")
+      && contentSource.includes('ant-switch-disabled'),
+    '9G-3: 隔离世界同样上报 disabled 标记，供诊断面板提示余额不足/加载中');
+  const disabledHelperStart = pageConfirmSource.indexOf('function isACSwitchDisabledInPageWorld(');
+  const disabledHelperEnd = pageConfirmSource.indexOf('\n  async function requestACState', disabledHelperStart);
+  const disabledHelperSource = disabledHelperStart >= 0 && disabledHelperEnd > disabledHelperStart
+    ? pageConfirmSource.slice(disabledHelperStart, disabledHelperEnd)
+    : '';
+  const loadDisabledHelper = new Function(`${disabledHelperSource}; return { isACSwitchDisabledInPageWorld };`);
+  const { isACSwitchDisabledInPageWorld } = loadDisabledHelper();
+  const enabledSwitchMock = { disabled: false, className: 'ant-switch', hasAttribute: () => false, getAttribute: () => null };
+  const disabledPropMock = { disabled: true, className: 'ant-switch', hasAttribute: () => false, getAttribute: () => null };
+  const disabledClassMock = { disabled: false, className: 'ant-switch ant-switch-disabled', hasAttribute: () => false, getAttribute: () => null };
+  const disabledAttrMock = { disabled: false, className: 'ant-switch', hasAttribute: (a) => a === 'disabled', getAttribute: () => null };
+  assertPass(isACSwitchDisabledInPageWorld(null) === false
+      && isACSwitchDisabledInPageWorld(enabledSwitchMock) === false
+      && isACSwitchDisabledInPageWorld(disabledPropMock) === true
+      && isACSwitchDisabledInPageWorld(disabledClassMock) === true
+      && isACSwitchDisabledInPageWorld(disabledAttrMock) === true,
+    '9G-4: isACSwitchDisabledInPageWorld 实测：disabled 属性 / ant-switch-disabled 类 / aria-disabled 均判禁用');
   assertPass(countOccurrences(pwmBody, "toggleAC('on')") === 1
       && !pwmBody.includes('for (let retry'),
     '9H: 每个 PWM 开机步骤只调用一次 toggleAC(on)，无外围点击重试循环');

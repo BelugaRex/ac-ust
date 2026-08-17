@@ -95,6 +95,7 @@
   "diagnoseTabNotDiscarded": { "message": "标签页未被浏览器丢弃", "description": "诊断：标签页未被丢弃" },
   "diagnoseContentOK": { "message": "content script 响应正常", "description": "诊断：content script 正常" },
   "diagnoseAcReadable": { "message": "冷气状态可读: ", "description": "诊断：AC 状态可读前缀" },
+  "diagnoseAcDisabled": { "message": "AC 开关被禁用（余额不足或页面加载中），无法点击开启", "description": "诊断：AC 开关被禁用" },
   "diagnoseContentNoResponse": { "message": "content script 无响应: ", "description": "诊断：content script 无响应前缀" },
   "diagnoseSWOK": { "message": "后台 SW 响应正常", "description": "诊断：SW 响应正常" },
   "diagnoseClockSync": { "message": "clockMode 同步: ", "description": "诊断：时钟模式同步前缀" },
