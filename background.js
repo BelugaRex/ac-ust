@@ -2457,15 +2457,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       };
 
       const wasEnabled = schedule.enabled;
-      const { restart, ...data } = msg.data;  // 防止 restart 泄漏到 schedule 对象中
+      // 防止 restart 泄漏到 schedule 对象中；手动时长单独取出，智能模式下不上送覆盖。
+      const { restart, onMinutes: manualOn, offMinutes: manualOff, ...data } = msg.data;
+      // 智能模式开启时，on/off 时长是派生值（applySmartModeDurations 每周期按天气+灵敏度重算）。
+      // 弹窗在智能模式下已隐藏手动时长输入，其上送的 manualOn/manualOff 是过期值，直接覆盖会
+      // 污染 storage（余额估算、诊断面板、过期闹钟恢复都会读到错误时长，让灵敏度滑块看似无效）。
+      const smartEnabled = !!(data.smartMode?.enabled ?? schedule.smartMode?.enabled);
       schedule = {
         ...schedule,
         ...data,
         mode: 'pwm',
-        clockMode: data.clockMode !== undefined ? !!data.clockMode : schedule.clockMode,
-        onMinutes: sanitizeMinutes(data.onMinutes ?? schedule.onMinutes, 30),
-        offMinutes: sanitizeMinutes(data.offMinutes ?? schedule.offMinutes, 30)
+        clockMode: data.clockMode !== undefined ? !!data.clockMode : schedule.clockMode
       };
+      if (!smartEnabled) {
+        schedule.onMinutes = sanitizeMinutes(manualOn ?? schedule.onMinutes, 30);
+        schedule.offMinutes = sanitizeMinutes(manualOff ?? schedule.offMinutes, 30);
+      }
       // activeHours 单独 merge（嵌套对象）
       if (data.activeHours && typeof data.activeHours === 'object') {
         schedule.activeHours = {
