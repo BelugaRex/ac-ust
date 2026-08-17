@@ -327,11 +327,11 @@ async function applySmartModeDurations() {
   }
 
   if (suggested.onMinutes === 0) {
-    // 建议 0 分钟（过冷/过湿/大风）→ 本周期保持关闭，60 分钟后重估。
+    // 建议 0 分钟（过冷/过湿/大风）→ 本周期保持关闭，30 分钟后重估。
     // 置 pwmState='off' 让 OFF 相位确保关闭（零点击）；onMinutes 仅占位，不进入 ON 相位。
     schedule.pwmState = 'off';
-    schedule.onMinutes = 60;
-    schedule.offMinutes = 60;
+    schedule.onMinutes = SMART_MODE.CYCLE_MINUTES;
+    schedule.offMinutes = SMART_MODE.CYCLE_MINUTES;
   } else {
     schedule.onMinutes = suggested.onMinutes;
     schedule.offMinutes = Math.max(1, suggested.offMinutes);
@@ -1190,7 +1190,7 @@ async function runPwmStep() {
     await loadScheduleFromStorage();
     if (!schedule.enabled) return;
 
-    // 智能模式：启用时按天气重算本周期 on/off 时长（X=0 → 保持关闭 60 分钟）。
+    // 智能模式：启用时按天气重算本周期 on/off 时长（X=0 → 保持关闭 30 分钟）。
     await applySmartModeDurations();
 
     const targetAction = schedule.pwmState === 'on' ? 'on' : 'off';
@@ -1250,7 +1250,7 @@ async function runPwmStep() {
       throw new Error(`未处理的 PWM plan: ${plan.kind}/${plan.reason}`);
     }
 
-    // 智能模式：把下一 ON 触发对齐到整点，60 分钟周期锚定整点。
+    // 智能模式：把下一 ON 触发对齐到半点，30 分钟周期锚定半点。
     if (schedule.smartMode?.enabled) {
       alignSmartModeNextTrigger(plan);
     }

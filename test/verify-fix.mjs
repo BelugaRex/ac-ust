@@ -301,14 +301,14 @@ async function runTests() {
   const smartDefault = smartMode.computeSmartOnMinutes({
     sensitivity: 50, temperature: 30, dewPoint: 24, windSpeedMs: 1.5, rainMm: 0
   });
-  assertPass(smartDefault.valid === true && smartDefault.onMinutes === 23 && smartDefault.offMinutes === 37,
-    'smart: 默认场景 on=23/off=37（60 分钟周期开关互补）');
+  assertPass(smartDefault.valid === true && smartDefault.onMinutes === 11 && smartDefault.offMinutes === 19,
+    'smart: 默认场景 on=11/off=19（30 分钟周期开关互补）');
 
   // 降雨修正：Rain > 5.0 → t_raw *= 0.5
   const smartRain = smartMode.computeSmartOnMinutes({
     sensitivity: 50, temperature: 30, dewPoint: 24, windSpeedMs: 1.5, rainMm: 10
   });
-  assertPass(smartRain.onMinutes === 11, 'smart: 降雨 > 5mm 减半后 on=11');
+  assertPass(smartRain.onMinutes === 6, 'smart: 降雨 > 5mm 减半后 on=6');
 
   // 压缩机保护：1~4 分钟 → 强制 0
   assertPass(smartMode.clampAndRoundOnMinutes(1.0) === 0, 'smart: 压缩机保护 1 → 0');
@@ -316,22 +316,22 @@ async function runTests() {
   assertPass(smartMode.clampAndRoundOnMinutes(4.0) === 0, 'smart: 压缩机保护 4 → 0');
   assertPass(smartMode.clampAndRoundOnMinutes(0.4) === 0, 'smart: 0.4 舍入 0');
   assertPass(smartMode.clampAndRoundOnMinutes(5.2) === 5, 'smart: 5.2 舍入 5');
-  assertPass(smartMode.clampAndRoundOnMinutes(70) === 60, 'smart: 上限截断 60');
+  assertPass(smartMode.clampAndRoundOnMinutes(70) === 30, 'smart: 上限截断 30');
   assertPass(smartMode.clampAndRoundOnMinutes(-5) === 0, 'smart: 下限截断 0');
 
   // 冷天 → Teq 低 → 开启分钟数减少
   const smartCold = smartMode.computeSmartOnMinutes({
     sensitivity: 50, temperature: 18, dewPoint: 10, windSpeedMs: 3, rainMm: 0
   });
-  assertPass(smartCold.valid === true && smartCold.onMinutes === 10,
-    'smart: 冷天 Teq 低 → on=10');
+  assertPass(smartCold.valid === true && smartCold.onMinutes === 5,
+    'smart: 冷天 Teq 低 → on=5');
 
-  // 极热 + 满灵敏度 → 40（60 分钟周期）
+  // 极热 + 满灵敏度 → 20（30 分钟周期）
   const smartHot = smartMode.computeSmartOnMinutes({
     sensitivity: 100, temperature: 33, dewPoint: 26, windSpeedMs: 0, rainMm: 0
   });
-  assertPass(smartHot.onMinutes === 40 && smartHot.offMinutes === 20,
-    'smart: 极热满灵敏度 on=40/off=20');
+  assertPass(smartHot.onMinutes === 20 && smartHot.offMinutes === 10,
+    'smart: 极热满灵敏度 on=20/off=10');
 
   // 非法天气 → valid=false（调用方退化为手动时长）
   const smartBad = smartMode.computeSmartOnMinutes({

@@ -6,6 +6,7 @@ const {
   planPwmRecovery,
   reconcilePwmTrigger,
   nextHourBoundary,
+  nextHalfHourBoundary,
   alignSmartModeNextTrigger
 } = pwmPhase;
 
@@ -25,16 +26,22 @@ export function runPwmPhaseCases(assertPass) {
 
   assertPass(
     Object.keys(pwmPhase).sort().join(',')
-      === 'alignSmartModeNextTrigger,nextHourBoundary,planPwmRecovery,planPwmStep,reconcilePwmTrigger',
-    'PWM phase module 导出规划函数与整点对齐函数'
+      === 'alignSmartModeNextTrigger,nextHalfHourBoundary,nextHourBoundary,planPwmRecovery,planPwmStep,reconcilePwmTrigger',
+    'PWM phase module 导出规划函数与整点/半点对齐函数'
   );
 
-  // 智能模式整点对齐：nextHourBoundary 与 alignSmartModeNextTrigger
+  // 智能模式整点/半点对齐：nextHourBoundary（天气整点刷新）与 nextHalfHourBoundary（30 分钟周期）
   const hourTime = (h, m) => new Date(2026, 7, 17, h, m, 0).getTime();
   assertPass(nextHourBoundary(hourTime(13, 20)) === hourTime(14, 0),
     'nextHourBoundary: 13:20 → 14:00');
   assertPass(nextHourBoundary(hourTime(14, 0)) === hourTime(15, 0),
     'nextHourBoundary: 整点也进到下一小时');
+  assertPass(nextHalfHourBoundary(hourTime(13, 10)) === hourTime(13, 30),
+    'nextHalfHourBoundary: 13:10 → 13:30');
+  assertPass(nextHalfHourBoundary(hourTime(13, 45)) === hourTime(14, 0),
+    'nextHalfHourBoundary: 13:45 → 14:00');
+  assertPass(nextHalfHourBoundary(hourTime(13, 30)) === hourTime(14, 0),
+    'nextHalfHourBoundary: 半点也进到下一个半点');
 
   const smartOffCommit = {
     kind: 'commit',
@@ -43,10 +50,10 @@ export function runPwmPhaseCases(assertPass) {
     delayMinutes: 37,
     phasePatch: { pwmState: 'on', nextTriggerAt: hourTime(14, 20) }
   };
-  alignSmartModeNextTrigger(smartOffCommit, hourTime(13, 43));
-  assertPass(smartOffCommit.nextTriggerAt === hourTime(14, 0)
-      && smartOffCommit.phasePatch.nextTriggerAt === hourTime(14, 0),
-    'alignSmartModeNextTrigger: OFF 提交的下一 ON 触发对齐到整点');
+  alignSmartModeNextTrigger(smartOffCommit, hourTime(13, 10));
+  assertPass(smartOffCommit.nextTriggerAt === hourTime(13, 30)
+      && smartOffCommit.phasePatch.nextTriggerAt === hourTime(13, 30),
+    'alignSmartModeNextTrigger: OFF 提交的下一 ON 触发对齐到半点');
 
   const smartOnCommit = {
     kind: 'commit',

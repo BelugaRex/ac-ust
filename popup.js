@@ -177,7 +177,7 @@ activeHoursEnd.addEventListener('change', commitActiveHours);
 // ----- 智能模式：开关 + 灵敏度滑块 + 实时读数 -----
 function renderSmartReadout(suggested, weather) {
   const hasData = !!(suggested && suggested.valid);
-  // 建议开启分钟数（相对 60 分钟周期，如 30/60）
+  // 建议开启分钟数（相对 30 分钟周期，如 17/30）
   if (hasData) {
     smartSuggested.textContent = `${suggested.onMinutes}/${SMART_MODE.CYCLE_MINUTES}`;
     smartSuggested.classList.remove('is-empty');
@@ -265,7 +265,7 @@ smartSensitivity.addEventListener('input', () => {
 });
 
 smartSensitivity.addEventListener('change', async () => {
-  // 释放滑块：仅持久化灵敏度，不重启当前 60 分钟周期（实际执行周期固定 60 分钟）
+  // 释放滑块：仅持久化灵敏度，不重启当前 30 分钟周期（实际执行周期固定 30 分钟）
   currentSmartMode.sensitivity = clampSmartSensitivityLocal(smartSensitivity.value);
   syncModeUI();
   await updateSchedule(currentScheduleEnabled, false);

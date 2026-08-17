@@ -9,7 +9,7 @@
 //   3) 等效室外温度 Teq = T + 0.33*e - 0.70*Wind - 4.00
 //   4) 原始开启分钟数 t_raw = K * Teq
 //   5) 降雨修正：若 Rain > 5.0 则 t_raw *= 0.5
-//   6) 限幅到 [0, 60] 并四舍五入取整
+//   6) 限幅到 [0, 30] 并四舍五入取整
 //   7) 压缩机保护：结果落在 1~4 分钟时强制设为 0（避免频繁启停）
 //
 // 所有中间计算均使用浮点数，仅在最终输出时取整。
@@ -33,9 +33,10 @@
   const SMART_MODE = Object.freeze({
     K_MIN: 0.30,                 // 灵敏度滑块 0% 对应的 K
     K_MAX: 1.00,                 // 灵敏度滑块 100% 对应的 K
-    CYCLE_MINUTES: 60,           // 控制周期固定 60 分钟
+    CYCLE_MINUTES: 30,           // 控制周期 30 分钟（比 60 分钟切换更频繁，减小过冷/过热摆幅）
+    REFERENCE_CYCLE_MINUTES: 60, // t_raw = K*Teq 的标定参考周期（保持占空比不变）
     ON_MIN: 0,                   // 开启分钟数下限
-    ON_MAX: 60,                  // 开启分钟数上限
+    ON_MAX: 30,                  // 开启分钟数上限（= 控制周期长度）
     RAIN_THRESHOLD_MM: 5.0,      // 降雨修正触发阈值 (mm)
     RAIN_REDUCTION_FACTOR: 0.5,  // 降雨修正倍率
     COMPRESSOR_DEADBAND_MIN: 1,  // 压缩机保护死区下界
@@ -100,16 +101,18 @@
   }
 
   // 原始开启分钟数 t_raw = K * Teq，叠加降雨修正。
+  // t_raw 按 60 分钟参考周期标定；实际周期为 CYCLE_MINUTES 时按比例缩放，
+  // 保持相同占空比（on/(on+off)），仅缩短单次开/关时长以减小温度摆幅。
   function rawOnMinutes(k, teq, rainMm) {
     let tRaw = k * teq;
     const rain = finiteNumber(rainMm);
     if (rain !== null && rain > SMART_MODE.RAIN_THRESHOLD_MM) {
       tRaw *= SMART_MODE.RAIN_REDUCTION_FACTOR;
     }
-    return tRaw;
+    return tRaw * (SMART_MODE.CYCLE_MINUTES / SMART_MODE.REFERENCE_CYCLE_MINUTES);
   }
 
-  // 限幅到 [0, 60] → 四舍五入 → 压缩机保护（1~4 → 0）。
+  // 限幅到 [0, 30] → 四舍五入 → 压缩机保护（1~4 → 0）。
   function clampAndRoundOnMinutes(tRaw) {
     const clamped = clamp(Number(tRaw), SMART_MODE.ON_MIN, SMART_MODE.ON_MAX);
     let rounded = Math.round(clamped);

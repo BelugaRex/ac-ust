@@ -296,7 +296,8 @@ function computeTriggerAlignment(schedule, liveScheduledTime, opts) {
   return { nextAligned, legacyAligned, requireLegacyAlignment };
 }
 
-// 智能模式整点对齐：返回下一个整点（HH:00:00.000）的绝对毫秒时间。
+// 整点边界：返回下一个整点（HH:00:00.000）的绝对毫秒时间。
+// 用于天气闹钟 ac-smart-weather（天文台 rhrread 数据每小时整点更新），与智能模式周期长度无关。
 function nextHourBoundary(now = Date.now()) {
   const d = new Date(now);
   d.setMinutes(0, 0, 0);
@@ -304,21 +305,34 @@ function nextHourBoundary(now = Date.now()) {
   return d.getTime();
 }
 
-// 智能模式：把 OFF 提交的下一 ON 触发锚定到整点，使 60 分钟周期与整点对齐。
-// ON 提交（nextAction='off'）保持 now + onMinutes 不变——因 ON 相位已在整点开始，
-// 其结束时刻（整点 + onMinutes）天然落在整点节奏上。
+// 智能模式半点对齐：返回下一个半点（HH:00 或 HH:30:00.000）的绝对毫秒时间。
+// 30 分钟控制周期下，ON 相位锚定到半点边界。
+function nextHalfHourBoundary(now = Date.now()) {
+  const d = new Date(now);
+  if (d.getMinutes() < 30) {
+    d.setMinutes(30, 0, 0);
+  } else {
+    d.setMinutes(0, 0, 0);
+    d.setHours(d.getHours() + 1);
+  }
+  return d.getTime();
+}
+
+// 智能模式：把 OFF 提交的下一 ON 触发锚定到半点，使 30 分钟周期与半点对齐。
+// ON 提交（nextAction='off'）保持 now + onMinutes 不变——因 ON 相位已在半点开始，
+// 其结束时刻（半点 + onMinutes）天然落在半点节奏上。
 function alignSmartModeNextTrigger(plan, now = Date.now()) {
   if (!plan || plan.nextAction !== 'on') return;
   const currentTriggerAt = Number(plan.nextTriggerAt);
   if (!Number.isFinite(currentTriggerAt) || currentTriggerAt <= now) return;
-  const nextHour = nextHourBoundary(now);
-  if (nextHour <= now) return;
-  plan.nextTriggerAt = nextHour;
+  const nextBoundary = nextHalfHourBoundary(now);
+  if (nextBoundary <= now) return;
+  plan.nextTriggerAt = nextBoundary;
   if (typeof plan.delayMinutes === 'number') {
-    plan.delayMinutes = Math.max(1, (nextHour - now) / PWM_PHASE_MINUTE_MS);
+    plan.delayMinutes = Math.max(1, (nextBoundary - now) / PWM_PHASE_MINUTE_MS);
   }
   if (plan.phasePatch) {
-    plan.phasePatch.nextTriggerAt = nextHour;
+    plan.phasePatch.nextTriggerAt = nextBoundary;
   }
 }
 
@@ -328,6 +342,7 @@ if (typeof module !== 'undefined' && module.exports) {
     planPwmRecovery,
     reconcilePwmTrigger,
     nextHourBoundary,
+    nextHalfHourBoundary,
     alignSmartModeNextTrigger
   };
 }
