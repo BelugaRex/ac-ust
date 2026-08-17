@@ -224,7 +224,7 @@ function setNextTriggerAt(nextTriggerAt) {
 // 本机运行态缓存，不进入 sync。
 const SMART_WEATHER_KEY = 'ac_smart_weather';
 const SMART_WEATHER_URL = 'https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en';
-const SMART_WEATHER_TTL_MS = 10 * 60 * 1000;  // 天气缓存 10 分钟
+const SMART_WEATHER_TTL_MS = 60 * 60 * 1000;  // 天气缓存 1 小时（整点刷新一次）
 let smartWeatherInFlight = null;
 
 function clampSmartSensitivity(value) {
@@ -287,7 +287,7 @@ async function getSmartWeather({ force = false } = {}) {
 async function applySmartModeDurations() {
   if (!schedule.enabled || !schedule.smartMode?.enabled) return;
 
-  const weather = await getSmartWeather({ force: true });
+  const weather = await getSmartWeather();  // 用整点刷新的缓存（1 小时 TTL），周期内不重复拉取
   const suggested = computeSmartOnMinutes({
     sensitivity: schedule.smartMode.sensitivity,
     temperature: weather.temperature,
@@ -302,11 +302,11 @@ async function applySmartModeDurations() {
   }
 
   if (suggested.onMinutes === 0) {
-    // 建议 0 分钟（过冷/过湿/大风）→ 本周期保持关闭，30 分钟后重估。
+    // 建议 0 分钟（过冷/过湿/大风）→ 本周期保持关闭，60 分钟后重估。
     // 置 pwmState='off' 让 OFF 相位确保关闭（零点击）；onMinutes 仅占位，不进入 ON 相位。
     schedule.pwmState = 'off';
-    schedule.onMinutes = 30;
-    schedule.offMinutes = 30;
+    schedule.onMinutes = 60;
+    schedule.offMinutes = 60;
   } else {
     schedule.onMinutes = suggested.onMinutes;
     schedule.offMinutes = Math.max(1, suggested.offMinutes);
@@ -316,6 +316,32 @@ async function applySmartModeDurations() {
     `[AC扩展] 智能模式: K=${suggested.k.toFixed(3)} Teq=${suggested.teq.toFixed(1)}°C`
     + ` t_raw=${suggested.tRaw.toFixed(1)} → on=${suggested.onMinutes}min / off=${schedule.offMinutes}min`
   );
+}
+
+// 智能模式整点对齐：返回下一个整点（HH:00:00.000）的绝对毫秒时间。
+function nextHourBoundary(now = Date.now()) {
+  const d = new Date(now);
+  d.setMinutes(0, 0, 0);
+  d.setHours(d.getHours() + 1);
+  return d.getTime();
+}
+
+// 智能模式：把 OFF 提交的下一 ON 触发锚定到整点，使 60 分钟周期与整点对齐。
+// ON 提交（nextAction='off'）保持 now + onMinutes 不变——因 ON 相位已在整点开始，
+// 其结束时刻（整点 + onMinutes）天然落在整点节奏上。
+function alignSmartModeNextTrigger(plan, now = Date.now()) {
+  if (!plan || plan.nextAction !== 'on') return;
+  const currentTriggerAt = Number(plan.nextTriggerAt);
+  if (!Number.isFinite(currentTriggerAt) || currentTriggerAt <= now) return;
+  const nextHour = nextHourBoundary(now);
+  if (nextHour <= now) return;
+  plan.nextTriggerAt = nextHour;
+  if (typeof plan.delayMinutes === 'number') {
+    plan.delayMinutes = Math.max(1, (nextHour - now) / 60000);
+  }
+  if (plan.phasePatch) {
+    plan.phasePatch.nextTriggerAt = nextHour;
+  }
 }
 
 function clearPageTimerProofState() {
@@ -1164,7 +1190,7 @@ async function runPwmStep() {
     await loadScheduleFromStorage();
     if (!schedule.enabled) return;
 
-    // 智能模式：启用时按天气重算本周期 on/off 时长（X=0 → 保持关闭 30 分钟）。
+    // 智能模式：启用时按天气重算本周期 on/off 时长（X=0 → 保持关闭 60 分钟）。
     await applySmartModeDurations();
 
     const targetAction = schedule.pwmState === 'on' ? 'on' : 'off';
@@ -1222,6 +1248,11 @@ async function runPwmStep() {
 
     if (plan.kind !== 'commit') {
       throw new Error(`未处理的 PWM plan: ${plan.kind}/${plan.reason}`);
+    }
+
+    // 智能模式：把下一 ON 触发对齐到整点，60 分钟周期锚定整点。
+    if (schedule.smartMode?.enabled) {
+      alignSmartModeNextTrigger(plan);
     }
 
     applyPwmPlanState(plan);
@@ -1465,9 +1496,9 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     // L2 长连接保活不变量:每分钟顺带确保 offscreen 文档仍在,
     // 防止 Chrome/Edge 在长时间无活跃后回收 offscreen 文档导致端口失活。
     await ensureOffscreen();
-    // 智能模式：每分钟顺带刷新天气缓存（TTL 内直接返回，实际约每 10 分钟拉取一次）。
-    if (schedule.smartMode?.enabled) {
-      getSmartWeather().catch(() => {});
+    // 智能模式：整点刷新天气一次（每小时 HH:00 左右强制拉取，其余分钟命中缓存）。
+    if (schedule.smartMode?.enabled && new Date().getMinutes() === 0) {
+      getSmartWeather({ force: true }).catch(() => {});
     }
     // 间隔模式下的 storage 一致性校准:PWM 步骤漏写 storage 时,1 分钟内会被这里纠正。
     // 这样诊断面板看到的 storage.nextTriggerAt 永远不会落后 live ac-pwm 超过 1 分钟。
@@ -2437,7 +2468,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         };
       }
       // 智能模式开启时立即拉取天气（fire-and-forget），让 popup 读数即时可用；
-      // getSmartWeather 内部有 10 分钟 TTL 节流，缓存新鲜时不会重复请求。
+      // getSmartWeather 内部有 1 小时 TTL 节流，缓存新鲜时不会重复请求。
       if (schedule.smartMode?.enabled) {
         getSmartWeather().catch(() => {});
       }

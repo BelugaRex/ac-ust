@@ -210,7 +210,7 @@ function renderSmartReadout(suggested, weather) {
 }
 
 let smartWeatherRefreshAt = 0;
-const SMART_WEATHER_TTL_MS = 10 * 60 * 1000;
+const SMART_WEATHER_TTL_MS = 60 * 60 * 1000;
 
 async function updateSmartReadout() {
   if (!currentSmartMode.enabled) {
@@ -281,7 +281,7 @@ smartSensitivity.addEventListener('input', () => {
 });
 
 smartSensitivity.addEventListener('change', async () => {
-  // 释放滑块：仅持久化灵敏度，不重启当前 30 分钟周期（实际执行周期固定 30 分钟）
+  // 释放滑块：仅持久化灵敏度，不重启当前 60 分钟周期（实际执行周期固定 60 分钟）
   currentSmartMode.sensitivity = clampSmartSensitivityLocal(smartSensitivity.value);
   syncModeUI();
   await updateSchedule(currentScheduleEnabled, false);

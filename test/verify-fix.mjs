@@ -301,8 +301,8 @@ async function runTests() {
   const smartDefault = smartMode.computeSmartOnMinutes({
     sensitivity: 50, temperature: 30, dewPoint: 24, windSpeedMs: 1.5, rainMm: 0
   });
-  assertPass(smartDefault.valid === true && smartDefault.onMinutes === 23 && smartDefault.offMinutes === 7,
-    'smart: 默认场景 on=23/off=7（30 分钟周期开关互补）');
+  assertPass(smartDefault.valid === true && smartDefault.onMinutes === 23 && smartDefault.offMinutes === 37,
+    'smart: 默认场景 on=23/off=37（60 分钟周期开关互补）');
 
   // 降雨修正：Rain > 5.0 → t_raw *= 0.5
   const smartRain = smartMode.computeSmartOnMinutes({
@@ -316,7 +316,7 @@ async function runTests() {
   assertPass(smartMode.clampAndRoundOnMinutes(4.0) === 0, 'smart: 压缩机保护 4 → 0');
   assertPass(smartMode.clampAndRoundOnMinutes(0.4) === 0, 'smart: 0.4 舍入 0');
   assertPass(smartMode.clampAndRoundOnMinutes(5.2) === 5, 'smart: 5.2 舍入 5');
-  assertPass(smartMode.clampAndRoundOnMinutes(40) === 30, 'smart: 上限截断 30');
+  assertPass(smartMode.clampAndRoundOnMinutes(70) === 60, 'smart: 上限截断 60');
   assertPass(smartMode.clampAndRoundOnMinutes(-5) === 0, 'smart: 下限截断 0');
 
   // 冷天 → Teq 低 → 开启分钟数减少
@@ -326,12 +326,12 @@ async function runTests() {
   assertPass(smartCold.valid === true && smartCold.onMinutes === 10,
     'smart: 冷天 Teq 低 → on=10');
 
-  // 极热 + 满灵敏度 → 30（限幅）
+  // 极热 + 满灵敏度 → 40（60 分钟周期）
   const smartHot = smartMode.computeSmartOnMinutes({
     sensitivity: 100, temperature: 33, dewPoint: 26, windSpeedMs: 0, rainMm: 0
   });
-  assertPass(smartHot.onMinutes === 30 && smartHot.offMinutes === 0,
-    'smart: 极热满灵敏度 on=30/off=0');
+  assertPass(smartHot.onMinutes === 40 && smartHot.offMinutes === 20,
+    'smart: 极热满灵敏度 on=40/off=20');
 
   // 非法天气 → valid=false（调用方退化为手动时长）
   const smartBad = smartMode.computeSmartOnMinutes({

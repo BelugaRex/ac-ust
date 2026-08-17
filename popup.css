@@ -843,13 +843,6 @@ a:focus-visible,
   font-weight: 400;
 }
 
-.smart-hint {
-  color: var(--text-tertiary);
-  font-size: 11px;
-  line-height: 15px;
-  overflow-wrap: anywhere;
-}
-
 /* 循环定时与智能控制平级互斥：折叠容器 */
 #timerBody {
   border-bottom: 1px solid var(--separator);
