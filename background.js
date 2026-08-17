@@ -162,6 +162,16 @@ async function rescheduleActiveBoundary() {
   chrome.alarms.create('ac-active-boundary', { delayInMinutes: delayMin });
 }
 
+// 调度下一次整点天气刷新（智能模式启用时；否则清除闹钟）。
+async function rescheduleSmartWeatherAlarm() {
+  try {
+    await chrome.alarms.clear('ac-smart-weather');
+  } catch (_) { /* ignore */ }
+  if (!schedule.smartMode?.enabled) return;
+  const nextHour = nextHourBoundary(Date.now());
+  chrome.alarms.create('ac-smart-weather', { when: nextHour });
+}
+
 // 边界闹钟触发：进入/退出运行时段，自动启用/关闭 PWM
 async function onActiveBoundaryCrossed() {
   // 重新调度下一次边界（先调度，避免后续 await 抛出时漏掉）
@@ -965,6 +975,7 @@ async function init() {
 
 // ----- 设置/更新 PWM 循环闹钟 -----
 async function setupAlarms(startImmediately = false) {
+  await rescheduleSmartWeatherAlarm();
   if (!schedule.enabled) {
     await chrome.alarms.clear('ac-pwm');
     await chrome.alarms.clear('ac-badge-tick');
@@ -1470,10 +1481,6 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     // L2 长连接保活不变量:每分钟顺带确保 offscreen 文档仍在,
     // 防止 Chrome/Edge 在长时间无活跃后回收 offscreen 文档导致端口失活。
     await ensureOffscreen();
-    // 智能模式：整点刷新天气一次（每小时 HH:00 左右强制拉取，其余分钟命中缓存）。
-    if (schedule.smartMode?.enabled && new Date().getMinutes() === 0) {
-      getSmartWeather({ force: true }).catch(() => {});
-    }
     // 间隔模式下的 storage 一致性校准:PWM 步骤漏写 storage 时,1 分钟内会被这里纠正。
     // 这样诊断面板看到的 storage.nextTriggerAt 永远不会落后 live ac-pwm 超过 1 分钟。
     if (schedule.enabled) {
@@ -1536,6 +1543,18 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       console.warn('[AC扩展] active hours boundary 处理失败:', e?.message);
       void appendDiagnosticLog('warn', 'alarm-active-boundary', e);
       rescheduleActiveBoundary();  // 出错也重新调度，避免漏掉下次
+    }
+  }
+
+  if (alarm.name === 'ac-smart-weather') {
+    // 先调度下一次整点，再拉取，避免下面 await 抛出时漏掉下次
+    await rescheduleSmartWeatherAlarm();
+    if (schedule.smartMode?.enabled) {
+      try {
+        await getSmartWeather({ force: true });
+      } catch (e) {
+        console.warn('[AC扩展] 整点天气拉取失败:', e?.message);
+      }
     }
   }
 

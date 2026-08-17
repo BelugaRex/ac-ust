@@ -177,9 +177,9 @@ activeHoursEnd.addEventListener('change', commitActiveHours);
 // ----- 智能模式：开关 + 灵敏度滑块 + 实时读数 -----
 function renderSmartReadout(suggested, weather) {
   const hasData = !!(suggested && suggested.valid);
-  // 建议开启分钟数
+  // 建议开启分钟数（相对 60 分钟周期，如 30/60）
   if (hasData) {
-    smartSuggested.textContent = `${suggested.onMinutes} ${t('unitMinutes')}`;
+    smartSuggested.textContent = `${suggested.onMinutes}/${SMART_MODE.CYCLE_MINUTES}`;
     smartSuggested.classList.remove('is-empty');
   } else {
     smartSuggested.textContent = '--';
@@ -209,9 +209,6 @@ function renderSmartReadout(suggested, weather) {
   }
 }
 
-let smartWeatherRefreshAt = 0;
-const SMART_WEATHER_TTL_MS = 60 * 60 * 1000;
-
 async function updateSmartReadout() {
   if (!currentSmartMode.enabled) {
     renderSmartReadout(null, null);
@@ -231,22 +228,9 @@ async function updateSmartReadout() {
 
   try {
     const stored = await chrome.storage.local.get('ac_smart_weather');
-    let weather = stored.ac_smart_weather;
-    const fetchedAt = Number(weather?.fetchedAt) || 0;
-    const isStale = !weather || fetchedAt === 0 || (Date.now() - fetchedAt) > SMART_WEATHER_TTL_MS;
+    const weather = stored.ac_smart_weather;
 
-    // 天气缓存缺失/过期：主动触发后台拉取（节流 60s，后台另有 TTL 兜底）
-    if (isStale && (Date.now() - smartWeatherRefreshAt) > 60 * 1000) {
-      smartWeatherRefreshAt = Date.now();
-      try {
-        const resp = await chrome.runtime.sendMessage({ type: 'refreshSmartWeather' });
-        if (resp && resp.weather) {
-          // 无论是否有效都更新，保留 error 以便在“数据更新”行显示“天气数据不可用”
-          weather = resp.weather;
-        }
-      } catch (_) { /* SW 未就绪，下轮重试 */ }
-    }
-
+    // 天气只由后台整点闹钟刷新，popup 仅读缓存展示。
     if (!weather || !Number.isFinite(Number(weather.temperature))) {
       renderSmartReadout(null, weather || null);
       return;
