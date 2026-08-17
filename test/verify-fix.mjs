@@ -1351,6 +1351,32 @@ async function runTests() {
       && isACSwitchDisabledInPageWorld(disabledClassMock) === true
       && isACSwitchDisabledInPageWorld(disabledAttrMock) === true,
     '9G-4: isACSwitchDisabledInPageWorld 实测：disabled 属性 / ant-switch-disabled 类 / aria-disabled 均判禁用');
+  // 9G-5: 行为级证明——禁用开关时 ensureACState 直接返回失败，绝不调用点击。
+  const ensureFnStart = pageConfirmSource.indexOf('async function ensureACState(targetState, clickCount = 0)');
+  const ensureFnEnd = pageConfirmSource.indexOf('\n  function findACSwitchInPageWorld', ensureFnStart);
+  const ensureFnSource = ensureFnStart >= 0 && ensureFnEnd > ensureFnStart
+    ? pageConfirmSource.slice(ensureFnStart, ensureFnEnd)
+    : '';
+  let disabledEnsureClickCalls = 0;
+  const loadEnsure = new Function(
+    'getACStatusInPageWorld', 'waitForACSwitchInPageWorld', 'clickElementOnceInPageWorld',
+    'clickConfirmDialogInPageWorld', 'sleepInPageWorld', 'MAX_AC_SWITCH_CLICKS', 'AC_STATE_SETTLE_MS',
+    `${ensureFnSource}; return { ensureACState };`
+  );
+  const { ensureACState } = loadEnsure(
+    () => ({ isOn: false, disabled: true, source: 'main-world-ant-switch' }),
+    async () => null,
+    () => { disabledEnsureClickCalls += 1; return true; },
+    async () => false,
+    async () => {},
+    3,
+    10000
+  );
+  const disabledEnsureResult = await ensureACState(true);
+  assertPass(disabledEnsureResult.success === false
+      && disabledEnsureResult.error.includes('被禁用')
+      && disabledEnsureClickCalls === 0,
+    '9G-5: 禁用开关时 ensureACState 直接返回失败且零点击（不再徒劳点 3 次）');
   assertPass(countOccurrences(pwmBody, "toggleAC('on')") === 1
       && !pwmBody.includes('for (let retry'),
     '9H: 每个 PWM 开机步骤只调用一次 toggleAC(on)，无外围点击重试循环');
