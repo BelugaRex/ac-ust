@@ -12,7 +12,7 @@
     const originalPrompt = window.prompt.bind(window);
 
     window.confirm = function(message) {
-      console.log('[AC扩展] 已自动确认原生 confirm 弹窗:', message);
+      console.warn('[AC扩展] 已自动确认原生 confirm 弹窗:', message);
       return true;
     };
 
@@ -134,7 +134,7 @@
 
     if (clickCount >= MAX_AC_SWITCH_CLICKS) {
       console.warn(`[AC扩展] ensureACState: ${MAX_AC_SWITCH_CLICKS} 次点击后仍未达到 ${targetState ? 'ON' : 'OFF'}，最终状态=${JSON.stringify(current)}`);
-      return failureResult(current, clickCount, `主世界已点击 ${MAX_AC_SWITCH_CLICKS} 次仍未达到 ${targetState ? 'ON' : 'OFF'}`);
+      return failureResult(current, clickCount, `主世界已点击 ${MAX_AC_SWITCH_CLICKS} 次仍未达到 ${targetState ? 'ON' : 'OFF'}（状态=${JSON.stringify(current)}）`);
     }
 
     const sw = await waitForACSwitchInPageWorld(5000);
@@ -153,9 +153,9 @@
       return failureResult(beforeClick, clickCount, '主世界 AC 开关 click() 调用失败');
     }
 
-    const dialogConfirmed = await clickConfirmDialogInPageWorld(3000);
+    const dialogConfirmed = await clickConfirmDialogInPageWorld(5000);
     const afterClick = getACStatusInPageWorld();
-    console.log(`[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(afterClick)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}`);
+    console.warn(`[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(afterClick)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}`);
     await sleepInPageWorld(AC_STATE_SETTLE_MS);
     return ensureACState(targetState, clickCount + 1);
   }
@@ -200,14 +200,27 @@
 
   async function clickConfirmDialogInPageWorld(timeoutMs) {
     const start = Date.now();
-    const texts = ['确定', '确认', 'OK', 'Ok', 'ok', 'Yes', 'YES'];
+    const confirmTexts = [
+      '确定', '确认', '开启', '打开', '启用', '是',
+      'OK', 'Ok', 'ok', 'Yes', 'YES', 'Confirm', 'Turn On', 'Proceed',
+      'Continue', 'Accept', 'Agree', 'Enable', 'Start'
+    ];
+    const isPrimaryButton = (button) => {
+      const cls = String(button.className || '');
+      return cls.includes('ant-btn-primary')
+        || cls.includes('ui primary')
+        || cls.includes('ui positive')
+        || cls.includes('btn-primary')
+        || cls.includes('btn-confirm');
+    };
     while (Date.now() - start <= timeoutMs) {
       const buttons = Array.from(document.querySelectorAll(
-        '.ant-modal-confirm-btns button, .ant-modal button, .ant-popconfirm-buttons button, [role="dialog"] button'
+        '.ant-modal-confirm-btns button, .ant-modal button, .ant-popconfirm-buttons button, '
+        + '[role="dialog"] button, [role="alertdialog"] button, .ui.modal button, .ui.modal .actions button, .modal button'
       ));
       const btn = buttons.find((button) => {
         const text = (button.textContent || '').trim();
-        return texts.includes(text) || button.matches('.ant-btn-primary') || String(button.className || '').includes('ant-btn-primary');
+        return confirmTexts.includes(text) || isPrimaryButton(button);
       });
       if (btn) {
         clickElementOnceInPageWorld(btn);
