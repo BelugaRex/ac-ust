@@ -238,7 +238,7 @@ function getACBalanceSnapshot() {
   }
 
   // 主世界失败后不在隔离世界接力点击；下一步只交给后台延迟重试。
-  console.warn('[AC扩展] 主世界切换未成功，隔离世界不再接力点击（避免双切噪音）:', mainWorldResult || 'null');
+  console.warn('[AC扩展] 主世界切换未成功，隔离世界不再接力点击（避免双切噪音）:', mainWorldResult ? JSON.stringify(mainWorldResult) : 'null');
   return {
     success: false,
     action: targetAction,

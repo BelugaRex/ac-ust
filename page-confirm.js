@@ -133,7 +133,7 @@
     }
 
     if (clickCount >= MAX_AC_SWITCH_CLICKS) {
-      console.warn(`[AC扩展] ensureACState: ${MAX_AC_SWITCH_CLICKS} 次点击后仍未达到 ${targetState ? 'ON' : 'OFF'}`);
+      console.warn(`[AC扩展] ensureACState: ${MAX_AC_SWITCH_CLICKS} 次点击后仍未达到 ${targetState ? 'ON' : 'OFF'}，最终状态=${JSON.stringify(current)}`);
       return failureResult(current, clickCount, `主世界已点击 ${MAX_AC_SWITCH_CLICKS} 次仍未达到 ${targetState ? 'ON' : 'OFF'}`);
     }
 
@@ -153,7 +153,9 @@
       return failureResult(beforeClick, clickCount, '主世界 AC 开关 click() 调用失败');
     }
 
-    await clickConfirmDialogInPageWorld(3000);
+    const dialogConfirmed = await clickConfirmDialogInPageWorld(3000);
+    const afterClick = getACStatusInPageWorld();
+    console.log(`[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(afterClick)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}`);
     await sleepInPageWorld(AC_STATE_SETTLE_MS);
     return ensureACState(targetState, clickCount + 1);
   }
