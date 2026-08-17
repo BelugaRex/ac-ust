@@ -811,6 +811,7 @@ btnDiagnose.addEventListener('click', async () => {
   const isChrome = /Chrome\//i.test(ua) && !isEdge;
   const browserName = isEdge ? 'Edge' : isChrome ? 'Chrome' : 'Unknown';
   const browserVer = ua.match(isEdge ? /Edg\/([\d.]+)/ : /Chrome\/([\d.]+)/)?.[1] || '?';
+  lines.push(t('diagnoseTime') + new Date().toLocaleString());
   lines.push(t('diagnoseBrowser') + browserName + ' ' + browserVer);
   
   try {
