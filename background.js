@@ -254,12 +254,27 @@ async function fetchSmartWeather() {
 
 // 读取天气观测：缓存未过期直接返回，否则单飞拉取。
 // 拉取失败回退旧缓存并标记 stale；无缓存则返回错误占位（调用方退化为手动时长）。
-async function getSmartWeather({ force = false } = {}) {
-  if (!force) {
-    const cached = (await chrome.storage.local.get(SMART_WEATHER_KEY))[SMART_WEATHER_KEY];
-    if (cached && cached.fetchedAt && (Date.now() - cached.fetchedAt) < SMART_WEATHER_TTL_MS) {
-      return { ...cached, stale: false, error: '' };
+async function getSmartWeather({ force = false, readOnly = false } = {}) {
+  const cached = (await chrome.storage.local.get(SMART_WEATHER_KEY))[SMART_WEATHER_KEY];
+  if (!force && cached && cached.fetchedAt
+      && (Date.now() - cached.fetchedAt) < SMART_WEATHER_TTL_MS) {
+    return { ...cached, stale: false, error: '' };
+  }
+  if (readOnly) {
+    // 只读：缓存过期/缺失时不拉取，回退旧缓存（标记 stale）或返回错误占位。
+    if (cached && cached.fetchedAt) {
+      return { ...cached, stale: true, error: '' };
     }
+    return {
+      fetchedAt: 0,
+      temperature: null,
+      dewPoint: null,
+      windSpeedMs: null,
+      rainMm: null,
+      relativeHumidity: null,
+      stale: true,
+      error: 'no-cache'
+    };
   }
   if (smartWeatherInFlight) return smartWeatherInFlight;
 
@@ -297,7 +312,7 @@ async function getSmartWeather({ force = false } = {}) {
 async function applySmartModeDurations() {
   if (!schedule.enabled || !schedule.smartMode?.enabled) return;
 
-  const weather = await getSmartWeather();  // 用整点刷新的缓存（1 小时 TTL），周期内不重复拉取
+  const weather = await getSmartWeather({ readOnly: true });  // 只读整点缓存，不主动拉取
   const suggested = computeSmartOnMinutes({
     sensitivity: schedule.smartMode.sensitivity,
     temperature: weather.temperature,
@@ -2460,11 +2475,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sensitivity: clampSmartSensitivity(data.smartMode.sensitivity)
         };
       }
-      // 智能模式开启时立即拉取天气（fire-and-forget），让 popup 读数即时可用；
-      // getSmartWeather 内部有 1 小时 TTL 节流，缓存新鲜时不会重复请求。
-      if (schedule.smartMode?.enabled) {
-        getSmartWeather().catch(() => {});
-      }
+      // 天气只由整点闹钟 ac-smart-weather 刷新（setupAlarms 已调度），此处不即时拉取。
 
       let offResult = null;
       if (!schedule.enabled) {
