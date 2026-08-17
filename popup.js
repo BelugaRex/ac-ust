@@ -71,6 +71,7 @@ const balanceEstimate = document.getElementById('balanceEstimate');
 const smartModeToggle = document.getElementById('smartModeToggle');
 const smartModeToggleState = document.getElementById('smartModeToggleState');
 const smartSensitivity = document.getElementById('smartSensitivity');
+const smartSensitivityValue = document.getElementById('smartSensitivityValue');
 const timerBody = document.getElementById('timerBody');
 const smartBody = document.getElementById('smartBody');
 const smartSuggested = document.getElementById('smartSuggested');
@@ -103,6 +104,19 @@ function clampSmartSensitivityLocal(value) {
   // 兼容旧版 0~100 无级值：>10 视为旧值，按 /10 折算到 0~10 档位。
   const normalized = n > 10 ? n / 10 : n;
   return Math.round(Math.min(10, Math.max(0, normalized)));
+}
+
+function updateSmartSensitivityBubble() {
+  const value = Number(smartSensitivity.value);
+  const min = Number(smartSensitivity.min) || 0;
+  const max = Number(smartSensitivity.max) || 10;
+  smartSensitivityValue.textContent = String(value);
+  const thumbSize = 24;  // 与 CSS thumb 尺寸一致
+  const width = smartSensitivity.clientWidth;
+  if (width > thumbSize && max > min) {
+    const percent = (value - min) / (max - min);
+    smartSensitivityValue.style.left = `${percent * (width - thumbSize) + thumbSize / 2}px`;
+  }
 }
 
 async function loadSettings() {
@@ -153,6 +167,7 @@ function syncModeUI() {
 
   // 灵敏度滑块始终可调，便于在开启智能控制前预设偏好
   smartSensitivity.value = String(currentSmartMode.sensitivity);
+  requestAnimationFrame(updateSmartSensitivityBubble);
 
   // 平级互斥折叠：智能控制开 → 折叠循环定时 body；循环定时开 → 折叠智能控制 body
   timerBody.hidden = smartOn;
@@ -263,6 +278,7 @@ smartModeToggle.addEventListener('change', async () => {
 smartSensitivity.addEventListener('input', () => {
   // 平滑预览：滑动过程中即时更新建议分钟数，不触发后台写入
   currentSmartMode.sensitivity = clampSmartSensitivityLocal(smartSensitivity.value);
+  updateSmartSensitivityBubble();
   void updateSmartReadout();
 });
 

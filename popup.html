@@ -1300,7 +1300,10 @@
       <div class="setting-group smart-body" id="smartBody">
           <div class="smart-slider-row">
             <span class="smart-end" data-i18n="smartModeWeak"></span>
-            <input type="range" id="smartSensitivity" min="0" max="10" step="1" value="5" data-i18n-aria-label="smartModeSensitivityLabel">
+            <div class="smart-slider-wrap">
+              <input type="range" id="smartSensitivity" min="0" max="10" step="1" value="5" data-i18n-aria-label="smartModeSensitivityLabel">
+              <span class="smart-slider-value" id="smartSensitivityValue" aria-hidden="true">5</span>
+            </div>
             <span class="smart-end" data-i18n="smartModeStrong"></span>
           </div>
           <div class="smart-readout" id="smartReadout">
