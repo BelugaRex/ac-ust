@@ -85,7 +85,7 @@ let schedule = {
   pageTimerRetryAt: 0,
   pageTimerRetryMinutes: 0,
   activeHours: { enabled: false, start: '08:00', end: '23:00' },  // v0.5.x: PWM 运行时段（白名单，同日）
-  smartMode: { enabled: false, sensitivity: 50 }  // v0.8.0: 智能模式（天气驱动的开启时长，灵敏度 0~100）
+  smartMode: { enabled: false, sensitivity: 5 }  // v0.8.0: 智能模式（天气驱动的开启时长，灵敏度 0~10 档位）
 };
 
 let pwmStepRunning = false;
@@ -239,8 +239,10 @@ let smartWeatherInFlight = null;
 
 function clampSmartSensitivity(value) {
   const n = Number(value);
-  if (!Number.isFinite(n)) return 50;
-  return Math.round(Math.min(100, Math.max(0, n)));
+  if (!Number.isFinite(n)) return 5;
+  // 兼容旧版 0~100 无级值：>10 视为旧值，按 /10 折算到 0~10 档位。
+  const normalized = n > 10 ? n / 10 : n;
+  return Math.round(Math.min(10, Math.max(0, normalized)));
 }
 
 async function fetchSmartWeather() {
@@ -2601,7 +2603,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
           pageTimerTargetAt: 0,
           pageTimerRetryMinutes: 0,
           activeHours: { enabled: false, start: '08:00', end: '23:00' },
-          smartMode: { enabled: false, sensitivity: 50 }
+          smartMode: { enabled: false, sensitivity: 5 }
         }
       });
       console.log('[AC扩展] 首次安装，已设置默认值（间隔模式）');

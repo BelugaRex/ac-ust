@@ -12,7 +12,7 @@ const staticPreviewSchedule = {
   onMinutes: 15,
   offMinutes: 45,
   activeHours: { enabled: true, start: '08:00', end: '23:00' },
-  smartMode: { enabled: false, sensitivity: 50 },
+  smartMode: { enabled: false, sensitivity: 5 },
   pwmState: 'off',
   actualStatus: { isOn: true },
   balanceMinutes: 60,
@@ -92,15 +92,17 @@ try {
 // ----- 加载已保存的设置 -----
 let currentScheduleEnabled = false;
 let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
-let currentSmartMode = { enabled: false, sensitivity: 50 };
+let currentSmartMode = { enabled: false, sensitivity: 5 };
 let lastAnnouncedState = '';
 let _toggleProgrammatic = false; // 防止程序同步 timerToggle 时触发 onChange 循环
 let _smartProgrammatic = false;  // 防止程序同步 smartModeToggle 时触发 onChange 循环
 
 function clampSmartSensitivityLocal(value) {
   const n = Number(value);
-  if (!Number.isFinite(n)) return 50;
-  return Math.round(Math.min(100, Math.max(0, n)));
+  if (!Number.isFinite(n)) return 5;
+  // 兼容旧版 0~100 无级值：>10 视为旧值，按 /10 折算到 0~10 档位。
+  const normalized = n > 10 ? n / 10 : n;
+  return Math.round(Math.min(10, Math.max(0, normalized)));
 }
 
 async function loadSettings() {
@@ -122,7 +124,7 @@ async function loadSettings() {
   const sm = schedule.smartMode || {};
   currentSmartMode = {
     enabled: !!sm.enabled,
-    sensitivity: clampSmartSensitivityLocal(sm.sensitivity ?? 50)
+    sensitivity: clampSmartSensitivityLocal(sm.sensitivity ?? 5)
   };
   syncModeUI();
 }

@@ -41,7 +41,7 @@ function composeSyncPayload(schedule, now = Date.now()) {
       : { enabled: false, start: '08:00', end: '23:00' },
     smartMode: schedule.smartMode
       ? { enabled: !!schedule.smartMode.enabled, sensitivity: schedule.smartMode.sensitivity }
-      : { enabled: false, sensitivity: 50 },
+      : { enabled: false, sensitivity: 5 },
     pwmState: schedule.pwmState === 'on' ? 'on' : 'off',
     // 远端若拿到过去时戳：本端刚 toggle 完到-下一周期绝对时间，
     // 但 sync 传输有延迟，1 分钟内仍可采纳用于边界对齐；超过 1 分钟

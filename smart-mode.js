@@ -3,8 +3,8 @@
 // ============================================================
 //
 // 依据 HKUST 宿舍定频空调智能控制算法（严格实现）：
-//   1) 灵敏度系数 K = K_MIN + (滑块值 / 100) * (K_MAX - K_MIN)
-//      → 滑块 0% 对应 K=0.30，100% 对应 K=1.00（连续无级线性映射）
+//   1) 灵敏度系数 K = K_MIN + (档位 / 10) * (K_MAX - K_MIN)
+//      → 档位 0 对应 K=0.30，档位 10 对应 K=1.00（共 11 档线性映射）
 //   2) 水汽压 e (hPa) = 6.112 * exp((17.67 * Td) / (Td + 243.5))
 //   3) 等效室外温度 Teq = T + 0.33*e - 0.70*Wind - 4.00
 //   4) 原始开启分钟数 t_raw = K * Teq
@@ -31,8 +31,8 @@
 
   // ---- 可调常量（后续可在此集中调整） ----
   const SMART_MODE = Object.freeze({
-    K_MIN: 0.30,                 // 灵敏度滑块 0% 对应的 K
-    K_MAX: 1.00,                 // 灵敏度滑块 100% 对应的 K
+    K_MIN: 0.30,                 // 灵敏度档位 0 对应的 K
+    K_MAX: 1.00,                 // 灵敏度档位 10 对应的 K
     CYCLE_MINUTES: 30,           // 控制周期 30 分钟（比 60 分钟切换更频繁，减小过冷/过热摆幅）
     REFERENCE_CYCLE_MINUTES: 60, // t_raw = K*Teq 的标定参考周期（保持占空比不变）
     ON_MIN: 0,                   // 开启分钟数下限
@@ -58,12 +58,12 @@
     return Number.isFinite(n) ? n : null;
   }
 
-  // 灵敏度滑块值 (0~100) → 灵敏度系数 K (0.30~1.00)，连续无级。
+  // 灵敏度档位 (0~10，共 11 档) → 灵敏度系数 K (0.30~1.00)。
   function sensitivityToK(sensitivity) {
     const s = Number(sensitivity);
     if (!Number.isFinite(s)) return SMART_MODE.K_MIN;
-    const normalized = clamp(s, 0, 100);
-    return SMART_MODE.K_MIN + (normalized / 100) * (SMART_MODE.K_MAX - SMART_MODE.K_MIN);
+    const normalized = clamp(s, 0, 10);
+    return SMART_MODE.K_MIN + (normalized / 10) * (SMART_MODE.K_MAX - SMART_MODE.K_MIN);
   }
 
   // Magnus 公式：由露点温度 Td (°C) 计算水汽压 e (hPa)。
