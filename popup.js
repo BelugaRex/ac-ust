@@ -169,9 +169,10 @@ function syncModeUI() {
   smartSensitivity.value = String(currentSmartMode.sensitivity);
   requestAnimationFrame(updateSmartSensitivityBubble);
 
-  // 平级互斥折叠：智能控制开 → 折叠循环定时 body；循环定时开 → 折叠智能控制 body
-  timerBody.hidden = smartOn;
-  smartBody.hidden = timerOn;
+  // 折叠：各自开关关闭时隐藏对应 body。智能控制开 → 循环定时关（其 body 折叠）；
+  // 循环定时开 → 智能控制关（其 body 折叠）；两者都关 → 两个 body 都折叠。
+  timerBody.hidden = !timerOn;
+  smartBody.hidden = !smartOn;
 }
 
 function commitActiveHours() {
