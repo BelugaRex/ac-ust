@@ -2070,6 +2070,58 @@ async function runTests() {
       && selectiveReceiverActions.join(',') === 'ping,status,ping,status'
       && selectiveReceiverInjections.length === 2,
     '9Z-3A: ping 正常但 status 被吞时，业务读取超时后强制替换 listener 并只重试一次');
+
+  // 错误页（chrome-error://）兜底注入：executeScript 抛 "showing error page" 时，
+  // 读路径不得刷新页面，只降级为 warn 并失败返回，交给看门狗 / PWM 重试自然恢复。
+  let errorPageReloadCalls = 0;
+  const errorPageDiagnosticLogs = [];
+  const errorPageChrome = {
+    tabs: {
+      async query() {
+        return [{
+          id: 54,
+          url: 'https://w5.ab.ust.hk/njggt/app/home',
+          status: 'complete',
+          discarded: false
+        }];
+      },
+      async get(tabId) {
+        return {
+          id: tabId,
+          url: 'https://w5.ab.ust.hk/njggt/app/home',
+          status: 'complete',
+          discarded: false
+        };
+      },
+      async sendMessage() {
+        throw new Error('Could not establish connection. Receiving end does not exist.');
+      },
+      async reload() { errorPageReloadCalls += 1; },
+      async update() { throw new Error('读路径错误页恢复不得导航用户页面'); }
+    },
+    scripting: {
+      async executeScript() {
+        throw new Error('Frame with ID 0 is showing error page');
+      }
+    }
+  };
+  const errorPageHarness = loadStatusRecovery(
+    errorPageChrome,
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
+    async () => {},
+    async (level, source) => { errorPageDiagnosticLogs.push({ level, source }); },
+    quietConsole,
+    'https://w5.ab.ust.hk/njggt/app/home'
+  );
+  const errorPageStatus = await errorPageHarness.getCurrentACStatus();
+  assertPass(errorPageStatus?.isOn === null
+      && errorPageStatus?.error === 'AC 页面未就绪'
+      && errorPageReloadCalls === 0
+      && errorPageDiagnosticLogs.length === 1
+      && errorPageDiagnosticLogs[0]?.level === 'warn'
+      && errorPageDiagnosticLogs[0]?.source === 'content-script-injection',
+    '9Z-5: 错误页兜底注入不刷新页面，降级为 warn 并失败返回，交给重试恢复');
+
   assertPass(countOccurrences(backgroundSource, 'sendReadMessageToExactACHome(') >= 5
       && !backgroundSource.includes("sendMessageToExactACHome(tab.id, { action: 'status' })")
       && !backgroundSource.includes("sendMessageToExactACHome(tab.id, { action: 'getPageTimer' })")

@@ -1692,6 +1692,15 @@ async function ensureContentScriptLoaded(tabId) {
   return injectContentScriptsIntoExactHome(tabId);
 }
 
+// 错误页（chrome-error:// 网络/服务器失败等）不是代码缺陷，而是页面暂时不可用：
+// 此时 tab.url 仍等于 AC_PAGE，精确守门放行，但 executeScript 会抛
+// "Frame with ID 0 is showing error page"。读路径不得刷新页面，识别后降级为
+// 告警并返回失败，交给看门狗 / PWM 重试在页面恢复后自然重试。
+function isErrorPageError(error) {
+  const message = typeof error?.message === 'string' ? error.message : String(error ?? '');
+  return /showing error page/i.test(message);
+}
+
 async function injectContentScriptsIntoExactHome(tabId) {
   try {
     if (!await getExactACHomeTab(tabId)) return false;
@@ -1717,6 +1726,11 @@ async function injectContentScriptsIntoExactHome(tabId) {
     console.log('[AC扩展] scripting.executeScript 兜底注入并复核完成 (ISOLATED + MAIN)');
     return true;
   } catch (error) {
+    if (isErrorPageError(error)) {
+      console.warn('[AC扩展] AC 页面正在显示错误页（网络/服务器问题），本次注入跳过，等待重试:', error?.message);
+      void appendDiagnosticLog('warn', 'content-script-injection', error);
+      return false;
+    }
     console.error('[AC扩展] scripting.executeScript 兜底注入失败:', error?.message);
     void appendDiagnosticLog('error', 'content-script-injection', error);
     return false;
