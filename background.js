@@ -236,6 +236,7 @@ const SMART_WEATHER_KEY = 'ac_smart_weather';
 const SMART_WEATHER_URL = 'https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en';
 const SMART_WEATHER_TTL_MS = 60 * 60 * 1000;  // 天气缓存 1 小时（整点刷新一次）
 let smartWeatherInFlight = null;
+let smartReapplyInFlight = false;  // 滑块松开后即时重设 Power-off after 的单飞守卫
 
 function clampSmartSensitivity(value) {
   const n = Number(value);
@@ -347,6 +348,66 @@ async function applySmartModeDurations() {
     `[AC扩展] 智能模式: K=${suggested.k.toFixed(3)} Teq=${suggested.teq.toFixed(1)}°C`
     + ` t_raw=${suggested.tRaw.toFixed(1)} → on=${suggested.onMinutes}min / off=${schedule.offMinutes}min`
   );
+}
+
+// 智能模式：滑块松开后立即按新灵敏度重设当前 ON 相位的 Power-off after。
+// 配合 updateSchedule(restart=false)——后者只持久化灵敏度、不打断当前周期；
+// 本函数补上「即时反馈」，让页面关机定时器不再等下一个 30 分钟周期才变化。
+// 仅 AC 当前处于 ON 相位(pwmState='off')时重设页面定时器；AC 关闭时只更新派生时长，
+// 下一 ON 相位自然采用新值。整个过程异步执行，不阻塞 popup 的 updateSchedule 响应。
+async function reapplySmartSensitivityNow() {
+  if (!schedule.enabled || !schedule.smartMode?.enabled) return;
+  if (pwmStepRunning) return;  // 避免与正在执行的 PWM 步骤并发操作页面定时器
+
+  const wasOnPhase = schedule.pwmState === 'off';
+  const oldOnMinutes = Number(schedule.onMinutes) || 0;
+  const oldTriggerAt = Number(schedule.nextTriggerAt) || 0;
+
+  const weather = await getSmartWeather();
+  const suggested = computeSmartOnMinutes({
+    sensitivity: schedule.smartMode.sensitivity,
+    temperature: weather.temperature,
+    dewPoint: weather.dewPoint,
+    windSpeedMs: weather.windSpeedMs,
+    rainMm: weather.rainMm
+  });
+
+  if (!suggested.valid) return;  // 天气不可用 → 保持当前周期不变
+
+  // 落地派生 on/off（on=0 用占位，语义与 applySmartModeDurations 保持一致）
+  schedule.onMinutes = suggested.onMinutes === 0
+    ? SMART_MODE.CYCLE_MINUTES
+    : suggested.onMinutes;
+  schedule.offMinutes = Math.max(1, suggested.offMinutes);
+
+  if (!wasOnPhase) {
+    await persistSchedule('reapply-smart-sensitivity-off-phase');
+    return;
+  }
+
+  // AC 当前 ON：按「剩余时间」重设 Power-off after，clamp 到 ≥1 分钟。
+  let minutes;
+  if (suggested.onMinutes === 0) {
+    minutes = 1;  // 新灵敏度下建议关闭 → 1 分钟后关机
+  } else {
+    const nowMs = Date.now();
+    const remainingBefore = oldTriggerAt > nowMs ? (oldTriggerAt - nowMs) / 60000 : 0;
+    const elapsed = Math.max(0, oldOnMinutes - remainingBefore);
+    minutes = Math.max(1, Math.min(suggested.onMinutes, Math.round(suggested.onMinutes - elapsed)));
+  }
+
+  await setPageTimer(minutes, { retryOnFailure: false });
+
+  const nowMs = Date.now();
+  const nextTriggerAt = nowMs + minutes * 60000;
+  await chrome.alarms.clear('ac-pwm');
+  if (nextTriggerAt > nowMs) {
+    chrome.alarms.create('ac-pwm', { when: nextTriggerAt });
+  }
+  setNextTriggerAt(nextTriggerAt);
+  schedule.alarmCreatedAt = nowMs;
+  schedule.alarmDelayMinutes = minutes;
+  await persistSchedule('reapply-smart-sensitivity-on-phase');
 }
 
 function clearPageTimerProofState() {
@@ -2404,6 +2465,7 @@ const BACKGROUND_MESSAGE_TYPES = new Set([
   'getScheduleLite',
   'getPageTimer',
   'refreshSmartWeather',
+  'reapplySmartNow',
   'repairSchedule',
   'toggleNow',
   'ensureDiagnostics'
@@ -2511,6 +2573,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // 在 sendResponse 之前完成推送，让 popup 拿到已推送的状态（虽然异步到达对端有时延）。
       await syncScheduleToSync('updateSchedule');
       sendResponse({ success: true, schedule, offResult });
+      return;
+    }
+    if (msg.type === 'reapplySmartNow') {
+      // 滑块松开后的即时反馈：立即应答，不阻塞 popup；重设在后台 waitUntil 保活执行。
+      sendResponse({ success: true, accepted: !smartReapplyInFlight });
+      if (!smartReapplyInFlight) {
+        smartReapplyInFlight = true;
+        waitUntil(reapplySmartSensitivityNow())
+          .catch((e) => {
+            console.warn('[AC扩展] 滑块灵敏度即时应用失败:', e?.message);
+            void appendDiagnosticLog('warn', 'reapply-smart-now', e);
+          })
+          .finally(() => { smartReapplyInFlight = false; });
+      }
       return;
     }
     if (msg.type === 'getSchedule') {

@@ -284,10 +284,13 @@ smartSensitivity.addEventListener('input', () => {
 });
 
 smartSensitivity.addEventListener('change', async () => {
-  // 释放滑块：仅持久化灵敏度，不重启当前 30 分钟周期（实际执行周期固定 30 分钟）
+  // 释放滑块：先持久化灵敏度，再通知后台立即重设当前 ON 相位的 Power-off after。
   currentSmartMode.sensitivity = clampSmartSensitivityLocal(smartSensitivity.value);
   syncModeUI();
   await updateSchedule(currentScheduleEnabled, false);
+  if (!IS_STATIC_PREVIEW && currentSmartMode.enabled && currentScheduleEnabled) {
+    chrome.runtime.sendMessage({ type: 'reapplySmartNow' }).catch(() => {});
+  }
 });
 
 // ----- 从后台拉取当前状态 + 直接读真实 PWM 闹钟 -----
