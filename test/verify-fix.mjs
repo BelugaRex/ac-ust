@@ -3150,6 +3150,62 @@ async function runTests() {
   assertPass(diagnosticLocaleKeys.every(key => zhCN[key]?.message && en[key]?.message),
     '15G: 持久诊断日志的摘要、空状态与读取失败文案均有中英文');
 
+  // 15H: 诊断日志按扩展版本自动重置——版本变化清空旧日志，同版本保留。
+  const reconcileStart = backgroundSource.indexOf("const DIAGNOSTIC_LOG_VERSION_KEY = 'ac_diagnostic_log_version';");
+  const reconcileEnd = backgroundSource.indexOf('\n// ----- 启动时加载设置并创建闹钟', reconcileStart);
+  const reconcileBody = reconcileStart >= 0 && reconcileEnd > reconcileStart
+    ? backgroundSource.slice(reconcileStart, reconcileEnd)
+    : '';
+  const loadReconcile = new Function('chrome', 'DIAGNOSTIC_LOG_KEY', `
+    ${reconcileBody}
+    return { reconcileDiagnosticLogVersion };
+  `);
+  function createReconcileStorage(initialLog, storedVersion) {
+    const state = {};
+    if (storedVersion !== undefined) state.ac_diagnostic_log_version = storedVersion;
+    if (initialLog !== undefined) state.ac_diagnostic_log = initialLog;
+    const calls = [];
+    return {
+      chrome: {
+        runtime: { getManifest: () => ({ version: '0.8.0' }) },
+        storage: {
+          local: {
+            async get(key) { return { [key]: state[key] }; },
+            async set(obj) { calls.push(['set', obj]); Object.assign(state, obj); },
+            async remove(key) { calls.push(['remove', key]); delete state[key]; }
+          }
+        }
+      },
+      state,
+      calls
+    };
+  }
+  const staleReconcileStorage = createReconcileStorage(
+    [{ timestamp: 1, level: 'error', source: 'old', message: 'legacy' }],
+    '0.7.9'
+  );
+  const staleReconcile = loadReconcile(staleReconcileStorage.chrome, 'ac_diagnostic_log');
+  await staleReconcile.reconcileDiagnosticLogVersion();
+  assertPass(staleReconcileStorage.state.ac_diagnostic_log === undefined
+      && staleReconcileStorage.state.ac_diagnostic_log_version === '0.8.0'
+      && staleReconcileStorage.calls.some(c => c[0] === 'remove' && c[1] === 'ac_diagnostic_log'),
+    '15H-1: 版本变化时自动清空遗留诊断日志并记录新版本');
+
+  const sameReconcileStorage = createReconcileStorage(
+    [{ timestamp: 1, level: 'error', source: 'current', message: 'keep' }],
+    '0.8.0'
+  );
+  const sameReconcile = loadReconcile(sameReconcileStorage.chrome, 'ac_diagnostic_log');
+  await sameReconcile.reconcileDiagnosticLogVersion();
+  assertPass(sameReconcileStorage.state.ac_diagnostic_log?.length === 1
+      && sameReconcileStorage.state.ac_diagnostic_log[0].source === 'current'
+      && !sameReconcileStorage.calls.some(c => c[0] === 'remove'),
+    '15H-2: 同版本保留现有诊断日志，不重复清理');
+
+  assertPass(backgroundSource.includes('async function reconcileDiagnosticLogVersion()')
+      && backgroundSource.includes('await reconcileDiagnosticLogVersion();'),
+    '15H-3: init 早期调用 reconcileDiagnosticLogVersion 清理遗留日志');
+
   // 汇总
   const passCount = results.filter(r => r.pass).length;
   const totalCount = results.length;

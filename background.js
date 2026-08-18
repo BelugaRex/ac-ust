@@ -986,6 +986,23 @@ async function watchdogCheck() {
   }
 }
 
+// ----- 诊断日志按版本自动重置 -----
+// 扩展版本变化（首次运行新代码 / 更新 / 版本 bump）时清空旧日志，
+// 避免上一版本的遗留异常在诊断面板里持续显示、误导排障。仅本机 storage.local。
+const DIAGNOSTIC_LOG_VERSION_KEY = 'ac_diagnostic_log_version';
+
+async function reconcileDiagnosticLogVersion() {
+  try {
+    const currentVersion = chrome.runtime.getManifest().version;
+    const stored = await chrome.storage.local.get(DIAGNOSTIC_LOG_VERSION_KEY);
+    if (stored[DIAGNOSTIC_LOG_VERSION_KEY] === currentVersion) return;
+    await chrome.storage.local.remove(DIAGNOSTIC_LOG_KEY);
+    await chrome.storage.local.set({ [DIAGNOSTIC_LOG_VERSION_KEY]: currentVersion });
+  } catch (_) {
+    // 清理失败不阻塞 init；异常日志本身继续按环形缓冲追加。
+  }
+}
+
 // ----- 启动时加载设置并创建闹钟 -----
 async function init() {
   // 提取（Fowler Extract Function）：启动时恢复页面定时器重试（不依赖 schedule.enabled）。
@@ -1006,6 +1023,8 @@ async function init() {
   }
 
   try {
+    // 版本变化时先清空遗留诊断日志，再继续 init（后续新异常正常追加）。
+    await reconcileDiagnosticLogVersion();
     // 提取（Fowler Extract Function）：init 终极防线——间隔模式下强制从 live ac-pwm 同步 nextTriggerAt 到 storage。
     async function syncFinalLiveAlarmOnInit() {
       // 终极防线：init 完成时，间隔模式下强制从 live ac-pwm 同步 nextTriggerAt 到 storage。
