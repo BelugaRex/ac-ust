@@ -1322,6 +1322,14 @@ async function runTests() {
       && pageConfirmSource.includes('window.alert = function(message)')
       && pageConfirmSource.includes('window.prompt = function(message, defaultValue'),
     '9G-1: 主世界保留原生 confirm/alert/prompt 自动接管与幂等守卫');
+  // 主世界 toggle 握手异常也必须回包：否则隔离世界静默等满超时拿到 null，
+  // 误触发后台刷新恢复。隔离世界超时也放宽到 90s 容纳慢异步 confirm + 最多 3 次点击。
+  assertPass(pageConfirmSource.includes('result = await requestACState(needOn);')
+      && pageConfirmSource.includes('主世界切换抛异常')
+      && pageConfirmSource.includes('detail: { requestId, action, ...result }'),
+    '9G-1A: 主世界 toggle 握手异常时仍回显失败结果，避免隔离世界拿到 null');
+  assertPass(contentSource.includes('requestMainWorldToggle(targetAction, 90000)'),
+    '9G-1B: 隔离世界 toggle 主世界握手超时放宽到 90s');
   // 9G-2/3/4: 识别禁用开关——真实页面 onSwitchChange 的 disabled 门控
   // disabled=(remaining_balance_in_percentage<=0 || loading || balance<=0) && !free_mode。
   // 禁用时 button 不触发 click，主世界若继续点 3 次只会徒劳失败，须在点击前拦截并给出明确错误。

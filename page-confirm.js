@@ -40,7 +40,19 @@
     if (!requestId || (action !== 'on' && action !== 'off')) return;
 
     const needOn = action === 'on';
-    const result = await requestACState(needOn);
+    let result;
+    try {
+      result = await requestACState(needOn);
+    } catch (error) {
+      // ensureACState 异常时也必须回包，否则隔离世界会静默等满超时拿到 null，
+      // 并误触发后台的「刷新恢复」链路。这里显式回失败，让上层可诊断。
+      result = {
+        success: false,
+        verified: false,
+        error: `主世界切换抛异常: ${error?.message || String(error)}`,
+        via: 'main-world-ensureACState'
+      };
+    }
     window.dispatchEvent(new CustomEvent('__AC_EXTENSION_TOGGLE_AC_RESULT__', {
       detail: { requestId, action, ...result }
     }));

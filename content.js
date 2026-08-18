@@ -240,7 +240,7 @@ function getACBalanceSnapshot() {
     return { success: false, error: t('contentTimeout') };
   }
 
-  const mainWorldResult = await requestMainWorldToggle(targetAction, 65000);
+  const mainWorldResult = await requestMainWorldToggle(targetAction, 90000);
 
   if (mainWorldResult?.success) {
     console.log('[AC扩展] 主世界切换成功:', mainWorldResult);
