@@ -12,7 +12,7 @@
     const originalPrompt = window.prompt.bind(window);
 
     window.confirm = function(message) {
-      console.warn('[AC扩展] 已自动确认原生 confirm 弹窗:', message);
+      console.log('[AC扩展] 已自动确认原生 confirm 弹窗:', message);
       return true;
     };
 
@@ -188,7 +188,13 @@
 
     const dialogConfirmed = await clickConfirmDialogInPageWorld(5000);
     const afterClick = getACStatusInPageWorld();
-    console.warn(`[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(afterClick)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}`);
+    const reachedTarget = typeof afterClick.isOn === 'boolean' && afterClick.isOn === targetState;
+    const afterClickMessage = `[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(afterClick)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}`;
+    if (reachedTarget) {
+      console.log(afterClickMessage);
+    } else {
+      console.warn(afterClickMessage);
+    }
     await sleepInPageWorld(AC_STATE_SETTLE_MS);
     return ensureACState(targetState, clickCount + 1);
   }
