@@ -1821,7 +1821,11 @@ async function runTests() {
       }
     }
   };
-  const contentWindow = { location: { href: 'https://w5.ab.ust.hk/njggt/app/home' } };
+  const contentWindow = {
+    location: { href: 'https://w5.ab.ust.hk/njggt/app/home' },
+    addEventListener() {},
+    removeEventListener() {}
+  };
   contentWindow.top = contentWindow;
   const contentWorld = {};
   const executeContentScript = new Function(
@@ -2129,6 +2133,19 @@ async function runTests() {
       && errorPageDiagnosticLogs[0]?.level === 'warn'
       && errorPageDiagnosticLogs[0]?.source === 'content-script-injection',
     '9Z-5: 错误页兜底注入不刷新页面，降级为 warn 并失败返回，交给重试恢复');
+
+  assertPass(contentSource.includes('reportContentError')
+      && contentSource.includes("window.addEventListener('error'")
+      && contentSource.includes("window.addEventListener('unhandledrejection'")
+      && contentSource.includes('__AC_EXTENSION_PAGE_ERROR__')
+      && contentSource.includes('self.__AC_CONTENT_ERROR_REPORTED__'),
+    '9Z-6: 隔离世界采集未捕获异常并桥接主世界错误回传');
+  assertPass(pageConfirmSource.includes('__AC_EXTENSION_ERROR_PATCHED__')
+      && pageConfirmSource.includes('__AC_EXTENSION_PAGE_ERROR__')
+      && pageConfirmSource.includes("window.addEventListener('error'")
+      && pageConfirmSource.includes("window.addEventListener('unhandledrejection'")
+      && pageConfirmSource.includes('chrome-extension://'),
+    '9Z-7: 主世界只回传扩展自身脚本异常，经 CustomEvent 桥接');
 
   assertPass(countOccurrences(backgroundSource, 'sendReadMessageToExactACHome(') >= 5
       && !backgroundSource.includes("sendMessageToExactACHome(tab.id, { action: 'status' })")
@@ -3205,6 +3222,11 @@ async function runTests() {
   assertPass(backgroundSource.includes('async function reconcileDiagnosticLogVersion()')
       && backgroundSource.includes('await reconcileDiagnosticLogVersion();'),
     '15H-3: init 早期调用 reconcileDiagnosticLogVersion 清理遗留日志');
+
+  assertPass(backgroundSource.includes("'reportContentError'")
+      && backgroundSource.includes("msg.type === 'reportContentError'")
+      && backgroundSource.includes("String(msg.source || 'content-script')"),
+    '15I: 后台接收内容脚本错误回传并写入本机诊断日志');
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;

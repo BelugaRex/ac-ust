@@ -4,6 +4,35 @@
 // ============================================================
 
 (() => {
+  // 主世界错误桥接（仅注册一次）：page-confirm 无法调用 chrome.runtime，
+  // 只把扩展自身脚本的未捕获异常经 CustomEvent 交给 content.js 回传 SW。
+  if (!window.__AC_EXTENSION_ERROR_PATCHED__) {
+    window.__AC_EXTENSION_ERROR_PATCHED__ = true;
+
+    function reportPageError(source, message) {
+      try {
+        window.dispatchEvent(new CustomEvent('__AC_EXTENSION_PAGE_ERROR__', {
+          detail: { source, message: String(message) }
+        }));
+      } catch (_) { /* 桥接失败不阻塞页面 */ }
+    }
+
+    function isExtensionCode(filename, stack) {
+      return String(filename || '').startsWith('chrome-extension://')
+        || String(stack || '').includes('chrome-extension://');
+    }
+
+    window.addEventListener('error', (event) => {
+      // 只回传扩展自身脚本的异常，避免把 UST 页面自己的报错混进诊断日志。
+      if (!isExtensionCode(event?.filename, event?.error?.stack)) return;
+      reportPageError('page-confirm-error', event?.error?.message || event?.message || '未知错误');
+    });
+    window.addEventListener('unhandledrejection', (event) => {
+      if (!isExtensionCode('', event?.reason?.stack)) return;
+      reportPageError('page-confirm-unhandledrejection', event?.reason?.message || String(event?.reason));
+    });
+  }
+
   if (!window.__AC_EXTENSION_DIALOG_PATCHED__) {
     window.__AC_EXTENSION_DIALOG_PATCHED__ = true;
 

@@ -96,6 +96,35 @@ chrome.runtime.onMessage.addListener(contentMessageListener);
 self.__AC_CONTENT_MESSAGE_LISTENER__ = contentMessageListener;
 self.__AC_CONTENT_LOADED__ = true;
 
+// ----- 内容脚本错误回传：把隔离世界未捕获异常上报给 SW 记入诊断日志 -----
+if (!self.__AC_CONTENT_ERROR_REPORTED__) {
+  self.__AC_CONTENT_ERROR_REPORTED__ = true;
+
+  function reportContentError(source, message) {
+    try {
+      const request = chrome.runtime.sendMessage({
+        type: 'reportContentError',
+        source,
+        error: String(message)
+      });
+      if (request && typeof request.catch === 'function') request.catch(() => {});
+    } catch (_) { /* SW 未就绪或上下文失效时静默，不阻塞页面 */ }
+  }
+
+  window.addEventListener('error', (event) => {
+    reportContentError('content-script-error', event?.error?.message || event?.message || '未知错误');
+  });
+  window.addEventListener('unhandledrejection', (event) => {
+    reportContentError('content-script-unhandledrejection', event?.reason?.message || String(event?.reason));
+  });
+  // 主世界（page-confirm.js）无法直接调用 chrome.runtime，经 CustomEvent 桥接回传。
+  window.addEventListener('__AC_EXTENSION_PAGE_ERROR__', (event) => {
+    const detail = event.detail || {};
+    if (!detail?.message) return;
+    reportContentError(detail.source || 'page-confirm-error', detail.message);
+  });
+}
+
 // ----- 获取当前 AC 状态 -----
 function getACStatus() {
   const antSwitch = findAntACSwitch();

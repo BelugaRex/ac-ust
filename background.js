@@ -2501,7 +2501,8 @@ const BACKGROUND_MESSAGE_TYPES = new Set([
   'reapplySmartNow',
   'repairSchedule',
   'toggleNow',
-  'ensureDiagnostics'
+  'ensureDiagnostics',
+  'reportContentError'
 ]);
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
@@ -2532,6 +2533,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ success: false, error: e?.message || String(e), swStartupTime, initCompletedAt });
     });
     return true;
+  }
+
+  if (msg.type === 'reportContentError') {
+    // 内容脚本错误回传（fire-and-forget）：content.js / page-confirm.js 采集到未捕获异常后
+    // 上报，写入本机诊断日志，让「复制诊断」一并带出页面脚本错误。
+    void appendDiagnosticLog(
+      msg.level === 'warn' ? 'warn' : 'error',
+      String(msg.source || 'content-script').slice(0, 80),
+      msg.error || msg.message
+    );
+    sendResponse({ success: true });
+    return false;
   }
 
   (async () => {
