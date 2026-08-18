@@ -2934,6 +2934,10 @@ async function runTests() {
       && alarmListenerBody13.includes("persistReconciledPwmTrigger(liveAlarm, 'badge-tick-sync', PWM_TRIGGER_NEXT_ONLY_OPTIONS)")
       && ensureDiagnosticAlarmsBody.includes("persistReconciledPwmTrigger(pwmAlarm, 'ensureDiagnosticAlarms', PWM_TRIGGER_NEXT_ONLY_OPTIONS)"),
     '13M: strict wrapper 与四条副作用校准路径统一委派持久化 helper，并显式保留各自 profile');
+  assertPass(ensureDiagnosticAlarmsBody.includes('schedule.smartMode?.enabled && !smartWeatherAlarm')
+      && ensureDiagnosticAlarmsBody.includes('await rescheduleSmartWeatherAlarm();')
+      && ensureDiagnosticAlarmsBody.includes('smartWeather: smartWeatherAlarm ? { scheduledTime: smartWeatherAlarm.scheduledTime } : null'),
+    '13M-2: 诊断自愈补建 ac-smart-weather（智能模式天气闹钟）并回传 alarm 状态');
   assertPass(persistScheduleBody.includes('reconcilePwmTrigger(schedule, liveAlarm, PWM_TRIGGER_NEXT_ONLY_OPTIONS)')
       && !persistScheduleBody.includes('persistReconciledPwmTrigger(')
       && snapshotBody.includes('reconcilePwmTrigger(snapshot, alarm, PWM_TRIGGER_SNAPSHOT_OPTIONS)')
@@ -2978,6 +2982,13 @@ async function runTests() {
       && popupSource.includes("diagnosePageTimerRetryNone")
       && popupSource.includes("diagnoseHeartbeatStale"),
     '14G: 诊断面板新增 5 闹钟中的 ac-active-boundary/ac-page-timer-retry 与 L2 offscreen 与 heartbeat 真状态读取');
+  assertPass(popupSource.includes("diagnoseSmartWeatherAlarm")
+      && popupSource.includes("diagnoseSmartWeatherAlarmMissing")
+      && popupSource.includes("diagnoseSmartWeatherFresh")
+      && popupSource.includes("diagnoseSmartWeatherStale")
+      && popupSource.includes("diagnoseSmartWeatherNoCache")
+      && popupSource.includes("ensured?.alarms?.smartWeather"),
+    '14G-2: 诊断面板新增智能模式天气闹钟与缓存新鲜度检查');
   assertPass(!popupSource.includes('const fmt2 =')
       && popupSource.includes("const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';")
       && /diagnoseTriMatch', fmt\(/.test(popupSource)

@@ -2439,12 +2439,13 @@ async function ensureDiagnosticAlarms() {
   if (!schedule.enabled) {
     await chrome.alarms.clear('ac-badge-tick');
     await chrome.alarms.clear('ac-watchdog');
+    await chrome.alarms.clear('ac-smart-weather');
     return {
       success: true,
       enabled: false,
       repaired: false,
       schedule: { ...schedule },
-      alarms: { badge: null, watchdog: null, pwm: null }
+      alarms: { badge: null, watchdog: null, pwm: null, smartWeather: null }
     };
   }
 
@@ -2468,6 +2469,15 @@ async function ensureDiagnosticAlarms() {
     repaired = true;
   }
 
+  // 智能模式天气闹钟自愈：ac-smart-weather 是 v0.8.0 新增闹钟，不在既有 5 闹钟
+  // 自愈清单里；丢失后天气缓存冻结，等效温度/建议分钟数不再更新。与 badge-tick/watchdog 一样补建。
+  let smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
+  if (schedule.smartMode?.enabled && !smartWeatherAlarm) {
+    await rescheduleSmartWeatherAlarm();
+    smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
+    repaired = true;
+  }
+
   badgeAlarm = await chrome.alarms.get('ac-badge-tick');
   watchdogAlarm = await chrome.alarms.get('ac-watchdog');
   pwmAlarm = await chrome.alarms.get('ac-pwm');
@@ -2486,7 +2496,8 @@ async function ensureDiagnosticAlarms() {
     alarms: {
       badge: badgeAlarm ? { scheduledTime: badgeAlarm.scheduledTime } : null,
       watchdog: watchdogAlarm ? { scheduledTime: watchdogAlarm.scheduledTime, periodInMinutes: watchdogAlarm.periodInMinutes } : null,
-      pwm: pwmAlarm ? { scheduledTime: pwmAlarm.scheduledTime } : null
+      pwm: pwmAlarm ? { scheduledTime: pwmAlarm.scheduledTime } : null,
+      smartWeather: smartWeatherAlarm ? { scheduledTime: smartWeatherAlarm.scheduledTime } : null
     }
   };
 }

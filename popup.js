@@ -908,6 +908,33 @@ btnDiagnose.addEventListener('click', async () => {
     }
     add(!!watchdogAlarm, t('diagnoseWatchdog') + (watchdogAlarm ? t('diagnoseBadgeRebuilt') + new Date(watchdogAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
 
+    // 2.0c 智能模式天气刷新链路：ac-smart-weather 闹钟 + ac_smart_weather 缓存新鲜度。
+    // v0.8.0 智能模式新增，此前诊断漏检——闹钟丢失后天气冻结、等效温度/建议分钟数不再更新却无红灯。
+    // 后台 ensureDiagnostics 已在上方补建；此处仅展示状态与缓存新鲜度，不重复补建。
+    const smartOnDiag = !!s.smartMode?.enabled;
+    if (!smartOnDiag) {
+      add(true, t('diagnoseSmartModeOff'));
+    } else {
+      const smartWeatherAlarm = ensured?.alarms?.smartWeather || alarms.find(a => a.name === 'ac-smart-weather');
+      add(!!smartWeatherAlarm, t('diagnoseSmartWeatherAlarm') + (smartWeatherAlarm
+        ? t('diagnoseBadgeRebuilt') + new Date(smartWeatherAlarm.scheduledTime).toLocaleTimeString() + ')'
+        : ' ' + t('diagnoseSmartWeatherAlarmMissing')));
+
+      const weatherRes = await chrome.storage.local.get('ac_smart_weather');
+      const weatherCache = weatherRes.ac_smart_weather;
+      const fetchedAt = Number(weatherCache?.fetchedAt) || 0;
+      if (fetchedAt > 0) {
+        const ageMin = Math.round((Date.now() - fetchedAt) / 60000);
+        if (ageMin <= 60) {
+          add(true, t('diagnoseSmartWeatherFresh', ageMin));
+        } else {
+          add(false, t('diagnoseSmartWeatherStale', ageMin));
+        }
+      } else {
+        add(false, t('diagnoseSmartWeatherNoCache'));
+      }
+    }
+
     // 2.1 PWM 运行时段(同日 white-list)与 ac-active-boundary 闹钟(指北固定 5 闹钟之一)。
     // activeHours.enabled=false 表示全天运行,无边界闹钟是预期,显示透明绿。
     if (s.activeHours?.enabled === true) {
