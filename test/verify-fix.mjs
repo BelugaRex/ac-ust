@@ -2320,6 +2320,11 @@ async function runTests() {
   assertPass(contentSource.includes("pickerInput.getAttribute('title')")
       && contentSource.includes('const effectiveValue = value || title'),
     '11J: 内容脚本以用户实测的 title=HH:MM 作为 value 的刷新后兼容回退');
+  assertPass(contentSource.includes('async function typeTimeIntoPickerInput(input, value)')
+      && contentSource.includes('const MAX_TYPING_ATTEMPTS = 3')
+      && contentSource.includes('async function typeOnceIntoPickerInput(picker, input, value)')
+      && contentSource.includes('return inputValue === value || inputTitle === value;'),
+    '11J-1: 页面定时器写入有限重试，并同时接受 value 或 title 命中目标 HH:MM');
 
   const clearPageTimerProofStart = backgroundSource.indexOf('function clearPageTimerProofState()');
   const clearPageTimerProofEnd = backgroundSource.indexOf('\nasync function syncStoredTriggerFromAlarm', clearPageTimerProofStart);

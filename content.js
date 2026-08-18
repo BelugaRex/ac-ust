@@ -358,7 +358,28 @@ function setNativeInputValue(input, value) {
 async function typeTimeIntoPickerInput(input, value) {
   const picker = input.closest('.ant-picker') || input;
   const hadReadonly = input.hasAttribute('readonly');
+  // 受控 AntD picker 单次模拟输入可能被 React 中途回退；有限重试提高可靠性。
+  const MAX_TYPING_ATTEMPTS = 3;
 
+  for (let attempt = 1; attempt <= MAX_TYPING_ATTEMPTS; attempt++) {
+    try {
+      if (await typeOnceIntoPickerInput(picker, input, value)) {
+        if (hadReadonly) input.setAttribute('readonly', '');
+        return true;
+      }
+      console.warn(`[AC扩展] 页面定时器输入第 ${attempt} 次未接受 ${value}`);
+    } catch (e) {
+      console.warn(`[AC扩展] 页面定时器输入第 ${attempt} 次异常:`, e?.message || e);
+    }
+  }
+
+  if (hadReadonly) input.setAttribute('readonly', '');
+  return false;
+}
+
+// 单次模拟手动输入。成功判定同时接受 value 与 title 命中目标 HH:MM：
+// 受控 picker 可能只把确认值写到二者之一，避免只读时序差异误报「输入框未接受时间」。
+async function typeOnceIntoPickerInput(picker, input, value) {
   input.removeAttribute('readonly');
   picker.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
   picker.click();
@@ -390,9 +411,9 @@ async function typeTimeIntoPickerInput(input, value) {
     await sleep(300);
   }
 
-  if (hadReadonly) input.setAttribute('readonly', '');
-
-  return input.value === value;
+  const inputValue = (input.value || '').trim();
+  const inputTitle = (input.getAttribute('title') || '').trim();
+  return inputValue === value || inputTitle === value;
 }
 
 // ----- 查找 AC 开关 DOM 元素 -----
