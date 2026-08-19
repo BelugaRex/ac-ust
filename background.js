@@ -396,8 +396,9 @@ async function reapplySmartSensitivityNow() {
     minutes = Math.max(1, Math.min(suggested.onMinutes, Math.round(suggested.onMinutes - elapsed)));
   }
 
-  await setPageTimer(minutes, { retryOnFailure: false });
-
+  // 先更新扩展自身追踪（ac-pwm + nextTriggerAt + storage），让弹窗倒计时立即反映新关机时间；
+  // 同时清掉旧 ac-pwm，避免旧关机时刻在下方慢速 setPageTimer 期间触发 runPwmStep 提前关机。
+  // 页面定时器（安全网）随后补设，不再阻塞倒计时更新。
   const nowMs = Date.now();
   const nextTriggerAt = nowMs + minutes * 60000;
   await chrome.alarms.clear('ac-pwm');
@@ -408,6 +409,14 @@ async function reapplySmartSensitivityNow() {
   schedule.alarmCreatedAt = nowMs;
   schedule.alarmDelayMinutes = minutes;
   await persistSchedule('reapply-smart-sensitivity-on-phase');
+
+  console.log(
+    `[AC扩展] 滑块灵敏度即时应用: sens=${schedule.smartMode.sensitivity}`
+    + ` → on=${suggested.onMinutes}min, ${minutes}min 后关机 (${new Date(nextTriggerAt).toLocaleTimeString()})`
+  );
+
+  // 页面关机定时器作为安全网补设；失败不回溯已更新的倒计时。
+  await setPageTimer(minutes, { retryOnFailure: false });
 }
 
 function clearPageTimerProofState() {
