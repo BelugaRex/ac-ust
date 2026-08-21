@@ -1,43 +1,5 @@
 # Privacy Policy for AC-UST
 
-**Last updated: 2026-08-11**
+The current privacy policy is maintained at [`商店/PRIVACY.md`](商店/PRIVACY.md).
 
-## Data Collection
-
-AC-UST does **not** collect, transmit, or share any personal information or user data with any third party.
-
-### What data does AC-UST access?
-
-| Data | Purpose | Stored? | Transmitted? |
-|------|---------|---------|-------------|
-| Chrome Storage (`chrome.storage.local`) | Save user timer settings (on/off minutes, clock mode, PWM state) | ✅ Locally only | ❌ Never |
-| Local diagnostic log (`chrome.storage.local`) | Keep up to 50 recent background errors for the user-triggered diagnostic report; entries contain only timestamp, severity, code-stage label, and a truncated message with URLs and email-like text redacted | ✅ Locally only | ❌ Never |
-| Chrome Storage (`chrome.storage.sync`) | v0.5.6+ synchronizes timer settings + PWM phase across the same browser account's devices (so multi-device PWM doesn't fight over the AC) | ✅ Browser account sync store (user-controlled) | ⚠️ Only via the browser's own account sync feature — never sent to any AC-UST/developer server |
-| HKUST Smart Power Meter page (`w5.ab.ust.hk`) | Read AC switch state, remaining balance, and toggle AC on/off; v0.5.7+ also reads the page's built-in "Power-off after" timer value (HH:MM) for cross-device phase validation | ❌ | ❌ Never |
-| Chrome Alarms (`chrome.alarms`) | Schedule timed AC on/off events | ✅ Locally only | ❌ Never |
-| Chrome Tabs | Find or open only matching `https://w5.ab.ust.hk/njggt/app/*` tabs for scheduled operations; other tabs are not read or recorded | ❌ | ❌ Never |
-
-### What data does AC-UST NOT collect?
-
-- ❌ No personal information (name, email, phone, etc.)
-- ❌ No location data
-- ❌ No browsing history
-- ❌ No cookies or tracking data
-- ❌ No analytics or telemetry
-- ❌ No authentication credentials
-
-## Data Storage
-
-All data is stored **in the browser's storage** (`chrome.storage.local` per-device, plus optional `chrome.storage.sync` for users who have signed into Chrome/Edge sync to keep their timer phase aligned across devices). The extension does not communicate with any external servers. The `chrome.storage.sync` payload contains only timer config + current PWM phase (`enabled`, `onMinutes`, `offMinutes`, `activeHours`, `pwmState`, `nextTriggerAt`); **never** includes heartbeats, diagnostic logs, page tab state, or any other runtime data. The local diagnostic ring retains at most 50 entries and does not store page URLs, tab IDs, DOM content, balances, or account information. If you have not signed into browser sync or have disabled extension sync, the extension gracefully falls back to local-only storage and behaves identically. Starting v0.5.7, the extension also reads the AC page's built-in "Power-off after" timer value (HH:MM displayed in the Ant Design time picker) to cross-check PWM phase alignment — this is a read-only DOM access on the already-open AC page, no data is transmitted anywhere.
-
-## Third-Party Services
-
-AC-UST does not integrate with any third-party services, analytics platforms, or advertising networks.
-
-## Changes to This Policy
-
-Any changes to this privacy policy will be reflected in this document and the GitHub repository at [github.com/BelugaRex/ac-ust](https://github.com/BelugaRex/ac-ust).
-
-## Contact
-
-For questions about this privacy policy, open an issue at [github.com/BelugaRex/ac-ust/issues](https://github.com/BelugaRex/ac-ust/issues).
+This compatibility page remains at the original URL so existing links do not break. Chrome Web Store submissions should use the direct policy URL listed in [`商店/CHROMEWEBSTORE.md`](商店/CHROMEWEBSTORE.md).

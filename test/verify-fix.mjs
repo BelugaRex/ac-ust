@@ -2805,10 +2805,41 @@ async function runTests() {
   const readme = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
   assertPass(readme.includes('下载源码 ZIP，解压后运行 `bash ./build.sh`，再 Load Unpacked `dist/`'),
     '12I: GitHub Releases 安装说明先构建，再加载 dist');
-  const webStoreMetadata = fs.readFileSync(path.join(ROOT, 'CHROMEWEBSTORE.md'), 'utf8');
+  const storeDir = path.join(ROOT, '商店');
+  const webStoreMetadata = fs.readFileSync(path.join(storeDir, 'CHROMEWEBSTORE.md'), 'utf8');
+  const storeAssetNames = [
+    'icon-128.png',
+    'screenshot-1.png',
+    'screenshot-2.png',
+    'promo-small.png',
+    'promo-marquee.png'
+  ];
+  const expectedStoreAssetDimensions = {
+    'icon-128.png': [128, 128],
+    'screenshot-1.png': [1280, 800],
+    'screenshot-2.png': [1280, 800],
+    'promo-small.png': [440, 280],
+    'promo-marquee.png': [1400, 560]
+  };
+  const hasExpectedPngDimensions = (name, expectedDimensions) => {
+    const png = fs.readFileSync(path.join(storeDir, '素材', name));
+    return png.subarray(0, 8).equals(Buffer.from('89504e470d0a1a0a', 'hex'))
+      && png.subarray(12, 16).toString('ascii') === 'IHDR'
+      && png.readUInt32BE(16) === expectedDimensions[0]
+      && png.readUInt32BE(20) === expectedDimensions[1];
+  };
   assertPass(webStoreMetadata.includes(`| 版本 | ${manifest.version} |`)
-      && webStoreMetadata.includes(`releases/ac-ust-v${manifest.version}.zip`),
-    '12J: Chrome Web Store 元数据版本和 ZIP 文件名与 manifest 同步');
+      && webStoreMetadata.includes(`releases/ac-ust-v${manifest.version}.zip`)
+      && fs.existsSync(path.join(storeDir, 'README.md'))
+      && fs.existsSync(path.join(storeDir, 'PRIVACY.md'))
+      && fs.existsSync(path.join(storeDir, '素材模板.html'))
+      && fs.existsSync(path.join(storeDir, '生成素材.mjs'))
+      && storeAssetNames.every(name => fs.existsSync(path.join(storeDir, '素材', name)))
+      && Object.entries(expectedStoreAssetDimensions)
+        .every(([name, dimensions]) => hasExpectedPngDimensions(name, dimensions))
+      && fs.readFileSync(path.join(storeDir, '素材', 'icon-128.png'))
+        .equals(fs.readFileSync(path.join(ROOT, 'icons', 'ac-ust_128.png'))),
+    '12J: Chrome Web Store 提交目录齐全，版本/ZIP 与 manifest 同步，图片尺寸正确且商店图标等同运行图标');
 
   // ===== 用例 13: PWM 持久化恢复独立于 popup 轮询 =====
   console.log('\n\n=== 用例 13: PWM 持久化恢复独立于 popup 轮询 ===\n');
@@ -3120,7 +3151,7 @@ async function runTests() {
   assertPass(popupHtmlV.length >= 2 && popupHtmlV.every(v => v === manifest.version),
     `14K: dist/popup.html ?v= 缓存参数 (${popupHtmlV.join(', ') || 'none'}) 全部等于 manifest.json version (${manifest.version})`);
 
-  // 14L: CHROMEWEBSTORE.md 所有版本字符串与 manifest.version 同步(发布资产一致性守门)
+  // 14L: 商店/CHROMEWEBSTORE.md 所有版本字符串与 manifest.version 同步(发布资产一致性守门)
   //  使用 \d+\.\d+\.\d+ 而非 \b0\.\d+\.\d+\b，避免匹配 ac-ust-vX.Y.Z 时 vX 之间无词边界被 \b 截掉
   const chwsVers = [...webStoreMetadata.matchAll(/\d+\.\d+\.\d+/g)].map(m => m[0]);
   assertPass(chwsVers.length >= 2 && chwsVers.every(v => v === manifest.version),

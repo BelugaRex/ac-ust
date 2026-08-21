@@ -1121,7 +1121,7 @@ btnDiagnose.addEventListener('click', async () => {
     }
 
     // 8. 最近后台异常：只读本机有界环形日志，并入现有复制诊断报告。
-    // 日志不含 URL、tabId、DOM、余额或账号信息，也不会进入 chrome.storage.sync。
+    // 日志会脱敏 URL 与邮箱，不记录原始 DOM、余额或账号信息，也不会进入 chrome.storage.sync。
     try {
       const diagnosticStorage = await chrome.storage.local.get('ac_diagnostic_log');
       appendRecentDiagnosticLogLines(lines, diagnosticStorage?.ac_diagnostic_log);

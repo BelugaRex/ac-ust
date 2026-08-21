@@ -1,7 +1,7 @@
 {
   "extName": { "message": "AC-UST", "description": "扩展名称" },
   "extShortName": { "message": "AC-UST", "description": "扩展短名称" },
-  "extDesc": { "message": "以 PWM 循环定时自动控制 HKUST Smart Power Meter 冷气", "description": "扩展描述，Chrome Web Store 显示" },
+  "extDesc": { "message": "为 HKUST Smart Power Meter 提供 PWM 冷气定时、智能天气控制、运行时段和跨设备相位对齐", "description": "扩展描述，Chrome Web Store 显示" },
   "extActionTitle": { "message": "冷气定时控制", "description": "工具栏图标悬停提示文字" },
 
   "acLoading": { "message": "加载中…", "description": "弹窗初始加载状态文字" },

@@ -1,7 +1,7 @@
 {
   "extName": { "message": "AC-UST" },
   "extShortName": { "message": "AC-UST" },
-  "extDesc": { "message": "Auto-control the HKUST Smart Power Meter AC with PWM cycle scheduling" },
+  "extDesc": { "message": "PWM AC scheduling, weather-based smart control, active hours, and cross-device phase alignment for HKUST Smart Power Meter" },
   "extActionTitle": { "message": "AC Timer Control" },
 
   "acLoading": { "message": "Loading…" },

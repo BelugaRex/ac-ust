@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>AC-UST Store Assets</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei UI", sans-serif;
+      color: #14263d;
+      background: #eef4fb;
+    }
+
+    * { box-sizing: border-box; }
+
+    html,
+    body {
+      width: 100%;
+      height: 100%;
+      margin: 0;
+      overflow: hidden;
+    }
+
+    body {
+      background: radial-gradient(circle at 18% 12%, #ffffff 0, #f6f9fd 34%, #e9f1fa 100%);
+    }
+
+    .screen {
+      width: 100%;
+      height: 100%;
+      padding: 64px 88px;
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 250px;
+      align-items: center;
+      gap: 92px;
+    }
+
+    .copy { max-width: 650px; }
+
+    .eyebrow {
+      margin-bottom: 22px;
+      color: #0a66c2;
+      font-size: 18px;
+      font-weight: 750;
+      letter-spacing: 0.08em;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: 52px;
+      line-height: 1.12;
+      letter-spacing: -0.035em;
+      font-weight: 780;
+    }
+
+    .copy p {
+      max-width: 610px;
+      margin: 22px 0 30px;
+      color: #52667e;
+      font-size: 22px;
+      line-height: 1.6;
+    }
+
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .chip {
+      padding: 10px 15px;
+      border: 1px solid #cad8e7;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.82);
+      color: #31506f;
+      font-size: 16px;
+      font-weight: 680;
+    }
+
+    .popup-frame {
+      width: 250px;
+      overflow: hidden;
+      border: 1px solid #d7e0eb;
+      border-radius: 14px;
+      background: #f3f4f6;
+      box-shadow: 0 24px 64px rgba(31, 64, 104, 0.18);
+    }
+
+    iframe {
+      display: block;
+      width: 250px;
+      height: 620px;
+      border: 0;
+      background: #f3f4f6;
+    }
+
+    .promo {
+      width: 100%;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      background: linear-gradient(135deg, #111b35 0%, #233f7a 58%, #315ca8 100%);
+      color: #ffffff;
+    }
+
+    .promo-card {
+      display: flex;
+      align-items: center;
+      border: 1px solid rgba(255, 255, 255, 0.18);
+      background: rgba(255, 255, 255, 0.08);
+      box-shadow: 0 24px 64px rgba(5, 14, 35, 0.22);
+    }
+
+    .promo-card img {
+      image-rendering: pixelated;
+      flex: 0 0 auto;
+    }
+
+    .promo h1 {
+      color: #ffffff;
+      letter-spacing: -0.025em;
+    }
+
+    .promo p {
+      margin: 10px 0 0;
+      color: #cfddff;
+      line-height: 1.5;
+    }
+
+    .promo-small {
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .promo-small .promo-card {
+      width: 100%;
+      height: 100%;
+      padding: 24px;
+      gap: 20px;
+      border-radius: 22px;
+    }
+
+    .promo-small img { width: 72px; height: 72px; }
+
+    .promo-small h1 { font-size: 31px; line-height: 1.05; }
+
+    .promo-small p { font-size: 15px; }
+
+    .promo-marquee {
+      justify-content: center;
+      padding: 56px 72px;
+    }
+
+    .promo-marquee .promo-card {
+      width: 100%;
+      height: 100%;
+      padding: 58px 68px;
+      gap: 42px;
+      border-radius: 34px;
+    }
+
+    .promo-marquee img { width: 112px; height: 112px; }
+
+    .promo-marquee h1 { font-size: 48px; line-height: 1.08; }
+
+    .promo-marquee p { font-size: 23px; }
+  </style>
+</head>
+<body>
+  <main id="asset"></main>
+  <script>
+    const assetName = new URLSearchParams(location.search).get('asset') || 'screenshot-pwm';
+    const asset = document.getElementById('asset');
+
+    const screenshotCopy = assetName === 'screenshot-smart'
+      ? {
+          title: '智能控制，按天气自动调节',
+          text: '使用香港天文台公开天气数据在本机计算建议开启时长；11 档灵敏度即时预览，并按每个 30 分钟周期执行。',
+          chips: ['公开天气数据', '本地计算', '11 档灵敏度', '压缩机保护']
+        }
+      : {
+          title: '循环定时，稳定对齐',
+          text: '自定义开关时长与每日运行时段，多设备共享相位；页面关机时间、扩展闹钟和倒计时采用同一绝对截止时间。',
+          chips: ['PWM 循环', '运行时段', '跨设备相位对齐', 'OFF 零点击']
+        };
+
+    function markReady() {
+      document.documentElement.dataset.ready = 'true';
+    }
+
+    if (assetName.startsWith('screenshot-')) {
+      asset.className = 'screen';
+      asset.innerHTML = `
+        <section class="copy">
+          <div class="eyebrow">AC-UST 0.8.1</div>
+          <h1>${screenshotCopy.title}</h1>
+          <p>${screenshotCopy.text}</p>
+          <div class="chips">${screenshotCopy.chips.map(text => `<span class="chip">${text}</span>`).join('')}</div>
+        </section>
+        <div class="popup-frame"><iframe title="AC-UST popup" src="../dist/popup.html"></iframe></div>`;
+
+      const frame = asset.querySelector('iframe');
+      frame.addEventListener('load', () => {
+        setTimeout(async () => {
+          const frameDocument = frame.contentDocument;
+          if (assetName === 'screenshot-smart') {
+            frameDocument.getElementById('smartModeToggle')?.click();
+            await new Promise(resolve => setTimeout(resolve, 500));
+            const status = frameDocument.getElementById('status');
+            if (status) status.textContent = '';
+          }
+          const shell = frameDocument.getElementById('appShell');
+          if (shell) frame.style.height = `${Math.ceil(shell.getBoundingClientRect().height)}px`;
+          markReady();
+        }, 900);
+      }, { once: true });
+    } else {
+      const marquee = assetName === 'promo-marquee';
+      asset.className = `promo ${marquee ? 'promo-marquee' : 'promo-small'}`;
+      asset.innerHTML = `
+        <section class="promo-card">
+          <img src="素材/icon-128.png" alt="">
+          <div>
+            <h1>AC-UST</h1>
+            <p>${marquee
+              ? 'PWM 循环 · 智能天气控制 · 运行时段 · 跨设备相位对齐'
+              : 'HKUST Smart Power Meter<br>PWM + 智能天气控制'}</p>
+          </div>
+        </section>`;
+      requestAnimationFrame(markReady);
+    }
+  </script>
+</body>
+</html>
