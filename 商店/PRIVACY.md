@@ -14,8 +14,8 @@ To perform its single purpose, the extension processes limited content from the 
 | --- | --- | --- | --- |
 | Settings and runtime state | Store PWM durations, smart-control sensitivity, active hours, phase, deadlines, retry state, and related operating status | `chrome.storage.local` on the user's device | None, except the limited sync fields described below |
 | Synced configuration | Align enabled state, durations, active hours, smart-control configuration, PWM phase, and next trigger across devices in the same browser ecosystem | `chrome.storage.sync`, controlled by the user's Chrome/Edge account settings | Sent only through the browser vendor's sync service; never through an AC-UST or developer server |
-| HKUST portal content | Read AC switch state, Charge Mode, remaining balance, and the `Power-off after` value; perform configured startup and timer actions | Current values and the most recent valid balance may be cached locally; raw DOM and credentials are not stored | Control actions are submitted only to the user-authenticated `w5.ab.ust.hk` portal as required to operate the AC |
-| Hong Kong Observatory weather | Calculate smart-control ON time from public current weather observations | Cached locally for up to one hour | Fetched over HTTPS from `data.weather.gov.hk`; requests do not include HKUST account data, portal content, extension settings, balances, or diagnostics |
+| HKUST portal content | Read AC switch state, Charge Mode, remaining balance, and the `Power-off after` value; perform configured startup and timer actions | Current values and the most recent valid balance may be cached in `chrome.storage.local`; the balance is also copied to `chrome.storage.session` as a same-session hot cache. Raw DOM and credentials are not stored | Control actions are submitted only to the user-authenticated `w5.ab.ust.hk` portal as required to operate the AC |
+| Hong Kong Observatory weather | Calculate smart-control ON time from public current weather observations | The most recent successful observation is cached locally. After one hour it is treated as stale, but may remain as a fallback until a later refresh succeeds or extension storage is cleared | Fetched over HTTPS from `data.weather.gov.hk`; requests do not include HKUST account data, portal content, extension settings, balances, or diagnostics |
 | Local diagnostic log | Let the user inspect recent background failures | Up to 50 redacted entries in `chrome.storage.local`; each entry contains only timestamp, severity, code-stage label, and a truncated message | Never uploaded or synced |
 | Browser alarms and matching tabs | Schedule operations and find or open the exact HKUST AC page | Alarm metadata and relevant runtime state remain local | Other tabs are not read, recorded, or transmitted |
 
@@ -41,7 +41,7 @@ There are no AC-UST developer servers, remote-code services, analytics platforms
 ## Local Storage and Retention
 
 - Settings and runtime state remain in browser extension storage until the user changes them, clears extension data, or removes the extension, subject to the browser's own storage behavior.
-- The weather cache is refreshed on an hourly schedule and replaced by newer observations.
+- The weather cache is scheduled to refresh hourly. If a refresh fails, the most recent successful observation may remain as a stale fallback until a later refresh succeeds or extension storage is cleared.
 - The diagnostic ring stores at most 50 redacted entries and is reset when the installed extension version changes.
 - AC-UST does not store raw HKUST page HTML or authentication credentials.
 
