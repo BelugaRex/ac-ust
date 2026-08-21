@@ -98,14 +98,6 @@ let lastAnnouncedState = '';
 let _toggleProgrammatic = false; // 防止程序同步 timerToggle 时触发 onChange 循环
 let _smartProgrammatic = false;  // 防止程序同步 smartModeToggle 时触发 onChange 循环
 
-function clampSmartSensitivityLocal(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return 5;
-  // 兼容旧版 0~100 无级值：>10 视为旧值，按 /10 折算到 0~10 档位。
-  const normalized = n > 10 ? n / 10 : n;
-  return Math.round(Math.min(10, Math.max(0, normalized)));
-}
-
 function updateSmartSensitivityBubble() {
   const value = Number(smartSensitivity.value);
   const min = Number(smartSensitivity.min) || 0;
@@ -138,7 +130,7 @@ async function loadSettings() {
   const sm = schedule.smartMode || {};
   currentSmartMode = {
     enabled: !!sm.enabled,
-    sensitivity: clampSmartSensitivityLocal(sm.sensitivity ?? 5)
+    sensitivity: normalizeSmartSensitivity(sm.sensitivity ?? 5)
   };
   syncModeUI();
 }
@@ -278,14 +270,14 @@ smartModeToggle.addEventListener('change', async () => {
 
 smartSensitivity.addEventListener('input', () => {
   // 平滑预览：滑动过程中即时更新建议分钟数，不触发后台写入
-  currentSmartMode.sensitivity = clampSmartSensitivityLocal(smartSensitivity.value);
+  currentSmartMode.sensitivity = normalizeSmartSensitivity(smartSensitivity.value);
   updateSmartSensitivityBubble();
   void updateSmartReadout();
 });
 
 smartSensitivity.addEventListener('change', async () => {
   // 释放滑块：先持久化灵敏度，再通知后台立即重设当前 ON 相位的 Power-off after。
-  currentSmartMode.sensitivity = clampSmartSensitivityLocal(smartSensitivity.value);
+  currentSmartMode.sensitivity = normalizeSmartSensitivity(smartSensitivity.value);
   syncModeUI();
   await updateSchedule(currentScheduleEnabled, false);
   if (!IS_STATIC_PREVIEW && currentSmartMode.enabled && currentScheduleEnabled) {
@@ -660,10 +652,11 @@ startup().then(setupStaticPreviewFit);
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：硬编码须与 manifest.json 版本同步，build.sh 会在 dist/ 中再次核对并注入）
-const APP_VERSION = '0.6.15';
+const APP_VERSION = '0.8.1';
 // BUILD_TIME 由 build.sh 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
+const BUILD_TIME_EPOCH_MS = 0;
 
 function formatBuildTimeShort(buildTime) {
   const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):\d{2}$/.exec(buildTime);
@@ -700,6 +693,14 @@ const btnCopyDiag = document.getElementById('btnCopyDiag');
 const DIAGNOSTIC_MESSAGE_TIMEOUT_MS = 10000;
 const DIAGNOSTIC_TRIGGER_TOLERANCE_MS = 1500;
 let lastDiagLines = [];
+
+function getTimestampAgeMs(timestamp, nowMs = Date.now()) {
+  const value = Number(timestamp);
+  const now = Number(nowMs);
+  if (!Number.isFinite(value) || value <= 0 || !Number.isFinite(now)) return null;
+  const ageMs = now - value;
+  return ageMs >= 0 ? ageMs : null;
+}
 
 function areDiagnosticTriggersAligned(...triggerTimes) {
   const times = triggerTimes.map(Number);
@@ -763,20 +764,42 @@ function renderDiagnoseResult(lines) {
   document.getElementById('diagContent').replaceChildren(fragment);
 }
 
-function appendRecentDiagnosticLogLines(lines, entries) {
-  const validEntries = Array.isArray(entries)
-    ? entries.filter(entry => entry && typeof entry === 'object')
+function selectRecentDiagnosticEntries(entries, nowMs = Date.now()) {
+  const now = Number(nowMs);
+  const buildEpoch = Number(BUILD_TIME_EPOCH_MS);
+  if (!Number.isSafeInteger(now) || !Number.isSafeInteger(buildEpoch) || buildEpoch < 0) {
+    return { total: 0, entries: [] };
+  }
+
+  const eligible = Array.isArray(entries)
+    ? entries
+      .map((entry, index) => ({ entry, index }))
+      .filter(({ entry }) => entry
+        && typeof entry === 'object'
+        && Number.isSafeInteger(entry.timestamp)
+        && entry.timestamp >= buildEpoch
+        && entry.timestamp <= now)
+      .sort((left, right) => (
+        right.entry.timestamp - left.entry.timestamp || right.index - left.index
+      ))
     : [];
-  if (!validEntries.length) {
+
+  return {
+    total: eligible.length,
+    entries: eligible.slice(0, 5).map(({ entry }) => entry)
+  };
+}
+
+function appendRecentDiagnosticLogLines(lines, entries, nowMs = Date.now()) {
+  const selection = selectRecentDiagnosticEntries(entries, nowMs);
+  if (!selection.total) {
     lines.push('✅ ' + t('diagnoseRecentErrorsEmpty'));
     return;
   }
 
-  const recentEntries = validEntries.slice(-10);
-  lines.push(t('diagnoseRecentErrors', validEntries.length, recentEntries.length));
-  recentEntries.forEach((entry) => {
-    const timestamp = Number(entry.timestamp);
-    const time = Number.isFinite(timestamp) ? new Date(timestamp).toLocaleString() : '?';
+  lines.push(t('diagnoseRecentErrors', selection.total, selection.entries.length));
+  selection.entries.forEach((entry) => {
+    const time = new Date(entry.timestamp).toLocaleString();
     const level = entry.level === 'warn' ? 'WARN' : 'ERROR';
     const source = String(entry.source || 'unknown').slice(0, 80);
     const message = String(entry.message || '').slice(0, 300);
@@ -923,9 +946,10 @@ btnDiagnose.addEventListener('click', async () => {
       const weatherRes = await chrome.storage.local.get('ac_smart_weather');
       const weatherCache = weatherRes.ac_smart_weather;
       const fetchedAt = Number(weatherCache?.fetchedAt) || 0;
-      if (fetchedAt > 0) {
-        const ageMin = Math.round((Date.now() - fetchedAt) / 60000);
-        if (ageMin <= 60) {
+      const ageMs = getTimestampAgeMs(fetchedAt);
+      if (ageMs !== null) {
+        const ageMin = Math.round(ageMs / 60000);
+        if (ageMs <= 60 * 60000) {
           add(true, t('diagnoseSmartWeatherFresh', ageMin));
         } else {
           add(false, t('diagnoseSmartWeatherStale', ageMin));
@@ -951,8 +975,9 @@ btnDiagnose.addEventListener('click', async () => {
     {
       const hbRes = await chrome.storage.local.get('__heartbeat');
       const hbAt = hbRes?.__heartbeat || 0;
-      const hbAge = hbAt ? Math.round((Date.now() - hbAt) / 1000) : -1;
-      if (hbAge >= 0 && hbAge < 60) {
+      const hbAgeMs = getTimestampAgeMs(hbAt);
+      const hbAge = hbAgeMs === null ? -1 : Math.round(hbAgeMs / 1000);
+      if (hbAgeMs !== null && hbAgeMs < 60 * 1000) {
         add(true, t('diagnoseHeartbeat', hbAge));
       } else {
         add(false, t('diagnoseHeartbeatStale', hbAge));

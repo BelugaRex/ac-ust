@@ -58,6 +58,14 @@
     return Number.isFinite(n) ? n : null;
   }
 
+  // 设置兼容归一化：当前使用 0~10 整数档；旧版 0~100 值按 /10 迁移。
+  function normalizeSmartSensitivity(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return 5;
+    const normalized = n > 10 ? n / 10 : n;
+    return Math.round(clamp(normalized, 0, 10));
+  }
+
   // 灵敏度档位 (0~10，共 11 档) → 灵敏度系数 K (0.30~1.30)。
   function sensitivityToK(sensitivity) {
     const s = Number(sensitivity);
@@ -202,6 +210,7 @@
 
   return {
     SMART_MODE,
+    normalizeSmartSensitivity,
     sensitivityToK,
     vaporPressureFromDewPoint,
     deriveDewPoint,

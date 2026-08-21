@@ -140,9 +140,9 @@
   "diagnoseActiveBoundaryMissing": { "message": "ac-active-boundary 闹钟缺失 (运行时段边界不会自动触发)", "description": "诊断：ac-active-boundary 闹钟缺失" },
   "diagnosePageTimerRetry": { "message": "页面定时器重试中 (下次 $1，$2 分钟后)", "description": "诊断：page timer 重试。$1=重试时刻,$2=重试分钟数" },
   "diagnosePageTimerRetryNone": { "message": "页面定时器无重试 (pageTimerRetryMinutes=0)", "description": "诊断：page timer 无重试" },
-  "diagnoseRecentErrors": { "message": "ℹ️ 近期后台异常：共 $1 条，显示最近 $2 条", "description": "诊断：本地持久化异常日志摘要。$1=总条数,$2=显示条数" },
-  "diagnoseRecentErrorsEmpty": { "message": "近期后台异常为空", "description": "诊断：没有持久化后台异常" },
-  "diagnoseRecentErrorsReadFailed": { "message": "读取近期后台异常失败: ", "description": "诊断：读取持久化异常日志失败前缀" },
+  "diagnoseRecentErrors": { "message": "ℹ️ 当前构建以来的后台异常：共 $1 条，显示最新 $2 条", "description": "诊断：当前构建以来的本地持久化异常日志摘要。$1=总条数,$2=显示条数" },
+  "diagnoseRecentErrorsEmpty": { "message": "当前构建以来没有后台异常", "description": "诊断：当前构建以来没有合格的持久化后台异常" },
+  "diagnoseRecentErrorsReadFailed": { "message": "读取当前构建的后台异常失败: ", "description": "诊断：读取当前构建持久化异常日志失败前缀" },
 
   "badgeDefault": { "message": "冷气定时控制", "description": "扩展图标默认标题" },
   "badgeClockSoon": { "message": "即将切换冷气状态", "description": "时钟模式：即将切换状态时图标标题" },

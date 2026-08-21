@@ -51,6 +51,13 @@ function pwmPhaseCommitPlan(reason, nextAction, nextTriggerAt, now, proofAction)
   };
 }
 
+function pwmPhasePageTimerTarget(observations, fallbackTargetAt, now) {
+  const pageTimerTargetAt = Number(observations?.pageTimerTargetAt);
+  return Number.isFinite(pageTimerTargetAt) && pageTimerTargetAt > now
+    ? pageTimerTargetAt
+    : fallbackTargetAt;
+}
+
 function planPwmTargetStep(schedule, targetAction, observations, now, durations) {
   if (targetAction === 'on') {
     return planPwmOnTargetStep(schedule, observations, now, durations);
@@ -114,10 +121,15 @@ function planPwmOnTargetStep(schedule, observations, now, durations) {
     return pwmPhaseRetryPlan('page-timer-failed', 'on', now, 'clear');
   }
 
+  const nextTriggerAt = pwmPhasePageTimerTarget(
+    observations,
+    now + durations.onMinutes * PWM_PHASE_MINUTE_MS,
+    now
+  );
   return pwmPhaseCommitPlan(
     'on-phase-committed',
     'off',
-    now + durations.onMinutes * PWM_PHASE_MINUTE_MS,
+    nextTriggerAt,
     now
   );
 }
@@ -201,10 +213,11 @@ function planPwmRecovery(schedule, expiredScheduledTime, observations = {}, opts
     return pwmPhaseRetryPlan('page-timer-failed', 'off', now);
   }
 
-  const pageTimerTargetAt = Number(observations.pageTimerTargetAt);
-  const alignedTriggerAt = Number.isFinite(pageTimerTargetAt) && pageTimerTargetAt > now
-    ? pageTimerTargetAt
-    : nextTriggerAt;
+  const alignedTriggerAt = pwmPhasePageTimerTarget(
+    observations,
+    nextTriggerAt,
+    now
+  );
 
   return pwmPhaseCommitPlan(
     'page-timer-confirmed',

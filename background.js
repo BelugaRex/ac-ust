@@ -238,14 +238,6 @@ const SMART_WEATHER_TTL_MS = 60 * 60 * 1000;  // 天气缓存 1 小时（整点�
 let smartWeatherInFlight = null;
 let smartReapplyInFlight = false;  // 滑块松开后即时重设 Power-off after 的单飞守卫
 
-function clampSmartSensitivity(value) {
-  const n = Number(value);
-  if (!Number.isFinite(n)) return 5;
-  // 兼容旧版 0~100 无级值：>10 视为旧值，按 /10 折算到 0~10 档位。
-  const normalized = n > 10 ? n / 10 : n;
-  return Math.round(Math.min(10, Math.max(0, normalized)));
-}
-
 async function fetchSmartWeather() {
   const res = await fetch(SMART_WEATHER_URL, { cache: 'no-store' });
   if (!res.ok) throw new Error(`天气接口 HTTP ${res.status}`);
@@ -393,30 +385,38 @@ async function reapplySmartSensitivityNow() {
     const nowMs = Date.now();
     const remainingBefore = oldTriggerAt > nowMs ? (oldTriggerAt - nowMs) / 60000 : 0;
     const elapsed = Math.max(0, oldOnMinutes - remainingBefore);
-    minutes = Math.max(1, Math.min(suggested.onMinutes, Math.round(suggested.onMinutes - elapsed)));
+    minutes = Math.max(1, Math.min(suggested.onMinutes, suggested.onMinutes - elapsed));
   }
 
-  // 先更新扩展自身追踪（ac-pwm + nextTriggerAt + storage），让弹窗倒计时立即反映新关机时间；
-  // 同时清掉旧 ac-pwm，避免旧关机时刻在下方慢速 setPageTimer 期间触发 runPwmStep 提前关机。
-  // 页面定时器（安全网）随后补设，不再阻塞倒计时更新。
-  const nowMs = Date.now();
-  const nextTriggerAt = nowMs + minutes * 60000;
+  // 先清旧 alarm，避免旧关机时刻在慢速新鲜页验证期间抢跑；页面写入方返回
+  // 已对齐 UST HH:MM 接口的绝对 targetAt，再用同一值恢复扩展倒计时。
   await chrome.alarms.clear('ac-pwm');
-  if (nextTriggerAt > nowMs) {
-    chrome.alarms.create('ac-pwm', { when: nextTriggerAt });
+  setNextTriggerAt(0);
+  schedule.alarmCreatedAt = 0;
+  schedule.alarmDelayMinutes = 0;
+  const timerResult = await setPageTimer(minutes, { retryOnFailure: false });
+  if (!timerResult?.success) {
+    schedule.pageTimerError = `灵敏度即时应用时页面关机定时器未确认：${timerResult?.error || '未知错误'}；1 分钟后重试`;
+    await createPwmAlarmFromPlan(
+      { nextTriggerAt: Date.now() + 60000 },
+      'reapply-smart-pageTimer-failed'
+    );
+    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+    await persistSchedule('reapply-smart-sensitivity-pageTimer-failed');
+    await updateBadge();
+    return;
   }
-  setNextTriggerAt(nextTriggerAt);
-  schedule.alarmCreatedAt = nowMs;
-  schedule.alarmDelayMinutes = minutes;
+
+  const reapplyPlan = { nextTriggerAt: schedule.pageTimerTargetAt };
+  await createPwmAlarmFromPlan(reapplyPlan, 'reapply-smart-sensitivity');
+  await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
   await persistSchedule('reapply-smart-sensitivity-on-phase');
+  await updateBadge();
 
   console.log(
     `[AC扩展] 滑块灵敏度即时应用: sens=${schedule.smartMode.sensitivity}`
-    + ` → on=${suggested.onMinutes}min, ${minutes}min 后关机 (${new Date(nextTriggerAt).toLocaleTimeString()})`
+    + ` → on=${suggested.onMinutes}min, 页面目标 ${new Date(schedule.pageTimerTargetAt).toLocaleTimeString()}`
   );
-
-  // 页面关机定时器作为安全网补设；失败不回溯已更新的倒计时。
-  await setPageTimer(minutes, { retryOnFailure: false });
 }
 
 function clearPageTimerProofState() {
@@ -521,7 +521,7 @@ async function advanceExpiredAlarmToNextBoundary(expiredScheduledTime) {
       observations = {
         ...observations,
         pageTimerSucceeded: !!timerResult?.success,
-        pageTimerTargetAt: schedule.pageTimerTargetAt
+        pageTimerTargetAt: Number(timerResult?.targetAt)
       };
       plan = planPwmRecovery(recoverySchedule, expiredScheduledTime, observations);
     }
@@ -1328,6 +1328,7 @@ async function runPwmStep() {
       applyPwmPlanState(plan);
       const pageTimerResult = await setPageTimer(plan.timerMinutes, { retryOnFailure: false });
       observations.pageTimerSucceeded = !!pageTimerResult?.success;
+      observations.pageTimerTargetAt = Number(pageTimerResult?.targetAt);
       observations.pageTimerError = pageTimerResult?.error || schedule.pageTimerError || '';
       plan = planPwmStep(schedule, observations);
     }
@@ -1469,10 +1470,14 @@ async function setPageTimer(minutes, { retryOnFailure = true } = {}) {
 
   // 提取（Fowler Extract Function）：页面定时器成功后的证明记录——解析目标时刻、清重试态、持久化并回传验证结果。
   const recordPageTimerProof = async (result, minutes, verification) => {
-    const parsedTarget = parsePageTimerValue(result.value, Date.now());
-    schedule.pageTimerTargetAt = parsedTarget?.valid
-      ? parsedTarget.targetMs
-      : Date.now() + Math.max(1, Number(schedule.pageTimerMinutes) || 1) * 60000;
+    const targetAt = Number(result.targetAt);
+    if (!Number.isSafeInteger(targetAt) || targetAt <= Date.now()) {
+      return finishFailure({
+        success: false,
+        error: '页面定时器未返回有效的未来绝对目标时间'
+      }, 'invalid-target');
+    }
+    schedule.pageTimerTargetAt = targetAt;
     schedule.pageTimerError = '';
     schedule.pageTimerRetryAt = 0;
     schedule.pageTimerRetryMinutes = 0;
@@ -2151,7 +2156,10 @@ async function repairScheduleClock() {
   }
 
   schedule.pwmState = currentOn ? 'off' : 'on';
-  await createPwmAlarmWithVerify(delay, 'repair');
+  const repairPlan = currentOn
+    ? { nextTriggerAt: schedule.pageTimerTargetAt }
+    : { nextTriggerAt: Date.now() + delay * 60000 };
+  await createPwmAlarmFromPlan(repairPlan, 'repair');
   await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
   await persistSchedule('repairScheduleClock-interval');
   await updateBadge();
@@ -2432,8 +2440,10 @@ async function toggleNowAndSync(action) {
   }
 
   schedule.pwmState = currentOn ? 'off' : 'on';
-
-  await createPwmAlarmWithVerify(delay, 'toggle');
+  const togglePlan = currentOn
+    ? { nextTriggerAt: schedule.pageTimerTargetAt }
+    : { nextTriggerAt: Date.now() + delay * 60000 };
+  await createPwmAlarmFromPlan(togglePlan, 'toggle');
   await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
   await persistSchedule('toggleNowAndSync-interval');
   await updateBadge();
@@ -2613,7 +2623,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (data.smartMode && typeof data.smartMode === 'object') {
         schedule.smartMode = {
           enabled: !!data.smartMode.enabled,
-          sensitivity: clampSmartSensitivity(data.smartMode.sensitivity)
+          sensitivity: normalizeSmartSensitivity(data.smartMode.sensitivity)
         };
       }
       // 天气只由整点闹钟 ac-smart-weather 刷新（setupAlarms 已调度），此处不即时拉取。

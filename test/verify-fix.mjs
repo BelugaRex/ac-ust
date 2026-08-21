@@ -289,6 +289,22 @@ async function runTests() {
   assertPass(smartMode.sensitivityToK(11) === 1.30, 'smart: K 上限截断到 1.30');
   assertPass(smartMode.sensitivityToK(undefined) === 0.30, 'smart: K 非法输入回退 0.30');
 
+  const normalizeSmartSensitivity = smartMode.normalizeSmartSensitivity;
+  assertPass(typeof normalizeSmartSensitivity === 'function',
+    'smart: 灵敏度兼容归一化由 smart-mode.js 提供共享纯函数');
+  if (typeof normalizeSmartSensitivity === 'function') {
+    assertPass([
+      [undefined, 5],
+      [Number.NaN, 5],
+      [-1, 0],
+      [4.5, 5],
+      [10, 10],
+      [50, 5],
+      [100, 10]
+    ].every(([input, expected]) => normalizeSmartSensitivity(input) === expected),
+    'smart: 灵敏度归一化覆盖非法值、边界、四舍五入与旧版 0~100 值');
+  }
+
   // 水汽压（Magnus 公式）
   assertPass(Math.abs(smartMode.vaporPressureFromDewPoint(25) - 31.67) < 0.5,
     'smart: 露点 25°C → 水汽压 ≈31.7 hPa');
@@ -303,6 +319,20 @@ async function runTests() {
   });
   assertPass(smartDefault.valid === true && smartDefault.onMinutes === 14 && smartDefault.offMinutes === 16,
     'smart: 默认场景 on=14/off=16（30 分钟周期开关互补）');
+
+  const smartPrecise = smartMode.computeSmartOnMinutes({
+    sensitivity: 10,
+    temperature: 32.3,
+    dewPoint: 10,
+    windSpeedMs: 0,
+    rainMm: 0
+  });
+  assertPass(smartPrecise.valid === true
+      && Math.abs(smartPrecise.tRaw - 21.03) < 0.02
+      && !Number.isInteger(smartPrecise.tRaw)
+      && smartPrecise.onMinutes === 21
+      && smartPrecise.offMinutes === 9,
+    'smart: K/天气/Teq/tRaw 保留浮点，仅最终 onMinutes 量化供显示与控制');
 
   // 降雨修正：Rain > 5.0 → t_raw *= 0.5
   const smartRain = smartMode.computeSmartOnMinutes({
@@ -747,9 +777,22 @@ async function runTests() {
 
   const distPopupSource = fs.readFileSync(path.join(ROOT, 'dist', 'popup.js'), 'utf8');
   const distBuildTime = distPopupSource.match(/const BUILD_TIME = '([^']+)'/)?.[1];
+  const distBuildEpoch = Number(
+    distPopupSource.match(/const BUILD_TIME_EPOCH_MS = (\d+);/)?.[1]
+  );
+  const buildEpochDate = new Date(distBuildEpoch);
+  const expectedDistBuildTime = Number.isSafeInteger(distBuildEpoch)
+    ? `${buildEpochDate.getFullYear()}-${String(buildEpochDate.getMonth() + 1).padStart(2, '0')}-${String(buildEpochDate.getDate()).padStart(2, '0')}`
+      + ` ${String(buildEpochDate.getHours()).padStart(2, '0')}:${String(buildEpochDate.getMinutes()).padStart(2, '0')}:${String(buildEpochDate.getSeconds()).padStart(2, '0')}`
+    : '';
   assertPass(distPopupSource.includes(`const APP_VERSION = '${manifest.version}'`)
       && !!distBuildTime && distBuildTime !== 'dev',
     'dist/popup.js 已注入版本号和非 dev 构建时间');
+  assertPass(Number.isSafeInteger(distBuildEpoch)
+      && distBuildEpoch > 0
+      && distBuildTime === expectedDistBuildTime
+      && popupJs.includes('const BUILD_TIME_EPOCH_MS = 0;'),
+    'build: 文本构建时间与数值 epoch 由同一秒注入，源码保留数值占位');
   assertPass(fs.existsSync(path.join(ROOT, 'releases', `ac-ust-v${manifest.version}.zip`)),
     `商店 ZIP 已生成: ac-ust-v${manifest.version}.zip`);
 
@@ -1166,6 +1209,12 @@ async function runTests() {
   const pageConfirmSource = fs.readFileSync(path.join(ROOT, 'page-confirm.js'), 'utf8');
   const countOccurrences = (source, needle) => source.split(needle).length - 1;
 
+  assertPass(!popupJs.includes('function clampSmartSensitivityLocal(')
+      && !backgroundSource.includes('function clampSmartSensitivity(')
+      && countOccurrences(popupJs, 'normalizeSmartSensitivity(') >= 3
+      && countOccurrences(backgroundSource, 'normalizeSmartSensitivity(') >= 1,
+    'smart: popup/background 复用共享灵敏度归一化，不保留重复本地实现');
+
   const mainWorldBridgeStart = contentSource.indexOf('function requestMainWorldResult({');
   const mainWorldBridgeEnd = contentSource.indexOf('\n// ----- 等待开关元素出现', mainWorldBridgeStart);
   const mainWorldBridgeSource = mainWorldBridgeStart >= 0 && mainWorldBridgeEnd > mainWorldBridgeStart
@@ -1488,6 +1537,38 @@ async function runTests() {
   assertPass(!contentSource.includes("error: t('contentCrossDayLimit')")
       && contentSource.includes('crossesMidnight,'),
     '9M: Power-off after 跨午夜时间直接输入，不再被代码拒绝');
+  const pageTimerTargetStart = contentSource.indexOf('function computePageTimerTarget(');
+  const pageTimerTargetEnd = contentSource.indexOf('\n// 找到 "Power-off after"', pageTimerTargetStart);
+  const pageTimerTargetSource = pageTimerTargetStart >= 0 && pageTimerTargetEnd > pageTimerTargetStart
+    ? contentSource.slice(pageTimerTargetStart, pageTimerTargetEnd)
+    : '';
+  const computePageTimerTarget = pageTimerTargetSource
+    ? new Function(`${pageTimerTargetSource}; return computePageTimerTarget;`)()
+    : null;
+  assertPass(typeof computePageTimerTarget === 'function',
+    '9M-1: content 暴露可独立验证的页面关机目标纯计算');
+  if (typeof computePageTimerTarget === 'function') {
+    const targetNow = new Date(2026, 0, 15, 10, 0, 30, 500).getTime();
+    const targetExpected = Math.ceil((targetNow + 5 * 60000) / 60000) * 60000;
+    const targetResult = computePageTimerTarget(5, targetNow);
+    const targetDate = new Date(targetExpected);
+    const targetValue = `${String(targetDate.getHours()).padStart(2, '0')}:${String(targetDate.getMinutes()).padStart(2, '0')}`;
+    const midnightNow = new Date(2026, 0, 15, 23, 59, 30, 0).getTime();
+    const midnightExpected = Math.ceil((midnightNow + 60000) / 60000) * 60000;
+    const midnightResult = computePageTimerTarget(1, midnightNow);
+    assertPass(targetResult.targetAt === targetExpected
+        && targetResult.value === targetValue
+        && targetResult.actualDelayMinutes === (targetExpected - targetNow) / 60000
+        && targetResult.actualDelayMinutes > targetResult.requestedMinutes,
+      '9M-2: 非整分请求向上对齐 UST 分钟接口，并保留实际浮点延迟');
+    assertPass(midnightResult.targetAt === midnightExpected
+        && midnightResult.crossesMidnight === true
+        && midnightResult.value === '00:01',
+      '9M-3: 23:59:30 的 1 分钟请求安全上取整到次日 00:01');
+    assertPass(contentSource.includes('targetAt,')
+        && contentSource.includes('actualDelayMinutes,'),
+      '9M-4: content setTimer 响应回传 targetAt 与实际延迟给后台');
+  }
   const verificationStartForReload = backgroundSource.indexOf('async function verifyPageTimerPersistence(');
   const verificationEndForReload = backgroundSource.indexOf('\n// 关机定时器设置失败时', verificationStartForReload);
   const verifySectionForReload = verificationStartForReload >= 0 && verificationEndForReload > verificationStartForReload
@@ -2191,6 +2272,16 @@ async function runTests() {
     { acIsOn: true, pageTimerSucceeded: true },
     { now: plannerNow10 }
   );
+  const plannerPageTarget10 = plannerNow10 + 13 * 60_000;
+  const timerTargetCommittedPlan10 = pwmPhase.planPwmStep(
+    plannerOnSchedule10,
+    {
+      acIsOn: true,
+      pageTimerSucceeded: true,
+      pageTimerTargetAt: plannerPageTarget10
+    },
+    { now: plannerNow10 }
+  );
   const setPageTimerCallIdx = pwmBody.indexOf('const pageTimerResult = await setPageTimer(plan.timerMinutes');
   assertPass(timerRequiredPlan10.kind === 'hold'
       && timerRequiredPlan10.prerequisite === 'set-page-timer'
@@ -2202,17 +2293,21 @@ async function runTests() {
   assertPass(timerFailedPlan10.kind === 'retry'
       && timerFailedPlan10.phasePatch.pwmState === 'on'
       && timerCommittedPlan10.kind === 'commit'
-      && timerCommittedPlan10.phasePatch.pwmState === 'off',
-    '10B: 页面定时器失败保持 ON，相位仅在确认成功后推进为 OFF');
+      && timerCommittedPlan10.phasePatch.pwmState === 'off'
+      && timerTargetCommittedPlan10.nextTriggerAt === plannerPageTarget10
+      && timerTargetCommittedPlan10.phasePatch.nextTriggerAt === plannerPageTarget10,
+    '10B: 页面定时器失败保持 ON；成功后推进为 OFF 并采纳页面绝对目标');
 
   const pageTimerObservationIdx = pwmBody.indexOf('observations.pageTimerSucceeded = !!pageTimerResult?.success', setPageTimerCallIdx);
+  const pageTimerTargetObservationIdx = pwmBody.indexOf('observations.pageTimerTargetAt = Number(pageTimerResult?.targetAt)', pageTimerObservationIdx);
   const pageTimerReplanIdx = pwmBody.indexOf('plan = planPwmStep(schedule, observations);', pageTimerObservationIdx);
   const finalPlanApplyIdx = pwmBody.lastIndexOf('applyPwmPlanState(plan);');
   assertPass(setPageTimerCallIdx > 0
       && pageTimerObservationIdx > setPageTimerCallIdx
-      && pageTimerReplanIdx > pageTimerObservationIdx
+      && pageTimerTargetObservationIdx > pageTimerObservationIdx
+      && pageTimerReplanIdx > pageTimerTargetObservationIdx
       && finalPlanApplyIdx > pageTimerReplanIdx,
-    '10C: adapter 将页面结果回传 planner，重新规划后才应用最终相位');
+    '10C: adapter 将页面成功与 targetAt 回传 planner，重新规划后才应用最终相位');
 
   assertPass(timerFailedPlan10.reason === 'page-timer-failed'
       && timerFailedPlan10.retryMinutes === 1
@@ -2292,8 +2387,11 @@ async function runTests() {
   const proofWriteIdx = setTimerBody.indexOf('schedule.pageTimerMinutes = result.actualDelayMinutes || minutes');
   assertPass(verificationCallIdx > 0
       && proofWriteIdx > verificationCallIdx
-      && setTimerBody.includes('verified: true'),
-    '11C: setPageTimer 仅在新鲜页确认后才写入页面关机证明');
+      && setTimerBody.includes('verified: true')
+      && setTimerBody.includes('const targetAt = Number(result.targetAt);')
+      && setTimerBody.includes('schedule.pageTimerTargetAt = targetAt;')
+      && !setTimerBody.includes('parsePageTimerValue(result.value, Date.now())'),
+    '11C: setPageTimer 仅在新鲜页确认后写证明，并直接采纳写入方绝对 targetAt');
   assertPass(retryBody.includes('schedule.pageTimerRetryMinutes = retryMinutes')
       && retryBody.includes("createAlarm('ac-page-timer-retry'")
       && backgroundSource.includes('const retryMinutes = schedule.pageTimerRetryMinutes'),
@@ -2310,6 +2408,20 @@ async function runTests() {
       && toggleOffIdx > toggleTimerIdx
       && toggleBody.includes("'toggle-pageTimer-failed'"),
     '11F: 手动开机仅在新鲜确认页面定时器后才进入 OFF 相位');
+  const reapplyStart = backgroundSource.indexOf('async function reapplySmartSensitivityNow()');
+  const reapplyEnd = backgroundSource.indexOf('\nfunction clearPageTimerProofState()', reapplyStart);
+  const reapplyBody = reapplyStart >= 0 && reapplyEnd > reapplyStart
+    ? backgroundSource.slice(reapplyStart, reapplyEnd)
+    : '';
+  assertPass(repairBody.includes("nextTriggerAt: schedule.pageTimerTargetAt")
+      && repairBody.includes("createPwmAlarmFromPlan(")
+      && toggleBody.includes("nextTriggerAt: schedule.pageTimerTargetAt")
+      && toggleBody.includes("createPwmAlarmFromPlan(")
+      && reapplyBody.indexOf('await setPageTimer(minutes') >= 0
+      && reapplyBody.indexOf('createPwmAlarmFromPlan(') > reapplyBody.indexOf('await setPageTimer(minutes')
+      && reapplyBody.includes('nextTriggerAt: schedule.pageTimerTargetAt')
+      && !reapplyBody.includes('nowMs + minutes * 60000'),
+    '11F-1: repair、手动 ON 与智能重设均以页面证明 targetAt 创建同一绝对 ac-pwm');
   const recoveryNow11G = 1_700_000_000_000;
   const recoveryPlan11G = pwmPhase.planPwmRecovery({
     enabled: true,
@@ -3042,6 +3154,33 @@ async function runTests() {
       && !diagnoseHandlerSource.includes('memNext === memLive'),
     '14O: 两方与三方触发时间共用 1500ms 容差，浏览器毫秒小数不再误报时钟失步');
 
+  const timestampAgeStart = popupSource.indexOf('function getTimestampAgeMs(');
+  const timestampAgeEnd = popupSource.indexOf('\nfunction areDiagnosticTriggersAligned', timestampAgeStart);
+  const timestampAgeSource = timestampAgeStart >= 0 && timestampAgeEnd > timestampAgeStart
+    ? popupSource.slice(timestampAgeStart, timestampAgeEnd)
+    : '';
+  const getTimestampAgeMs = timestampAgeSource
+    ? new Function(`${timestampAgeSource}; return getTimestampAgeMs;`)()
+    : null;
+  assertPass(typeof getTimestampAgeMs === 'function',
+    '14P: 诊断新鲜度使用共享原始毫秒年龄 helper');
+  if (typeof getTimestampAgeMs === 'function') {
+    const ageNow = 10_000_000;
+    const weatherAge = getTimestampAgeMs(ageNow - 60 * 60_000 - 1, ageNow);
+    const heartbeatAge = getTimestampAgeMs(ageNow - 59_500, ageNow);
+    assertPass(weatherAge === 60 * 60_000 + 1
+        && Math.round(weatherAge / 60000) === 60
+        && weatherAge > 60 * 60_000
+        && heartbeatAge === 59_500
+        && Math.round(heartbeatAge / 1000) === 60
+        && heartbeatAge < 60_000
+        && getTimestampAgeMs(ageNow + 1, ageNow) === null,
+      '14P-1: 阈值比较保留原始毫秒；四舍五入只用于天气/heartbeat 文案');
+    assertPass(popupSource.includes('ageMs <= 60 * 60000')
+        && popupSource.includes('hbAgeMs < 60 * 1000'),
+      '14P-2: 天气与 heartbeat 判定比较原始毫秒，不比较已取整显示值');
+  }
+
   // ===== 用例 15: 持久化脱敏诊断日志 =====
   console.log('\n\n=== 用例 15: 持久化脱敏诊断日志 ===\n');
 
@@ -3139,36 +3278,63 @@ async function runTests() {
       && backgroundSource.includes("appendDiagnosticLog('error', 'toggle-refresh-recovery'"),
     '15E: 日志只进 local，并覆盖 init、PWM、消息汇聚与刷新恢复关键错误链');
 
-  const recentLogStart = popupSource.indexOf('function appendRecentDiagnosticLogLines(lines, entries) {');
+  const recentLogStart = popupSource.indexOf('function selectRecentDiagnosticEntries(');
   const recentLogEnd = popupSource.indexOf('\nbtnDiagnose.addEventListener', recentLogStart);
   const recentLogBody = recentLogStart >= 0 && recentLogEnd > recentLogStart
     ? popupSource.slice(recentLogStart, recentLogEnd)
     : '';
-  const createRecentLogHarness = new Function('t', `
+  const createRecentLogHarness = recentLogBody ? new Function('t', 'BUILD_TIME_EPOCH_MS', `
     ${recentLogBody}
-    return appendRecentDiagnosticLogLines;
-  `);
-  const recentLogHarness = createRecentLogHarness((key, ...subs) => {
+    return { selectRecentDiagnosticEntries, appendRecentDiagnosticLogLines };
+  `) : null;
+  assertPass(typeof createRecentLogHarness === 'function',
+    '15F-0: popup 提供当前构建诊断记录的纯选择器');
+  const recentLogHarness = createRecentLogHarness?.((key, ...subs) => {
     if (key === 'diagnoseRecentErrorsEmpty') return 'NO RECENT ERRORS';
     if (key === 'diagnoseRecentErrors') return `RECENT ERRORS ${subs[0]}/${subs[1]}`;
     return key;
-  });
-  const recentLines = [];
-  recentLogHarness(recentLines, Array.from({ length: 12 }, (_, index) => ({
-    timestamp: 1700000000000 + index,
-    level: index % 2 ? 'warn' : 'error',
-    source: `source-${index}`,
-    message: `message-${index}`
-  })));
-  const emptyRecentLines = [];
-  recentLogHarness(emptyRecentLines, []);
-  assertPass(recentLines.length === 11
-      && recentLines[0] === 'RECENT ERRORS 12/10'
-      && !recentLines.some(line => line.includes('/source-0]') || line.includes('/source-1]'))
-      && recentLines.some(line => line.includes('source-11'))
-      && emptyRecentLines[0] === '✅ NO RECENT ERRORS'
-      && popupSource.includes("chrome.storage.local.get('ac_diagnostic_log')"),
-    '15F: popup 诊断并入最近 10 条持久异常，无日志时显示明确空状态');
+  }, 10_000);
+  if (recentLogHarness) {
+    const now15F = 20_000;
+    const input15F = [
+      null,
+      { timestamp: 9_999, level: 'error', source: 'before-build', message: 'old' },
+      { timestamp: 10_000, level: 'error', source: 'build-boundary', message: 'equal' },
+      { timestamp: '15000', level: 'error', source: 'string-time', message: 'invalid' },
+      { timestamp: Number.NaN, level: 'error', source: 'nan-time', message: 'invalid' },
+      { timestamp: Number.MAX_SAFE_INTEGER + 1, level: 'error', source: 'unsafe-time', message: 'invalid' },
+      { timestamp: 20_001, level: 'error', source: 'future', message: 'invalid' },
+      { timestamp: 15_000, level: 'warn', source: 'source-15', message: '15' },
+      { timestamp: 18_000, level: 'error', source: 'source-18', message: '18' },
+      { timestamp: 20_000, level: 'error', source: 'equal-old', message: 'old tie' },
+      { timestamp: 17_000, level: 'error', source: 'source-17', message: '17' },
+      { timestamp: 19_000, level: 'warn', source: 'source-19', message: '19' },
+      { timestamp: 16_000, level: 'error', source: 'source-16', message: '16' },
+      { timestamp: 20_000, level: 'warn', source: 'equal-new', message: 'new tie' }
+    ];
+    const selection15F = recentLogHarness.selectRecentDiagnosticEntries(input15F, now15F);
+    const recentLines = [];
+    recentLogHarness.appendRecentDiagnosticLogLines(recentLines, input15F, now15F);
+    const emptyRecentLines = [];
+    recentLogHarness.appendRecentDiagnosticLogLines(emptyRecentLines, [
+      { timestamp: 9_999, source: 'before-build' },
+      { timestamp: 20_001, source: 'future' },
+      { timestamp: '15000', source: 'string-time' }
+    ], now15F);
+    assertPass(selection15F.total === 8
+        && selection15F.entries.length === 5
+        && selection15F.entries.map(entry => entry.source).join(',')
+          === 'equal-new,equal-old,source-19,source-18,source-17',
+      '15F-1: 当前构建边界含等号、拒绝未来/非法时间戳，并按时间与后写顺序取最新五条');
+    assertPass(recentLines.length === 6
+        && recentLines[0] === 'RECENT ERRORS 8/5'
+        && recentLines[1].includes('equal-new')
+        && recentLines[2].includes('equal-old')
+        && recentLines[5].includes('source-17')
+        && emptyRecentLines[0] === '✅ NO RECENT ERRORS'
+        && popupSource.includes("chrome.storage.local.get('ac_diagnostic_log')"),
+      '15F-2: popup 仅渲染当前构建最新五条（新→旧），无合格记录显示空状态');
+  }
 
   const diagnosticLocaleKeys = [
     'diagnoseRecentErrors',
@@ -3195,7 +3361,7 @@ async function runTests() {
     const calls = [];
     return {
       chrome: {
-        runtime: { getManifest: () => ({ version: '0.8.0' }) },
+        runtime: { getManifest: () => ({ version: manifest.version }) },
         storage: {
           local: {
             async get(key) { return { [key]: state[key] }; },
@@ -3215,13 +3381,13 @@ async function runTests() {
   const staleReconcile = loadReconcile(staleReconcileStorage.chrome, 'ac_diagnostic_log');
   await staleReconcile.reconcileDiagnosticLogVersion();
   assertPass(staleReconcileStorage.state.ac_diagnostic_log === undefined
-      && staleReconcileStorage.state.ac_diagnostic_log_version === '0.8.0'
+      && staleReconcileStorage.state.ac_diagnostic_log_version === manifest.version
       && staleReconcileStorage.calls.some(c => c[0] === 'remove' && c[1] === 'ac_diagnostic_log'),
     '15H-1: 版本变化时自动清空遗留诊断日志并记录新版本');
 
   const sameReconcileStorage = createReconcileStorage(
     [{ timestamp: 1, level: 'error', source: 'current', message: 'keep' }],
-    '0.8.0'
+    manifest.version
   );
   const sameReconcile = loadReconcile(sameReconcileStorage.chrome, 'ac_diagnostic_log');
   await sameReconcile.reconcileDiagnosticLogVersion();

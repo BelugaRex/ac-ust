@@ -285,6 +285,34 @@ export function runPwmPhaseCases(assertPass) {
     { toggleSucceeded: true, pageTimerSucceeded: true },
     { now }
   ));
+  const onPageTimerTargetAt = now + 13 * MINUTE_MS;
+  const onCommitWithPageTarget = keep(planPwmStep(
+    stepOnSchedule,
+    {
+      toggleSucceeded: true,
+      pageTimerSucceeded: true,
+      pageTimerTargetAt: onPageTimerTargetAt
+    },
+    { now }
+  ));
+  const onCommitWithExpiredPageTarget = keep(planPwmStep(
+    stepOnSchedule,
+    {
+      toggleSucceeded: true,
+      pageTimerSucceeded: true,
+      pageTimerTargetAt: now
+    },
+    { now }
+  ));
+  const onCommitWithInvalidPageTarget = keep(planPwmStep(
+    stepOnSchedule,
+    {
+      toggleSucceeded: true,
+      pageTimerSucceeded: true,
+      pageTimerTargetAt: Number.NaN
+    },
+    { now }
+  ));
   assertPass(
     stepDisabled.kind === 'noop'
       && onToggleHold.kind === 'hold'
@@ -301,6 +329,13 @@ export function runPwmPhaseCases(assertPass) {
       && onCommit.nextAction === 'off'
       && onCommit.delayMinutes === 12,
     'step ON: toggle、already-on、page timer 与 commit 路径正确'
+  );
+  assertPass(
+    onCommitWithPageTarget.nextTriggerAt === onPageTimerTargetAt
+      && onCommitWithPageTarget.phasePatch.nextTriggerAt === onPageTimerTargetAt
+      && onCommitWithExpiredPageTarget.nextTriggerAt === now + 12 * MINUTE_MS
+      && onCommitWithInvalidPageTarget.nextTriggerAt === now + 12 * MINUTE_MS,
+    'step ON: 优先采纳未来页面绝对目标，过期或非法目标回退相对时长'
   );
 
   const offFreshProof = keep(planPwmStep(

@@ -100,7 +100,6 @@
             "composeSyncPayload",
             "computePhaseAdoption",
             "computeConfigDiff",
-            "parsePageTimerValue",
             "isPageTimerProofFresh",
             "computePageTimerAdoption"
           ]
@@ -114,7 +113,9 @@
         "symbols": [
           "planPwmStep",
           "planPwmRecovery",
-          "reconcilePwmTrigger"
+          "reconcilePwmTrigger",
+          "nextHourBoundary",
+          "alignSmartModeNextTrigger"
         ]
       },
       "consumers": [
@@ -123,7 +124,9 @@
           "symbols": [
             "planPwmStep",
             "planPwmRecovery",
-            "reconcilePwmTrigger"
+            "reconcilePwmTrigger",
+            "nextHourBoundary",
+            "alignSmartModeNextTrigger"
           ]
         }
       ]
@@ -133,6 +136,7 @@
       "provider": {
         "file": "smart-mode.js",
         "symbols": [
+          "normalizeSmartSensitivity",
           "computeSmartOnMinutes",
           "sensitivityToK",
           "equivalentTemperature"
@@ -142,12 +146,14 @@
         {
           "file": "background.js",
           "symbols": [
+            "normalizeSmartSensitivity",
             "computeSmartOnMinutes"
           ]
         },
         {
           "file": "popup.js",
           "symbols": [
+            "normalizeSmartSensitivity",
             "computeSmartOnMinutes"
           ]
         }

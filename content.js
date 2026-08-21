@@ -513,7 +513,15 @@ async function setPagePowerOffTimer(totalMinutes) {
   console.log(`[AC扩展] 尝试设置页面定时器: ${totalMinutes} 分钟`);
 
   try {
-    const { requestedMinutes, crossesMidnight, hours, minutes: mins, value } = computePageTimerTarget(totalMinutes);
+    const {
+      requestedMinutes,
+      actualDelayMinutes,
+      targetAt,
+      crossesMidnight,
+      hours,
+      minutes: mins,
+      value
+    } = computePageTimerTarget(totalMinutes);
 
     const pickerInput = findPowerOffTimerInput();
     if (!pickerInput) {
@@ -533,7 +541,8 @@ async function setPagePowerOffTimer(totalMinutes) {
       hours,
       minutes: mins,
       requestedMinutes,
-      actualDelayMinutes: requestedMinutes,
+      actualDelayMinutes,
+      targetAt,
       crossesMidnight,
       value: confirmedValue,
       title: (pickerInput.getAttribute('title') || '').trim()
@@ -544,15 +553,30 @@ async function setPagePowerOffTimer(totalMinutes) {
 }
 
 // 提取（Fowler Extract Function）：页面关机定时器目标时刻的纯计算（分钟数 → HH:MM 与跨午夜判断）。
-function computePageTimerTarget(totalMinutes) {
-  const requestedMinutes = Math.max(1, parseInt(totalMinutes, 10) || 1);
-  const now = new Date();
-  const target = new Date(now.getTime() + requestedMinutes * 60000);
+function computePageTimerTarget(totalMinutes, nowMs = Date.now()) {
+  const numericMinutes = Number(totalMinutes);
+  const requestedMinutes = Number.isFinite(numericMinutes) && numericMinutes > 0
+    ? numericMinutes
+    : 1;
+  const safeNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
+  const targetAt = Math.ceil(
+    (safeNowMs + requestedMinutes * 60000) / 60000
+  ) * 60000;
+  const now = new Date(safeNowMs);
+  const target = new Date(targetAt);
   const crossesMidnight = target.toDateString() !== now.toDateString();
   const hours = target.getHours();
   const mins = target.getMinutes();
   const value = `${String(hours).padStart(2, '0')}:${String(mins).padStart(2, '0')}`;
-  return { requestedMinutes, crossesMidnight, hours, minutes: mins, value };
+  return {
+    requestedMinutes,
+    actualDelayMinutes: (targetAt - safeNowMs) / 60000,
+    targetAt,
+    crossesMidnight,
+    hours,
+    minutes: mins,
+    value
+  };
 }
 
 // 找到 "Power-off after" 旁的定时器输入框
