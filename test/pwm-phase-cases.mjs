@@ -7,6 +7,8 @@ const {
   reconcilePwmTrigger,
   nextHourBoundary,
   nextHalfHourBoundary,
+  smartModePageTimerTargetAt,
+  planSmartModeOnWindow,
   alignSmartModeNextTrigger
 } = pwmPhase;
 
@@ -26,12 +28,12 @@ export function runPwmPhaseCases(assertPass) {
 
   assertPass(
     Object.keys(pwmPhase).sort().join(',')
-      === 'alignSmartModeNextTrigger,nextHalfHourBoundary,nextHourBoundary,planPwmRecovery,planPwmStep,reconcilePwmTrigger',
+      === 'alignSmartModeNextTrigger,nextHalfHourBoundary,nextHourBoundary,planPwmRecovery,planPwmStep,planSmartModeOnWindow,reconcilePwmTrigger,smartModePageTimerTargetAt',
     'PWM phase module 导出规划函数与整点/半点对齐函数'
   );
 
   // 智能模式整点/半点对齐：nextHourBoundary（天气整点刷新）与 nextHalfHourBoundary（30 分钟周期）
-  const hourTime = (h, m) => new Date(2026, 7, 17, h, m, 0).getTime();
+  const hourTime = (h, m, s = 0, ms = 0) => new Date(2026, 7, 17, h, m, s, ms).getTime();
   assertPass(nextHourBoundary(hourTime(13, 20)) === hourTime(14, 0),
     'nextHourBoundary: 13:20 → 14:00');
   assertPass(nextHourBoundary(hourTime(14, 0)) === hourTime(15, 0),
@@ -42,6 +44,145 @@ export function runPwmPhaseCases(assertPass) {
     'nextHalfHourBoundary: 13:45 → 14:00');
   assertPass(nextHalfHourBoundary(hourTime(13, 30)) === hourTime(14, 0),
     'nextHalfHourBoundary: 半点也进到下一个半点');
+
+  const smartBeforeWindow = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    { now: hourTime(13, 29, 59, 999), maxOnMinutes: 25 }
+  );
+  const smartAtWindow = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    { now: hourTime(13, 30), maxOnMinutes: 25 }
+  );
+  const smartLateInWindow = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    { now: hourTime(13, 30, 59, 999), maxOnMinutes: 25 }
+  );
+  const smartAfterWindow = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    { now: hourTime(13, 31), maxOnMinutes: 25 }
+  );
+  const smartAtHourWindow = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    { now: hourTime(14, 0), maxOnMinutes: 25 }
+  );
+  const smartLateHourWindow = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    { now: hourTime(14, 0, 59, 999), maxOnMinutes: 25 }
+  );
+  const smartAfterHourWindow = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    { now: hourTime(14, 1), maxOnMinutes: 25 }
+  );
+  assertPass(smartBeforeWindow.kind === 'defer'
+      && smartBeforeWindow.nextTriggerAt === hourTime(13, 30)
+      && smartBeforeWindow.phasePatch.pwmState === 'on'
+      && smartAtWindow.kind === 'allow'
+      && smartAtWindow.boundaryAt === hourTime(13, 30)
+      && smartAtWindow.windowEndsAt === hourTime(13, 31)
+      && smartAtWindow.pageTimerTargetAt === hourTime(13, 55)
+      && smartLateInWindow.kind === 'allow'
+      && smartLateInWindow.windowEndsAt === hourTime(13, 31)
+      && smartLateInWindow.pageTimerTargetAt === hourTime(13, 55)
+      && smartAfterWindow.kind === 'defer'
+      && smartAfterWindow.nextTriggerAt === hourTime(14, 0)
+      && smartAtHourWindow.kind === 'allow'
+      && smartAtHourWindow.pageTimerTargetAt === hourTime(14, 25)
+      && smartLateHourWindow.kind === 'allow'
+      && smartLateHourWindow.pageTimerTargetAt === hourTime(14, 25)
+      && smartAfterHourWindow.kind === 'defer'
+      && smartAfterHourWindow.nextTriggerAt === hourTime(14, 30),
+    'planSmartModeOnWindow: 智能自动 ON 仅在 :00/:30 分钟执行，并锚定半点绝对关机截止时间');
+  assertPass(planSmartModeOnWindow(
+    { onMinutes: 26 },
+    { now: hourTime(13, 30), maxOnMinutes: 25 }
+  ).kind === 'refuse'
+      && planSmartModeOnWindow(
+        { onMinutes: 26 },
+        { now: hourTime(13, 30), maxOnMinutes: 30 }
+      ).kind === 'refuse',
+  'planSmartModeOnWindow: 25 分钟为不可由调用参数放宽的智能 ON 硬上限');
+  assertPass(smartModePageTimerTargetAt(25, hourTime(13, 30, 59, 999)) === hourTime(13, 55),
+    'smartModePageTimerTargetAt: 延迟唤醒仍以半点 + 25 分钟关机');
+  const smartAlreadyOnRetry = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    {
+      now: hourTime(13, 45),
+      maxOnMinutes: 25,
+      acIsOn: true,
+      boundaryAt: hourTime(13, 30)
+    }
+  );
+  const smartAlreadyOnOverrun = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    {
+      now: hourTime(13, 55),
+      maxOnMinutes: 25,
+      acIsOn: true,
+      boundaryAt: hourTime(13, 30)
+    }
+  );
+  const smartAlreadyOnAcrossBoundary = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    {
+      now: hourTime(14, 0),
+      maxOnMinutes: 25,
+      acIsOn: true,
+      boundaryAt: hourTime(13, 30)
+    }
+  );
+  const smartAlreadyOnMissingBoundary = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    { now: hourTime(14, 0), maxOnMinutes: 25, acIsOn: true }
+  );
+  const smartAlreadyOnInvalidBoundary = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    {
+      now: hourTime(14, 0),
+      maxOnMinutes: 25,
+      acIsOn: true,
+      boundaryAt: hourTime(13, 31)
+    }
+  );
+  const smartAlreadyOnFutureBoundary = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    {
+      now: hourTime(13, 45),
+      maxOnMinutes: 25,
+      acIsOn: true,
+      boundaryAt: hourTime(14, 0)
+    }
+  );
+  assertPass(smartAlreadyOnRetry.kind === 'allow'
+      && smartAlreadyOnRetry.reason === 'smart-on-already-active'
+      && smartAlreadyOnRetry.pageTimerTargetAt === hourTime(13, 55)
+      && smartAlreadyOnOverrun.kind === 'allow'
+      && smartAlreadyOnOverrun.reason === 'smart-on-overrun-shutdown'
+      && smartAlreadyOnOverrun.pageTimerTargetAt === hourTime(13, 56)
+      && smartAlreadyOnAcrossBoundary.kind === 'allow'
+      && smartAlreadyOnAcrossBoundary.reason === 'smart-on-overrun-shutdown'
+      && smartAlreadyOnAcrossBoundary.boundaryAt === hourTime(13, 30)
+      && smartAlreadyOnAcrossBoundary.pageTimerTargetAt === hourTime(14, 1)
+      && smartAlreadyOnMissingBoundary.reason === 'smart-on-overrun-shutdown'
+      && smartAlreadyOnMissingBoundary.boundaryAt === 0
+      && smartAlreadyOnMissingBoundary.pageTimerTargetAt === hourTime(14, 1)
+      && smartAlreadyOnInvalidBoundary.reason === 'smart-on-overrun-shutdown'
+      && smartAlreadyOnInvalidBoundary.boundaryAt === 0
+      && smartAlreadyOnInvalidBoundary.pageTimerTargetAt === hourTime(14, 1)
+      && smartAlreadyOnFutureBoundary.reason === 'smart-on-overrun-shutdown'
+      && smartAlreadyOnFutureBoundary.boundaryAt === 0
+      && smartAlreadyOnFutureBoundary.pageTimerTargetAt === hourTime(13, 46),
+    'planSmartModeOnWindow: AC 已开启时只沿用有效原半点，缺失、非法、未来或过期锚点只安排下一整分钟关机');
+  assertPass(smartModePageTimerTargetAt(
+    10,
+    hourTime(13, 15),
+    hourTime(13, 0)
+  ) === hourTime(13, 10)
+      && smartModePageTimerTargetAt(
+        10,
+        hourTime(13, 15),
+        hourTime(13, 1)
+      ) === 0,
+    'smartModePageTimerTargetAt: 灵敏度重设可沿用原半点锚点，并拒绝非半点锚点');
 
   const smartOffCommit = {
     kind: 'commit',
@@ -54,6 +195,34 @@ export function runPwmPhaseCases(assertPass) {
   assertPass(smartOffCommit.nextTriggerAt === hourTime(13, 30)
       && smartOffCommit.phasePatch.nextTriggerAt === hourTime(13, 30),
     'alignSmartModeNextTrigger: OFF 提交的下一 ON 触发对齐到半点');
+
+  const smartFiveMinuteGap = {
+    kind: 'commit',
+    nextAction: 'on',
+    nextTriggerAt: hourTime(13, 26),
+    delayMinutes: 1,
+    phasePatch: { pwmState: 'on', nextTriggerAt: hourTime(13, 26) }
+  };
+  alignSmartModeNextTrigger(
+    smartFiveMinuteGap,
+    hourTime(13, 25),
+    { notBeforeAt: hourTime(13, 30) }
+  );
+  const smartShortGap = {
+    kind: 'commit',
+    nextAction: 'on',
+    nextTriggerAt: hourTime(13, 26),
+    delayMinutes: 1,
+    phasePatch: { pwmState: 'on', nextTriggerAt: hourTime(13, 26) }
+  };
+  alignSmartModeNextTrigger(
+    smartShortGap,
+    hourTime(13, 25),
+    { notBeforeAt: hourTime(13, 31) }
+  );
+  assertPass(smartFiveMinuteGap.nextTriggerAt === hourTime(13, 30)
+      && smartShortGap.nextTriggerAt === hourTime(14, 0),
+    'alignSmartModeNextTrigger: 下一智能 ON 至少晚于已确认关机 5 分钟');
 
   const smartOnCommit = {
     kind: 'commit',
@@ -263,6 +432,26 @@ export function runPwmPhaseCases(assertPass) {
 
   const stepOnSchedule = { ...base, pwmState: 'on', onMinutes: 12, offMinutes: 8 };
   const stepOffSchedule = { ...stepOnSchedule, pwmState: 'off' };
+  const loopModeAtArbitraryMinute = keep(planPwmStep(
+    stepOnSchedule,
+    {},
+    { now: hourTime(13, 17) }
+  ));
+  const loopOnTargetAt = hourTime(13, 29);
+  const loopOnCommitAtArbitraryMinute = keep(planPwmStep(
+    stepOnSchedule,
+    {
+      toggleSucceeded: true,
+      pageTimerSucceeded: true,
+      pageTimerTargetAt: loopOnTargetAt
+    },
+    { now: hourTime(13, 17) }
+  ));
+  const loopOffCommitAtArbitraryMinute = keep(planPwmStep(
+    stepOffSchedule,
+    { acIsOn: false },
+    { now: loopOnTargetAt }
+  ));
   const stepDisabled = keep(planPwmStep(
     { ...stepOnSchedule, enabled: false },
     {},
@@ -314,7 +503,15 @@ export function runPwmPhaseCases(assertPass) {
     { now }
   ));
   assertPass(
-    stepDisabled.kind === 'noop'
+    loopModeAtArbitraryMinute.kind === 'hold'
+      && loopModeAtArbitraryMinute.prerequisite === 'toggle-on'
+      && loopOnCommitAtArbitraryMinute.kind === 'commit'
+      && loopOnCommitAtArbitraryMinute.nextAction === 'off'
+      && loopOnCommitAtArbitraryMinute.nextTriggerAt === hourTime(13, 29)
+      && loopOffCommitAtArbitraryMinute.kind === 'commit'
+      && loopOffCommitAtArbitraryMinute.nextAction === 'on'
+      && loopOffCommitAtArbitraryMinute.nextTriggerAt === hourTime(13, 37)
+      && stepDisabled.kind === 'noop'
       && onToggleHold.kind === 'hold'
       && onToggleHold.prerequisite === 'toggle-on'
       && onToggleHold.proofAction === 'clear'
@@ -328,7 +525,7 @@ export function runPwmPhaseCases(assertPass) {
       && onCommit.kind === 'commit'
       && onCommit.nextAction === 'off'
       && onCommit.delayMinutes === 12,
-    'step ON: toggle、already-on、page timer 与 commit 路径正确'
+    'step ON/OFF: 循环模式可在 13:17→13:29→13:37 完整运行，不受半点限制'
   );
   assertPass(
     onCommitWithPageTarget.nextTriggerAt === onPageTimerTargetAt

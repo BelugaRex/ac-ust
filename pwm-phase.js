@@ -1,5 +1,6 @@
 const PWM_PHASE_MINUTE_MS = 60_000;
 const PWM_PHASE_RETRY_MINUTES = 1;
+const SMART_MODE_ON_HARD_MAX_MINUTES = 25;
 
 function pwmPhaseNow(opts) {
   return Number.isFinite(opts?.now) ? opts.now : Date.now();
@@ -331,14 +332,130 @@ function nextHalfHourBoundary(now = Date.now()) {
   return d.getTime();
 }
 
+function halfHourBoundaryAtOrBefore(now = Date.now()) {
+  const d = new Date(now);
+  d.setMinutes(d.getMinutes() < 30 ? 0 : 30, 0, 0);
+  return d.getTime();
+}
+
+function isHalfHourBoundary(timestamp) {
+  const value = Number(timestamp);
+  if (!Number.isSafeInteger(value)) return false;
+  const d = new Date(value);
+  return (d.getMinutes() === 0 || d.getMinutes() === 30)
+    && d.getSeconds() === 0
+    && d.getMilliseconds() === 0;
+}
+
+function nextHalfHourBoundaryAtOrAfter(timestamp) {
+  return isHalfHourBoundary(timestamp)
+    ? Number(timestamp)
+    : nextHalfHourBoundary(timestamp);
+}
+
+function smartModePageTimerTargetAt(
+  onMinutes,
+  now = Date.now(),
+  boundaryAt = halfHourBoundaryAtOrBefore(now)
+) {
+  const duration = Number(onMinutes);
+  if (!Number.isInteger(duration) || duration <= 0
+      || duration > SMART_MODE_ON_HARD_MAX_MINUTES
+      || !isHalfHourBoundary(boundaryAt)) {
+    return 0;
+  }
+  return Number(boundaryAt) + duration * PWM_PHASE_MINUTE_MS;
+}
+
+// 智能控制自动 ON 门禁：只允许在 HH:00/HH:30 这一分钟内启动，并把关机
+// 截止时间固定为“半点边界 + onMinutes”，避免浏览器迟唤醒与 UST 分钟上取整
+// 把 5 分钟关闭窗口压短。循环定时不调用此函数，保持任意分钟切换。
+function planSmartModeOnWindow(schedule, opts = {}) {
+  const now = pwmPhaseNow(opts);
+  const onMinutes = Number(schedule?.onMinutes);
+  const requestedMaxOnMinutes = opts?.maxOnMinutes === undefined
+    ? SMART_MODE_ON_HARD_MAX_MINUTES
+    : Number(opts.maxOnMinutes);
+  const maxOnMinutes = Math.min(
+    requestedMaxOnMinutes,
+    SMART_MODE_ON_HARD_MAX_MINUTES
+  );
+  if (!Number.isInteger(onMinutes) || onMinutes <= 0
+      || !Number.isFinite(maxOnMinutes) || maxOnMinutes <= 0
+      || onMinutes > maxOnMinutes) {
+    return { kind: 'refuse', reason: 'invalid-smart-on-duration' };
+  }
+
+  const acIsOn = opts?.acIsOn === true;
+  const storedBoundaryAt = Number(opts?.boundaryAt);
+  const hasActiveBoundary = acIsOn
+    && isHalfHourBoundary(storedBoundaryAt)
+    && storedBoundaryAt <= now;
+  const boundaryAt = hasActiveBoundary
+    ? storedBoundaryAt
+    : halfHourBoundaryAtOrBefore(now);
+  const pageTimerTargetAt = smartModePageTimerTargetAt(onMinutes, now, boundaryAt);
+  if (acIsOn) {
+    if (!hasActiveBoundary) {
+      return {
+        kind: 'allow',
+        reason: 'smart-on-overrun-shutdown',
+        boundaryAt: 0,
+        pageTimerTargetAt: Math.floor(now / PWM_PHASE_MINUTE_MS + 1)
+          * PWM_PHASE_MINUTE_MS
+      };
+    }
+    if (pageTimerTargetAt > now) {
+      return {
+        kind: 'allow',
+        reason: 'smart-on-already-active',
+        boundaryAt,
+        pageTimerTargetAt
+      };
+    }
+    return {
+      kind: 'allow',
+      reason: 'smart-on-overrun-shutdown',
+      boundaryAt,
+      pageTimerTargetAt: Math.floor(now / PWM_PHASE_MINUTE_MS + 1)
+        * PWM_PHASE_MINUTE_MS
+    };
+  }
+
+  if (now - boundaryAt < PWM_PHASE_MINUTE_MS && pageTimerTargetAt > now) {
+    return {
+      kind: 'allow',
+      reason: 'smart-on-window',
+      boundaryAt,
+      windowEndsAt: boundaryAt + PWM_PHASE_MINUTE_MS,
+      pageTimerTargetAt
+    };
+  }
+
+  const nextTriggerAt = nextHalfHourBoundary(now);
+  return {
+    kind: 'defer',
+    reason: 'wait-for-smart-on-window',
+    nextAction: 'on',
+    nextTriggerAt,
+    delayMinutes: Math.max(1, (nextTriggerAt - now) / PWM_PHASE_MINUTE_MS),
+    phasePatch: { pwmState: 'on', nextTriggerAt }
+  };
+}
+
 // 智能模式：把 OFF 提交的下一 ON 触发锚定到半点，使 30 分钟周期与半点对齐。
 // ON 提交（nextAction='off'）保持 now + onMinutes 不变——因 ON 相位已在半点开始，
 // 其结束时刻（半点 + onMinutes）天然落在半点节奏上。
-function alignSmartModeNextTrigger(plan, now = Date.now()) {
+function alignSmartModeNextTrigger(plan, now = Date.now(), options = {}) {
   if (!plan || plan.nextAction !== 'on') return;
   const currentTriggerAt = Number(plan.nextTriggerAt);
   if (!Number.isFinite(currentTriggerAt) || currentTriggerAt <= now) return;
-  const nextBoundary = nextHalfHourBoundary(now);
+  const requestedNotBeforeAt = Number(options?.notBeforeAt);
+  const notBeforeAt = Number.isFinite(requestedNotBeforeAt)
+    ? Math.max(now + 1, requestedNotBeforeAt)
+    : now + 1;
+  if (isHalfHourBoundary(currentTriggerAt) && currentTriggerAt >= notBeforeAt) return;
+  const nextBoundary = nextHalfHourBoundaryAtOrAfter(notBeforeAt);
   if (nextBoundary <= now) return;
   plan.nextTriggerAt = nextBoundary;
   if (typeof plan.delayMinutes === 'number') {
@@ -356,6 +473,8 @@ if (typeof module !== 'undefined' && module.exports) {
     reconcilePwmTrigger,
     nextHourBoundary,
     nextHalfHourBoundary,
+    smartModePageTimerTargetAt,
+    planSmartModeOnWindow,
     alignSmartModeNextTrigger
   };
 }

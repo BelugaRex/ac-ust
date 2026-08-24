@@ -74,7 +74,7 @@ const contentMessageListener = (msg, sender, sendResponse) => {
     return false;
   }
   if (action === 'on' || action === 'off') {
-    toggleACSwitch(action).then(result => sendResponse(result));
+    toggleACSwitch(action, msg.notAfterAt).then(result => sendResponse(result));
     return true; // 异步响应
   }
   if (action === 'status') {
@@ -82,7 +82,7 @@ const contentMessageListener = (msg, sender, sendResponse) => {
     return true;
   }
   if (action === 'setTimer') {
-    setPagePowerOffTimer(msg.minutes).then(result => sendResponse(result));
+    setPagePowerOffTimer(msg.minutes, msg.targetAt).then(result => sendResponse(result));
     return true;
   }
   if (action === 'getPageTimer') {
@@ -259,8 +259,12 @@ function getACBalanceSnapshot() {
 }
 
 // ----- 切换 AC 开关 -----
-  async function toggleACSwitch(targetAction) {
+  async function toggleACSwitch(targetAction, notAfterAt = 0) {
   console.log(`[AC扩展] 准备切换 AC: ${targetAction}`);
+
+  if (notAfterAt !== 0 && !Number.isSafeInteger(notAfterAt)) {
+    return { success: false, error: '自动开启窗口截止时间无效' };
+  }
 
   // 隔离世界只确认页面已渲染，然后把目标状态交给主世界 ensureACState()。
   // 状态预检、单次 click、10 秒等待与递归复查全部由主世界统一负责。
@@ -269,7 +273,7 @@ function getACBalanceSnapshot() {
     return { success: false, error: t('contentTimeout') };
   }
 
-  const mainWorldResult = await requestMainWorldToggle(targetAction, 90000);
+  const mainWorldResult = await requestMainWorldToggle(targetAction, 90000, notAfterAt);
 
   if (mainWorldResult?.success) {
     console.log('[AC扩展] 主世界切换成功:', mainWorldResult);
@@ -327,12 +331,15 @@ function requestMainWorldResult({
   });
 }
 
-async function requestMainWorldToggle(targetAction, timeoutMs) {
+async function requestMainWorldToggle(targetAction, timeoutMs, notAfterAt = 0) {
   return requestMainWorldResult({
     requestIdPrefix: 'ac',
     requestEvent: '__AC_EXTENSION_TOGGLE_AC__',
     resultEvent: '__AC_EXTENSION_TOGGLE_AC_RESULT__',
-    payload: { action: targetAction },
+    payload: {
+      action: targetAction,
+      ...(notAfterAt !== 0 ? { notAfterAt } : {})
+    },
     timeoutMs,
     timeoutResult: null
   });
@@ -509,7 +516,7 @@ function findAntACSwitch() {
 }
 
 // ----- 设置页面自带的定时关闭（作为保险）-----
-async function setPagePowerOffTimer(totalMinutes) {
+async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
   console.log(`[AC扩展] 尝试设置页面定时器: ${totalMinutes} 分钟`);
 
   try {
@@ -521,7 +528,7 @@ async function setPagePowerOffTimer(totalMinutes) {
       hours,
       minutes: mins,
       value
-    } = computePageTimerTarget(totalMinutes);
+    } = computePageTimerTarget(totalMinutes, Date.now(), requestedTargetAt);
 
     const pickerInput = findPowerOffTimerInput();
     if (!pickerInput) {
@@ -553,15 +560,23 @@ async function setPagePowerOffTimer(totalMinutes) {
 }
 
 // 提取（Fowler Extract Function）：页面关机定时器目标时刻的纯计算（分钟数 → HH:MM 与跨午夜判断）。
-function computePageTimerTarget(totalMinutes, nowMs = Date.now()) {
+function computePageTimerTarget(totalMinutes, nowMs = Date.now(), requestedTargetAt = 0) {
   const numericMinutes = Number(totalMinutes);
   const requestedMinutes = Number.isFinite(numericMinutes) && numericMinutes > 0
     ? numericMinutes
     : 1;
   const safeNowMs = Number.isFinite(nowMs) ? nowMs : Date.now();
-  const targetAt = Math.ceil(
-    (safeNowMs + requestedMinutes * 60000) / 60000
-  ) * 60000;
+  const absoluteTargetAt = requestedTargetAt;
+  const hasExplicitAbsoluteTarget = requestedTargetAt !== 0;
+  const hasValidAbsoluteTarget = Number.isSafeInteger(absoluteTargetAt)
+    && absoluteTargetAt > safeNowMs
+    && absoluteTargetAt % 60000 === 0;
+  if (hasExplicitAbsoluteTarget && !hasValidAbsoluteTarget) {
+    throw new Error('显式绝对目标时间无效、已过期或未对齐整分钟');
+  }
+  const targetAt = hasValidAbsoluteTarget
+    ? absoluteTargetAt
+    : Math.ceil((safeNowMs + requestedMinutes * 60000) / 60000) * 60000;
   const now = new Date(safeNowMs);
   const target = new Date(targetAt);
   const crossesMidnight = target.toDateString() !== now.toDateString();

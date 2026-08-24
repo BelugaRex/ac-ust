@@ -346,7 +346,10 @@ async function runTests() {
   assertPass(smartMode.clampAndRoundOnMinutes(4.0) === 0, 'smart: 压缩机保护 4 → 0');
   assertPass(smartMode.clampAndRoundOnMinutes(0.4) === 0, 'smart: 0.4 舍入 0');
   assertPass(smartMode.clampAndRoundOnMinutes(5.2) === 5, 'smart: 5.2 舍入 5');
-  assertPass(smartMode.clampAndRoundOnMinutes(70) === 30, 'smart: 上限截断 30');
+  assertPass(smartMode.clampAndRoundOnMinutes(25) === 25
+      && smartMode.clampAndRoundOnMinutes(26) === 25
+      && smartMode.clampAndRoundOnMinutes(70) === 25,
+    'smart: 开启上限截断 25，30 分钟周期至少保留 5 分钟关闭窗口');
   assertPass(smartMode.clampAndRoundOnMinutes(-5) === 0, 'smart: 下限截断 0');
 
   // 冷天 → Teq 低 → 开启分钟数减少
@@ -356,12 +359,12 @@ async function runTests() {
   assertPass(smartCold.valid === true && smartCold.onMinutes === 6,
     'smart: 冷天 Teq 低 → on=6');
 
-  // 极热 + 满灵敏度 → 20（30 分钟周期）
+  // 极热 + 满灵敏度 → 25/5（30 分钟周期）
   const smartHot = smartMode.computeSmartOnMinutes({
     sensitivity: 10, temperature: 33, dewPoint: 26, windSpeedMs: 0, rainMm: 0
   });
-  assertPass(smartHot.onMinutes === 26 && smartHot.offMinutes === 4,
-    'smart: 极热满灵敏度 on=26/off=4');
+  assertPass(smartHot.onMinutes === 25 && smartHot.offMinutes === 5,
+    'smart: 极热满灵敏度 on=25/off=5，避免短时间关机后重启');
 
   // 非法天气 → valid=false（调用方退化为手动时长）
   const smartBad = smartMode.computeSmartOnMinutes({
@@ -846,7 +849,8 @@ async function runTests() {
     offMinutes: 30,
     activeHours: { enabled: false, start: '08:00', end: '23:00' },
     pwmState: 'off',
-    nextTriggerAt: futureTime
+    nextTriggerAt: futureTime,
+    smartOnBoundaryAt: futureTime - 30 * 60_000
   };
 
   // 6A: composeSyncPayload 未来 nextTriggerAt 原样保留 + 含 syncedAt
@@ -854,7 +858,9 @@ async function runTests() {
   assertPass(payload1.enabled === true, '6A: composeSyncPayload enabled 转译');
   assertPass(payload1.nextTriggerAt === futureTime, '6A: composeSyncPayload 未来 nextTriggerAt 原样保留');
   assertPass(payload1.syncedAt === 1700000000000, '6A: composeSyncPayload syncedAt 戳记正确');
-  assertPass(payload1.pwmState === 'off' && payload1.onMinutes === 30, '6A: composeSyncPayload 其他字段转译');
+  assertPass(payload1.pwmState === 'off' && payload1.onMinutes === 30
+      && !Object.hasOwn(payload1, 'smartOnBoundaryAt'),
+    '6A: composeSyncPayload 共享字段转译且排除本机智能 ON 锚点');
 
   // 6B: activeHours 必须是深拷贝（修改 payload 不能污染源 schedule）
   payload1.activeHours.enabled = true;
@@ -1268,12 +1274,18 @@ async function runTests() {
   const toggleBridge = createMainWorldBridge({
     __AC_EXTENSION_TOGGLE_AC__: { success: true, action: 'on' }
   });
-  const toggleBridgeResult = await toggleBridge.requestMainWorldToggle('on', 65000);
+  const toggleBridgeDeadline = Date.now() + 60000;
+  const toggleBridgeResult = await toggleBridge.requestMainWorldToggle(
+    'on',
+    65000,
+    toggleBridgeDeadline
+  );
   assertPass(toggleBridgeResult?.success === true
       && toggleBridgeResult.action === 'on'
       && !Object.hasOwn(toggleBridgeResult, 'requestId')
       && toggleBridge.sentEvents[0]?.type === '__AC_EXTENSION_TOGGLE_AC__'
       && toggleBridge.sentEvents[0]?.detail?.action === 'on'
+      && toggleBridge.sentEvents[0]?.detail?.notAfterAt === toggleBridgeDeadline
       && /^ac-\d+-/.test(toggleBridge.sentEvents[0]?.detail?.requestId || '')
       && toggleBridge.listeners.size === 0,
     '9Bridge-1: 主世界 toggle 握手保留事件、action、requestId 前缀与完成后监听器清理');
@@ -1330,7 +1342,7 @@ async function runTests() {
     ? backgroundSource.slice(setTimerStart, setTimerEnd)
     : '';
 
-  const toggleOnceStart = backgroundSource.indexOf('async function toggleACOnce(action)');
+  const toggleOnceStart = backgroundSource.indexOf('async function toggleACOnce(action, options = {})');
   const toggleOnceEnd = backgroundSource.indexOf('\nasync function _toggleOnExistingTab', toggleOnceStart);
   const toggleOnceBody = toggleOnceStart >= 0 && toggleOnceEnd > toggleOnceStart
     ? backgroundSource.slice(toggleOnceStart, toggleOnceEnd)
@@ -1373,12 +1385,15 @@ async function runTests() {
     '9G-1: 主世界保留原生 confirm/alert/prompt 自动接管与幂等守卫');
   // 主世界 toggle 握手异常也必须回包：否则隔离世界静默等满超时拿到 null，
   // 误触发后台刷新恢复。隔离世界超时也放宽到 90s 容纳慢异步 confirm + 最多 3 次点击。
-  assertPass(pageConfirmSource.includes('result = await requestACState(needOn);')
+  assertPass(pageConfirmSource.includes('result = await requestACState(needOn, notAfterAt);')
       && pageConfirmSource.includes('主世界切换抛异常')
       && pageConfirmSource.includes('detail: { requestId, action, ...result }'),
     '9G-1A: 主世界 toggle 握手异常时仍回显失败结果，避免隔离世界拿到 null');
-  assertPass(contentSource.includes('requestMainWorldToggle(targetAction, 90000)'),
-    '9G-1B: 隔离世界 toggle 主世界握手超时放宽到 90s');
+  assertPass(contentSource.includes('requestMainWorldToggle(targetAction, 90000, notAfterAt)')
+      && contentSource.includes('toggleACSwitch(action, msg.notAfterAt)')
+      && contentSource.includes('notAfterAt !== 0 && !Number.isSafeInteger(notAfterAt)')
+      && contentSource.includes('...(notAfterAt !== 0 ? { notAfterAt } : {})'),
+    '9G-1B: 隔离世界 toggle 保留 90s 握手，并把智能 ON 首分钟截止透传到主世界');
   // 9G-2/3/4: 识别禁用开关——真实页面 onSwitchChange 的 disabled 门控
   // disabled=(remaining_balance_in_percentage<=0 || loading || balance<=0) && !free_mode。
   // 禁用时 button 不触发 click，主世界若继续点 3 次只会徒劳失败，须在点击前拦截并给出明确错误。
@@ -1430,10 +1445,44 @@ async function runTests() {
     10000
   );
   const disabledEnsureResult = await ensureACState(true);
+  let expiredWindowClickCalls = 0;
+  const { ensureACState: ensureExpiredWindow } = loadEnsure(
+    () => ({ isOn: false, disabled: false, source: 'main-world-ant-switch' }),
+    async () => ({}),
+    () => { expiredWindowClickCalls += 1; return true; },
+    async () => false,
+    async () => {},
+    3,
+    10000
+  );
+  ensureExpiredWindow.notAfterAt = Date.now() - 1;
+  const expiredWindowResult = await ensureExpiredWindow(true);
+  const confirmFnStart = pageConfirmSource.indexOf('async function clickConfirmDialogInPageWorld(');
+  const confirmFnEnd = pageConfirmSource.indexOf('\n  async function waitForACSwitchInPageWorld', confirmFnStart);
+  const confirmFnSource = confirmFnStart >= 0 && confirmFnEnd > confirmFnStart
+    ? pageConfirmSource.slice(confirmFnStart, confirmFnEnd)
+    : '';
+  let expiredConfirmClickCalls = 0;
+  const confirmDeadlineAt = Date.now();
+  const { clickConfirmDialogInPageWorld } = new Function(
+    'document', 'Date', 'clickElementOnceInPageWorld', 'sleepInPageWorld',
+    `${confirmFnSource}; return { clickConfirmDialogInPageWorld };`
+  )(
+    { querySelectorAll: () => [{ textContent: 'Confirm', className: '' }] },
+    { now: () => confirmDeadlineAt },
+    () => { expiredConfirmClickCalls += 1; return true; },
+    async () => {}
+  );
+  const expiredConfirmResult = await clickConfirmDialogInPageWorld(5000, confirmDeadlineAt);
   assertPass(disabledEnsureResult.success === false
       && disabledEnsureResult.error.includes('被禁用')
-      && disabledEnsureClickCalls === 0,
-    '9G-5: 禁用开关时 ensureACState 直接返回失败且零点击（不再徒劳点 3 次）');
+      && disabledEnsureClickCalls === 0
+      && expiredWindowResult.success === false
+      && expiredWindowResult.error.includes('窗口已结束')
+      && expiredWindowClickCalls === 0
+      && expiredConfirmResult === false
+      && expiredConfirmClickCalls === 0,
+    '9G-5: 禁用开关或智能 ON 窗口已结束时，开关与确认按钮均零点击');
   // 9G-6: 反证——启用开关（free mode 下余额为 0 也不禁用）不被误判禁用，仍走完整点击链路。
   let enabledEnsureClickCalls = 0;
   const { ensureACState: ensureEnabled } = loadEnsure(
@@ -1450,13 +1499,52 @@ async function runTests() {
       && enabledEnsureResult.clicks === 3
       && enabledEnsureClickCalls === 3,
     '9G-6: 启用开关（free mode）不判禁用，仍走 3 次点击链路后才失败');
-  assertPass(countOccurrences(pwmBody, "toggleAC('on')") === 1
+  assertPass(countOccurrences(pwmBody, "toggleAC('on', {") === 1
       && !pwmBody.includes('for (let retry'),
     '9H: 每个 PWM 开机步骤只调用一次 toggleAC(on)，无外围点击重试循环');
+  const smartWindowGuardIndex = pwmBody.indexOf('planSmartModeOnWindow(schedule');
+  const smartWindowPlanIndex = pwmBody.indexOf(
+    'const smartOnWindow = planSmartAutomaticOn(targetAction, observations.acIsOn);'
+  );
+  const smartToggleBranchIndex = pwmBody.indexOf(
+    "if (plan.kind === 'hold' && plan.prerequisite === 'toggle-on')"
+  );
+  const smartBoundaryPersistIndex = pwmBody.indexOf(
+    "persistSchedule('runPwmStep-smart-on-boundary'"
+  );
+  const toggleOnIndex = pwmBody.indexOf("toggleAC('on', {");
+  assertPass(smartWindowGuardIndex >= 0
+      && smartWindowGuardIndex < toggleOnIndex
+      && smartWindowPlanIndex > toggleOnIndex
+      && smartWindowPlanIndex < smartToggleBranchIndex
+      && smartBoundaryPersistIndex > smartWindowPlanIndex
+      && smartBoundaryPersistIndex < smartToggleBranchIndex
+      && countOccurrences(
+        pwmBody,
+        'planSmartAutomaticOn(targetAction, observations.acIsOn)'
+      ) === 1
+      && pwmBody.includes("schedule.smartMode?.enabled && targetAction === 'on'")
+      && pwmBody.includes('maxOnMinutes: SMART_MODE.ON_MAX')
+      && pwmBody.includes('acIsOn')
+      && pwmBody.includes('boundaryAt: schedule.smartOnBoundaryAt')
+      && pwmBody.includes('schedule.smartOnBoundaryAt = Number(smartOnWindow.boundaryAt) || 0;')
+      && pwmBody.includes("persistSchedule('runPwmStep-smart-on-boundary', { syncFromLiveAlarm: false })")
+      && pwmBody.includes('observations.smartOnWindowEndsAt = Number(smartOnWindow.windowEndsAt) || 0;')
+      && pwmBody.includes('notAfterAt: observations.smartOnWindowEndsAt || 0')
+      && pwmBody.includes('observations.smartPageTimerTargetAt = Number(smartOnWindow.pageTimerTargetAt);'),
+    '9H-1: production 仅在智能自动 ON 分支统一规划；物理开机前持久化锚点并透传首分钟截止');
+  assertPass(setTimerBody.includes('targetAt = 0')
+      && setTimerBody.includes("action: 'setTimer'")
+      && setTimerBody.includes('targetAt')
+      && contentSource.includes('setPagePowerOffTimer(msg.minutes, msg.targetAt)'),
+    '9H-2: 智能半点绝对关机截止时间由 background 透传到 content，不退化为相对分钟');
+  assertPass(pwmBody.includes('SMART_MODE.MIN_OFF_MINUTES')
+      && pwmBody.includes('alignSmartModeNextTrigger(plan, smartAlignNow, { notBeforeAt })'),
+    '9H-3: 智能 OFF 提交按已确认关机时刻保留至少 5 分钟，再对齐下一半点 ON');
   assertPass(!backgroundSource.includes('retryExistingTabToggle')
       && !backgroundSource.includes('async function retryToggle'),
     '9I: background 已删除四次即时消息重试路径');
-  assertPass(existingTabBody.includes('attemptACToggleWithRecovery(tab.id, action, 1)')
+  assertPass(existingTabBody.includes("attemptACToggleWithRecovery(tab.id, action, 1, '', options)")
       && existingTabBody.includes('async function refreshACControlPage(tabId)')
       && existingTabBody.includes('return attemptACToggleWithRecovery(')
       && existingTabBody.includes('refreshesRemaining - 1')
@@ -1556,15 +1644,41 @@ async function runTests() {
     const midnightNow = new Date(2026, 0, 15, 23, 59, 30, 0).getTime();
     const midnightExpected = Math.ceil((midnightNow + 60000) / 60000) * 60000;
     const midnightResult = computePageTimerTarget(1, midnightNow);
+    const smartBoundary = new Date(2026, 0, 15, 10, 0, 0, 0).getTime();
+    const smartTargetAt = smartBoundary + 25 * 60000;
+    const smartTargetResult = computePageTimerTarget(25, targetNow, smartTargetAt);
+    const explicitZeroTargetResult = computePageTimerTarget(5, targetNow, 0);
+    const invalidExplicitTargets = [
+      smartBoundary - 60000,
+      targetNow,
+      smartTargetAt + 1,
+      smartTargetAt + 0.5,
+      String(smartTargetAt)
+    ];
+    const invalidExplicitTargetsRejected = invalidExplicitTargets.every((invalidTargetAt) => {
+      try {
+        computePageTimerTarget(25, targetNow, invalidTargetAt);
+        return false;
+      } catch (error) {
+        return /绝对|目标/.test(error?.message || '');
+      }
+    });
     assertPass(targetResult.targetAt === targetExpected
         && targetResult.value === targetValue
         && targetResult.actualDelayMinutes === (targetExpected - targetNow) / 60000
-        && targetResult.actualDelayMinutes > targetResult.requestedMinutes,
+        && targetResult.actualDelayMinutes > targetResult.requestedMinutes
+        && explicitZeroTargetResult.targetAt === targetExpected,
       '9M-2: 非整分请求向上对齐 UST 分钟接口，并保留实际浮点延迟');
     assertPass(midnightResult.targetAt === midnightExpected
         && midnightResult.crossesMidnight === true
         && midnightResult.value === '00:01',
       '9M-3: 23:59:30 的 1 分钟请求安全上取整到次日 00:01');
+    assertPass(smartTargetResult.targetAt === smartTargetAt
+        && smartTargetResult.value === '10:25'
+        && smartTargetResult.actualDelayMinutes < 25,
+      '9M-3A: 智能 ON 使用“半点 + 开启分钟数”绝对截止时间，不被相对时长上取整压缩关机窗口');
+    assertPass(invalidExplicitTargetsRejected,
+      '9M-3B: 显式智能绝对截止时间过期、非整分、非整数或类型错误时拒绝设置，不回退相对 25 分钟');
     assertPass(contentSource.includes('targetAt,')
         && contentSource.includes('actualDelayMinutes,'),
       '9M-4: content setTimer 响应回传 targetAt 与实际延迟给后台');
@@ -2396,12 +2510,14 @@ async function runTests() {
       && retryBody.includes("createAlarm('ac-page-timer-retry'")
       && backgroundSource.includes('const retryMinutes = schedule.pageTimerRetryMinutes'),
     '11D: 非 PWM 的关机请求失败会保存分钟数并由 ac-page-timer-retry 持续重试');
-  const repairTimerIdx = repairBody.indexOf('await setPageTimer(schedule.onMinutes');
+  const repairTimerIdx = repairBody.indexOf('await setPageTimer(timerMinutes');
   const repairOffIdx = repairBody.indexOf("schedule.pwmState = currentOn ? 'off' : 'on';");
   assertPass(repairTimerIdx > 0
       && repairOffIdx > repairTimerIdx
+      && repairBody.includes('planSmartModeOnWindow(schedule')
+      && repairBody.includes('targetAt: smartTargetAt')
       && repairBody.includes("'repair-pageTimer-failed'"),
-    '11E: 时钟修复仅在新鲜确认页面定时器后才恢复 OFF 相位');
+    '11E: 时钟修复沿用智能绝对截止，并仅在新鲜确认后恢复 OFF 相位');
   const toggleTimerIdx = toggleBody.indexOf('await setPageTimer(schedule.onMinutes');
   const toggleOffIdx = toggleBody.indexOf("schedule.pwmState = currentOn ? 'off' : 'on';");
   assertPass(toggleTimerIdx > 0
@@ -2422,6 +2538,182 @@ async function runTests() {
       && reapplyBody.includes('nextTriggerAt: schedule.pageTimerTargetAt')
       && !reapplyBody.includes('nowMs + minutes * 60000'),
     '11F-1: repair、手动 ON 与智能重设均以页面证明 targetAt 创建同一绝对 ac-pwm');
+  assertPass(reapplyBody.includes('const previousSmartBoundaryAt = oldTriggerAt - oldOnMinutes * 60000;')
+      && reapplyBody.includes('const storedSmartBoundaryAt = Number(schedule.smartOnBoundaryAt);')
+      && reapplyBody.includes('storedSmartBoundaryAt <= nowMs')
+      && reapplyBody.includes('storedSmartBoundaryAt === 0')
+      && reapplyBody.includes('previousSmartBoundaryAt <= nowMs')
+      && reapplyBody.includes('activeSmartBoundaryAt')
+      && reapplyBody.includes('smartModePageTimerTargetAt(')
+      && reapplyBody.includes('previousSmartBoundaryAt')
+      && reapplyBody.includes('pwmStepRunning')
+      && reapplyBody.includes('pwmRuntimeRevision !== oldPwmRuntimeRevision')
+      && reapplyBody.includes('schedule.pwmState !== oldPwmState')
+      && reapplyBody.includes('(Number(schedule.nextTriggerAt) || 0) !== oldTriggerAt')
+      && reapplyBody.includes('(Number(schedule.smartOnBoundaryAt) || 0) !== oldSmartBoundaryAt')
+      && reapplyBody.includes('targetAt: smartDeadlineAt')
+      && reapplyBody.includes('nextMinuteTargetAt')
+      && !reapplyBody.includes('targetAt: 0'),
+    '11F-2: 智能灵敏度即时重设沿用原周期半点锚点；截止已过只尽快关机，不重给相对 25 分钟');
+  const reapplyRaceSchedule = {
+    enabled: true,
+    pwmState: 'off',
+    onMinutes: 25,
+    offMinutes: 5,
+    nextTriggerAt: new Date(2026, 7, 17, 13, 55, 0, 0).getTime(),
+    smartOnBoundaryAt: new Date(2026, 7, 17, 13, 30, 0, 0).getTime(),
+    smartMode: { enabled: true, sensitivity: 5 }
+  };
+  let releaseReapplyWeather;
+  let reapplyComputeCalls = 0;
+  const reapplyRaceHarness = new Function(
+    'schedule', 'getSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE', 'persistSchedule',
+    `let pwmStepRunning = false;
+let pwmRuntimeRevision = 0;
+${reapplyBody}
+return {
+  reapplySmartSensitivityNow,
+  completePwmStep() {
+    pwmStepRunning = true;
+    pwmRuntimeRevision += 1;
+    pwmStepRunning = false;
+  }
+};`
+  )(
+    reapplyRaceSchedule,
+    () => new Promise(resolve => { releaseReapplyWeather = resolve; }),
+    () => { reapplyComputeCalls += 1; return { valid: true }; },
+    smartMode.SMART_MODE,
+    async () => {}
+  );
+  const reapplyRacePromise = reapplyRaceHarness.reapplySmartSensitivityNow();
+  reapplyRaceHarness.completePwmStep();
+  releaseReapplyWeather({});
+  await reapplyRacePromise;
+  assertPass(reapplyComputeCalls === 0
+      && reapplyRaceSchedule.onMinutes === 25
+      && reapplyRaceSchedule.offMinutes === 5
+      && reapplyRaceSchedule.nextTriggerAt
+        === new Date(2026, 7, 17, 13, 55, 0, 0).getTime(),
+    '11F-2A: 等待天气期间 PWM 即使已完成推进，旧灵敏度重设仍放弃且不覆盖新相位');
+  const stableReapplySchedule = {
+    ...reapplyRaceSchedule,
+    pwmState: 'on',
+    onMinutes: 25,
+    offMinutes: 5
+  };
+  const stableReapplyPersistReasons = [];
+  const stableReapplyHarness = new Function(
+    'schedule', 'getSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE', 'persistSchedule',
+    `let pwmStepRunning = false;
+let pwmRuntimeRevision = 0;
+${reapplyBody}
+return { reapplySmartSensitivityNow };`
+  )(
+    stableReapplySchedule,
+    async () => ({}),
+    () => ({ valid: true, onMinutes: 10, offMinutes: 20 }),
+    smartMode.SMART_MODE,
+    async reason => { stableReapplyPersistReasons.push(reason); }
+  );
+  await stableReapplyHarness.reapplySmartSensitivityNow();
+  assertPass(stableReapplySchedule.onMinutes === 10
+      && stableReapplySchedule.offMinutes === 20
+      && stableReapplyPersistReasons.join(',') === 'reapply-smart-sensitivity-off-phase',
+    '11F-2B: 天气等待期间相位快照稳定时，灵敏度重设仍正常更新下一 ON 周期');
+  const repairFunctionSource = extractSourceSection(
+    backgroundSource,
+    'async function repairScheduleClock() {',
+    '\n// 弹窗 est（Est. until）',
+    'repairScheduleClock behavior'
+  );
+  const loadRepairScheduleClock = new Function(
+    'schedule',
+    'restoreIntervalAlarmFromStorage',
+    'updateBadge',
+    'getCurrentACStatus',
+    'setPageTimer',
+    'createPwmAlarmWithVerify',
+    'createAlarm',
+    'persistSchedule',
+    'createPwmAlarmFromPlan',
+    'SMART_MODE',
+    'planSmartModeOnWindow',
+    'Date',
+    `${repairFunctionSource}; return repairScheduleClock;`
+  );
+  const runRepairCase = async (initialSchedule, nowMs) => {
+    const repairSchedule = {
+      ...initialSchedule,
+      smartMode: { ...initialSchedule.smartMode }
+    };
+    const timerCalls = [];
+    const alarmPlans = [];
+    const repairScheduleClock = loadRepairScheduleClock(
+      repairSchedule,
+      async () => false,
+      async () => {},
+      async () => ({ isOn: true }),
+      async (minutes, options = {}) => {
+        const targetAt = Number(options.targetAt) || nowMs + minutes * 60000;
+        timerCalls.push({ minutes, options: { ...options }, targetAt });
+        repairSchedule.pageTimerTargetAt = targetAt;
+        return { success: true, targetAt };
+      },
+      async () => { throw new Error('成功恢复不应进入失败重试'); },
+      async () => {},
+      async () => {},
+      async plan => { alarmPlans.push({ ...plan }); },
+      smartMode.SMART_MODE,
+      pwmPhase.planSmartModeOnWindow,
+      { now: () => nowMs }
+    );
+    const result = await repairScheduleClock();
+    return { result, schedule: repairSchedule, timerCalls, alarmPlans };
+  };
+  const smartRepairBoundary = new Date(2026, 7, 17, 13, 30, 0, 0).getTime();
+  const activeSmartRepair = await runRepairCase({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 25,
+    offMinutes: 5,
+    nextTriggerAt: 0,
+    smartOnBoundaryAt: smartRepairBoundary,
+    smartMode: { enabled: true, sensitivity: 5 }
+  }, new Date(2026, 7, 17, 13, 45, 0, 0).getTime());
+  const overrunSmartRepair = await runRepairCase({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 25,
+    offMinutes: 5,
+    nextTriggerAt: 0,
+    smartOnBoundaryAt: smartRepairBoundary,
+    smartMode: { enabled: true, sensitivity: 5 }
+  }, new Date(2026, 7, 17, 13, 56, 0, 0).getTime());
+  const ordinaryRepairNow = new Date(2026, 7, 17, 13, 17, 0, 0).getTime();
+  const ordinaryRepair = await runRepairCase({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 12,
+    offMinutes: 8,
+    nextTriggerAt: 0,
+    smartOnBoundaryAt: 0,
+    smartMode: { enabled: false, sensitivity: 5 }
+  }, ordinaryRepairNow);
+  assertPass(activeSmartRepair.timerCalls[0]?.minutes === 10
+      && activeSmartRepair.timerCalls[0]?.options.targetAt
+        === smartRepairBoundary + 25 * 60000
+      && activeSmartRepair.alarmPlans[0]?.nextTriggerAt
+        === smartRepairBoundary + 25 * 60000
+      && activeSmartRepair.schedule.pwmState === 'off'
+      && overrunSmartRepair.timerCalls[0]?.minutes === 1
+      && overrunSmartRepair.timerCalls[0]?.options.targetAt
+        === new Date(2026, 7, 17, 13, 57, 0, 0).getTime()
+      && ordinaryRepair.timerCalls[0]?.minutes === 12
+      && !Object.hasOwn(ordinaryRepair.timerCalls[0]?.options || {}, 'targetAt')
+      && ordinaryRepair.alarmPlans[0]?.nextTriggerAt
+        === ordinaryRepairNow + 12 * 60000,
+    '11F-3: 重启时钟修复沿用智能原半点截止，超时只给下一分钟，普通 PWM 仍按相对时长');
   const recoveryNow11G = 1_700_000_000_000;
   const recoveryPlan11G = pwmPhase.planPwmRecovery({
     enabled: true,
@@ -2923,7 +3215,8 @@ async function runTests() {
     pageTimerTargetAt: Date.now() + 30 * 60_000,
     pageTimerError: 'keep',
     pageTimerRetryAt: Date.now() + 60_000,
-    pageTimerRetryMinutes: 1
+    pageTimerRetryMinutes: 1,
+    smartOnBoundaryAt: Date.now() - 30 * 60_000
   };
   const resetDisabledPwmRuntime = loadResetDisabledPwmRuntime(
     resetRuntimeSchedule,
@@ -2944,6 +3237,7 @@ async function runTests() {
       && resetRuntimeSchedule.nextTriggerAt === 0
       && resetRuntimeSchedule.alarmCreatedAt === 0
       && resetRuntimeSchedule.alarmDelayMinutes === 0
+      && resetRuntimeSchedule.smartOnBoundaryAt === 0
       && resetRuntimeSchedule.pageTimerMinutes === 30
       && resetRuntimeSchedule.pageTimerError === 'keep'
       && resetRuntimeSchedule.pageTimerRetryMinutes === 1,
@@ -3082,6 +3376,7 @@ async function runTests() {
       && ensureDiagnosticAlarmsBody.includes('smartWeather: smartWeatherAlarm ? { scheduledTime: smartWeatherAlarm.scheduledTime } : null'),
     '13M-2: 诊断自愈补建 ac-smart-weather（智能模式天气闹钟）并回传 alarm 状态');
   assertPass(persistScheduleBody.includes('reconcilePwmTrigger(schedule, liveAlarm, PWM_TRIGGER_NEXT_ONLY_OPTIONS)')
+      && persistScheduleBody.includes('if (!schedule.smartMode?.enabled) schedule.smartOnBoundaryAt = 0;')
       && !persistScheduleBody.includes('persistReconciledPwmTrigger(')
       && snapshotBody.includes('reconcilePwmTrigger(snapshot, alarm, PWM_TRIGGER_SNAPSHOT_OPTIONS)')
       && !snapshotBody.includes('persistReconciledPwmTrigger('),

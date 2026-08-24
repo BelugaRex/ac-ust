@@ -84,14 +84,17 @@ let schedule = {
   pageTimerError: '',
   pageTimerRetryAt: 0,
   pageTimerRetryMinutes: 0,
+  smartOnBoundaryAt: 0,
   activeHours: { enabled: false, start: '08:00', end: '23:00' },  // v0.5.x: PWM 运行时段（白名单，同日）
   smartMode: { enabled: false, sensitivity: 5 }  // v0.8.0: 智能模式（天气驱动的开启时长，灵敏度 0~10 档位）
 };
 
 let pwmStepRunning = false;
+let pwmRuntimeRevision = 0;
 let lastPwmStepAt = 0;  // A4: 看门狗 cooldown 追踪
 let acToggleInFlight = null;
 let acToggleInFlightAction = null;
+let acToggleInFlightNotAfterAt = 0;
 
 const PWM_TRIGGER_STRICT_OPTIONS = Object.freeze({
   nextTriggerToleranceMs: 0,
@@ -321,6 +324,14 @@ async function applySmartModeDurations() {
   });
 
   if (!suggested.valid) {
+    schedule.onMinutes = Math.min(
+      SMART_MODE.ON_MAX,
+      sanitizeMinutes(schedule.onMinutes, SMART_MODE.ON_MAX)
+    );
+    schedule.offMinutes = Math.max(
+      SMART_MODE.MIN_OFF_MINUTES,
+      sanitizeMinutes(schedule.offMinutes, SMART_MODE.MIN_OFF_MINUTES)
+    );
     console.warn('[AC扩展] 智能模式：天气不可用，本周期沿用手动时长');
     return;
   }
@@ -352,10 +363,23 @@ async function reapplySmartSensitivityNow() {
   if (pwmStepRunning) return;  // 避免与正在执行的 PWM 步骤并发操作页面定时器
 
   const wasOnPhase = schedule.pwmState === 'off';
+  const oldPwmState = schedule.pwmState;
   const oldOnMinutes = Number(schedule.onMinutes) || 0;
+  const oldOffMinutes = Number(schedule.offMinutes) || 0;
   const oldTriggerAt = Number(schedule.nextTriggerAt) || 0;
+  const oldSmartBoundaryAt = Number(schedule.smartOnBoundaryAt) || 0;
+  const oldPwmRuntimeRevision = pwmRuntimeRevision;
 
   const weather = await getSmartWeather();
+  if (!schedule.enabled || !schedule.smartMode?.enabled || pwmStepRunning
+      || pwmRuntimeRevision !== oldPwmRuntimeRevision
+      || schedule.pwmState !== oldPwmState
+      || (Number(schedule.onMinutes) || 0) !== oldOnMinutes
+      || (Number(schedule.offMinutes) || 0) !== oldOffMinutes
+      || (Number(schedule.nextTriggerAt) || 0) !== oldTriggerAt
+      || (Number(schedule.smartOnBoundaryAt) || 0) !== oldSmartBoundaryAt) {
+    return;
+  }
   const suggested = computeSmartOnMinutes({
     sensitivity: schedule.smartMode.sensitivity,
     temperature: weather.temperature,
@@ -377,16 +401,41 @@ async function reapplySmartSensitivityNow() {
     return;
   }
 
-  // AC 当前 ON：按「剩余时间」重设 Power-off after，clamp 到 ≥1 分钟。
-  let minutes;
-  if (suggested.onMinutes === 0) {
-    minutes = 1;  // 新灵敏度下建议关闭 → 1 分钟后关机
-  } else {
-    const nowMs = Date.now();
-    const remainingBefore = oldTriggerAt > nowMs ? (oldTriggerAt - nowMs) / 60000 : 0;
-    const elapsed = Math.max(0, oldOnMinutes - remainingBefore);
-    minutes = Math.max(1, Math.min(suggested.onMinutes, suggested.onMinutes - elapsed));
-  }
+  // AC 当前 ON：沿用原半点锚点重设 Power-off after，不从当前时刻重获完整 ON 时长。
+  const nowMs = Date.now();
+  const previousSmartBoundaryAt = oldTriggerAt - oldOnMinutes * 60000;
+  const storedSmartBoundaryAt = Number(schedule.smartOnBoundaryAt);
+  const storedSmartDeadlineAt = smartModePageTimerTargetAt(
+    oldOnMinutes,
+    nowMs,
+    storedSmartBoundaryAt
+  );
+  const previousSmartDeadlineAt = smartModePageTimerTargetAt(
+    oldOnMinutes,
+    nowMs,
+    previousSmartBoundaryAt
+  );
+  const activeSmartBoundaryAt = storedSmartDeadlineAt > 0
+      && storedSmartBoundaryAt <= nowMs
+    ? storedSmartBoundaryAt
+    : storedSmartBoundaryAt === 0
+        && previousSmartDeadlineAt > 0
+        && previousSmartBoundaryAt <= nowMs
+      ? previousSmartBoundaryAt
+      : 0;
+  schedule.smartOnBoundaryAt = activeSmartBoundaryAt;
+  const computedSmartDeadlineAt = suggested.onMinutes > 0
+    ? smartModePageTimerTargetAt(
+      suggested.onMinutes,
+      nowMs,
+      activeSmartBoundaryAt
+    )
+    : 0;
+  const nextMinuteTargetAt = Math.floor(nowMs / 60000 + 1) * 60000;
+  const smartDeadlineAt = computedSmartDeadlineAt > nowMs
+    ? computedSmartDeadlineAt
+    : nextMinuteTargetAt;
+  const minutes = Math.max(1, Math.ceil((smartDeadlineAt - nowMs) / 60000));
 
   // 先清旧 alarm，避免旧关机时刻在慢速新鲜页验证期间抢跑；页面写入方返回
   // 已对齐 UST HH:MM 接口的绝对 targetAt，再用同一值恢复扩展倒计时。
@@ -394,7 +443,10 @@ async function reapplySmartSensitivityNow() {
   setNextTriggerAt(0);
   schedule.alarmCreatedAt = 0;
   schedule.alarmDelayMinutes = 0;
-  const timerResult = await setPageTimer(minutes, { retryOnFailure: false });
+  const timerResult = await setPageTimer(minutes, {
+    retryOnFailure: false,
+    targetAt: smartDeadlineAt
+  });
   if (!timerResult?.success) {
     schedule.pageTimerError = `灵敏度即时应用时页面关机定时器未确认：${timerResult?.error || '未知错误'}；1 分钟后重试`;
     await createPwmAlarmFromPlan(
@@ -434,6 +486,7 @@ function applyPwmPlanState(plan) {
 
 async function resetDisabledPwmRuntime() {
   schedule.pwmState = 'off';
+  schedule.smartOnBoundaryAt = 0;
   setNextTriggerAt(0);
   schedule.alarmCreatedAt = 0;
   schedule.alarmDelayMinutes = 0;
@@ -648,6 +701,7 @@ async function loadScheduleFromStorage() {
 
 async function persistSchedule(reason = '', options = {}) {
   const { syncFromLiveAlarm = true } = options;
+  if (!schedule.smartMode?.enabled) schedule.smartOnBoundaryAt = 0;
 
   if (syncFromLiveAlarm && schedule.enabled) {
     const liveAlarm = await chrome.alarms.get('ac-pwm');
@@ -1210,13 +1264,25 @@ async function runPwmStep() {
     console.warn('[AC扩展] PWM 步骤距上次执行不足 5s，跳过（看门狗 cooldown）');
     return;
   }
+  pwmRuntimeRevision += 1;
   pwmStepRunning = true;
+
+  function planSmartAutomaticOn(targetAction, acIsOn) {
+    if (!(schedule.smartMode?.enabled && targetAction === 'on')) return null;
+    return planSmartModeOnWindow(schedule, {
+      maxOnMinutes: SMART_MODE.ON_MAX,
+      acIsOn,
+      boundaryAt: schedule.smartOnBoundaryAt
+    });
+  }
 
   // 提取（Fowler Extract Function）：PWM 开机 hold 分支——单次点击 + 只读复核，不在外围重试。
   // 观察结果写回 observations，最终返回重新规划后的 plan。
   async function resolveToggleOnHold(plan, observations) {
     try {
-      const toggleResult = await toggleAC('on');
+      const toggleResult = await toggleAC('on', {
+        notAfterAt: observations.smartOnWindowEndsAt || 0
+      });
       observations.toggleSucceeded = !!toggleResult?.success;
       observations.toggleError = toggleResult?.error || '';
       if (!observations.toggleSucceeded) {
@@ -1312,6 +1378,17 @@ async function runPwmStep() {
     }
     plan = planPwmStep(schedule, observations);
 
+    const smartOnWindow = planSmartAutomaticOn(targetAction, observations.acIsOn);
+    if (smartOnWindow?.kind === 'allow') {
+      observations.smartPageTimerTargetAt = Number(smartOnWindow.pageTimerTargetAt);
+      observations.smartOnWindowEndsAt = Number(smartOnWindow.windowEndsAt) || 0;
+      schedule.smartOnBoundaryAt = Number(smartOnWindow.boundaryAt) || 0;
+      await persistSchedule('runPwmStep-smart-on-boundary', { syncFromLiveAlarm: false });
+    } else if (smartOnWindow) {
+      schedule.smartOnBoundaryAt = 0;
+      plan = smartOnWindow;
+    }
+
     if (preCheckStatus?.isOn === (targetAction === 'on')) {
       console.log(`[AC扩展] 预检：AC 已在目标状态 (${targetAction})，跳过切换，直接推进周期`);
     }
@@ -1324,9 +1401,30 @@ async function runPwmStep() {
       plan = await resolveToggleOnHold(plan, observations);
     }
 
+    if (plan.kind === 'defer') {
+      applyPwmPlanState(plan);
+      await chrome.alarms.clear('ac-pwm');
+      await createPwmAlarmFromPlan(plan, 'PWM-smart-on-deferred');
+      await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+      await persistSchedule('runPwmStep-smart-on-deferred');
+      await updateBadge();
+      await syncScheduleToSync('runPwmStep-smart-on-deferred');
+      console.log(`[AC扩展] 智能自动开启等待下一个半点: ${new Date(plan.nextTriggerAt).toLocaleTimeString()}`);
+      return;
+    }
+
+    if (plan.kind === 'refuse') {
+      schedule.pageTimerError = `智能自动开启被拒绝：${plan.reason}`;
+      await persistSchedule('runPwmStep-smart-on-refused', { syncFromLiveAlarm: false });
+      return;
+    }
+
     if (plan.kind === 'hold' && plan.prerequisite === 'set-page-timer') {
       applyPwmPlanState(plan);
-      const pageTimerResult = await setPageTimer(plan.timerMinutes, { retryOnFailure: false });
+      const pageTimerResult = await setPageTimer(plan.timerMinutes, {
+        retryOnFailure: false,
+        targetAt: observations.smartPageTimerTargetAt || 0
+      });
       observations.pageTimerSucceeded = !!pageTimerResult?.success;
       observations.pageTimerTargetAt = Number(pageTimerResult?.targetAt);
       observations.pageTimerError = pageTimerResult?.error || schedule.pageTimerError || '';
@@ -1348,7 +1446,13 @@ async function runPwmStep() {
 
     // 智能模式：把下一 ON 触发对齐到半点，30 分钟周期锚定半点。
     if (schedule.smartMode?.enabled) {
-      alignSmartModeNextTrigger(plan);
+      const recordedOffAt = Number(schedule.pageTimerTargetAt);
+      const smartAlignNow = targetAction === 'off'
+          && Number.isFinite(recordedOffAt) && recordedOffAt > 0
+        ? recordedOffAt
+        : Date.now();
+      const notBeforeAt = smartAlignNow + SMART_MODE.MIN_OFF_MINUTES * 60000;
+      alignSmartModeNextTrigger(plan, smartAlignNow, { notBeforeAt });
     }
 
     applyPwmPlanState(plan);
@@ -1447,7 +1551,7 @@ async function schedulePageTimerRetry(minutes, reason = '') {
 }
 
 // ----- 设置页面自带定时器（安全网，自动关不用手动开）-----
-async function setPageTimer(minutes, { retryOnFailure = true } = {}) {
+async function setPageTimer(minutes, { retryOnFailure = true, targetAt = 0 } = {}) {
   let autoCreatedTabId = null;
 
   const finishFailure = async (failure, reason) => {
@@ -1507,7 +1611,8 @@ async function setPageTimer(minutes, { retryOnFailure = true } = {}) {
 
     const result = await sendMessageToExactACHome(tab.id, {
       action: 'setTimer',
-      minutes
+      minutes,
+      targetAt
     });
     if (!result?.success) {
       return await finishFailure(result || { success: false, error: t('bgPageTimerFailed') }, 'failed');
@@ -1825,9 +1930,16 @@ async function sendMessageToExactACHome(tabId, message, { timeoutMs = 0 } = {}) 
 }
 
 // ----- 切换 AC 状态 -----
-async function toggleAC(action) {
+async function toggleAC(action, { notAfterAt = 0 } = {}) {
+  const requestedNotAfterAt = notAfterAt === 0
+    ? 0
+    : Number(notAfterAt);
+  if (requestedNotAfterAt !== 0 && !Number.isSafeInteger(requestedNotAfterAt)) {
+    return { success: false, error: '自动开启窗口截止时间无效' };
+  }
   if (acToggleInFlight) {
-    if (acToggleInFlightAction === action) {
+    if (acToggleInFlightAction === action
+        && acToggleInFlightNotAfterAt === requestedNotAfterAt) {
       console.log(`[AC扩展] 合并重复的 toggleAC(${action}) 请求`);
       return acToggleInFlight;
     }
@@ -1839,16 +1951,18 @@ async function toggleAC(action) {
   }
 
   acToggleInFlightAction = action;
-  acToggleInFlight = toggleACOnce(action);
+  acToggleInFlightNotAfterAt = requestedNotAfterAt;
+  acToggleInFlight = toggleACOnce(action, { notAfterAt: requestedNotAfterAt });
   try {
     return await acToggleInFlight;
   } finally {
     acToggleInFlight = null;
     acToggleInFlightAction = null;
+    acToggleInFlightNotAfterAt = 0;
   }
 }
 
-async function toggleACOnce(action) {
+async function toggleACOnce(action, options = {}) {
   // A1: 顶层幂等预检 — 先查当前 AC 真实状态，已是目标则跳过，避免多余开关噪音
   const needOn = action === 'on';
   try {
@@ -1863,15 +1977,15 @@ async function toggleACOnce(action) {
   const homeTab = tabs.find(tab => isACHomePageTab(tab) && !tab.discarded);
 
   if (homeTab?.id) {
-    return waitUntil(_toggleOnExistingTab(homeTab, action));
+    return waitUntil(_toggleOnExistingTab(homeTab, action, options));
   }
 
   console.log('[AC扩展] 没有精确 AC home 页面，创建隐藏标签...');
   const created = await chrome.tabs.create({ url: AC_PAGE, active: false });
-  return waitUntil(_toggleOnNewTab(created?.id, action));
+  return waitUntil(_toggleOnNewTab(created?.id, action, options));
 }
 
-async function _toggleOnExistingTab(tab, action) {
+async function _toggleOnExistingTab(tab, action, options = {}) {
   // 操作目标必须从始至终精确等于 AC_PAGE。billing-cycle、warning、登录回调、
   // query/hash 变体和相似路径都属于用户页面，禁止导航、注入或发送空调消息。
   if (!isACHomePageTab(tab)) {
@@ -1882,10 +1996,10 @@ async function _toggleOnExistingTab(tab, action) {
     };
   }
 
-  return attemptACToggleWithRecovery(tab.id, action, 1);
+  return attemptACToggleWithRecovery(tab.id, action, 1, '', options);
 }
 
-async function attemptACToggleOnExactHome(tabId, action) {
+async function attemptACToggleOnExactHome(tabId, action, options = {}) {
   if (!await getExactACHomeTab(tabId)) {
     return {
       success: false,
@@ -1901,7 +2015,7 @@ async function attemptACToggleOnExactHome(tabId, action) {
   }
 
   try {
-    return await sendACToggleMessage(tabId, action);
+    return await sendACToggleMessage(tabId, action, options);
   } catch (error) {
     console.error('[AC扩展] 发送消息失败:', error?.message);
     void appendDiagnosticLog('error', 'toggle-message', error);
@@ -1932,8 +2046,14 @@ async function refreshACControlPage(tabId) {
   }
 }
 
-async function attemptACToggleWithRecovery(tabId, action, refreshesRemaining = 1, initialError = '') {
-  const result = await attemptACToggleOnExactHome(tabId, action);
+async function attemptACToggleWithRecovery(
+  tabId,
+  action,
+  refreshesRemaining = 1,
+  initialError = '',
+  options = {}
+) {
+  const result = await attemptACToggleOnExactHome(tabId, action, options);
   if (result.success || result.invalidTarget || refreshesRemaining <= 0) {
     if (!result.success && initialError) {
       void appendDiagnosticLog('error', 'toggle-refresh-recovery', new Error(result.error));
@@ -1960,12 +2080,17 @@ async function attemptACToggleWithRecovery(tabId, action, refreshesRemaining = 1
     tabId,
     action,
     refreshesRemaining - 1,
-    firstError
+    firstError,
+    options
   );
 }
 
-async function sendACToggleMessage(tabId, action) {
-  const result = await sendMessageToExactACHome(tabId, { action });
+async function sendACToggleMessage(tabId, action, options = {}) {
+  const notAfterAt = Number(options?.notAfterAt) || 0;
+  const result = await sendMessageToExactACHome(tabId, {
+    action,
+    ...(notAfterAt > 0 ? { notAfterAt } : {})
+  });
   console.log(`[AC扩展] ${action} 命令返回:`, result);
   if (!result?.success) {
     console.warn('[AC扩展] 页面返回未确认:', result);
@@ -1979,14 +2104,14 @@ async function sendACToggleMessage(tabId, action) {
   return { success: true, tabId, result };
 }
 
-async function _toggleOnNewTab(tabId, action) {
+async function _toggleOnNewTab(tabId, action, options = {}) {
   try {
     const tab = await getReadyACTab(tabId, 30000);
     if (!tab?.id) {
       return { success: false, error: '新建的 AC 页面未就绪' };
     }
 
-    return await _toggleOnExistingTab(tab, action);
+    return await _toggleOnExistingTab(tab, action, options);
   } finally {
     // 只关闭扩展自动创建的标签，不能关闭用户原本打开的 HKUST 页面。
     if (Number.isInteger(tabId)) {
@@ -2120,7 +2245,31 @@ async function repairScheduleClock() {
     // 先保留“下一步 ON”的安全检查点；只有新鲜页面确认关机定时器后，
     // 才允许恢复为下一步 OFF。
     schedule.pwmState = 'on';
-    const timerResult = await setPageTimer(schedule.onMinutes, { retryOnFailure: false });
+    const nowMs = Date.now();
+    const nextMinuteTargetAt = Math.floor(nowMs / 60000 + 1) * 60000;
+    let smartTargetAt = 0;
+    if (schedule.smartMode?.enabled) {
+      const smartRepairPlan = planSmartModeOnWindow(schedule, {
+        now: nowMs,
+        maxOnMinutes: SMART_MODE.ON_MAX,
+        acIsOn: true,
+        boundaryAt: schedule.smartOnBoundaryAt
+      });
+      const plannedSmartTargetAt = Number(smartRepairPlan?.pageTimerTargetAt);
+      smartTargetAt = smartRepairPlan?.kind === 'allow'
+          && Number.isSafeInteger(plannedSmartTargetAt)
+          && plannedSmartTargetAt > nowMs
+        ? plannedSmartTargetAt
+        : nextMinuteTargetAt;
+      schedule.smartOnBoundaryAt = Number(smartRepairPlan?.boundaryAt) || 0;
+    }
+    const timerMinutes = smartTargetAt > 0
+      ? Math.max(1, Math.ceil((smartTargetAt - nowMs) / 60000))
+      : schedule.onMinutes;
+    const timerResult = await setPageTimer(timerMinutes, {
+      retryOnFailure: false,
+      ...(smartTargetAt > 0 ? { targetAt: smartTargetAt } : {})
+    });
     if (!timerResult?.success) {
       schedule.pageTimerError = `时钟修复时页面关机定时器未确认：${timerResult?.error || '未知错误'}；保持 on 相位，1 分钟后重试`;
       await createPwmAlarmWithVerify(1, 'repair-pageTimer-failed');
@@ -2765,6 +2914,7 @@ chrome.runtime.onInstalled.addListener(async (details) => {
           alarmDelayMinutes: 0,
           pageTimerTargetAt: 0,
           pageTimerRetryMinutes: 0,
+          smartOnBoundaryAt: 0,
           activeHours: { enabled: false, start: '08:00', end: '23:00' },
           smartMode: { enabled: false, sensitivity: 5 }
         }

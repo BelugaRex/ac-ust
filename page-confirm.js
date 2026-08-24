@@ -63,15 +63,16 @@
   const AC_STATE_SETTLE_MS = 10000;
   let acStateRequestInFlight = null;
   let acStateRequestTarget = null;
+  let acStateRequestNotAfterAt = 0;
 
   window.addEventListener('__AC_EXTENSION_TOGGLE_AC__', async (event) => {
-    const { requestId, action } = event.detail || {};
+    const { requestId, action, notAfterAt = 0 } = event.detail || {};
     if (!requestId || (action !== 'on' && action !== 'off')) return;
 
     const needOn = action === 'on';
     let result;
     try {
-      result = await requestACState(needOn);
+      result = await requestACState(needOn, notAfterAt);
     } catch (error) {
       // ensureACState 异常时也必须回包，否则隔离世界会静默等满超时拿到 null，
       // 并误触发后台的「刷新恢复」链路。这里显式回失败，让上层可诊断。
@@ -128,9 +129,19 @@
       || String(sw.className || '').includes('ant-switch-disabled');
   }
 
-  async function requestACState(targetState) {
+  async function requestACState(targetState, notAfterAt = 0) {
+    const requestedNotAfterAt = notAfterAt === 0 ? 0 : Number(notAfterAt);
+    if (requestedNotAfterAt !== 0 && !Number.isSafeInteger(requestedNotAfterAt)) {
+      return {
+        success: false,
+        verified: false,
+        error: '自动开启窗口截止时间无效',
+        via: 'main-world-ensureACState'
+      };
+    }
     if (acStateRequestInFlight) {
-      if (acStateRequestTarget === targetState) {
+      if (acStateRequestTarget === targetState
+          && acStateRequestNotAfterAt === requestedNotAfterAt) {
         console.log(`[AC扩展] ensureACState: 合并重复的 ${targetState ? 'ON' : 'OFF'} 请求`);
         return acStateRequestInFlight;
       }
@@ -143,12 +154,16 @@
     }
 
     acStateRequestTarget = targetState;
+  acStateRequestNotAfterAt = requestedNotAfterAt;
+  ensureACState.notAfterAt = requestedNotAfterAt;
     acStateRequestInFlight = ensureACState(targetState);
     try {
       return await acStateRequestInFlight;
     } finally {
       acStateRequestInFlight = null;
       acStateRequestTarget = null;
+      acStateRequestNotAfterAt = 0;
+      ensureACState.notAfterAt = 0;
     }
   }
 
@@ -178,11 +193,22 @@
         via: 'main-world-ensureACState'
       };
     }
+    function getOnWindowError() {
+      const notAfterAt = Number(ensureACState.notAfterAt) || 0;
+      if (!targetState || notAfterAt === 0) return '';
+      if (!Number.isSafeInteger(notAfterAt)) return '自动开启窗口截止时间无效';
+      return Date.now() >= notAfterAt ? '智能自动开启窗口已结束' : '';
+    }
 
     const current = getACStatusInPageWorld();
     if (typeof current.isOn === 'boolean' && current.isOn === targetState) {
       console.log(`[AC扩展] ensureACState: 已达到 ${targetState ? 'ON' : 'OFF'}，点击数=${clickCount}`);
       return successResult(current, clickCount);
+    }
+
+    const currentWindowError = getOnWindowError();
+    if (currentWindowError) {
+      return failureResult(current, clickCount, currentWindowError);
     }
 
     if (current.disabled) {
@@ -205,6 +231,10 @@
     if (typeof beforeClick.isOn === 'boolean' && beforeClick.isOn === targetState) {
       return successResult(beforeClick, clickCount);
     }
+    const beforeClickWindowError = getOnWindowError();
+    if (beforeClickWindowError) {
+      return failureResult(beforeClick, clickCount, beforeClickWindowError);
+    }
     if (beforeClick.disabled) {
       console.warn('[AC扩展] ensureACState: 点击前 AC 开关被禁用，无法切换');
       return failureResult(beforeClick, clickCount, 'AC 开关被禁用（余额不足或页面加载中），无法切换');
@@ -215,7 +245,10 @@
       return failureResult(beforeClick, clickCount, '主世界 AC 开关 click() 调用失败');
     }
 
-    const dialogConfirmed = await clickConfirmDialogInPageWorld(5000);
+    const dialogConfirmed = await clickConfirmDialogInPageWorld(
+      5000,
+      Number(ensureACState.notAfterAt) || 0
+    );
     const afterClick = getACStatusInPageWorld();
     const reachedTarget = typeof afterClick.isOn === 'boolean' && afterClick.isOn === targetState;
     const afterClickMessage = `[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(afterClick)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}`;
@@ -266,7 +299,7 @@
     }
   }
 
-  async function clickConfirmDialogInPageWorld(timeoutMs) {
+  async function clickConfirmDialogInPageWorld(timeoutMs, notAfterAt = 0) {
     const start = Date.now();
     const confirmTexts = [
       '确定', '确认', '开启', '打开', '启用', '是',
@@ -291,6 +324,11 @@
         return confirmTexts.includes(text) || isPrimaryButton(button);
       });
       if (btn) {
+        if (notAfterAt !== 0
+            && (!Number.isSafeInteger(notAfterAt) || Date.now() >= notAfterAt)) {
+          console.warn('[AC扩展] ensureACState: 确认弹窗出现时智能自动开启窗口已结束，不再点击确认');
+          return false;
+        }
         clickElementOnceInPageWorld(btn);
         return true;
       }
