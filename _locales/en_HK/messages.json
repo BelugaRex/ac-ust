@@ -83,6 +83,42 @@
     "message": "分钟",
     "description": "时长输入框内嵌的单位文字"
   },
+  "smartModeLabel": {
+    "message": "智能控制",
+    "description": "智能控制区段标题（依据天气自动计算开启时长）"
+  },
+  "smartModeWeak": {
+    "message": "更省钱",
+    "description": "灵敏度滑块左端标签"
+  },
+  "smartModeStrong": {
+    "message": "更干冷",
+    "description": "灵敏度滑块右端标签"
+  },
+  "smartModeSensitivityLabel": {
+    "message": "智能模式灵敏度",
+    "description": "灵敏度滑块的无障碍标签"
+  },
+  "smartModeSuggested": {
+    "message": "建议开启",
+    "description": "建议开启分钟数行的标签"
+  },
+  "smartModeTeq": {
+    "message": "等效室外温度",
+    "description": "等效室外温度行的标签"
+  },
+  "smartModeUpdated": {
+    "message": "数据更新",
+    "description": "天气数据更新时间行的标签"
+  },
+  "smartModeWeatherUnavailable": {
+    "message": "天气数据不可用",
+    "description": "天气数据不可用时的占位文字"
+  },
+  "smartModeWeatherStale": {
+    "message": "已缓存",
+    "description": "天气数据为旧缓存时的后缀"
+  },
   "diagnoseResultLabel": {
     "message": "诊断结果",
     "description": "诊断输出区域的无障碍标签"
@@ -279,6 +315,30 @@
     "message": "ac-watchdog (every 5 min)",
     "description": "诊断：看门狗闹钟"
   },
+  "diagnoseSmartModeOff": {
+    "message": "智能模式未开启 (等效温度不适用)",
+    "description": "诊断：智能模式未开启"
+  },
+  "diagnoseSmartWeatherAlarm": {
+    "message": "ac-smart-weather 天气闹钟（每小时整点）",
+    "description": "诊断：智能天气闹钟"
+  },
+  "diagnoseSmartWeatherAlarmMissing": {
+    "message": "ac-smart-weather 天气闹钟缺失 (天气不会整点刷新)",
+    "description": "诊断：智能天气闹钟缺失"
+  },
+  "diagnoseSmartWeatherFresh": {
+    "message": "天气缓存新鲜 ($1 分钟前)",
+    "description": "诊断：天气缓存新鲜度。$1=分钟数"
+  },
+  "diagnoseSmartWeatherStale": {
+    "message": "天气缓存已过期 ($1 分钟前，疑似未在刷新)",
+    "description": "诊断：天气缓存过期。$1=分钟数"
+  },
+  "diagnoseSmartWeatherNoCache": {
+    "message": "天气缓存缺失 (尚未成功拉取)",
+    "description": "诊断：天气缓存缺失"
+  },
   "diagnoseHeartbeat": {
     "message": "setInterval heartbeat (storage every 20s)",
     "description": "诊断：心跳新鲜度。$1=秒数"
@@ -306,6 +366,10 @@
   "diagnoseAcReadable": {
     "message": "AC status readable: ",
     "description": "诊断：AC 状态可读前缀"
+  },
+  "diagnoseAcDisabled": {
+    "message": "AC 开关被禁用（余额不足或页面加载中），无法点击开启",
+    "description": "诊断：AC 开关被禁用"
   },
   "diagnoseContentNoResponse": {
     "message": "content script no response: ",
@@ -374,6 +438,10 @@
   "diagnoseBrowser": {
     "message": "ℹ️ 浏览器: ",
     "description": "诊断：浏览器信息前缀"
+  },
+  "diagnoseTime": {
+    "message": "ℹ️ 诊断时间: ",
+    "description": "诊断：本次点击诊断的时刻"
   },
   "diagnoseSelfHealFail": {
     "message": "popup 侧 storage 自愈失败: ",
@@ -456,16 +524,16 @@
     "description": "诊断：page timer 无重试"
   },
   "diagnoseRecentErrors": {
-    "message": "ℹ️ 近期后台异常：共 $1 条，显示最近 $2 条",
-    "description": "诊断：本地持久化异常日志摘要。$1=总条数,$2=显示条数"
+    "message": "ℹ️ 当前构建以来的后台异常：共 $1 条，显示最新 $2 条",
+    "description": "诊断：当前构建以来的本地持久化异常日志摘要。$1=总条数,$2=显示条数"
   },
   "diagnoseRecentErrorsEmpty": {
-    "message": "近期后台异常为空",
-    "description": "诊断：没有持久化后台异常"
+    "message": "当前构建以来没有后台异常",
+    "description": "诊断：当前构建以来没有合格的持久化后台异常"
   },
   "diagnoseRecentErrorsReadFailed": {
-    "message": "读取近期后台异常失败: ",
-    "description": "诊断：读取持久化异常日志失败前缀"
+    "message": "读取当前构建的后台异常失败: ",
+    "description": "诊断：读取当前构建持久化异常日志失败前缀"
   },
   "badgeDefault": {
     "message": "AC Timer Control",
