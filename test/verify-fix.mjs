@@ -1721,9 +1721,9 @@ async function runTests() {
       && existingTabBody.includes('refreshesRemaining - 1')
       && existingTabBody.includes('await chrome.tabs.reload(tabId)')
       && existingTabBody.includes('await chrome.tabs.update(tabId, { url: AC_PAGE })')
-      && existingTabBody.includes('await waitForTabReady(tabId, 30000)')
+      && existingTabBody.includes('await waitForTabReady(tabId, 30000, isACHomePageTab)')
       && existingTabBody.includes('recoveredByPageRefresh: true'),
-    '9J: 开机恢复收束为有限递归函数，控制页 reload 或回到精确 home 后最多重试一次');
+    '9J: 开机恢复收束为有限递归函数，等待控制页精确回到 home 后最多重试一次');
   assertPass(!contentSource.includes('function dispatchUserClick(')
       && !contentSource.includes('async function clickConfirmDialog('),
     '9K: content 隔离世界不存在第二套开关/确认点击器');
@@ -2038,13 +2038,17 @@ async function runTests() {
 
   const driftCalls = { send: 0, reload: 0, update: 0, wait: 0 };
   let driftUrl = 'https://w5.ab.ust.hk/njggt/app/home';
+  let driftPendingUrl = '';
+  let driftReadyPredicate = null;
+  const driftSendUrls = [];
   const driftChrome = {
     tabs: {
       async sendMessage() {
         driftCalls.send += 1;
+        driftSendUrls.push(driftUrl);
         if (driftCalls.send === 1) {
           driftUrl = 'https://w5.ab.ust.hk/njggt/app/billing-cycle';
-          return { success: false, error: '首次未确认' };
+          throw new Error('The page keeping the extension port is moved into back/forward cache, so the message channel is closed.');
         }
         return { success: true, state: 'on' };
       },
@@ -2053,7 +2057,7 @@ async function runTests() {
         driftCalls.update += 1;
         assertPass(tabId === 45 && info?.url === 'https://w5.ab.ust.hk/njggt/app/home',
           '9J-6: 控制标签偏离时由统一恢复函数输入精确 home URL');
-        driftUrl = info.url;
+        driftPendingUrl = info.url;
       },
       async get(tabId) {
         return { id: tabId, url: driftUrl, status: 'complete' };
@@ -2062,7 +2066,13 @@ async function runTests() {
   };
   const driftHarness = loadToggleRecovery(
     driftChrome,
-    async () => { driftCalls.wait += 1; return true; },
+    async (_tabId, _timeoutMs, isReadyTab) => {
+      driftCalls.wait += 1;
+      driftReadyPredicate = isReadyTab;
+      if (typeof isReadyTab !== 'function') return false;
+      driftUrl = driftPendingUrl;
+      return isReadyTab({ id: 45, url: driftUrl, status: 'complete' });
+    },
     () => true,
     tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
     async () => true,
@@ -2080,8 +2090,70 @@ async function runTests() {
     { id: 45, url: 'https://w5.ab.ust.hk/njggt/app/home' }, 'on');
   assertPass(driftResult.success === true && driftResult.recoveredByPageRefresh === true
       && driftCalls.send === 2 && driftCalls.reload === 0
-      && driftCalls.update === 1 && driftCalls.wait === 1,
-    '9J-7: 首次失败后控制标签若已偏离，回到精确 home 并递归重试一次');
+      && driftCalls.update === 1 && driftCalls.wait === 1
+      && typeof driftReadyPredicate === 'function'
+      && driftReadyPredicate({ url: 'https://w5.ab.ust.hk/njggt/app/billing-cycle' }) === false
+      && driftReadyPredicate({ url: 'https://w5.ab.ust.hk/njggt/app/home' }) === true
+      && driftSendUrls.length === 2
+      && driftSendUrls.every(url => url === 'https://w5.ab.ust.hk/njggt/app/home'),
+    '9J-7: BFCache 断口且旧业务页仍 complete 时，等待精确 home 导航完成后才递归重试一次');
+
+  const waitForTabReadyStart = backgroundSource.indexOf('async function waitForTabReady(');
+  const waitForTabReadyEnd = backgroundSource.indexOf('\nfunction isACTab(tab)', waitForTabReadyStart);
+  const waitForTabReadySource = waitForTabReadyStart >= 0 && waitForTabReadyEnd > waitForTabReadyStart
+    ? backgroundSource.slice(waitForTabReadyStart, waitForTabReadyEnd)
+    : '';
+  let exactReadyGetCalls = 0;
+  let exactReadyListenerAdds = 0;
+  let exactReadyListenerRemoves = 0;
+  const exactReadyEvents = [];
+  const exactReadyChrome = {
+    tabs: {
+      async get(tabId) {
+        exactReadyGetCalls += 1;
+        const tab = exactReadyGetCalls === 1
+          ? { id: tabId, url: 'https://w5.ab.ust.hk/njggt/app/billing-cycle', status: 'complete' }
+          : { id: tabId, url: 'https://w5.ab.ust.hk/njggt/app/home', status: 'complete' };
+        exactReadyEvents.push(`get:${tab.url}`);
+        return tab;
+      },
+      onUpdated: {
+        addListener() {
+          exactReadyListenerAdds += 1;
+          exactReadyEvents.push('add-listener');
+        },
+        removeListener() {
+          exactReadyListenerRemoves += 1;
+          exactReadyEvents.push('remove-listener');
+        }
+      }
+    }
+  };
+  const waitForTabReady = new Function(
+    'chrome', 'isACTab', 'setTimeout', 'clearTimeout',
+    `${waitForTabReadySource}; return waitForTabReady;`
+  )(
+    exactReadyChrome,
+    tab => tab?.url?.startsWith('https://w5.ab.ust.hk/njggt/app/'),
+    () => 1,
+    () => {}
+  );
+  const exactReadyResult = await waitForTabReady(
+    46,
+    30000,
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home'
+  );
+  assertPass(exactReadyResult === true
+      && exactReadyGetCalls === 2
+      && exactReadyListenerAdds === 1
+      && exactReadyListenerRemoves === 1
+      && exactReadyEvents.join(',') === [
+        'get:https://w5.ab.ust.hk/njggt/app/billing-cycle',
+        'add-listener',
+        'get:https://w5.ab.ust.hk/njggt/app/home',
+        'remove-listener'
+      ].join(','),
+    '9J-8: 精确等待拒绝旧业务页 complete，并在监听后复读捕获已完成的 home 导航');
 
   // 9T: 初始 tab URL 偏离精确 home 时，必须立即拒绝，不能导航、注入或发送消息。
   const proactiveCalls = { send: 0, update: 0, get: 0, ready: 0, ensure: 0 };

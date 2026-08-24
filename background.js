@@ -2083,7 +2083,7 @@ async function refreshACControlPage(tabId) {
       await chrome.tabs.update(tabId, { url: AC_PAGE });
     }
 
-    const pageReady = await waitForTabReady(tabId, 30000);
+    const pageReady = await waitForTabReady(tabId, 30000, isACHomePageTab);
     if (!pageReady) throw new Error('刷新后的 AC home 未在 30 秒内就绪');
     const readyTab = await getExactACHomeTab(tabId);
     if (!readyTab) {
@@ -2193,9 +2193,9 @@ async function getReadyACTab(preferredTabId = null, timeoutMs = 30000) {
   return isACHomePageTab(tab) ? tab : null;
 }
 
-async function waitForTabReady(tabId, timeoutMs = 30000) {
+async function waitForTabReady(tabId, timeoutMs = 30000, isReadyTab = isACTab) {
   const tab = await chrome.tabs.get(tabId).catch(() => null);
-  if (tab?.status === 'complete' && isACTab(tab)) return true;
+  if (tab?.status === 'complete' && isReadyTab(tab)) return true;
 
   return new Promise((resolve) => {
     let settled = false;
@@ -2209,13 +2209,16 @@ async function waitForTabReady(tabId, timeoutMs = 30000) {
 
     const onUpdated = (updatedTabId, changeInfo, updatedTab) => {
       if (updatedTabId !== tabId) return;
-      if (changeInfo.status === 'complete' && isACTab(updatedTab)) {
+      if (changeInfo.status === 'complete' && isReadyTab(updatedTab)) {
         finish(true);
       }
     };
 
     const timer = setTimeout(() => finish(false), timeoutMs);
     chrome.tabs.onUpdated.addListener(onUpdated);
+    chrome.tabs.get(tabId).then((latestTab) => {
+      if (latestTab?.status === 'complete' && isReadyTab(latestTab)) finish(true);
+    }).catch(() => {});
   });
 }
 
