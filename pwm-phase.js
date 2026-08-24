@@ -311,7 +311,7 @@ function computeTriggerAlignment(schedule, liveScheduledTime, opts) {
 }
 
 // 整点边界：返回下一个整点（HH:00:00.000）的绝对毫秒时间。
-// 用于天气闹钟 ac-smart-weather（天文台 rhrread 数据每小时整点更新），与智能模式周期长度无关。
+// 用于天气闹钟 ac-smart-weather（天文台 JKB 多源数据每小时整点更新），与智能模式周期长度无关。
 function nextHourBoundary(now = Date.now()) {
   const d = new Date(now);
   d.setMinutes(0, 0, 0);

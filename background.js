@@ -229,24 +229,41 @@ function setNextTriggerAt(nextTriggerAt) {
   schedule.nextTriggerAt = nextTriggerAt > 0 ? nextTriggerAt : 0;
 }
 
-// ===== 智能模式：天气取数（天文台开放数据 rhrread）+ 动态时长 =====
-// 按需求使用香港天文台开放数据 API（weather.php?dataType=rhrread，Current Weather Report）。
-// 实测其提供：气温（多站）、湿度（仅天文台一站）、分区雨量；不含露点与风速。故由
-// smart-mode.js 的 parseRhrreadWeather 解析：气温取将军澳站（Tseung Kwan O / JKB），
-// 露点由气温 + 湿度 Magnus 逆推，风速取 0（静风）为保守默认（风项在算法中保留）。天气仅作为
+// ===== 智能模式：将军澳 JKB 天气取数 + 动态时长 =====
+// 香港天文台为将军澳提供独立的气温、相对湿度、10 分钟平均风与站点雨量开放数据。
+// smart-mode.js 按同一站名精确合并四个源，并由 JKB 气温 + 湿度推导露点；天气仅作为
 // 本机运行态缓存，不进入 sync。
 const SMART_WEATHER_KEY = 'ac_smart_weather';
-const SMART_WEATHER_URL = 'https://data.weather.gov.hk/weatherAPI/opendata/weather.php?dataType=rhrread&lang=en';
+const SMART_WEATHER_URLS = Object.freeze({
+  temperature: 'https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv',
+  humidity: 'https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_humidity.csv',
+  wind: 'https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_10min_wind.csv',
+  rainfall: 'https://data.weather.gov.hk/weatherAPI/opendata/hourlyRainfall.php?lang=en'
+});
 const SMART_WEATHER_TTL_MS = 60 * 60 * 1000;  // 天气缓存 1 小时（整点刷新一次）
 let smartWeatherInFlight = null;
 let smartReapplyInFlight = false;  // 滑块松开后即时重设 Power-off after 的单飞守卫
 
+async function fetchSmartWeatherResource(resourceName, responseType) {
+  const response = await fetch(SMART_WEATHER_URLS[resourceName], { cache: 'no-store' });
+  if (!response.ok) throw new Error(`${resourceName} 天气接口 HTTP ${response.status}`);
+  return responseType === 'json' ? response.json() : response.text();
+}
+
 async function fetchSmartWeather() {
-  const res = await fetch(SMART_WEATHER_URL, { cache: 'no-store' });
-  if (!res.ok) throw new Error(`天气接口 HTTP ${res.status}`);
-  const data = await res.json();
-  const parsed = parseRhrreadWeather(data);
-  if (!parsed) throw new Error('天气数据缺失或格式异常');
+  const [temperatureCsv, humidityCsv, windCsv, rainfallData] = await Promise.all([
+    fetchSmartWeatherResource('temperature', 'text'),
+    fetchSmartWeatherResource('humidity', 'text'),
+    fetchSmartWeatherResource('wind', 'text'),
+    fetchSmartWeatherResource('rainfall', 'json')
+  ]);
+  const parsed = parseTseungKwanOWeather({
+    temperatureCsv,
+    humidityCsv,
+    windCsv,
+    rainfallData
+  });
+  if (!parsed) throw new Error('将军澳天气数据缺失或格式异常');
   return { fetchedAt: Date.now(), ...parsed };
 }
 
@@ -349,7 +366,8 @@ async function applySmartModeDurations() {
 
   console.log(
     `[AC扩展] 智能模式: K=${suggested.k.toFixed(3)} Teq=${suggested.teq.toFixed(1)}°C`
-    + ` t_raw=${suggested.tRaw.toFixed(1)} → on=${suggested.onMinutes}min / off=${schedule.offMinutes}min`
+    + ` rain×${suggested.rainFactor.toFixed(3)} t_raw=${suggested.tRaw.toFixed(1)}`
+    + ` → on=${suggested.onMinutes}min / off=${schedule.offMinutes}min`
   );
 }
 

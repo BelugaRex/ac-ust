@@ -592,7 +592,7 @@ async function updateSchedule(enabled, restart = false) {
       // popup 不再发第二次 toggleNow（避免双击噪音）
       showStatus(t('statusClosedOK'), 'success');
     } else {
-      showStatus(t('statusOnOK'), 'success');
+      showStatus(t(data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK'), 'success');
     }
 
     const alarm = await chrome.alarms.get('ac-pwm');
@@ -652,7 +652,7 @@ startup().then(setupStaticPreviewFit);
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：硬编码须与 manifest.json 版本同步，build.sh 会在 dist/ 中再次核对并注入）
-const APP_VERSION = '0.8.1';
+const APP_VERSION = '0.8.2';
 // BUILD_TIME 由 build.sh 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -938,6 +938,7 @@ btnDiagnose.addEventListener('click', async () => {
     if (!smartOnDiag) {
       add(true, t('diagnoseSmartModeOff'));
     } else {
+      add(true, t('diagnoseSmartModeOn'));
       const smartWeatherAlarm = ensured?.alarms?.smartWeather || alarms.find(a => a.name === 'ac-smart-weather');
       add(!!smartWeatherAlarm, t('diagnoseSmartWeatherAlarm') + (smartWeatherAlarm
         ? t('diagnoseBadgeRebuilt') + new Date(smartWeatherAlarm.scheduledTime).toLocaleTimeString() + ')'

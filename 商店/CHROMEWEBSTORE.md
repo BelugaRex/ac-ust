@@ -7,7 +7,7 @@
 | 字段 | 值 |
 | --- | --- |
 | 名称 | AC-UST |
-| 版本 | 0.8.1 |
+| 版本 | 0.8.2 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率（Productivity） |
 | 语言 | 中文（简体）、English |
@@ -23,15 +23,15 @@
 
 PWM AC scheduling, weather-based smart control, active hours, and cross-device phase alignment for HKUST Smart Power Meter.
 
-## 0.8.1 更新说明
+## 0.8.2 更新说明
 
 ### 中文
 
-智能计算现在会保留完整浮点精度，只在最终显示和控制时量化分钟数。页面关机时间、新鲜页证明、扩展闹钟和倒计时统一采用向上对齐到整分钟的绝对截止时间。诊断报告仅显示当前构建以来最新 5 条本机脱敏异常，并按时间从新到旧排列。
+智能自动开启现在只在整点或半点的首分钟执行，错过后等待下一半点，单次最多开启 25 分钟。天气输入统一使用将军澳站的气温、相对湿度、风速与站点雨量；降雨从无雨到黄色暴雨门槛按连续指数曲线增强影响，最终开启时间最多减少一半。
 
 ### English
 
-Smart calculations now preserve full floating-point precision until the final displayed and controlled minute value. The portal shutdown time, fresh-page proof, extension alarm, and countdown share one absolute deadline rounded up to a whole minute. Diagnostics now show only the five newest redacted local errors from the current build, newest first.
+Smart automatic startup now runs only during the first minute of each hour or half-hour, waits for the next half-hour when missed, and limits each ON window to 25 minutes. Weather inputs now use Tseung Kwan O station temperature, humidity, wind, and rainfall. Rain influence increases continuously along an exponential curve up to the Amber Rainstorm threshold, while final ON time is never reduced by more than half.
 
 ## 详细说明（中文 / zh-CN）
 
@@ -148,12 +148,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.1.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.2.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP、图标和本目录资料通过验证。
-2. 上传 `releases/ac-ust-v0.8.1.zip`。
+2. 上传 `releases/ac-ust-v0.8.2.zip`。
 3. 填写商品详情、隐私声明、权限理由与审核测试说明。
 4. 选择私享（Private）、受信任测试人员和香港地区。
 5. 提交审核时选择推迟发布；审核通过后在允许期限内由作者手动发布。

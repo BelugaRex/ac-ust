@@ -189,7 +189,7 @@ async function runDiagnosticSelfHeal(chrome, opts = {}) {
 
   // 红灯判断(直接复制 popup.js 逻辑)
   add(!!storedSchedule, 'storage 可读写');
-  add(s.enabled === true, 'schedule.enabled=true (定时已启用)');
+  add(s.enabled === true, 'schedule.enabled=true (自动控制已启用)');
   add(!!s.mode, 'mode=' + (s.mode || '?'));
   add(s.clockMode !== undefined, 'clockMode=' + (s.clockMode ? '时钟' : '间隔'));
   if (s.clockMode === false && s.enabled && !effectiveNextTriggerAt) {
@@ -281,7 +281,7 @@ async function runTests() {
   runPwmPhaseCases(assertPass);
 
   console.log('\n\n=== 智能控制纯决策接口 (v0.8.0) ===\n');
-  // K 映射（0%→0.30，100%→1.00，线性无级）
+  // K 映射（档位 0→0.30，档位 10→1.30）
   assertPass(Math.abs(smartMode.sensitivityToK(0) - 0.30) < 1e-9, 'smart: K(档位0)=0.30');
   assertPass(Math.abs(smartMode.sensitivityToK(10) - 1.30) < 1e-9, 'smart: K(档位10)=1.30');
   assertPass(Math.abs(smartMode.sensitivityToK(5) - 0.80) < 1e-9, 'smart: K(档位5)=0.80');
@@ -334,11 +334,79 @@ async function runTests() {
       && smartPrecise.offMinutes === 9,
     'smart: K/天气/Teq/tRaw 保留浮点，仅最终 onMinutes 量化供显示与控制');
 
-  // 降雨修正：Rain > 5.0 → t_raw *= 0.5
+  // 降雨修正：0~30 mm/h 后段更陡的归一化指数曲线，黄雨阈值及以上最多减半
+  const expectedRainFactor = (rainMm) => {
+    const normalizedRain = Math.min(1, Math.max(0, rainMm / 30));
+    const normalizedImpact = (Math.exp(2 * normalizedRain) - 1) / (Math.exp(2) - 1);
+    return 1 - 0.5 * normalizedImpact;
+  };
+  const expectedRainFactors = [
+    [0, 1],
+    [5, expectedRainFactor(5)],
+    [10, expectedRainFactor(10)],
+    [15, expectedRainFactor(15)],
+    [20, expectedRainFactor(20)],
+    [25, expectedRainFactor(25)],
+    [30, 0.5],
+    [60, 0.5]
+  ];
+  assertPass(expectedRainFactors.every(([rainMm, expected]) => (
+    Math.abs(smartMode.rainOnTimeFactor(rainMm) - expected) < 1e-9
+  )), 'smart: 雨量 0~30mm/h 按 α=2 归一化指数曲线降到 50%');
+
+  const rainFactorSamples = Array.from({ length: 301 }, (_, index) => (
+    smartMode.rainOnTimeFactor(index / 10)
+  ));
+  assertPass(rainFactorSamples.every((factor, index) => (
+    factor >= 0.5 && factor <= 1
+      && (index === 0 || factor < rainFactorSamples[index - 1])
+  )), 'smart: 0~30mm/h 全区间连续单调递减且倍率始终为 0.5~1');
+  const fiveMillimeterDrops = [0, 5, 10, 15, 20, 25, 30]
+    .map(rainMm => smartMode.rainOnTimeFactor(rainMm))
+    .slice(1)
+    .map((factor, index, factors) => (
+      (index === 0 ? 1 : factors[index - 1]) - factor
+    ));
+  assertPass(fiveMillimeterDrops.every((drop, index) => (
+    index === 0 || drop > fiveMillimeterDrops[index - 1]
+  )), 'smart: 每增加 5mm 的开启时间折减随雨势增强而严格增大');
+  assertPass(Math.abs(
+    smartMode.rainOnTimeFactor(5.0001) - smartMode.rainOnTimeFactor(5)
+  ) < 1e-5
+      && smartMode.rainOnTimeFactor(5.0001) > 0.5,
+    'smart: 旧 5mm 阈值附近无阶跃，不会刚超过 5mm 就直接减半');
+  assertPass([
+    -1,
+    null,
+    undefined,
+    '',
+    Number.NaN
+  ].every(rainMm => smartMode.rainOnTimeFactor(rainMm) === 1),
+  'smart: 负数或缺失/非法雨量按无雨处理，不意外缩短开启时间');
+
+  const hotRawOnMinutes = smartMode.rawOnMinutes(1.30, 40.5);
+  const hotRainMinutes = [0, 5, 10, 15, 20, 25, 30].map(rainMm => (
+    smartMode.finalizeRainAdjustedOnMinutes(hotRawOnMinutes, rainMm)
+  ));
+  assertPass(Math.abs(hotRawOnMinutes - 26.325) < 1e-9
+      && hotRainMinutes.join(',') === '25,24,23,22,20,17,13',
+    'smart: Teq=40.5/档位10 小雨温和、暴雨加速折减，黄雨为 13/30');
+
+  const rainFinalizationCases = [4.4, 4.6, 5, 6, 7, 8, 9, 10, 14, 25, 26.325];
+  assertPass(rainFinalizationCases.every((tRaw) => {
+    const dry = smartMode.finalizeRainAdjustedOnMinutes(tRaw, 0);
+    const yellowRain = smartMode.finalizeRainAdjustedOnMinutes(tRaw, 30);
+    return yellowRain <= dry
+      && yellowRain >= Math.ceil(dry * 0.5)
+      && (yellowRain === 0 || yellowRain >= 5);
+  }), 'smart: 最终分钟数叠加压缩机死区后仍最多减半，非零开启至少 5 分钟');
+
   const smartRain = smartMode.computeSmartOnMinutes({
     sensitivity: 5, temperature: 30, dewPoint: 24, windSpeedMs: 1.5, rainMm: 10
   });
-  assertPass(smartRain.onMinutes === 7, 'smart: 降雨 > 5mm 减半后 on=7');
+  assertPass(smartRain.onMinutes === 13
+      && Math.abs(smartRain.rainFactor - expectedRainFactor(10)) < 1e-9,
+    'smart: 10mm/h 仅温和折减，较大雨量才加速接近减半');
 
   // 压缩机保护：1~4 分钟 → 强制 0
   assertPass(smartMode.clampAndRoundOnMinutes(1.0) === 0, 'smart: 压缩机保护 1 → 0');
@@ -377,39 +445,33 @@ async function runTests() {
   assertPass(smartDew !== null && Math.abs(smartDew - 26.2) < 0.5,
     'smart: deriveDewPoint(30°C, 80%) ≈ 26.2°C');
 
-  // rhrread 解析：站点偏好（将军澳 JKB 优先）+ 露点推导 + 静风默认 + 分区雨量
-  const hkoWeather = smartMode.parseRhrreadWeather({
-    temperature: { data: [
-      { place: 'Hong Kong Observatory', value: 29, unit: 'C' },
-      { place: 'Clear Water Bay', value: 27, unit: 'C' },
-      { place: 'Sai Kung', value: 28, unit: 'C' },
-      { place: 'Tseung Kwan O', value: 26, unit: 'C' }
-    ] },
-    humidity: { data: [{ place: 'Hong Kong Observatory', value: 84, unit: 'percent' }] },
-    rainfall: { data: [{ place: 'Sai Kung', max: 2, main: 'FALSE', unit: 'mm' }] }
+  // 将军澳 JKB 多源解析：同站温湿度、风速 km/h→m/s、站点雨量，不混用西贡区值
+  const hkoWeather = smartMode.parseTseungKwanOWeather({
+    temperatureCsv: '\uFEFFDate time,Automatic Weather Station,Air Temperature(degree Celsius)\r\n'
+      + '202608241510,Sai Kung,33.3\r\n202608241510,Tseung Kwan O,32.6\r\n',
+    humidityCsv: 'Date time,Automatic Weather Station,Relative Humidity(percent)\n'
+      + '202608241510,HK Observatory,73\n202608241510,Tseung Kwan O,67\n',
+    windCsv: 'Date time,Automatic Weather Station,Direction,Speed,Gust\n'
+      + '202608241510,Sai Kung,South,10,21\n202608241510,Tseung Kwan O,Southwest,16,26\n',
+    rainfallData: {
+      hourlyRainfall: [
+        { automaticWeatherStation: 'Sai Kung', value: '40', unit: 'mm' },
+        { automaticWeatherStation: 'Tseung Kwan O', value: '6', unit: 'mm' }
+      ]
+    }
   });
   assertPass(hkoWeather !== null
-      && hkoWeather.temperature === 26   // 将军澳站（Tseung Kwan O / JKB）优先
-      && hkoWeather.windSpeedMs === 0
-      && hkoWeather.rainMm === 2
+      && hkoWeather.temperature === 32.6
+      && hkoWeather.relativeHumidity === 67
+      && Math.abs(hkoWeather.windSpeedMs - 16 / 3.6) < 1e-9
+      && hkoWeather.rainMm === 6
       && Number.isFinite(hkoWeather.dewPoint),
-    'smart: parseRhrreadWeather 取将军澳站 + 静风默认 + 分区雨量 + 露点推导');
+    'smart: JKB 四源解析使用同站温湿度/风/雨量并推导露点');
 
-  // rhrread 解析：无将军澳站 → 回退西贡站
-  const hkoFallback = smartMode.parseRhrreadWeather({
-    temperature: { data: [
-      { place: 'Sai Kung', value: 28, unit: 'C' },
-      { place: 'Hong Kong Observatory', value: 29, unit: 'C' }
-    ] },
-    humidity: { data: [{ place: 'Hong Kong Observatory', value: 84, unit: 'percent' }] },
-    rainfall: { data: [{ place: 'Sai Kung', max: 0, main: 'FALSE', unit: 'mm' }] }
-  });
-  assertPass(hkoFallback !== null && hkoFallback.temperature === 28,
-    'smart: parseRhrreadWeather 无将军澳站时回退西贡站');
-
-  // rhrread 解析：气温缺失 → null
-  assertPass(smartMode.parseRhrreadWeather({ temperature: { data: [] } }) === null,
-    'smart: parseRhrreadWeather 气温缺失返回 null');
+  assertPass(smartMode.parseTseungKwanOWeather({
+    temperatureCsv: 'Date time,Automatic Weather Station,Temperature\n202608241510,Sai Kung,33.3\n',
+    humidityCsv: 'Date time,Automatic Weather Station,Humidity\n202608241510,Tseung Kwan O,67\n'
+  }) === null, 'smart: 缺少 JKB 气温时拒绝借用其他站点');
 
   console.log('\n--- 断言 ---');
   assertPass(result.selfHealed === true, 'selfHealed 标志为 true(自愈触发)');
@@ -646,6 +708,15 @@ async function runTests() {
       && /\.header-version\s*\{[^}]*?font-size:\s*11px/.test(popupCssNoComments),
     '排版层级固定为 11/12/13/14/15px，26px 仅用于倒计时主数字');
   const popupJs = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
+  assertPass(popupJs.includes('const timerOn = currentScheduleEnabled && !smartOn;')
+      && popupJs.includes("showStatus(t(data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK'), 'success');")
+      && popupJs.includes("add(true, t('diagnoseSmartModeOn'))")
+      && zhCN.statusSmartOnOK?.message === '智能控制已开启'
+      && zhCN.diagnoseOn?.message === '自动控制已启用'
+      && zhCN.diagnoseSmartModeOn?.message.includes('循环定时按互斥规则关闭')
+      && en.statusSmartOnOK?.message === 'Smart control is on'
+      && en.diagnoseOn?.message === 'automatic control active',
+    '智能控制与循环定时互斥展示，成功提示和诊断区分全局自动控制与当前模式');
   assertPass(popupJs.includes('const IS_STATIC_PREVIEW = !globalThis.chrome?.runtime?.id;')
       && /const staticPreviewSchedule = \{[\s\S]{0,400}enabled:\s*true,[\s\S]{0,400}actualStatus:\s*\{\s*isOn:\s*true\s*\}/.test(popupJs)
       && /async function refreshStatus\(\) \{[\s\S]{0,160}if \(IS_STATIC_PREVIEW\)/.test(popupJs)
@@ -1220,6 +1291,15 @@ async function runTests() {
       && countOccurrences(popupJs, 'normalizeSmartSensitivity(') >= 3
       && countOccurrences(backgroundSource, 'normalizeSmartSensitivity(') >= 1,
     'smart: popup/background 复用共享灵敏度归一化，不保留重复本地实现');
+
+  assertPass([
+    'latest_1min_temperature.csv',
+    'latest_1min_humidity.csv',
+    'latest_10min_wind.csv',
+    'hourlyRainfall.php?lang=en'
+  ].every(resource => backgroundSource.includes(resource))
+      && backgroundSource.includes('parseTseungKwanOWeather({'),
+    'smart: background 并行接入 JKB 温度/湿度/风/站点雨量四个官方源');
 
   const mainWorldBridgeStart = contentSource.indexOf('function requestMainWorldResult({');
   const mainWorldBridgeEnd = contentSource.indexOf('\n// ----- 等待开关元素出现', mainWorldBridgeStart);

@@ -8,7 +8,7 @@
 //   2) 水汽压 e (hPa) = 6.112 * exp((17.67 * Td) / (Td + 243.5))
 //   3) 等效室外温度 Teq = T + 0.33*e - 0.70*Wind - 4.00
 //   4) 原始开启分钟数 t_raw = K * Teq
-//   5) 降雨修正：若 Rain > 5.0 则 t_raw *= 0.5
+//   5) 降雨修正：0~30 mm/h 按后段更陡的指数曲线逐步降到 50%，30 mm/h 以上保持 50%
 //   6) 限幅到 [0, 25] 并四舍五入取整（30 分钟周期至少保留 5 分钟关闭窗口）
 //   7) 压缩机保护：结果落在 1~4 分钟时强制设为 0（避免频繁启停）
 //
@@ -38,8 +38,9 @@
     ON_MIN: 0,                   // 开启分钟数下限
     ON_MAX: 25,                  // 开启分钟数上限（30 分钟周期至少关闭 5 分钟）
     MIN_OFF_MINUTES: 5,          // 相邻智能 ON 周期之间的最短关闭窗口
-    RAIN_THRESHOLD_MM: 5.0,      // 降雨修正触发阈值 (mm)
-    RAIN_REDUCTION_FACTOR: 0.5,  // 降雨修正倍率
+    RAIN_FULL_EFFECT_MM: 30,     // 香港天文台黄雨阈值：过去 1 小时雨量 30 mm
+    RAIN_MIN_FACTOR: 0.5,        // 达黄雨阈值后的最大修正：开启时间减半
+    RAIN_CURVE_ALPHA: 2,         // 归一化指数曲率：雨势越强，每毫米的边际影响越大
     COMPRESSOR_DEADBAND_MIN: 1,  // 压缩机保护死区下界
     COMPRESSOR_DEADBAND_MAX: 4,  // 压缩机保护死区上界
     // Teq = T + VAPOR_COEF*e - WIND_COEF*Wind + TEQ_OFFSET
@@ -109,16 +110,30 @@
     return t + SMART_MODE.VAPOR_COEF * e - SMART_MODE.WIND_COEF * windSafe + SMART_MODE.TEQ_OFFSET;
   }
 
-  // 原始开启分钟数 t_raw = K * Teq，叠加降雨修正。
+  // 原始开启分钟数 t_raw = K * Teq。
   // t_raw 按 60 分钟参考周期标定；实际周期为 CYCLE_MINUTES 时按比例缩放，
   // 保持相同占空比（on/(on+off)），仅缩短单次开/关时长以减小温度摆幅。
-  function rawOnMinutes(k, teq, rainMm) {
-    let tRaw = k * teq;
+  function rawOnMinutes(k, teq) {
+    return k * teq * (SMART_MODE.CYCLE_MINUTES / SMART_MODE.REFERENCE_CYCLE_MINUTES);
+  }
+
+  // 从无雨到黄雨阈值采用归一化指数影响曲线；后段斜率更大，使暴雨影响强于小雨。
+  // impact = (exp(alpha*x)-1)/(exp(alpha)-1)，factor = 1-(1-minFactor)*impact。
+  function rainOnTimeFactor(rainMm) {
     const rain = finiteNumber(rainMm);
-    if (rain !== null && rain > SMART_MODE.RAIN_THRESHOLD_MM) {
-      tRaw *= SMART_MODE.RAIN_REDUCTION_FACTOR;
-    }
-    return tRaw * (SMART_MODE.CYCLE_MINUTES / SMART_MODE.REFERENCE_CYCLE_MINUTES);
+    if (rain === null || rain <= 0) return 1;
+    const normalizedRain = clamp(rain, 0, SMART_MODE.RAIN_FULL_EFFECT_MM)
+      / SMART_MODE.RAIN_FULL_EFFECT_MM;
+    const normalizedImpact = Math.expm1(SMART_MODE.RAIN_CURVE_ALPHA * normalizedRain)
+      / Math.expm1(SMART_MODE.RAIN_CURVE_ALPHA);
+    return 1 - (1 - SMART_MODE.RAIN_MIN_FACTOR) * normalizedImpact;
+  }
+
+  // 降雨修正作用于已经满足 25 分钟硬上限的基础开启时间，确保“最多减半”
+  // 是对真实开启时间的约束，而不是对可能远超上限的中间值进行修正。
+  function applyRainOnTimeAdjustment(tRaw, rainMm) {
+    const baseOnMinutes = clamp(Number(tRaw), SMART_MODE.ON_MIN, SMART_MODE.ON_MAX);
+    return baseOnMinutes * rainOnTimeFactor(rainMm);
   }
 
   // 限幅到 [0, 25] → 四舍五入 → 压缩机保护（1~4 → 0）。
@@ -132,52 +147,74 @@
     return rounded;
   }
 
-  // ---- 天文台开放数据（rhrread）解析 ----
-  // 数据源：香港天文台开放数据 API `weather.php?dataType=rhrread`（Current Weather Report）。
-  // 实测其提供：气温（多站）、湿度（仅天文台一站）、分区雨量；**不提供露点与风速**。故：
-  //   - 气温：优先取将军澳站（Tseung Kwan O，站号 JKB），回退到西贡/清水湾/天文台
-  //   - 露点：由气温 + 湿度用 Magnus 逆推（deriveDewPoint，天文台开放数据不提供露点）
-  //   - 风速：天文台开放数据不提供，取 0（静风）为保守默认（风项在算法中保留）
-  //   - 雨量：取西贡区（HKUST 所在分区）过去 1 小时雨量
-  const HKO_TEMP_STATIONS = ['Tseung Kwan O', 'Sai Kung', 'Clear Water Bay', 'Hong Kong Observatory'];
-  const HKO_HUMIDITY_STATION = 'Hong Kong Observatory';
-  const HKO_RAIN_DISTRICT = 'Sai Kung';
-  const HKO_DEFAULT_WIND_MS = 0;
+  // 最终分钟数同时满足两条硬边界：降雨最多把无雨建议减半，非零开启不得落入 1~4 分钟死区。
+  function finalizeRainAdjustedOnMinutes(tRaw, rainMm) {
+    const dryOnMinutes = clampAndRoundOnMinutes(tRaw);
+    const rainAdjustedOnMinutes = clampAndRoundOnMinutes(
+      applyRainOnTimeAdjustment(tRaw, rainMm)
+    );
+    if (dryOnMinutes === 0) return 0;
+    const minimumOnMinutes = Math.max(
+      SMART_MODE.COMPRESSOR_DEADBAND_MAX + 1,
+      Math.ceil(dryOnMinutes * SMART_MODE.RAIN_MIN_FACTOR)
+    );
+    return Math.max(rainAdjustedOnMinutes, minimumOnMinutes);
+  }
 
-  // 解析 rhrread JSON → { temperature, relativeHumidity, dewPoint, windSpeedMs, rainMm }。
-  // 任一关键字段（气温）缺失时返回 null，调用方应退化为手动时长。
-  function parseRhrreadWeather(data) {
-    if (!data || typeof data !== 'object') return null;
+  // ---- 将军澳 JKB 独立实时数据源解析 ----
+  // 香港天文台分别提供气温、相对湿度、10 分钟平均风与站点过去 1 小时雨量；
+  // 四个源都按站名精确选 Tseung Kwan O，避免把天文台湿度、静风或整个西贡区雨量混入。
+  const HKO_SMART_STATION = 'Tseung Kwan O';
 
-    const tempList = Array.isArray(data.temperature?.data) ? data.temperature.data : [];
-    let temperature = null;
-    for (const name of HKO_TEMP_STATIONS) {
-      const hit = tempList.find((s) => s?.place === name && finiteNumber(s?.value) !== null);
-      if (hit) { temperature = finiteNumber(hit.value); break; }
-    }
-    if (temperature === null) {
-      const first = tempList.find((s) => finiteNumber(s?.value) !== null);
-      if (first) temperature = finiteNumber(first.value);
-    }
-    if (temperature === null) return null;
+  function parseSimpleCsv(csvText) {
+    if (typeof csvText !== 'string') return [];
+    return csvText
+      .replace(/^\uFEFF/, '')
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map(line => line.split(',').map((cell) => {
+        const trimmed = cell.trim();
+        return trimmed.startsWith('"') && trimmed.endsWith('"')
+          ? trimmed.slice(1, -1).replace(/""/g, '"')
+          : trimmed;
+      }));
+  }
 
-    const humList = Array.isArray(data.humidity?.data) ? data.humidity.data : [];
-    const humidity = finiteNumber(humList.find((s) => s?.place === HKO_HUMIDITY_STATION)?.value)
-      ?? finiteNumber(humList[0]?.value) ?? 0;
+  function findStationCsvRow(csvText) {
+    return parseSimpleCsv(csvText)
+      .slice(1)
+      .find(row => row[1] === HKO_SMART_STATION) || null;
+  }
 
-    const rainList = Array.isArray(data.rainfall?.data) ? data.rainfall.data : [];
-    const rainEntry = rainList.find((r) => r?.place === HKO_RAIN_DISTRICT)
-      || rainList.find((r) => String(r?.main).toUpperCase() === 'TRUE');
-    const rainValue = rainEntry
-      ? (finiteNumber(rainEntry.max) ?? finiteNumber(rainEntry.max1))
-      : null;
+  // 返回 { temperature, relativeHumidity, dewPoint, windSpeedMs, rainMm }；
+  // 气温或同站湿度缺失时返回 null，调用方沿用旧缓存或退化为手动时长。
+  function parseTseungKwanOWeather({
+    temperatureCsv,
+    humidityCsv,
+    windCsv,
+    rainfallData
+  } = {}) {
+    const temperature = finiteNumber(findStationCsvRow(temperatureCsv)?.[2]);
+    const relativeHumidity = finiteNumber(findStationCsvRow(humidityCsv)?.[2]);
+    if (temperature === null || relativeHumidity === null) return null;
+
+    const windSpeedKmh = finiteNumber(findStationCsvRow(windCsv)?.[3]);
+    const rainfallEntries = Array.isArray(rainfallData?.hourlyRainfall)
+      ? rainfallData.hourlyRainfall
+      : [];
+    const rainMm = finiteNumber(rainfallEntries.find(entry => (
+      entry?.automaticWeatherStation === HKO_SMART_STATION
+    ))?.value);
+    const dewPoint = deriveDewPoint(temperature, relativeHumidity);
+    if (dewPoint === null) return null;
 
     return {
       temperature,
-      relativeHumidity: humidity,
-      dewPoint: deriveDewPoint(temperature, humidity),
-      windSpeedMs: HKO_DEFAULT_WIND_MS,
-      rainMm: rainValue ?? 0
+      relativeHumidity,
+      dewPoint,
+      windSpeedMs: windSpeedKmh === null ? 0 : windSpeedKmh / 3.6,
+      rainMm: rainMm ?? 0
     };
   }
 
@@ -197,13 +234,17 @@
         offMinutes: SMART_MODE.CYCLE_MINUTES
       };
     }
-    const tRaw = rawOnMinutes(k, teq, rainMm);
-    const onMinutes = clampAndRoundOnMinutes(tRaw);
+    const tRaw = rawOnMinutes(k, teq);
+    const rainFactor = rainOnTimeFactor(rainMm);
+    const rainAdjustedMinutes = applyRainOnTimeAdjustment(tRaw, rainMm);
+    const onMinutes = finalizeRainAdjustedOnMinutes(tRaw, rainMm);
     return {
       valid: true,
       k,
       teq,
       tRaw,
+      rainFactor,
+      rainAdjustedMinutes,
       onMinutes,
       offMinutes: SMART_MODE.CYCLE_MINUTES - onMinutes
     };
@@ -217,8 +258,11 @@
     deriveDewPoint,
     equivalentTemperature,
     rawOnMinutes,
+    rainOnTimeFactor,
+    applyRainOnTimeAdjustment,
     clampAndRoundOnMinutes,
+    finalizeRainAdjustedOnMinutes,
     computeSmartOnMinutes,
-    parseRhrreadWeather
+    parseTseungKwanOWeather
   };
 });

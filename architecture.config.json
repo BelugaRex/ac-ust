@@ -139,7 +139,8 @@
           "normalizeSmartSensitivity",
           "computeSmartOnMinutes",
           "sensitivityToK",
-          "equivalentTemperature"
+          "equivalentTemperature",
+          "parseTseungKwanOWeather"
         ]
       },
       "consumers": [
@@ -147,7 +148,8 @@
           "file": "background.js",
           "symbols": [
             "normalizeSmartSensitivity",
-            "computeSmartOnMinutes"
+            "computeSmartOnMinutes",
+            "parseTseungKwanOWeather"
           ]
         },
         {
