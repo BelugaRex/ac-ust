@@ -165,14 +165,14 @@ async function rescheduleActiveBoundary() {
   chrome.alarms.create('ac-active-boundary', { delayInMinutes: delayMin });
 }
 
-// 调度下一次整点天气刷新（智能模式启用时；否则清除闹钟）。
+// 调度下一次 :10/:50 天气预取（智能模式启用时；否则清除闹钟）。
 async function rescheduleSmartWeatherAlarm() {
   try {
     await chrome.alarms.clear('ac-smart-weather');
   } catch (_) { /* ignore */ }
   if (!schedule.smartMode?.enabled) return;
-  const nextHour = nextHourBoundary(Date.now());
-  chrome.alarms.create('ac-smart-weather', { when: nextHour });
+  const plan = planNextSmartWeatherPrefetch(Date.now());
+  await createAlarm('ac-smart-weather', { when: plan.prefetchAt });
 }
 
 // 边界闹钟触发：进入/退出运行时段，自动启用/关闭 PWM
@@ -234,13 +234,14 @@ function setNextTriggerAt(nextTriggerAt) {
 // smart-mode.js 按同一站名精确合并四个源，并由 JKB 气温 + 湿度推导露点；天气仅作为
 // 本机运行态缓存，不进入 sync。
 const SMART_WEATHER_KEY = 'ac_smart_weather';
+const SMART_WEATHER_PLAN_KEY = 'ac_smart_weather_plan';
 const SMART_WEATHER_URLS = Object.freeze({
   temperature: 'https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_temperature.csv',
   humidity: 'https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_1min_humidity.csv',
   wind: 'https://data.weather.gov.hk/weatherAPI/hko_data/regional-weather/latest_10min_wind.csv',
   rainfall: 'https://data.weather.gov.hk/weatherAPI/opendata/hourlyRainfall.php?lang=en'
 });
-const SMART_WEATHER_TTL_MS = 60 * 60 * 1000;  // 天气缓存 1 小时（整点刷新一次）
+const SMART_WEATHER_TTL_MS = 60 * 60 * 1000;
 let smartWeatherInFlight = null;
 let smartReapplyInFlight = false;  // 滑块松开后即时重设 Power-off after 的单飞守卫
 
@@ -267,29 +268,34 @@ async function fetchSmartWeather() {
   return { fetchedAt: Date.now(), ...parsed };
 }
 
+async function readStoredSmartWeather() {
+  const cached = (await chrome.storage.local.get(SMART_WEATHER_KEY))[SMART_WEATHER_KEY];
+  if (cached && cached.fetchedAt) {
+    return {
+      ...cached,
+      stale: (Date.now() - cached.fetchedAt) >= SMART_WEATHER_TTL_MS,
+      error: ''
+    };
+  }
+  return {
+    fetchedAt: 0,
+    temperature: null,
+    dewPoint: null,
+    windSpeedMs: null,
+    rainMm: null,
+    relativeHumidity: null,
+    stale: true,
+    error: 'no-cache'
+  };
+}
+
 // 读取天气观测：缓存未过期直接返回，否则单飞拉取。
 // 拉取失败回退旧缓存并标记 stale；无缓存则返回错误占位（调用方退化为手动时长）。
-async function getSmartWeather({ force = false, readOnly = false } = {}) {
-  const cached = (await chrome.storage.local.get(SMART_WEATHER_KEY))[SMART_WEATHER_KEY];
+async function getSmartWeather({ force = false } = {}) {
+  const cached = await readStoredSmartWeather();
   if (!force && cached && cached.fetchedAt
       && (Date.now() - cached.fetchedAt) < SMART_WEATHER_TTL_MS) {
     return { ...cached, stale: false, error: '' };
-  }
-  if (readOnly) {
-    // 只读：缓存过期/缺失时不拉取，回退旧缓存（标记 stale）或返回错误占位。
-    if (cached && cached.fetchedAt) {
-      return { ...cached, stale: true, error: '' };
-    }
-    return {
-      fetchedAt: 0,
-      temperature: null,
-      dewPoint: null,
-      windSpeedMs: null,
-      rainMm: null,
-      relativeHumidity: null,
-      stale: true,
-      error: 'no-cache'
-    };
   }
   if (smartWeatherInFlight) return smartWeatherInFlight;
 
@@ -322,50 +328,74 @@ async function getSmartWeather({ force = false, readOnly = false } = {}) {
   return smartWeatherInFlight;
 }
 
-// 智能模式启用时，重算本周期 on/off 时长并注入 schedule（在 runPwmStep 顶部调用）。
-// 天气不可用 → 沿用手动时长（优雅降级，不点击、不推进）。
-async function applySmartModeDurations() {
-  if (!schedule.enabled || !schedule.smartMode?.enabled) return;
-
-  // 缓存新鲜时直接用；缓存为空（首次开启智能控制）或已过期时按需拉取。
-  // 若只读不拉取，首个 PWM 周期会因无天气数据退化为手动时长，错误沿用旧 onMinutes
-  // （如本次实测本应开 13 分钟却按手动 34 分钟写入页面定时器）。
-  // getSmartWeather 内部有单飞 + 1 小时 TTL，不会每个周期都打网络请求。
-  const weather = await getSmartWeather();
-  const suggested = computeSmartOnMinutes({
+async function prepareSmartWeatherForBoundary(boundaryAt) {
+  if (!schedule.smartMode?.enabled) return null;
+  const weather = await getSmartWeather({ force: true });
+  const plan = prepareSmartWeatherDecision({
+    boundaryAt,
+    preparedAt: Date.now(),
     sensitivity: schedule.smartMode.sensitivity,
-    temperature: weather.temperature,
-    dewPoint: weather.dewPoint,
-    windSpeedMs: weather.windSpeedMs,
-    rainMm: weather.rainMm
+    weather
   });
+  if (!plan || !schedule.smartMode?.enabled) return null;
+  await chrome.storage.local.set({ [SMART_WEATHER_PLAN_KEY]: plan });
+  return plan;
+}
 
-  if (!suggested.valid) {
-    schedule.onMinutes = Math.min(
-      SMART_MODE.ON_MAX,
-      sanitizeMinutes(schedule.onMinutes, SMART_MODE.ON_MAX)
-    );
-    schedule.offMinutes = Math.max(
-      SMART_MODE.MIN_OFF_MINUTES,
-      sanitizeMinutes(schedule.offMinutes, SMART_MODE.MIN_OFF_MINUTES)
-    );
-    console.warn('[AC扩展] 智能模式：天气不可用，本周期沿用手动时长');
-    return;
+function currentSmartControlBoundary(now = Date.now()) {
+  const date = new Date(now);
+  if ((date.getMinutes() !== 0 && date.getMinutes() !== 30)
+      || date.getSeconds() > 59) {
+    return 0;
   }
+  date.setSeconds(0, 0);
+  return date.getTime();
+}
 
-  if (suggested.onMinutes === 0) {
-    // 建议 0 分钟（过冷/过湿/大风）→ 本周期保持关闭，30 分钟后重估。
-    // 置 pwmState='off' 让 OFF 相位确保关闭（零点击）；onMinutes 仅占位，不进入 ON 相位。
+function applySmartDurationDecision(decision) {
+  if (decision.onMinutes === 0) {
     schedule.pwmState = 'off';
     schedule.onMinutes = SMART_MODE.CYCLE_MINUTES;
     schedule.offMinutes = SMART_MODE.CYCLE_MINUTES;
   } else {
-    schedule.onMinutes = suggested.onMinutes;
-    schedule.offMinutes = Math.max(1, suggested.offMinutes);
+    schedule.onMinutes = decision.onMinutes;
+    schedule.offMinutes = Math.max(1, decision.offMinutes);
+  }
+}
+
+function applySmartDurationFallback() {
+  schedule.onMinutes = Math.min(
+    SMART_MODE.ON_MAX,
+    sanitizeMinutes(schedule.onMinutes, SMART_MODE.ON_MAX)
+  );
+  schedule.offMinutes = Math.max(
+    SMART_MODE.MIN_OFF_MINUTES,
+    sanitizeMinutes(schedule.offMinutes, SMART_MODE.MIN_OFF_MINUTES)
+  );
+}
+
+async function applyPreparedSmartModeDurations() {
+  if (!schedule.enabled || !schedule.smartMode?.enabled) return;
+  if (schedule.pwmState !== 'on') return;
+
+  const boundaryAt = currentSmartControlBoundary();
+  const stored = await chrome.storage.local.get(SMART_WEATHER_PLAN_KEY);
+  const suggested = consumeSmartWeatherDecision(stored[SMART_WEATHER_PLAN_KEY], {
+    boundaryAt,
+    sensitivity: schedule.smartMode.sensitivity
+  });
+
+  if (!suggested?.valid) {
+    applySmartDurationFallback();
+    console.warn('[AC扩展] 智能模式：目标边界预计算缺失，本周期沿用安全时长');
+    return;
   }
 
+  applySmartDurationDecision(suggested);
+
   console.log(
-    `[AC扩展] 智能模式: K=${suggested.k.toFixed(3)} Teq=${suggested.teq.toFixed(1)}°C`
+    `[AC扩展] 智能模式预计算: boundary=${new Date(boundaryAt).toLocaleTimeString()}`
+    + ` K=${suggested.k.toFixed(3)} Teq=${suggested.teq.toFixed(1)}°C`
     + ` rain×${suggested.rainFactor.toFixed(3)} t_raw=${suggested.tRaw.toFixed(1)}`
     + ` → on=${suggested.onMinutes}min / off=${schedule.offMinutes}min`
   );
@@ -388,7 +418,7 @@ async function reapplySmartSensitivityNow() {
   const oldSmartBoundaryAt = Number(schedule.smartOnBoundaryAt) || 0;
   const oldPwmRuntimeRevision = pwmRuntimeRevision;
 
-  const weather = await getSmartWeather();
+  const weather = await readStoredSmartWeather();
   if (!schedule.enabled || !schedule.smartMode?.enabled || pwmStepRunning
       || pwmRuntimeRevision !== oldPwmRuntimeRevision
       || schedule.pwmState !== oldPwmState
@@ -1369,8 +1399,8 @@ async function runPwmStep() {
     await loadScheduleFromStorage();
     if (!schedule.enabled) return;
 
-    // 智能模式：启用时按天气重算本周期 on/off 时长（X=0 → 保持关闭 30 分钟）。
-    await applySmartModeDurations();
+    // 智能模式：只消费 :10/:50 为当前控制边界准备的本地快照，不等待天气网络。
+    await applyPreparedSmartModeDurations();
 
     const targetAction = schedule.pwmState === 'on' ? 'on' : 'off';
     const currentDuration = Number(
@@ -1785,13 +1815,16 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
 
   if (alarm.name === 'ac-smart-weather') {
-    // 先调度下一次整点，再拉取，避免下面 await 抛出时漏掉下次
+    const boundaryAt = smartWeatherTargetBoundaryAt(alarm.scheduledTime);
     await rescheduleSmartWeatherAlarm();
-    if (schedule.smartMode?.enabled) {
+    if (schedule.smartMode?.enabled && boundaryAt > Date.now()) {
       try {
-        await getSmartWeather({ force: true });
+        const prepared = await prepareSmartWeatherForBoundary(boundaryAt);
+        if (!prepared) {
+          console.warn('[AC扩展] 智能天气预取未生成有效边界快照，保留最近成功快照');
+        }
       } catch (e) {
-        console.warn('[AC扩展] 整点天气拉取失败:', e?.message);
+        console.warn('[AC扩展] 智能天气预取失败:', e?.message);
       }
     }
   }
@@ -2764,7 +2797,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const wasEnabled = schedule.enabled;
       // 防止 restart 泄漏到 schedule 对象中；手动时长单独取出，智能模式下不上送覆盖。
       const { restart, onMinutes: manualOn, offMinutes: manualOff, ...data } = msg.data;
-      // 智能模式开启时，on/off 时长是派生值（applySmartModeDurations 每周期按天气+灵敏度重算）。
+      // 智能模式开启时，on/off 时长是派生值（控制边界消费预计算天气快照）。
       // 弹窗在智能模式下已隐藏手动时长输入，其上送的 manualOn/manualOff 是过期值，直接覆盖会
       // 污染 storage（余额估算、诊断面板、过期闹钟恢复都会读到错误时长，让灵敏度滑块看似无效）。
       const smartEnabled = !!(data.smartMode?.enabled ?? schedule.smartMode?.enabled);
@@ -2793,7 +2826,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sensitivity: normalizeSmartSensitivity(data.smartMode.sensitivity)
         };
       }
-      // 天气只由整点闹钟 ac-smart-weather 刷新（setupAlarms 已调度），此处不即时拉取。
+      // 天气只由 :10/:50 的 ac-smart-weather 预取（setupAlarms 已调度），此处不即时拉取。
 
       let offResult = null;
       if (!schedule.enabled) {
@@ -2849,8 +2882,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       return;
     }
     if (msg.type === 'refreshSmartWeather') {
-      // popup 主动触发天气拉取（天气缓存缺失/过期时）；getSmartWeather 内部有 TTL 节流。
-      const weather = await getSmartWeather();
+      const weather = await readStoredSmartWeather();
       sendResponse({ success: true, weather });
       return;
     }

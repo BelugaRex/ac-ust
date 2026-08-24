@@ -240,7 +240,7 @@ async function updateSmartReadout() {
     const stored = await chrome.storage.local.get('ac_smart_weather');
     const weather = stored.ac_smart_weather;
 
-    // 天气只由后台整点闹钟刷新，popup 仅读缓存展示。
+    // 天气只由后台 :10/:50 one-shot 预取，popup 仅读缓存展示。
     if (!weather || !Number.isFinite(Number(weather.temperature))) {
       renderSmartReadout(null, weather || null);
       return;
@@ -931,7 +931,7 @@ btnDiagnose.addEventListener('click', async () => {
     }
     add(!!watchdogAlarm, t('diagnoseWatchdog') + (watchdogAlarm ? t('diagnoseBadgeRebuilt') + new Date(watchdogAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
 
-    // 2.0c 智能模式天气刷新链路：ac-smart-weather 闹钟 + ac_smart_weather 缓存新鲜度。
+    // 2.0c 智能模式天气预取链路：ac-smart-weather one-shot 闹钟 + ac_smart_weather 缓存新鲜度。
     // v0.8.0 智能模式新增，此前诊断漏检——闹钟丢失后天气冻结、等效温度/建议分钟数不再更新却无红灯。
     // 后台 ensureDiagnostics 已在上方补建；此处仅展示状态与缓存新鲜度，不重复补建。
     const smartOnDiag = !!s.smartMode?.enabled;

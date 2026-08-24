@@ -473,6 +473,97 @@ async function runTests() {
     humidityCsv: 'Date time,Automatic Weather Station,Humidity\n202608241510,Tseung Kwan O,67\n'
   }) === null, 'smart: 缺少 JKB 气温时拒绝借用其他站点');
 
+  const preparedBoundary = new Date(2026, 7, 24, 16, 30, 0, 0).getTime();
+  const preparedWeather = {
+    fetchedAt: preparedBoundary - 20 * 60_000,
+    temperature: 32.6,
+    relativeHumidity: 67,
+    dewPoint: 25.8,
+    windSpeedMs: 16 / 3.6,
+    rainMm: 6,
+    stale: false,
+    error: ''
+  };
+  const preparedDecision = smartMode.prepareSmartWeatherDecision({
+    boundaryAt: preparedBoundary,
+    preparedAt: preparedBoundary - 10 * 60_000,
+    sensitivity: 5,
+    weather: preparedWeather
+  });
+  const consumedPreparedDecision = smartMode.consumeSmartWeatherDecision(
+    preparedDecision,
+    { boundaryAt: preparedBoundary, sensitivity: 5 }
+  );
+  assertPass(preparedDecision?.schemaVersion === 1
+      && preparedDecision.boundaryAt === preparedBoundary
+      && preparedDecision.preparedAt === preparedBoundary - 10 * 60_000
+      && preparedDecision.fetchedAt === preparedWeather.fetchedAt
+      && preparedDecision.sensitivity === 5
+      && preparedDecision.weather.temperature === preparedWeather.temperature
+      && consumedPreparedDecision?.valid === true
+      && consumedPreparedDecision.onMinutes === preparedDecision.onMinutes
+      && consumedPreparedDecision.offMinutes === preparedDecision.offMinutes
+      && consumedPreparedDecision.usedPreparedSensitivity === true,
+    'smart-plan: :10 预取生成目标 :30 快照，并在同一边界按原灵敏度直接消费');
+
+  const sensitivityChangedDecision = smartMode.consumeSmartWeatherDecision(
+    preparedDecision,
+    { boundaryAt: preparedBoundary, sensitivity: 10 }
+  );
+  assertPass(sensitivityChangedDecision?.valid === true
+      && sensitivityChangedDecision.preparedSensitivity === 5
+      && sensitivityChangedDecision.usedPreparedSensitivity === false
+      && sensitivityChangedDecision.onMinutes !== preparedDecision.onMinutes,
+    'smart-plan: 快照保存原始天气，边界消费可按当前灵敏度纯本地重算');
+
+  const stalePreparedWeather = {
+    ...preparedWeather,
+    fetchedAt: preparedBoundary - smartMode.SMART_MODE.WEATHER_PLAN_MAX_AGE_MS - 1
+  };
+  assertPass(smartMode.consumeSmartWeatherDecision(null, {
+    boundaryAt: preparedBoundary,
+    sensitivity: 5
+  }) === null
+      && smartMode.consumeSmartWeatherDecision(preparedDecision, {
+        boundaryAt: preparedBoundary + 30 * 60_000,
+        sensitivity: 5
+      }) === null
+      && smartMode.consumeSmartWeatherDecision({ ...preparedDecision, schemaVersion: 2 }, {
+        boundaryAt: preparedBoundary,
+        sensitivity: 5
+      }) === null
+      && smartMode.prepareSmartWeatherDecision({
+        boundaryAt: preparedBoundary,
+        preparedAt: preparedBoundary - 10 * 60_000,
+        sensitivity: 5,
+        weather: stalePreparedWeather
+      }) === null
+      && smartMode.prepareSmartWeatherDecision({
+        boundaryAt: preparedBoundary,
+        preparedAt: preparedBoundary - 10 * 60_000,
+        sensitivity: 5,
+        weather: { ...preparedWeather, stale: true }
+      }) === null
+      && smartMode.prepareSmartWeatherDecision({
+        boundaryAt: preparedBoundary,
+        preparedAt: preparedBoundary - 10 * 60_000,
+        sensitivity: 5,
+        weather: { ...preparedWeather, error: 'network failed' }
+      }) === null
+      && smartMode.prepareSmartWeatherDecision({
+        boundaryAt: preparedBoundary,
+        preparedAt: preparedBoundary - 10 * 60_000,
+        sensitivity: 5,
+        weather: { ...preparedWeather, fetchedAt: preparedBoundary - 9 * 60_000 }
+      }) === null
+      && smartMode.prepareSmartWeatherDecision({
+        boundaryAt: preparedBoundary,
+        preparedAt: preparedBoundary,
+        sensitivity: 5,
+        weather: preparedWeather
+      }) === null,
+    'smart-plan: 缺失、错槽、旧 schema、陈旧/错误天气与未来时间全部拒绝');
+
   console.log('\n--- 断言 ---');
   assertPass(result.selfHealed === true, 'selfHealed 标志为 true(自愈触发)');
   assertPass(after.nextTriggerAt === pwmTime, 'storage.nextTriggerAt 被修复为 ac-pwm.scheduledTime');
@@ -2609,6 +2700,79 @@ async function runTests() {
   const reapplyBody = reapplyStart >= 0 && reapplyEnd > reapplyStart
     ? backgroundSource.slice(reapplyStart, reapplyEnd)
     : '';
+  const smartWeatherSchedulerBody = extractSourceSection(
+    backgroundSource,
+    'async function rescheduleSmartWeatherAlarm() {',
+    '\n// 边界闹钟触发：进入/退出运行时段',
+    'rescheduleSmartWeatherAlarm'
+  );
+  const smartWeatherPreparationBody = extractSourceSection(
+    backgroundSource,
+    'async function prepareSmartWeatherForBoundary(boundaryAt) {',
+    '\nfunction currentSmartControlBoundary(',
+    'prepareSmartWeatherForBoundary'
+  );
+  const preparedDurationBody = extractSourceSection(
+    backgroundSource,
+    'async function applyPreparedSmartModeDurations() {',
+    '\n// 智能模式：滑块松开后立即按新灵敏度重设当前 ON 相位',
+    'applyPreparedSmartModeDurations'
+  );
+  const smartWeatherAlarmBody = extractSourceSection(
+    backgroundSource,
+    "if (alarm.name === 'ac-smart-weather') {",
+    "\n\n  if (alarm.name === 'ac-page-timer-retry')",
+    'ac-smart-weather alarm branch'
+  );
+  const refreshSmartWeatherBody = extractSourceSection(
+    backgroundSource,
+    "if (msg.type === 'refreshSmartWeather') {",
+    "\n    if (msg.type === 'repairSchedule')",
+    'refreshSmartWeather message branch'
+  );
+  const setupAlarmsForWeatherBody = extractSourceSection(
+    backgroundSource,
+    'async function setupAlarms(startImmediately = false) {',
+    '\nfunction sanitizeMinutes',
+    'setupAlarms weather recovery'
+  );
+  const diagnosticWeatherRecoveryBody = extractSourceSection(
+    backgroundSource,
+    'async function ensureDiagnosticAlarms() {',
+    '\nchrome.runtime.onMessage.addListener',
+    'ensureDiagnosticAlarms weather recovery'
+  );
+  assertPass(smartWeatherSchedulerBody.includes('planNextSmartWeatherPrefetch(Date.now())')
+      && smartWeatherSchedulerBody.includes("createAlarm('ac-smart-weather', { when: plan.prefetchAt })")
+      && !smartWeatherSchedulerBody.includes('periodInMinutes')
+      && smartWeatherAlarmBody.includes('smartWeatherTargetBoundaryAt(alarm.scheduledTime)')
+      && smartWeatherAlarmBody.indexOf('await rescheduleSmartWeatherAlarm();')
+        < smartWeatherAlarmBody.indexOf('await prepareSmartWeatherForBoundary(boundaryAt)')
+      && setupAlarmsForWeatherBody.includes('await rescheduleSmartWeatherAlarm();')
+      && diagnosticWeatherRecoveryBody.includes('await rescheduleSmartWeatherAlarm();'),
+    '11F-0: 天气任务使用严格未来的 :10/:50 one-shot，触发后先推进且启动/诊断可恢复');
+  assertPass(smartWeatherPreparationBody.includes('getSmartWeather({ force: true })')
+      && countOccurrences(backgroundSource, 'getSmartWeather(') === 2
+      && countOccurrences(backgroundSource, 'fetchSmartWeather(') === 2
+      && smartWeatherPreparationBody.includes('prepareSmartWeatherDecision({')
+      && smartWeatherPreparationBody.includes('[SMART_WEATHER_PLAN_KEY]: plan')
+      && preparedDurationBody.includes('chrome.storage.local.get(SMART_WEATHER_PLAN_KEY)')
+      && preparedDurationBody.includes('consumeSmartWeatherDecision(')
+      && !preparedDurationBody.includes('getSmartWeather(')
+      && !preparedDurationBody.includes('fetchSmartWeather')
+      && pwmBody.includes('await applyPreparedSmartModeDurations();')
+      && !pwmBody.includes('getSmartWeather(')
+      && !pwmBody.includes('fetchSmartWeather')
+      && !pwmBody.includes('prepareSmartWeatherForBoundary('),
+    '11F-0A: 只有预取路径强制联网；:00/:30 runPwmStep 仅消费目标绑定 storage 快照');
+  assertPass(reapplyBody.includes('const weather = await readStoredSmartWeather();')
+      && !reapplyBody.includes('getSmartWeather(')
+      && !reapplyBody.includes('fetchSmartWeather')
+      && refreshSmartWeatherBody.includes('readStoredSmartWeather()')
+      && !refreshSmartWeatherBody.includes('getSmartWeather(')
+      && popupJs.includes("chrome.storage.local.get('ac_smart_weather')")
+      && !popupJs.includes('refreshSmartWeather'),
+    '11F-0B: 灵敏度即时重设、兼容消息与 popup 全部只读本地天气，不直接或间接联网');
   assertPass(repairBody.includes("nextTriggerAt: schedule.pageTimerTargetAt")
       && repairBody.includes("createPwmAlarmFromPlan(")
       && toggleBody.includes("nextTriggerAt: schedule.pageTimerTargetAt")
@@ -2645,9 +2809,13 @@ async function runTests() {
     smartMode: { enabled: true, sensitivity: 5 }
   };
   let releaseReapplyWeather;
+  let reapplyWeatherReadStarted = false;
+  const deferredReapplyWeather = new Promise(resolve => {
+    releaseReapplyWeather = resolve;
+  });
   let reapplyComputeCalls = 0;
   const reapplyRaceHarness = new Function(
-    'schedule', 'getSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE', 'persistSchedule',
+    'schedule', 'readStoredSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE', 'persistSchedule',
     `let pwmStepRunning = false;
 let pwmRuntimeRevision = 0;
 ${reapplyBody}
@@ -2661,7 +2829,10 @@ return {
 };`
   )(
     reapplyRaceSchedule,
-    () => new Promise(resolve => { releaseReapplyWeather = resolve; }),
+    () => {
+      reapplyWeatherReadStarted = true;
+      return deferredReapplyWeather;
+    },
     () => { reapplyComputeCalls += 1; return { valid: true }; },
     smartMode.SMART_MODE,
     async () => {}
@@ -2670,7 +2841,8 @@ return {
   reapplyRaceHarness.completePwmStep();
   releaseReapplyWeather({});
   await reapplyRacePromise;
-  assertPass(reapplyComputeCalls === 0
+    assertPass(reapplyWeatherReadStarted
+      && reapplyComputeCalls === 0
       && reapplyRaceSchedule.onMinutes === 25
       && reapplyRaceSchedule.offMinutes === 5
       && reapplyRaceSchedule.nextTriggerAt
@@ -2684,7 +2856,7 @@ return {
   };
   const stableReapplyPersistReasons = [];
   const stableReapplyHarness = new Function(
-    'schedule', 'getSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE', 'persistSchedule',
+    'schedule', 'readStoredSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE', 'persistSchedule',
     `let pwmStepRunning = false;
 let pwmRuntimeRevision = 0;
 ${reapplyBody}

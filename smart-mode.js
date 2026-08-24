@@ -41,6 +41,7 @@
     RAIN_FULL_EFFECT_MM: 30,     // 香港天文台黄雨阈值：过去 1 小时雨量 30 mm
     RAIN_MIN_FACTOR: 0.5,        // 达黄雨阈值后的最大修正：开启时间减半
     RAIN_CURVE_ALPHA: 2,         // 归一化指数曲率：雨势越强，每毫米的边际影响越大
+    WEATHER_PLAN_MAX_AGE_MS: 60 * 60 * 1000,
     COMPRESSOR_DEADBAND_MIN: 1,  // 压缩机保护死区下界
     COMPRESSOR_DEADBAND_MAX: 4,  // 压缩机保护死区上界
     // Teq = T + VAPOR_COEF*e - WIND_COEF*Wind + TEQ_OFFSET
@@ -250,6 +251,104 @@
     };
   }
 
+  function isExactHalfHourBoundary(timestamp) {
+    const value = Number(timestamp);
+    if (!Number.isSafeInteger(value)) return false;
+    const date = new Date(value);
+    return (date.getMinutes() === 0 || date.getMinutes() === 30)
+      && date.getSeconds() === 0
+      && date.getMilliseconds() === 0;
+  }
+
+  function prepareSmartWeatherDecision({
+    boundaryAt,
+    preparedAt = Date.now(),
+    sensitivity,
+    weather
+  } = {}) {
+    const boundary = Number(boundaryAt);
+    const prepared = Number(preparedAt);
+    const fetchedAt = Number(weather?.fetchedAt);
+    if (!isExactHalfHourBoundary(boundary)
+        || !Number.isSafeInteger(prepared)
+        || !Number.isSafeInteger(fetchedAt)
+        || fetchedAt <= 0
+        || fetchedAt > prepared
+        || prepared >= boundary
+        || boundary - fetchedAt > SMART_MODE.WEATHER_PLAN_MAX_AGE_MS
+        || weather?.stale === true
+        || !!weather?.error) {
+      return null;
+    }
+
+    const normalizedSensitivity = normalizeSmartSensitivity(sensitivity);
+    const observation = {
+      temperature: finiteNumber(weather?.temperature),
+      relativeHumidity: finiteNumber(weather?.relativeHumidity),
+      dewPoint: finiteNumber(weather?.dewPoint),
+      windSpeedMs: finiteNumber(weather?.windSpeedMs),
+      rainMm: finiteNumber(weather?.rainMm)
+    };
+    const decision = computeSmartOnMinutes({
+      sensitivity: normalizedSensitivity,
+      ...observation
+    });
+    if (!decision.valid) return null;
+
+    return {
+      schemaVersion: 1,
+      boundaryAt: boundary,
+      preparedAt: prepared,
+      fetchedAt,
+      sensitivity: normalizedSensitivity,
+      weather: observation,
+      onMinutes: decision.onMinutes,
+      offMinutes: decision.offMinutes,
+      k: decision.k,
+      teq: decision.teq,
+      tRaw: decision.tRaw,
+      rainFactor: decision.rainFactor
+    };
+  }
+
+  function consumeSmartWeatherDecision(plan, { boundaryAt, sensitivity } = {}) {
+    const boundary = Number(boundaryAt);
+    const preparedAt = Number(plan?.preparedAt);
+    const fetchedAt = Number(plan?.fetchedAt);
+    if (plan?.schemaVersion !== 1
+        || !isExactHalfHourBoundary(boundary)
+        || Number(plan?.boundaryAt) !== boundary
+        || !Number.isSafeInteger(preparedAt)
+        || !Number.isSafeInteger(fetchedAt)
+        || fetchedAt <= 0
+        || fetchedAt > preparedAt
+        || preparedAt >= boundary
+        || boundary - fetchedAt > SMART_MODE.WEATHER_PLAN_MAX_AGE_MS
+        || !plan.weather
+        || typeof plan.weather !== 'object') {
+      return null;
+    }
+
+    const normalizedSensitivity = normalizeSmartSensitivity(sensitivity);
+    const decision = computeSmartOnMinutes({
+      sensitivity: normalizedSensitivity,
+      temperature: plan.weather.temperature,
+      dewPoint: plan.weather.dewPoint,
+      windSpeedMs: plan.weather.windSpeedMs,
+      rainMm: plan.weather.rainMm
+    });
+    if (!decision.valid) return null;
+    return {
+      ...decision,
+      boundaryAt: boundary,
+      preparedAt,
+      fetchedAt,
+      preparedSensitivity: normalizeSmartSensitivity(plan.sensitivity),
+      usedPreparedSensitivity: normalizedSensitivity
+        === normalizeSmartSensitivity(plan.sensitivity)
+    };
+  }
+
   return {
     SMART_MODE,
     normalizeSmartSensitivity,
@@ -263,6 +362,8 @@
     clampAndRoundOnMinutes,
     finalizeRainAdjustedOnMinutes,
     computeSmartOnMinutes,
+    prepareSmartWeatherDecision,
+    consumeSmartWeatherDecision,
     parseTseungKwanOWeather
   };
 });

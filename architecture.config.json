@@ -114,7 +114,11 @@
           "planPwmStep",
           "planPwmRecovery",
           "reconcilePwmTrigger",
-          "nextHourBoundary",
+          "planNextSmartWeatherPrefetch",
+          "smartWeatherTargetBoundaryAt",
+          "nextHalfHourBoundary",
+          "smartModePageTimerTargetAt",
+          "planSmartModeOnWindow",
           "alignSmartModeNextTrigger"
         ]
       },
@@ -125,7 +129,10 @@
             "planPwmStep",
             "planPwmRecovery",
             "reconcilePwmTrigger",
-            "nextHourBoundary",
+            "planNextSmartWeatherPrefetch",
+            "smartWeatherTargetBoundaryAt",
+            "smartModePageTimerTargetAt",
+            "planSmartModeOnWindow",
             "alignSmartModeNextTrigger"
           ]
         }
@@ -138,6 +145,8 @@
         "symbols": [
           "normalizeSmartSensitivity",
           "computeSmartOnMinutes",
+          "prepareSmartWeatherDecision",
+          "consumeSmartWeatherDecision",
           "sensitivityToK",
           "equivalentTemperature",
           "parseTseungKwanOWeather"
@@ -149,6 +158,8 @@
           "symbols": [
             "normalizeSmartSensitivity",
             "computeSmartOnMinutes",
+            "prepareSmartWeatherDecision",
+            "consumeSmartWeatherDecision",
             "parseTseungKwanOWeather"
           ]
         },
@@ -227,6 +238,22 @@
         "\\blocalStorage\\b",
         "\\bfetch\\s*\\(",
         "\\bimportScripts\\s*\\("
+      ]
+    },
+    {
+      "name": "smart weather control paths never invoke the fetch-capable reader",
+      "files": ["background.js"],
+      "forbidPatterns": [
+        "await\\s+getSmartWeather\\s*\\(\\s*(?:\\)|\\{(?!\\s*force\\s*:\\s*true\\s*\\}))"
+      ]
+    },
+    {
+      "name": "popup weather reads remain storage only",
+      "files": ["popup.js"],
+      "forbidPatterns": [
+        "\\bfetch\\s*\\(",
+        "refreshSmartWeather",
+        "\\bgetSmartWeather\\s*\\("
       ]
     },
     {
