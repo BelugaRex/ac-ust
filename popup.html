@@ -1236,28 +1236,21 @@
     </div>
     <p class="visually-hidden" id="statusAnnouncement" role="status" aria-live="polite" aria-atomic="true"></p>
 
-    <!-- Settings card: toggle in header, clock/interval in body -->
-    <div class="settings-card" role="group" aria-labelledby="pwmSettingsTitle">
-      <div class="settings-header" id="timerSectionHeader">
-        <h3 id="pwmSettingsTitle" data-i18n="pwmSettings"></h3>
+    <!-- Settings card: active hours, cycle timer and smart control as peer sections -->
+    <div class="settings-card">
+      <div class="settings-header" id="activeHoursSectionHeader">
+        <h3 id="activeHoursRow">
+          <label for="activeHoursToggle" data-i18n="activeHoursLabel"></label>
+        </h3>
         <div class="toggle-area">
-          <span class="visually-hidden" id="timerToggleState" data-i18n="timerDisabled" aria-live="polite" aria-atomic="true"></span>
           <label class="toggle-switch">
-            <input type="checkbox" id="timerToggle" aria-labelledby="pwmSettingsTitle" aria-describedby="timerToggleState">
+            <input type="checkbox" id="activeHoursToggle" aria-labelledby="activeHoursRow">
             <span class="toggle-slider"></span>
           </label>
         </div>
       </div>
-      <div id="timerBody">
-        <div class="setting-group" id="activeHoursSection">
-        <div class="section-heading" id="activeHoursRow">
-          <label class="section-title" for="activeHoursToggle" data-i18n="activeHoursLabel"></label>
-          <label class="toggle-switch">
-            <input type="checkbox" id="activeHoursToggle">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-        <div class="field-grid">
+      <div class="setting-group" id="activeHoursBody" role="group" aria-labelledby="activeHoursRow">
+        <div class="field-grid" id="activeHoursSection">
           <div class="field">
             <label class="field-label" for="activeHoursStart" data-i18n="activeHoursStartShort"></label>
             <input type="time" id="activeHoursStart" value="08:00" data-i18n-aria-label="activeHoursStartLabel">
@@ -1268,24 +1261,35 @@
           </div>
         </div>
       </div>
-      <div class="setting-group" id="intervalInputs">
-        <div class="field-grid">
-          <div class="field">
-            <label class="field-label" for="onMinutes" data-i18n="onMinutesLabel"></label>
-            <span class="number-field">
-              <input type="number" id="onMinutes" value="30" min="1" step="1">
-              <span class="field-unit" data-i18n="unitMinutes"></span>
-            </span>
-          </div>
-          <div class="field">
-            <label class="field-label" for="offMinutes" data-i18n="offMinutesLabel"></label>
-            <span class="number-field">
-              <input type="number" id="offMinutes" value="30" min="1" step="1">
-              <span class="field-unit" data-i18n="unitMinutes"></span>
-            </span>
-          </div>
+      <div class="settings-header" id="timerSectionHeader">
+        <h3 id="pwmSettingsTitle" data-i18n="pwmSettings"></h3>
+        <div class="toggle-area">
+          <span class="visually-hidden" id="timerToggleState" data-i18n="timerDisabled" aria-live="polite" aria-atomic="true"></span>
+          <label class="toggle-switch">
+            <input type="checkbox" id="timerToggle" aria-labelledby="pwmSettingsTitle" aria-describedby="timerToggleState">
+            <span class="toggle-slider"></span>
+          </label>
         </div>
       </div>
+      <div id="timerBody" role="group" aria-labelledby="pwmSettingsTitle">
+        <div class="setting-group" id="intervalInputs">
+          <div class="field-grid">
+            <div class="field">
+              <label class="field-label" for="onMinutes" data-i18n="onMinutesLabel"></label>
+              <span class="number-field">
+                <input type="number" id="onMinutes" value="30" min="1" step="1">
+                <span class="field-unit" data-i18n="unitMinutes"></span>
+              </span>
+            </div>
+            <div class="field">
+              <label class="field-label" for="offMinutes" data-i18n="offMinutesLabel"></label>
+              <span class="number-field">
+                <input type="number" id="offMinutes" value="30" min="1" step="1">
+                <span class="field-unit" data-i18n="unitMinutes"></span>
+              </span>
+            </div>
+          </div>
+        </div>
       </div>
       <div class="settings-header" id="smartSectionHeader">
         <h3 id="smartModeTitle" data-i18n="smartModeLabel"></h3>
@@ -1297,7 +1301,7 @@
           </label>
         </div>
       </div>
-      <div class="setting-group smart-body" id="smartBody">
+      <div class="setting-group smart-body" id="smartBody" role="group" aria-labelledby="smartModeTitle">
           <div class="smart-slider-row">
             <span class="smart-end" data-i18n="smartModeWeak"></span>
             <div class="smart-slider-wrap">

@@ -248,6 +248,34 @@
       ]
     },
     {
+      "name": "automatic control remains behind the shared active-hours gate",
+      "files": ["background.js"],
+      "requirePatterns": [
+        "function\\s+isAutomationAllowed\\s*\\(",
+        "const\\s+AUTOMATION_RUNTIME_ALARMS\\s*=\\s*new\\s+Set",
+        "isAutomationRuntimeAlarm\\s*&&\\s*!isAutomationAllowed\\s*\\(\\s*\\)",
+        "requireAutomationAllowed\\s*:\\s*true",
+        "function\\s+isAutomationOperationCurrent\\s*\\(",
+        "async\\s+function\\s+clearAutomationRuntimeAlarmsWhileBlocked\\s*\\("
+      ]
+    },
+    {
+      "name": "popup preserves the active-hours pause state",
+      "files": ["popup.js"],
+      "requirePatterns": [
+        "function\\s+syncActiveHoursUI\\s*\\(",
+        "_automationPausedByActiveHours\\s*===\\s*true",
+        "currentScheduleEnabled\\s*=\\s*true"
+      ]
+    },
+    {
+      "name": "popup delegates alarm repair to the gated service worker",
+      "files": ["popup.js"],
+      "forbidPatterns": [
+        "\\bchrome\\s*\\.\\s*alarms\\s*\\.\\s*create\\s*\\("
+      ]
+    },
+    {
       "name": "popup weather reads remain storage only",
       "files": ["popup.js"],
       "forbidPatterns": [

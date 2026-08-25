@@ -66,6 +66,7 @@ const contentMessageListener = (msg, sender, sendResponse) => {
 
   const isACOperation = action === 'on'
     || action === 'off'
+    || action === 'cancelAutomaticOn'
     || action === 'status'
     || action === 'setTimer'
     || action === 'getPageTimer';
@@ -73,7 +74,19 @@ const contentMessageListener = (msg, sender, sendResponse) => {
     sendResponse({ success: false, invalidTarget: true, error: '拒绝在非精确 AC home 页面执行空调操作' });
     return false;
   }
-  if (action === 'on' || action === 'off') {
+  if (action === 'cancelAutomaticOn') {
+    window.dispatchEvent(new CustomEvent('__AC_EXTENSION_CANCEL_AUTOMATIC_ON__'));
+    sendResponse({ success: true, cancelled: true });
+    return false;
+  }
+  if (action === 'off') {
+    sendResponse({
+      success: false,
+      error: 'OFF 操作已禁用；自动关机只允许使用 Power-off after'
+    });
+    return false;
+  }
+  if (action === 'on') {
     toggleACSwitch(action, msg.notAfterAt).then(result => sendResponse(result));
     return true; // 异步响应
   }
@@ -261,6 +274,10 @@ function getACBalanceSnapshot() {
 // ----- 切换 AC 开关 -----
   async function toggleACSwitch(targetAction, notAfterAt = 0) {
   console.log(`[AC扩展] 准备切换 AC: ${targetAction}`);
+
+  if (targetAction !== 'on') {
+    return { success: false, error: 'OFF 操作已禁用；请使用 Power-off after' };
+  }
 
   if (notAfterAt !== 0 && !Number.isSafeInteger(notAfterAt)) {
     return { success: false, error: '自动开启窗口截止时间无效' };

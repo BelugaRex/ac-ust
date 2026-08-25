@@ -85,16 +85,61 @@ let schedule = {
   pageTimerRetryAt: 0,
   pageTimerRetryMinutes: 0,
   smartOnBoundaryAt: 0,
-  activeHours: { enabled: false, start: '08:00', end: '23:00' },  // v0.5.x: PWM 运行时段（白名单，同日）
+  activeHours: { enabled: false, start: '08:00', end: '23:00' },  // 两种自动控制共用的运行时段（白名单，同日）
   smartMode: { enabled: false, sensitivity: 5 }  // v0.8.0: 智能模式（天气驱动的开启时长，灵敏度 0~10 档位）
 };
 
 let pwmStepRunning = false;
+let pwmStepRunningRevision = null;
 let pwmRuntimeRevision = 0;
+let scheduleLoadBlockedRevision = null;
 let lastPwmStepAt = 0;  // A4: 看门狗 cooldown 追踪
 let acToggleInFlight = null;
 let acToggleInFlightAction = null;
 let acToggleInFlightNotAfterAt = 0;
+let acToggleInFlightRequiresAutomation = false;
+let acToggleInFlightAutomationRevision = null;
+let timerBasedShutdownRevision = 0;
+
+function claimTimerBasedShutdown() {
+  timerBasedShutdownRevision += 1;
+  return timerBasedShutdownRevision;
+}
+
+function invalidateTimerBasedShutdown() {
+  timerBasedShutdownRevision += 1;
+  return timerBasedShutdownRevision;
+}
+
+function isTimerBasedShutdownCurrent(shutdownRevision) {
+  return Number.isSafeInteger(shutdownRevision)
+    && shutdownRevision === timerBasedShutdownRevision;
+}
+
+function isCurrentPwmStepRunning() {
+  return pwmStepRunning && pwmStepRunningRevision === pwmRuntimeRevision;
+}
+
+function claimPwmStepOwnership() {
+  const automationRevision = pwmRuntimeRevision += 1;
+  pwmStepRunning = true;
+  pwmStepRunningRevision = automationRevision;
+  return automationRevision;
+}
+
+function releasePwmStepOwnership(automationRevision) {
+  if (pwmStepRunningRevision !== automationRevision) return false;
+  lastPwmStepAt = Date.now();
+  pwmStepRunning = false;
+  pwmStepRunningRevision = null;
+  return true;
+}
+
+const AUTOMATION_RUNTIME_ALARMS = new Set([
+  'ac-pwm',
+  'ac-badge-tick',
+  'ac-watchdog'
+]);
 
 const PWM_TRIGGER_STRICT_OPTIONS = Object.freeze({
   nextTriggerToleranceMs: 0,
@@ -110,8 +155,8 @@ const PWM_TRIGGER_SNAPSHOT_OPTIONS = Object.freeze({
   allowDisabled: true
 });
 
-// ===== Active Hours (PWM 运行时段，白名单) =====
-// 启用后：在 [start, end) 时段内 PWM 自动运行；时段外自动关闭 PWM（避免噪音）。
+// ===== Active Hours（两种自动控制共用的运行时段白名单） =====
+// 启用后：在 [start, end) 时段内允许循环定时或智能控制运行；时段外暂停自动执行。
 // 同日时段（start < end 强制）。跨日场景用户应该用反向设置（如 23:00-07:00 关 = 07:00-23:00 开）。
 function parseHHMM(s) {
   if (typeof s !== 'string') return -1;
@@ -127,9 +172,28 @@ function isWithinActiveHours(now = new Date()) {
   if (!ah || !ah.enabled) return true;  // 未启用 = 永远在时段内
   const start = parseHHMM(ah.start);
   const end = parseHHMM(ah.end);
-  if (start < 0 || end < 0 || start >= end) return true;  // 非法配置 = 不限制
+  if (start < 0 || end < 0 || start >= end) return false;  // 非法配置安全暂停，等待用户修正
   const curMin = now.getHours() * 60 + now.getMinutes();
   return curMin >= start && curMin < end;
+}
+
+function isAutomationAllowed(now = new Date()) {
+  return schedule.enabled && isWithinActiveHours(now);
+}
+
+function isAutomationOperationCurrent(automationRevision) {
+  return Number.isSafeInteger(automationRevision)
+    && automationRevision === pwmRuntimeRevision
+    && isAutomationAllowed();
+}
+
+async function abortStaleAutomation(automationRevision, reason) {
+  if (isAutomationOperationCurrent(automationRevision)) return false;
+  if (schedule.enabled && !isWithinActiveHours()) {
+    console.warn(`[AC扩展] ${reason}: 自动操作跨越运行时段边界，重新执行暂停关机`);
+    await onActiveBoundaryCrossed();
+  }
+  return true;
 }
 
 // 返回下一次状态切换的时间戳（ms）。返回 0 表示无需调度（未启用或非法）。
@@ -154,6 +218,25 @@ function getNextActiveBoundary(now = new Date()) {
   return nextStart.getTime() < nextEnd.getTime() ? nextStart.getTime() : nextEnd.getTime();
 }
 
+function getAutomaticOnDeadline(requestedDeadline = 0, now = new Date()) {
+  const nowMs = now.getTime();
+  const requested = Number(requestedDeadline);
+  let deadline = Number.isSafeInteger(requested) && requested > 0
+    ? requested
+    : 0;
+
+  if (schedule.activeHours?.enabled && isWithinActiveHours(now)) {
+    const activeBoundaryAt = getNextActiveBoundary(now);
+    if (activeBoundaryAt > nowMs) {
+      deadline = deadline > 0
+        ? Math.min(deadline, activeBoundaryAt)
+        : activeBoundaryAt;
+    }
+  }
+
+  return deadline;
+}
+
 // 调度下一次 active hours 边界闹钟
 async function rescheduleActiveBoundary() {
   try {
@@ -161,8 +244,7 @@ async function rescheduleActiveBoundary() {
   } catch (_) { /* ignore */ }
   const next = getNextActiveBoundary();
   if (!next) return;
-  const delayMin = Math.max(1, (next - Date.now()) / 60000);
-  chrome.alarms.create('ac-active-boundary', { delayInMinutes: delayMin });
+  await createAlarm('ac-active-boundary', { when: next });
 }
 
 // 调度下一次 :10/:50 天气预取（智能模式启用时；否则清除闹钟）。
@@ -175,15 +257,15 @@ async function rescheduleSmartWeatherAlarm() {
   await createAlarm('ac-smart-weather', { when: plan.prefetchAt });
 }
 
-// 边界闹钟触发：进入/退出运行时段，自动启用/关闭 PWM
+// 边界闹钟触发：进入/退出运行时段，恢复/暂停已启用的自动控制
 async function onActiveBoundaryCrossed() {
   // 重新调度下一次边界（先调度，避免后续 await 抛出时漏掉）
-  rescheduleActiveBoundary();
+  await rescheduleActiveBoundary();
 
-  // 提取（Fowler Extract Function）：退出运行时段停用路径——B1 顺序：先 persist 已停用状态再执行长流程关机。
+  // 提取（Fowler Extract Function）：退出运行时段暂停路径——B1 顺序：先 persist 已重置运行态再执行长流程关机。
   async function shutdownAfterActiveHoursLeave() {
     await resetDisabledPwmRuntime();
-    // B1（active-hours 离开）：先 persist 已停用状态再执行长流程关机 — 与
+    // B1（active-hours 离开）：先 persist 已重置运行态再执行长流程关机 — 与
     // updateSchedule、applySyncedPhase 同步停用路径保持顺序一致，避免 SW 在
     // verifyPageTimerPersistence 长流程中被杀导致闹钟自愈"复活" PWM。
     await persistSchedule('active-hours-leave-pre-shutdown', { syncFromLiveAlarm: false });
@@ -194,24 +276,20 @@ async function onActiveBoundaryCrossed() {
   }
 
   const inside = isWithinActiveHours();
-  if (inside && !schedule.enabled) {
-    // 进入运行时段 → 自动启用 PWM
-    console.log('[ac-ust] active hours: entering, auto-enable PWM');
-    schedule.enabled = true;
+  if (inside && schedule.enabled) {
+    // 进入运行时段 → 恢复用户已启用的自动控制
+    console.log('[ac-ust] active hours: entering, resume automation');
     schedule.pwmState = 'on';
-    await persistSchedule('active-hours-enter');
+    await persistSchedule('active-hours-enter-pre-setup', { syncFromLiveAlarm: false });
     await setupAlarms(true);
-    await createAlarm('ac-watchdog', { periodInMinutes: 5 });
-    // [v0.5.6] 跨设备同步：activeHours 跨边界是低频事件（每日 ≤ 2 次），同步推送
-    await syncScheduleToSync('active-hours-enter');
+    if (isAutomationAllowed()) {
+      await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+    }
   } else if (!inside && schedule.enabled) {
-    // 退出运行时段 → 关闭 PWM 并停机（避免噪音）
-    console.log('[ac-ust] active hours: leaving, auto-disable PWM');
-    schedule.enabled = false;
+    // 退出运行时段 → 暂停自动控制并停机，但保留用户启用意图
+    console.log('[ac-ust] active hours: leaving, pause automation');
     await shutdownAfterActiveHoursLeave();
-    await persistSchedule('active-hours-leave');
-    // [v0.5.6] 同步推送离开时段状态
-    await syncScheduleToSync('active-hours-leave');
+    await rescheduleSmartWeatherAlarm();
   }
 }
 
@@ -407,7 +485,8 @@ async function applyPreparedSmartModeDurations() {
 // 仅 AC 当前处于 ON 相位(pwmState='off')时重设页面定时器；AC 关闭时只更新派生时长，
 // 下一 ON 相位自然采用新值。整个过程异步执行，不阻塞 popup 的 updateSchedule 响应。
 async function reapplySmartSensitivityNow() {
-  if (!schedule.enabled || !schedule.smartMode?.enabled) return;
+  if ((typeof isAutomationAllowed === 'function' && !isAutomationAllowed())
+      || !schedule.smartMode?.enabled) return;
   if (pwmStepRunning) return;  // 避免与正在执行的 PWM 步骤并发操作页面定时器
 
   const wasOnPhase = schedule.pwmState === 'off';
@@ -419,7 +498,8 @@ async function reapplySmartSensitivityNow() {
   const oldPwmRuntimeRevision = pwmRuntimeRevision;
 
   const weather = await readStoredSmartWeather();
-  if (!schedule.enabled || !schedule.smartMode?.enabled || pwmStepRunning
+  if ((typeof isAutomationAllowed === 'function' && !isAutomationAllowed())
+      || !schedule.smartMode?.enabled || pwmStepRunning
       || pwmRuntimeRevision !== oldPwmRuntimeRevision
       || schedule.pwmState !== oldPwmState
       || (Number(schedule.onMinutes) || 0) !== oldOnMinutes
@@ -487,29 +567,49 @@ async function reapplySmartSensitivityNow() {
 
   // 先清旧 alarm，避免旧关机时刻在慢速新鲜页验证期间抢跑；页面写入方返回
   // 已对齐 UST HH:MM 接口的绝对 targetAt，再用同一值恢复扩展倒计时。
-  await chrome.alarms.clear('ac-pwm');
+  await clearPwmAlarm(oldPwmRuntimeRevision);
   setNextTriggerAt(0);
   schedule.alarmCreatedAt = 0;
   schedule.alarmDelayMinutes = 0;
   const timerResult = await setPageTimer(minutes, {
     retryOnFailure: false,
-    targetAt: smartDeadlineAt
+    targetAt: smartDeadlineAt,
+    automationRevision: oldPwmRuntimeRevision
   });
+  if (await abortStaleAutomation(
+    oldPwmRuntimeRevision,
+    'reapply-smart-sensitivity-active-hours-paused'
+  )) return;
   if (!timerResult?.success) {
     schedule.pageTimerError = `灵敏度即时应用时页面关机定时器未确认：${timerResult?.error || '未知错误'}；1 分钟后重试`;
-    await createPwmAlarmFromPlan(
+    const alarmCreated = await createPwmAlarmFromPlan(
       { nextTriggerAt: Date.now() + 60000 },
-      'reapply-smart-pageTimer-failed'
+      'reapply-smart-pageTimer-failed',
+      oldPwmRuntimeRevision
     );
+    if (alarmCreated === false) return;
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+    if (await abortStaleAutomation(
+      oldPwmRuntimeRevision,
+      'reapply-smart-retry-active-hours-paused'
+    )) return;
     await persistSchedule('reapply-smart-sensitivity-pageTimer-failed');
     await updateBadge();
     return;
   }
 
   const reapplyPlan = { nextTriggerAt: schedule.pageTimerTargetAt };
-  await createPwmAlarmFromPlan(reapplyPlan, 'reapply-smart-sensitivity');
+  const alarmCreated = await createPwmAlarmFromPlan(
+    reapplyPlan,
+    'reapply-smart-sensitivity',
+    oldPwmRuntimeRevision
+  );
+  if (alarmCreated === false) return;
   await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+  if (await abortStaleAutomation(
+    oldPwmRuntimeRevision,
+    'reapply-smart-commit-active-hours-paused'
+  )) return;
   await persistSchedule('reapply-smart-sensitivity-on-phase');
   await updateBadge();
 
@@ -533,29 +633,62 @@ function applyPwmPlanState(plan) {
 }
 
 async function resetDisabledPwmRuntime() {
+  pwmRuntimeRevision += 1;
+  await cancelAutomaticOnRequests();
+  scheduleLoadBlockedRevision = pwmRuntimeRevision;
+  lastPwmStepAt = 0;
   schedule.pwmState = 'off';
   schedule.smartOnBoundaryAt = 0;
   setNextTriggerAt(0);
   schedule.alarmCreatedAt = 0;
   schedule.alarmDelayMinutes = 0;
-  await chrome.alarms.clear('ac-pwm');
-  await chrome.alarms.clear('ac-page-timer-retry');
+  await clearPwmAlarm(null, true);
   await chrome.alarms.clear('ac-badge-tick');
   await chrome.alarms.clear('ac-watchdog');
   await updateBadge();
 }
 
-async function persistReconciledPwmTrigger(alarm, reason, options) {
+async function persistReconciledPwmTrigger(
+  alarm,
+  reason,
+  options,
+  automationRevision = typeof pwmRuntimeRevision === 'number'
+    ? pwmRuntimeRevision
+    : null
+) {
+  if ((typeof isAutomationAllowed === 'function' && !isAutomationAllowed())
+      || (automationRevision !== null
+        && typeof isAutomationOperationCurrent === 'function'
+        && !isAutomationOperationCurrent(automationRevision))) {
+    return null;
+  }
   const plan = reconcilePwmTrigger(schedule, alarm, options);
   if (plan.kind !== 'sync-live') return null;
+  if ((typeof isAutomationAllowed === 'function' && !isAutomationAllowed())
+      || (automationRevision !== null
+        && typeof isAutomationOperationCurrent === 'function'
+        && !isAutomationOperationCurrent(automationRevision))) {
+    return null;
+  }
 
   applyPwmPlanState(plan);
   await persistSchedule(reason, { syncFromLiveAlarm: false });
   return plan;
 }
 
-async function syncStoredTriggerFromAlarm(alarm, reason = '从现有 PWM 闹钟同步绝对触发时间') {
-  const plan = await persistReconciledPwmTrigger(alarm, reason, PWM_TRIGGER_STRICT_OPTIONS);
+async function syncStoredTriggerFromAlarm(
+  alarm,
+  reason = '从现有 PWM 闹钟同步绝对触发时间',
+  automationRevision = typeof pwmRuntimeRevision === 'number'
+    ? pwmRuntimeRevision
+    : null
+) {
+  const plan = await persistReconciledPwmTrigger(
+    alarm,
+    reason,
+    PWM_TRIGGER_STRICT_OPTIONS,
+    automationRevision
+  );
   if (!plan) return false;
 
   console.log(`[AC扩展] ${reason}: ${new Date(plan.liveScheduledTime).toLocaleTimeString()}`);
@@ -581,8 +714,10 @@ async function backfillNextTriggerAt(persist = false) {
   }
 
   // 第二层：legacy 字段也丢了，但 live alarm 还在 → 从 alarm 恢复
-  if (schedule.enabled) {
+  if (isAutomationAllowed()) {
+    const automationRevision = pwmRuntimeRevision;
     const liveAlarm = await chrome.alarms.get('ac-pwm');
+    if (!isAutomationOperationCurrent(automationRevision)) return 0;
     const plan = reconcilePwmTrigger(schedule, liveAlarm, PWM_TRIGGER_NEXT_ONLY_OPTIONS);
     if (plan.kind === 'sync-live') {
       applyPwmPlanState(plan);
@@ -600,7 +735,12 @@ async function backfillNextTriggerAt(persist = false) {
 // 从已过期的闹钟时间推进到下一个未来周期边界。
 // 不会点击 AC 开关；但若恢复后理论上正处于 ON 阶段，必须先重新武装并
 // 通过新鲜页面确认 Power-off after，不能直接造出无关机证明的 OFF 相位。
-async function advanceExpiredAlarmToNextBoundary(expiredScheduledTime) {
+async function advanceExpiredAlarmToNextBoundary(
+  expiredScheduledTime,
+  automationRevision = pwmRuntimeRevision
+) {
+  if (!isAutomationOperationCurrent(automationRevision)) return false;
+
   const recoverySchedule = { ...schedule };
   let observations = {};
   let plan = planPwmRecovery(recoverySchedule, expiredScheduledTime, observations);
@@ -613,12 +753,23 @@ async function advanceExpiredAlarmToNextBoundary(expiredScheduledTime) {
 
   if (plan.kind === 'hold' && plan.prerequisite === 'set-page-timer') {
     const status = await getCurrentACStatus();
+    if (await abortStaleAutomation(
+      automationRevision,
+      'advance-expired-active-hours-paused'
+    )) return false;
     observations = { acIsOn: status?.isOn };
     plan = planPwmRecovery(recoverySchedule, expiredScheduledTime, observations);
 
     if (plan.kind === 'hold' && plan.prerequisite === 'set-page-timer') {
       applyPwmPlanState(plan);
-      const timerResult = await setPageTimer(plan.timerMinutes, { retryOnFailure: false });
+      const timerResult = await setPageTimer(plan.timerMinutes, {
+        retryOnFailure: false,
+        automationRevision
+      });
+      if (await abortStaleAutomation(
+        automationRevision,
+        'advance-expired-page-timer-active-hours-paused'
+      )) return false;
       observations = {
         ...observations,
         pageTimerSucceeded: !!timerResult?.success,
@@ -631,9 +782,18 @@ async function advanceExpiredAlarmToNextBoundary(expiredScheduledTime) {
   if (plan.kind === 'retry') {
     applyPwmPlanState(plan);
     schedule.pageTimerError = `过期闹钟恢复时页面关机定时器未确认：${schedule.pageTimerError || '未知错误'}；1 分钟后重试`;
-    await chrome.alarms.clear('ac-pwm');
-    await createPwmAlarmFromPlan(plan, 'advance-pageTimer-failed');
+    await clearPwmAlarm(automationRevision);
+    const alarmCreated = await createPwmAlarmFromPlan(
+      plan,
+      'advance-pageTimer-failed',
+      automationRevision
+    );
+    if (alarmCreated === false) return false;
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+    if (await abortStaleAutomation(
+      automationRevision,
+      'advance-retry-active-hours-paused'
+    )) return false;
     await persistSchedule('advanceExpiredAlarmToNextBoundary-pageTimer-failed', { syncFromLiveAlarm: false });
     await updateBadge();
     return true;
@@ -645,9 +805,18 @@ async function advanceExpiredAlarmToNextBoundary(expiredScheduledTime) {
   if (plan.proofAction === 'clear') {
     await chrome.alarms.clear('ac-page-timer-retry');
   }
-  await chrome.alarms.clear('ac-pwm');
-  await createPwmAlarmFromPlan(plan, 'advance-recovery');
+  await clearPwmAlarm(automationRevision);
+  const alarmCreated = await createPwmAlarmFromPlan(
+    plan,
+    'advance-recovery',
+    automationRevision
+  );
+  if (alarmCreated === false) return false;
   await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+  if (await abortStaleAutomation(
+    automationRevision,
+    'advance-commit-active-hours-paused'
+  )) return false;
   await persistSchedule('advanceExpiredAlarmToNextBoundary', { syncFromLiveAlarm: false });
   await updateBadge();
 
@@ -656,10 +825,12 @@ async function advanceExpiredAlarmToNextBoundary(expiredScheduledTime) {
 }
 
 async function restoreIntervalAlarmFromStorage(reason = '按 storage 剩余时间恢复 PWM 闹钟') {
-  if (!schedule.enabled) return false;
+  if (!isAutomationAllowed()) return false;
+  const automationRevision = pwmRuntimeRevision;
 
   const now = Date.now();
   const liveAlarm = await chrome.alarms.get('ac-pwm');
+  if (!isAutomationOperationCurrent(automationRevision)) return false;
   const liveDueAt = getLiveAlarmEndMs(liveAlarm);
   const storedDueAt = getStoredAlarmEndMs();
   const targetDueAt = liveDueAt || (storedDueAt > now ? storedDueAt : 0);
@@ -667,26 +838,26 @@ async function restoreIntervalAlarmFromStorage(reason = '按 storage 剩余时�
   if (!targetDueAt || targetDueAt <= now) return false;
 
   if (liveDueAt) {
-    await syncStoredTriggerFromAlarm(liveAlarm, `${reason}（沿用现有活闹钟）`);
+    await syncStoredTriggerFromAlarm(
+      liveAlarm,
+      `${reason}（沿用现有活闹钟）`,
+      automationRevision
+    );
     await updateBadge();
     return true;
   }
 
   const remainingMinutes = Math.max(1, (targetDueAt - now) / 60000);
-  await chrome.alarms.clear('ac-pwm');
-  await createAlarm('ac-pwm', { delayInMinutes: remainingMinutes });
+  await clearPwmAlarm(automationRevision);
+  const alarmCreated = await createPwmAlarmFromPlan(
+    { nextTriggerAt: targetDueAt },
+    'restore-interval',
+    automationRevision
+  );
+  if (alarmCreated === false) return false;
   await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-
-  const restoredAlarm = await chrome.alarms.get('ac-pwm');
-  if (!restoredAlarm?.scheduledTime) {
-    console.error('[AC扩展] restoreIntervalAlarmFromStorage 失败：ac-pwm 未成功恢复');
-    return false;
-  }
-
-  if (!schedule.nextTriggerAt || schedule.nextTriggerAt !== targetDueAt) {
-    setNextTriggerAt(targetDueAt);
-    await persistSchedule(reason, { syncFromLiveAlarm: false });
-  }
+  if (!isAutomationOperationCurrent(automationRevision)) return false;
+  await persistSchedule(reason, { syncFromLiveAlarm: false });
 
   await updateBadge();
   console.log(`[AC扩展] ${reason}，剩余 ${remainingMinutes.toFixed(2)} 分钟`);
@@ -695,52 +866,142 @@ async function restoreIntervalAlarmFromStorage(reason = '按 storage 剩余时�
 
 async function createAlarm(name, info) {
   try {
+    const isAutomationRuntimeAlarm = AUTOMATION_RUNTIME_ALARMS.has(name);
+    if (isAutomationRuntimeAlarm && !isAutomationAllowed()) {
+      await chrome.alarms.clear(name);
+      return false;
+    }
+
     const { persistAcrossSessions, ...safeInfo } = info || {};
     await chrome.alarms.create(name, safeInfo);
+    if (isAutomationRuntimeAlarm && !isAutomationAllowed()) {
+      await chrome.alarms.clear(name);
+      return false;
+    }
+
     // 验证创建成功
     const verify = await chrome.alarms.get(name);
     if (!verify) console.error('[AC扩展] createAlarm 失败: ' + name + ' ' + JSON.stringify(safeInfo));
+    return !!verify;
   } catch (e) {
     console.error('[AC扩展] createAlarm 异常: ' + name, e?.message);
     void appendDiagnosticLog('error', 'create-alarm', e);
+    return false;
   }
 }
 
-async function createPwmAlarmWithVerify(delay, logTag = 'PWM') {
-  schedule.alarmCreatedAt = Date.now();
-  schedule.alarmDelayMinutes = delay;
-  await createAlarm('ac-pwm', { delayInMinutes: delay });
-  const verify = await chrome.alarms.get('ac-pwm');
-  setNextTriggerAt(verify?.scheduledTime || (schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000));
-  if (!verify) {
-    console.error(`[AC扩展] ${logTag}: PWM 闹钟创建失败，重试...`);
-    await createAlarm('ac-pwm', { delayInMinutes: delay });
-  }
+let pwmAlarmWriteChain = Promise.resolve();
+
+function runSerializedPwmAlarmWrite(operation) {
+  const queued = pwmAlarmWriteChain
+    .catch(() => {})
+    .then(operation);
+  pwmAlarmWriteChain = queued.catch(() => {});
+  return queued;
 }
 
-async function createPwmAlarmFromPlan(plan, logTag = 'PWM') {
+function isPwmAlarmWriteCurrent(automationRevision) {
+  return automationRevision === null
+    ? isAutomationAllowed()
+    : isAutomationOperationCurrent(automationRevision);
+}
+
+async function clearPwmAlarm(automationRevision = null, force = false) {
+  return runSerializedPwmAlarmWrite(async () => {
+    if (!force && !isPwmAlarmWriteCurrent(automationRevision)) return false;
+    await chrome.alarms.clear('ac-pwm');
+    return force || isPwmAlarmWriteCurrent(automationRevision);
+  });
+}
+
+async function clearAutomationRuntimeAlarmsWhileBlocked(
+  blockedRevision = pwmRuntimeRevision
+) {
+  const blockIsCurrent = () => (
+    blockedRevision === pwmRuntimeRevision && !isAutomationAllowed()
+  );
+  if (!blockIsCurrent()) return false;
+
+  await clearPwmAlarm(null, true);
+  if (!blockIsCurrent()) return false;
+  await chrome.alarms.clear('ac-badge-tick');
+  if (!blockIsCurrent()) return false;
+  await chrome.alarms.clear('ac-watchdog');
+  return blockIsCurrent();
+}
+
+async function createPwmAlarmWithVerify(
+  delay,
+  logTag = 'PWM',
+  automationRevision = null
+) {
+  return runSerializedPwmAlarmWrite(async () => {
+    if (!isPwmAlarmWriteCurrent(automationRevision)) return false;
+
+    const alarmCreatedAt = Date.now();
+    const alarmDelayMinutes = delay;
+    let created = await createAlarm('ac-pwm', { delayInMinutes: delay });
+    if (!created && isPwmAlarmWriteCurrent(automationRevision)) {
+      console.error(`[AC扩展] ${logTag}: PWM 闹钟创建失败，重试...`);
+      created = await createAlarm('ac-pwm', { delayInMinutes: delay });
+    }
+    const verify = created ? await chrome.alarms.get('ac-pwm') : null;
+    if (!created || !verify || !isPwmAlarmWriteCurrent(automationRevision)) {
+      await chrome.alarms.clear('ac-pwm');
+      return false;
+    }
+
+    schedule.alarmCreatedAt = alarmCreatedAt;
+    schedule.alarmDelayMinutes = alarmDelayMinutes;
+    setNextTriggerAt(verify.scheduledTime
+      || (alarmCreatedAt + alarmDelayMinutes * 60000));
+    return true;
+  });
+}
+
+async function createPwmAlarmFromPlan(
+  plan,
+  logTag = 'PWM',
+  automationRevision = null
+) {
   const nextTriggerAt = Number(plan?.nextTriggerAt);
   if (!Number.isFinite(nextTriggerAt) || nextTriggerAt <= Date.now()) {
     throw new Error(`${logTag}: PWM plan 缺少未来触发时间`);
   }
 
-  schedule.alarmCreatedAt = Date.now();
-  schedule.alarmDelayMinutes = Math.max(
-    1,
-    (nextTriggerAt - schedule.alarmCreatedAt) / 60000
-  );
-  await createAlarm('ac-pwm', { when: nextTriggerAt });
-  let verify = await chrome.alarms.get('ac-pwm');
-  if (!verify) {
-    console.error(`[AC扩展] ${logTag}: PWM 闹钟创建失败，重试...`);
-    await createAlarm('ac-pwm', { when: nextTriggerAt });
-    verify = await chrome.alarms.get('ac-pwm');
-  }
-  setNextTriggerAt(verify?.scheduledTime || nextTriggerAt);
+  return runSerializedPwmAlarmWrite(async () => {
+    if (!isPwmAlarmWriteCurrent(automationRevision)) return false;
+
+    const alarmCreatedAt = Date.now();
+    const alarmDelayMinutes = Math.max(
+      1,
+      (nextTriggerAt - alarmCreatedAt) / 60000
+    );
+    let created = await createAlarm('ac-pwm', { when: nextTriggerAt });
+    let verify = created ? await chrome.alarms.get('ac-pwm') : null;
+    if ((!created || !verify) && isPwmAlarmWriteCurrent(automationRevision)) {
+      console.error(`[AC扩展] ${logTag}: PWM 闹钟创建失败，重试...`);
+      created = await createAlarm('ac-pwm', { when: nextTriggerAt });
+      verify = created ? await chrome.alarms.get('ac-pwm') : null;
+    }
+    if (!created || !verify || !isPwmAlarmWriteCurrent(automationRevision)) {
+      await chrome.alarms.clear('ac-pwm');
+      return false;
+    }
+
+    schedule.alarmCreatedAt = alarmCreatedAt;
+    schedule.alarmDelayMinutes = alarmDelayMinutes;
+    setNextTriggerAt(verify.scheduledTime || nextTriggerAt);
+    return true;
+  });
 }
 
 async function loadScheduleFromStorage() {
+  const automationRevision = pwmRuntimeRevision;
+  if (scheduleLoadBlockedRevision === automationRevision) return schedule;
   const saved = await chrome.storage.local.get(STORAGE_KEY);
+  if (automationRevision !== pwmRuntimeRevision
+      || scheduleLoadBlockedRevision === automationRevision) return schedule;
   if (saved[STORAGE_KEY]) {
     schedule = { ...schedule, ...saved[STORAGE_KEY] };
   }
@@ -751,18 +1012,24 @@ async function persistSchedule(reason = '', options = {}) {
   const { syncFromLiveAlarm = true } = options;
   if (!schedule.smartMode?.enabled) schedule.smartOnBoundaryAt = 0;
 
-  if (syncFromLiveAlarm && schedule.enabled) {
+  if (syncFromLiveAlarm && isAutomationAllowed()) {
+    const automationRevision = pwmRuntimeRevision;
     const liveAlarm = await chrome.alarms.get('ac-pwm');
-    const plan = reconcilePwmTrigger(schedule, liveAlarm, PWM_TRIGGER_NEXT_ONLY_OPTIONS);
-    if (plan.kind === 'sync-live') {
-      applyPwmPlanState(plan);
-      if (reason) {
-        console.log(`[AC扩展] ${reason}: 写入前按 live alarm 修正 nextTriggerAt`);
+    if (isAutomationOperationCurrent(automationRevision)) {
+      const plan = reconcilePwmTrigger(schedule, liveAlarm, PWM_TRIGGER_NEXT_ONLY_OPTIONS);
+      if (plan.kind === 'sync-live') {
+        applyPwmPlanState(plan);
+        if (reason) {
+          console.log(`[AC扩展] ${reason}: 写入前按 live alarm 修正 nextTriggerAt`);
+        }
       }
     }
   }
 
   await chrome.storage.local.set({ [STORAGE_KEY]: { ...schedule } });
+  if (scheduleLoadBlockedRevision === pwmRuntimeRevision) {
+    scheduleLoadBlockedRevision = null;
+  }
 }
 
 // ============================================================
@@ -772,7 +1039,6 @@ async function persistSchedule(reason = '', options = {}) {
 // 触发同步写入的时机（节流策略，远低于 sync 配额 100 写/小时、1200 写/天）：
 //   • runPwmStep 每次成功的阶段翻转 (toggleOk=true) — 60min 周期 ≈ 24 写/天
 //   • updateSchedule handler（用户改设置/toggle）— 用户发起，低频
-//   • onActiveBoundaryCrossed enter/leave — 每日 ≤ 2 次
 //   • onInstalled install—— push 默认配置到 sync（若 sync 为空）
 //   • init() 启动时—— 不写入，只读采纳
 //
@@ -813,21 +1079,28 @@ async function applySyncedPhase(remote, reason = '') {
   if (!remote || typeof remote !== 'object') return false;
 
   // 提取（Fowler Extract Function）：同步停用路径——B1 顺序：先 persist 停用状态，再走页面定时器关机。
-  async function shutdownAfterSyncDisable() {
+  async function shutdownAfterSyncDisable({ activeHoursPause = false } = {}) {
     await resetDisabledPwmRuntime();
     // B1（同步停用）：先 persist 停用状态再执行长流程关机 — 防止 SW 在
     // verifyPageTimerPersistence 的 2 分钟+等待中被杀后，storage 仍是 enabled=true
     // 导致重启后闹钟自愈"复活" PWM。末尾 `if (changed)` persist 仍处理相位/activeHours。
-    await persistSchedule('sync-disabled-pre-shutdown', { syncFromLiveAlarm: false });
+    if (activeHoursPause) {
+      await persistSchedule('sync-active-hours-paused-pre-shutdown', { syncFromLiveAlarm: false });
+    } else {
+      await persistSchedule('sync-disabled-pre-shutdown', { syncFromLiveAlarm: false });
+    }
     // 自动关机只依赖 UST 页面定时器，不再点击 AC 开关。
-    const shutdownResult = await requestTimerBasedShutdown('sync-disabled');
+    const shutdownResult = activeHoursPause
+      ? await requestTimerBasedShutdown('sync-active-hours-paused')
+      : await requestTimerBasedShutdown('sync-disabled');
     if (!shutdownResult?.success) {
-      schedule.pageTimerError = `同步停用后页面关机定时器未确认：${shutdownResult?.error || '未知错误'}`;
+      schedule.pageTimerError = `${activeHoursPause ? '同步运行时段暂停' : '同步停用'}后页面关机定时器未确认：${shutdownResult?.error || '未知错误'}`;
     }
   }
 
   // 先记录 enabled 旧值——config 采纳后判断是否需要重建闹钟基础设施
   const wasEnabled = schedule.enabled;
+  const wasAutomationAllowed = isAutomationAllowed();
 
   // 1) config 字段无相位守卫——直接 last-writer-wins 采纳
   const cfg = computeConfigDiff(schedule, remote);
@@ -842,12 +1115,15 @@ async function applySyncedPhase(remote, reason = '') {
   }
   const enabledChanged = cfg.fields.enabled !== undefined;
   const nowEnabled = schedule.enabled;
+  const automationAllowed = isAutomationAllowed();
 
   // 2) 相位字段需通过严格守卫（陈旧/容忍/自回环），computePhaseAdoption 决策
   // 提取（Fowler Extract Function）：相位采纳 + ac-pwm 重排；远端时戳过期则推进到下一未来边界。
-  async function adoptPhaseAndRearm(remote, nowEnabled) {
+  async function adoptPhaseAndRearm(remote, automationAllowed) {
+    const automationRevision = pwmRuntimeRevision;
     const adopt = computePhaseAdoption(schedule, remote, { lastSyncedAt });
     if (!adopt) return false;
+    if (!automationAllowed || !isAutomationOperationCurrent(automationRevision)) return false;
 
     const oldPwmState = schedule.pwmState;
     const oldTrigger = schedule.nextTriggerAt;
@@ -857,16 +1133,24 @@ async function applySyncedPhase(remote, reason = '') {
     schedule.alarmDelayMinutes = Math.max(1, (adopt.nextTriggerAt - Date.now()) / 60000);
     const phaseChanged = (oldPwmState !== schedule.pwmState || oldTrigger !== schedule.nextTriggerAt);
 
-    if (phaseChanged && nowEnabled) {
+    if (phaseChanged && automationAllowed) {
       try {
-        await chrome.alarms.clear('ac-pwm');
+        await clearPwmAlarm(automationRevision);
         const delayMs = adopt.nextTriggerAt - Date.now();
         if (delayMs > 0) {
           // 用绝对时间调度，让多设备对齐到同一时刻（非 delayInMinutes 各自倒计时）
-          chrome.alarms.create('ac-pwm', { when: adopt.nextTriggerAt });
+          const alarmCreated = await createPwmAlarmFromPlan(
+            { nextTriggerAt: adopt.nextTriggerAt },
+            'sync-phase-adopt',
+            automationRevision
+          );
+          if (alarmCreated === false) return false;
         } else {
           // 远端时戳已过期（在 staleMs 60s 窗口内）——推进到下一未来周期边界
-          await advanceExpiredAlarmToNextBoundary(adopt.nextTriggerAt);
+          await advanceExpiredAlarmToNextBoundary(
+            adopt.nextTriggerAt,
+            automationRevision
+          );
         }
       } catch (e) {
         console.warn('[AC扩展] sync 合并：重排 ac-pwm 闹钟失败:', e?.message);
@@ -875,15 +1159,26 @@ async function applySyncedPhase(remote, reason = '') {
     return phaseChanged;
   }
 
-  const phaseChanged = await adoptPhaseAndRearm(remote, nowEnabled);
+  const phaseChanged = await adoptPhaseAndRearm(remote, automationAllowed);
 
   // 3) 闹钟基础设施重建——只由 config 变更驱动（相位路径只管 ac-pwm）
   //    关键修复：若 enabled 在 sync 中翻为 true 但无相位（远端刚 enable 还没跑完第一步），
   //    只持久化 enabled=true 却不建闹钟，设备 B 永远不会真正执行 PWM。
   //    反之 enabled 翻为 false 也必须主动清理闹钟 + 停机，否则设备 B 继续跑本地 PWM。
   let didAlarmInfra = false;
-  if (enabledChanged) {
-    if (nowEnabled) {
+  if (enabledChanged || activeHoursChanged) {
+    if (!nowEnabled) {
+      if (enabledChanged) {
+        // true → false：清所有 PWM 相关闹钟 + 停机（B1 顺序：先 persist 再关）
+        await shutdownAfterSyncDisable();
+        didAlarmInfra = true;
+      }
+    } else if (!automationAllowed) {
+      // enabled 意图保持开启，但 activeHours 当前在时段外：立即暂停，不伪造 disabled。
+      await shutdownAfterSyncDisable({ activeHoursPause: true });
+      await rescheduleSmartWeatherAlarm();
+      didAlarmInfra = true;
+    } else if (enabledChanged || !wasAutomationAllowed) {
       // false → true：按是否已采纳相位决定是否立即新起 PWM cycle
       if (phaseChanged) {
         // 相位路径已建 ac-pwm；只补看门狗 + badge-tick（相位路径不管这两个）
@@ -899,11 +1194,8 @@ async function applySyncedPhase(remote, reason = '') {
         await setupAlarms(true);  // startImmediately → runPwmStep，内部建 ac-pwm + badge-tick
         await createAlarm('ac-watchdog', { periodInMinutes: 5 });
       }
-    } else {
-      // true → false：清所有 PWM 相关闹钟 + 停机（B1 顺序：先 persist 再关）
-      await shutdownAfterSyncDisable();
+      didAlarmInfra = true;
     }
-    didAlarmInfra = true;
   }
 
   // 4) active hours 边界闹钟：activeHours 变更或相位重排后都应重调度
@@ -973,7 +1265,8 @@ async function tryAdoptSyncedState(reason = '', explicitRemote = null) {
 // 优雅降级：page timer 并非服务器同步时，读回的是本机刚写的值——偏差 <
 // toleranceMs(60s)，computePageTimerAdoption 返回 null，不干预，功能等于关闭。
 async function tryAdoptPageTimer(reason = '') {
-  if (!schedule.enabled) return false;
+  if (!isAutomationAllowed() || isCurrentPwmStepRunning()) return false;
+  const automationRevision = pwmRuntimeRevision;
   try {
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
     const tab = tabs.find(isACHomePageTab);
@@ -984,6 +1277,8 @@ async function tryAdoptPageTimer(reason = '') {
 
     const adopt = computePageTimerAdoption(schedule, result, { now: Date.now() });
     if (!adopt) return false;
+    if (isCurrentPwmStepRunning()
+        || !isAutomationOperationCurrent(automationRevision)) return false;
 
     // 采纳 page timer 值作为权威"关"时刻
     const oldTrigger = schedule.nextTriggerAt;
@@ -992,16 +1287,32 @@ async function tryAdoptPageTimer(reason = '') {
     schedule.alarmDelayMinutes = Math.max(1, (adopt.nextTriggerAt - Date.now()) / 60000);
 
     // 重排 ac-pwm 闹钟到新时刻
-    await chrome.alarms.clear('ac-pwm');
+    await clearPwmAlarm(automationRevision);
     const delayMs = adopt.nextTriggerAt - Date.now();
     if (delayMs > 0) {
-      chrome.alarms.create('ac-pwm', { when: adopt.nextTriggerAt });
+      const alarmCreated = await createPwmAlarmFromPlan(
+        { nextTriggerAt: adopt.nextTriggerAt },
+        'page-timer-adopt',
+        automationRevision
+      );
+      if (alarmCreated === false) return false;
     } else {
-      await advanceExpiredAlarmToNextBoundary(adopt.nextTriggerAt);
+      await advanceExpiredAlarmToNextBoundary(
+        adopt.nextTriggerAt,
+        automationRevision
+      );
     }
 
     await rescheduleActiveBoundary();
+    if (await abortStaleAutomation(
+      automationRevision,
+      'page-timer-adopt-active-hours-paused'
+    )) return false;
     await persistSchedule(`page-timer-adopt (${reason})`, { syncFromLiveAlarm: false });
+    if (await abortStaleAutomation(
+      automationRevision,
+      'page-timer-adopt-sync-active-hours-paused'
+    )) return false;
     // 把修正后的相位推回 sync——让仅靠 sync 的设备也间接对齐到 page timer 的时刻
     await syncScheduleToSync(`page-timer-adopt (${reason})`);
 
@@ -1061,7 +1372,10 @@ async function ensureOffscreen() {
 // ----- 看门狗：定期检查 PWM 闹钟完整性 -----
 async function watchdogCheck() {
   await loadScheduleFromStorage();
-  if (!schedule.enabled) return;
+  if (!isAutomationAllowed()) {
+    await clearAutomationRuntimeAlarmsWhileBlocked();
+    if (!isAutomationAllowed()) return;
+  }
 
   // 提取（Fowler Extract Function）：看门狗缺失闹钟恢复——按剩余时间补恢复，失败则补执行当前阶段动作。
   async function recoverMissingPwmAlarm() {
@@ -1082,10 +1396,17 @@ async function watchdogCheck() {
     try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
   }
 
+  const automationRevision = pwmRuntimeRevision;
   const alarm = await chrome.alarms.get('ac-pwm');
+  if (!isAutomationOperationCurrent(automationRevision)) return;
 
   // 活闹钟存在 → 确保 storage 的 nextTriggerAt 与 alarm 同步（防止 SW 被 kill 后丢失）
-  const triggerPlan = await persistReconciledPwmTrigger(alarm, 'watchdogCheck', PWM_TRIGGER_NEXT_ONLY_OPTIONS);
+  const triggerPlan = await persistReconciledPwmTrigger(
+    alarm,
+    'watchdogCheck',
+    PWM_TRIGGER_NEXT_ONLY_OPTIONS,
+    automationRevision
+  );
   if (triggerPlan) {
     console.log('[AC扩展] 看门狗：已同步 nextTriggerAt ← live alarm');
   }
@@ -1141,9 +1462,15 @@ async function init() {
       // 终极防线：init 完成时，间隔模式下强制从 live ac-pwm 同步 nextTriggerAt 到 storage。
       // 防止 SW 跑早期版本代码、setupAlarms 走重建路径、或某条 persist 漏 sync 时出现
       // "活闹钟在但 storage 缺绝对触发时间" 的红灯。init 末尾是端到端最后一道闭环。
-      if (schedule.enabled) {
+      if (isAutomationAllowed()) {
+        const automationRevision = pwmRuntimeRevision;
         const finalLiveAlarm = await chrome.alarms.get('ac-pwm');
-        const triggerPlan = await persistReconciledPwmTrigger(finalLiveAlarm, 'init-finalSync', PWM_TRIGGER_NEXT_ONLY_OPTIONS);
+        const triggerPlan = await persistReconciledPwmTrigger(
+          finalLiveAlarm,
+          'init-finalSync',
+          PWM_TRIGGER_NEXT_ONLY_OPTIONS,
+          automationRevision
+        );
         if (triggerPlan) {
           console.log(`[AC扩展] init 末尾: 已从 live alarm 强制同步 nextTriggerAt=${new Date(triggerPlan.liveScheduledTime).toLocaleTimeString()}`);
         }
@@ -1156,6 +1483,9 @@ async function init() {
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     await loadScheduleFromStorage();
     await backfillNextTriggerAt(true);
+    if (schedule.enabled && !isAutomationAllowed()) {
+      await onActiveBoundaryCrossed();
+    }
     // [v0.5.6] 跨设备同步：在 setupAlarms 之前尝试从 chrome.storage.sync 采用远端相位。
     // 如有 sync 数据则合并到本地 schedule，再 setupAlarms，保证本机闹钟从对齐相位出发。
     // 新装在另一台设备的扩展启动时会先采用主机的 nextTriggerAt，避免本地从默认值跑偏。
@@ -1166,7 +1496,7 @@ async function init() {
     startHeartbeat();
     await setupAlarms();
     await updateBadge();
-    if (schedule.enabled) {
+    if (isAutomationAllowed()) {
       await createAlarm('ac-watchdog', { periodInMinutes: 5 });
     }
     await recoverPageTimerRetryOnStartup();
@@ -1188,18 +1518,25 @@ async function init() {
 // ----- 设置/更新 PWM 循环闹钟 -----
 async function setupAlarms(startImmediately = false) {
   await rescheduleSmartWeatherAlarm();
-  if (!schedule.enabled) {
-    await chrome.alarms.clear('ac-pwm');
-    await chrome.alarms.clear('ac-badge-tick');
-    await updateBadge();
-    console.log('[AC扩展] PWM 定时未启用');
-    return;
+  if (!isAutomationAllowed()) {
+    await clearAutomationRuntimeAlarmsWhileBlocked();
+    if (!isAutomationAllowed()) {
+      await updateBadge();
+      console.log(`[AC扩展] 自动控制${schedule.enabled ? '在运行时段外暂停' : '未启用'}`);
+      return;
+    }
   }
   schedule.onMinutes = sanitizeMinutes(schedule.onMinutes, 30);
   schedule.offMinutes = sanitizeMinutes(schedule.offMinutes, 30);
 
   if (startImmediately) {
-    await chrome.alarms.clear('ac-pwm');
+    await cancelAutomaticOnRequests();
+    pwmRuntimeRevision += 1;
+    lastPwmStepAt = 0;
+    invalidateTimerBasedShutdown();
+    const setupRevision = pwmRuntimeRevision;
+    await clearPwmAlarm(setupRevision);
+    if (!isAutomationOperationCurrent(setupRevision)) return;
     schedule.pwmState = 'on';
     // 不在这里写 storage——runPwmStep() 执行完毕后会写入完整的正确状态
     await runPwmStep();
@@ -1259,7 +1596,7 @@ function sanitizeMinutes(value, fallback) {
 }
 
 async function updateBadge() {
-  if (!schedule.enabled) {
+  if (!isAutomationAllowed()) {
     await clearBadge();
     return;
   }
@@ -1302,8 +1639,8 @@ async function clearBadge() {
 }
 
 async function runPwmStep() {
-  if (!schedule.enabled) return;
-  if (pwmStepRunning) {
+  if (!isAutomationAllowed()) return;
+  if (isCurrentPwmStepRunning()) {
     console.warn('[AC扩展] PWM 步骤已在执行，跳过重复触发');
     return;
   }
@@ -1312,8 +1649,8 @@ async function runPwmStep() {
     console.warn('[AC扩展] PWM 步骤距上次执行不足 5s，跳过（看门狗 cooldown）');
     return;
   }
-  pwmRuntimeRevision += 1;
-  pwmStepRunning = true;
+  const automationRevision = claimPwmStepOwnership();
+  invalidateTimerBasedShutdown();
 
   function planSmartAutomaticOn(targetAction, acIsOn) {
     if (!(schedule.smartMode?.enabled && targetAction === 'on')) return null;
@@ -1329,7 +1666,9 @@ async function runPwmStep() {
   async function resolveToggleOnHold(plan, observations) {
     try {
       const toggleResult = await toggleAC('on', {
-        notAfterAt: observations.smartOnWindowEndsAt || 0
+        notAfterAt: getAutomaticOnDeadline(observations.smartOnWindowEndsAt || 0),
+        requireAutomationAllowed: true,
+        automationRevision
       });
       observations.toggleSucceeded = !!toggleResult?.success;
       observations.toggleError = toggleResult?.error || '';
@@ -1358,7 +1697,10 @@ async function runPwmStep() {
   // 提取（Fowler Extract Function）：PWM 关机补时 hold 分支——页面定时器证明缺失时补设 1 分钟定时器。
   async function resolveShortTimerHold(plan, observations) {
     applyPwmPlanState(plan);
-    const timerResult = await setPageTimer(plan.timerMinutes, { retryOnFailure: false });
+    const timerResult = await setPageTimer(plan.timerMinutes, {
+      retryOnFailure: false,
+      automationRevision
+    });
     observations.shortTimerAttempted = true;
     observations.shortTimerSucceeded = !!timerResult?.success;
     schedule.pageTimerError = timerResult?.success
@@ -1380,11 +1722,17 @@ async function runPwmStep() {
       schedule.pageTimerError = failureDetail || schedule.pageTimerError
         || `自动${targetAction === 'on' ? '开启' : '关闭'}验证失败，1分钟后重试`;
     }
-    await createPwmAlarmFromPlan(
+    const alarmCreated = await createPwmAlarmFromPlan(
       plan,
-      plan.reason === 'page-timer-failed' ? 'PWM-pageTimer-failed' : 'PWM失败重试'
+      plan.reason === 'page-timer-failed' ? 'PWM-pageTimer-failed' : 'PWM失败重试',
+      automationRevision
     );
+    if (alarmCreated === false) return;
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+    if (await abortStaleAutomation(
+      automationRevision,
+      'runPwmStep-retry-active-hours-paused'
+    )) return;
     await persistSchedule(
       plan.reason === 'page-timer-failed'
         ? 'runPwmStep-on-pageTimer-failed'
@@ -1397,10 +1745,14 @@ async function runPwmStep() {
   return waitUntil((async () => {
   try {
     await loadScheduleFromStorage();
-    if (!schedule.enabled) return;
+    if (!isAutomationAllowed()) return;
 
     // 智能模式：只消费 :10/:50 为当前控制边界准备的本地快照，不等待天气网络。
     await applyPreparedSmartModeDurations();
+    if (await abortStaleAutomation(
+      automationRevision,
+      'runPwmStep-weather-active-hours-paused'
+    )) return;
 
     const targetAction = schedule.pwmState === 'on' ? 'on' : 'off';
     const currentDuration = Number(
@@ -1420,6 +1772,10 @@ async function runPwmStep() {
     console.log(`[AC扩展] PWM 执行: ${targetAction}，持续 ${currentDuration} 分钟`);
 
     const preCheckStatus = await getCurrentACStatus();
+    if (await abortStaleAutomation(
+      automationRevision,
+      'runPwmStep-status-active-hours-paused'
+    )) return;
     observations.acIsOn = preCheckStatus?.isOn;
     if (targetAction === 'off') {
       observations.proofFresh = isPageTimerProofFresh(schedule);
@@ -1447,15 +1803,32 @@ async function runPwmStep() {
 
     if (plan.kind === 'hold' && plan.prerequisite === 'toggle-on') {
       plan = await resolveToggleOnHold(plan, observations);
+      if (await abortStaleAutomation(
+        automationRevision,
+        'runPwmStep-toggle-active-hours-paused'
+      )) return;
     }
 
     if (plan.kind === 'defer') {
       applyPwmPlanState(plan);
-      await chrome.alarms.clear('ac-pwm');
-      await createPwmAlarmFromPlan(plan, 'PWM-smart-on-deferred');
+      await clearPwmAlarm(automationRevision);
+      const alarmCreated = await createPwmAlarmFromPlan(
+        plan,
+        'PWM-smart-on-deferred',
+        automationRevision
+      );
+      if (alarmCreated === false) return;
       await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+      if (await abortStaleAutomation(
+        automationRevision,
+        'runPwmStep-deferred-active-hours-paused'
+      )) return;
       await persistSchedule('runPwmStep-smart-on-deferred');
       await updateBadge();
+      if (await abortStaleAutomation(
+        automationRevision,
+        'runPwmStep-deferred-sync-active-hours-paused'
+      )) return;
       await syncScheduleToSync('runPwmStep-smart-on-deferred');
       console.log(`[AC扩展] 智能自动开启等待下一个半点: ${new Date(plan.nextTriggerAt).toLocaleTimeString()}`);
       return;
@@ -1471,8 +1844,13 @@ async function runPwmStep() {
       applyPwmPlanState(plan);
       const pageTimerResult = await setPageTimer(plan.timerMinutes, {
         retryOnFailure: false,
-        targetAt: observations.smartPageTimerTargetAt || 0
+        targetAt: observations.smartPageTimerTargetAt || 0,
+        automationRevision
       });
+      if (await abortStaleAutomation(
+        automationRevision,
+        'runPwmStep-page-timer-active-hours-paused'
+      )) return;
       observations.pageTimerSucceeded = !!pageTimerResult?.success;
       observations.pageTimerTargetAt = Number(pageTimerResult?.targetAt);
       observations.pageTimerError = pageTimerResult?.error || schedule.pageTimerError || '';
@@ -1481,6 +1859,10 @@ async function runPwmStep() {
 
     if (plan.kind === 'hold' && plan.prerequisite === 'set-short-page-timer') {
       plan = await resolveShortTimerHold(plan, observations);
+      if (await abortStaleAutomation(
+        automationRevision,
+        'runPwmStep-short-timer-active-hours-paused'
+      )) return;
     }
 
     if (plan.kind === 'retry') {
@@ -1504,17 +1886,29 @@ async function runPwmStep() {
     }
 
     applyPwmPlanState(plan);
-    await createPwmAlarmFromPlan(plan, 'PWM');
+  if (await abortStaleAutomation(
+    automationRevision,
+    'runPwmStep-commit-active-hours-paused'
+  )) return;
+  const alarmCreated = await createPwmAlarmFromPlan(plan, 'PWM', automationRevision);
+  if (alarmCreated === false) return;
     console.log(`[AC扩展] PWM 下一阶段:${schedule.pwmState}，${currentDuration}分钟后触发`);
 
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+    if (await abortStaleAutomation(
+      automationRevision,
+      'runPwmStep-persist-active-hours-paused'
+    )) return;
     await persistSchedule('runPwmStep-interval');
     await updateBadge();
 
+    if (await abortStaleAutomation(
+      automationRevision,
+      'runPwmStep-sync-active-hours-paused'
+    )) return;
     await syncScheduleToSync('runPwmStep');
   } finally {
-    lastPwmStepAt = Date.now();  // A4: 记录最后执行时间
-    pwmStepRunning = false;
+    releasePwmStepOwnership(automationRevision);
   }
   })());
 }
@@ -1522,15 +1916,31 @@ async function runPwmStep() {
 // 通过新鲜页面确认 Power-off after 已离开当前 React 状态并真正持久化。
 // 写入来源页无论是用户页还是扩展自建隐藏页都不能刷新：过早导航可能中断 UST
 // 的异步提交。每次读回都新建临时隐藏页，按退避窗口等待服务器落盘后再验证。
-async function verifyPageTimerPersistence(expectedValue) {
+async function verifyPageTimerPersistence(
+  expectedValue,
+  { automationRevision = null, shutdownRevision = null } = {}
+) {
   let lastActualValue = '';
   let lastFailure = '';
+  const persistenceWriteIsCurrent = () => (
+    automationRevision === null
+      || isAutomationOperationCurrent(automationRevision)
+  ) && (
+    shutdownRevision === null
+      || isTimerBasedShutdownCurrent(shutdownRevision)
+  );
 
   // 提取（Fowler Extract Function）：单次新鲜页读回尝试——建临时隐藏页、读回、比对、回收。
   async function attemptPersistenceRead(expectedValue, attempt) {
     let verifierTabId = null;
     try {
+      if (!persistenceWriteIsCurrent()) {
+        return { success: false, automationStale: true, shutdownStale: true };
+      }
       await sleep(PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS[attempt]);
+      if (!persistenceWriteIsCurrent()) {
+        return { success: false, automationStale: true, shutdownStale: true };
+      }
 
       const verifierTab = await chrome.tabs.create({ url: AC_PAGE, active: false });
       verifierTabId = verifierTab?.id || null;
@@ -1547,6 +1957,9 @@ async function verifyPageTimerPersistence(expectedValue) {
         verifierTabId,
         { action: 'getPageTimer' }
       );
+      if (!persistenceWriteIsCurrent()) {
+        return { success: false, automationStale: true, shutdownStale: true };
+      }
       const actualValue = String(readback?.value || readback?.title || '').trim();
       if (readback?.found && actualValue === expectedValue) {
         return { success: true, value: actualValue };
@@ -1570,6 +1983,9 @@ async function verifyPageTimerPersistence(expectedValue) {
 
   for (let attempt = 0; attempt < PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length; attempt++) {
     const attemptResult = await attemptPersistenceRead(expectedValue, attempt);
+    if (attemptResult.automationStale || attemptResult.shutdownStale) {
+      return attemptResult;
+    }
     if (attemptResult.success) {
       return { success: true, value: attemptResult.value, attempts: attempt + 1 };
     }
@@ -1598,11 +2014,69 @@ async function schedulePageTimerRetry(minutes, reason = '') {
   console.warn(`[AC扩展] 页面定时器将于 1 分钟后重试（${retryMinutes} 分钟，${reason || '未说明原因'}）`);
 }
 
+let pageTimerMessageWriteChain = Promise.resolve();
+
+function sendSerializedPageTimerMessage(
+  tabId,
+  message,
+  automationRevision = null,
+  shutdownRevision = null
+) {
+  const operation = pageTimerMessageWriteChain
+    .catch(() => {})
+    .then(async () => {
+      if (automationRevision !== null
+          && !isAutomationOperationCurrent(automationRevision)) {
+        return { success: false, automationStale: true, error: '自动控制已暂停' };
+      }
+      if (shutdownRevision !== null
+          && !isTimerBasedShutdownCurrent(shutdownRevision)) {
+        return { success: false, shutdownStale: true, error: '关机请求已失效' };
+      }
+      const result = await sendMessageToExactACHome(tabId, message);
+      if (automationRevision !== null
+          && !isAutomationOperationCurrent(automationRevision)) {
+        return { success: false, automationStale: true, error: '自动控制已暂停' };
+      }
+      if (shutdownRevision !== null
+          && !isTimerBasedShutdownCurrent(shutdownRevision)) {
+        return { success: false, shutdownStale: true, error: '关机请求已失效' };
+      }
+      return result;
+    });
+  pageTimerMessageWriteChain = operation.catch(() => {});
+  return operation;
+}
+
 // ----- 设置页面自带定时器（安全网，自动关不用手动开）-----
-async function setPageTimer(minutes, { retryOnFailure = true, targetAt = 0 } = {}) {
+async function setPageTimer(
+  minutes,
+  {
+    retryOnFailure = true,
+    targetAt = 0,
+    automationRevision = null,
+    shutdownRevision = null
+  } = {}
+) {
   let autoCreatedTabId = null;
 
+  const staleAutomationResult = () => ({
+    success: false,
+    automationStale: true,
+    shutdownStale: shutdownRevision !== null,
+    error: shutdownRevision !== null ? '关机请求已失效' : '自动控制已暂停'
+  });
+
+  const automationWriteIsCurrent = () => (
+    automationRevision === null
+      || isAutomationOperationCurrent(automationRevision)
+  ) && (
+    shutdownRevision === null
+      || isTimerBasedShutdownCurrent(shutdownRevision)
+  );
+
   const finishFailure = async (failure, reason) => {
+    if (!automationWriteIsCurrent()) return staleAutomationResult();
     schedule.pageTimerMinutes = null;
     schedule.pageTimerTargetAt = 0;
     schedule.pageTimerError = failure.error || t('bgPageTimerFailed');
@@ -1615,6 +2089,7 @@ async function setPageTimer(minutes, { retryOnFailure = true, targetAt = 0 } = {
       await chrome.alarms.clear('ac-page-timer-retry');
     }
 
+    if (!automationWriteIsCurrent()) return staleAutomationResult();
     await persistSchedule(`setPageTimer-${reason}`);
     console.warn('[AC扩展] 页面定时器设置失败:', schedule.pageTimerError);
     return failure;
@@ -1622,6 +2097,7 @@ async function setPageTimer(minutes, { retryOnFailure = true, targetAt = 0 } = {
 
   // 提取（Fowler Extract Function）：页面定时器成功后的证明记录——解析目标时刻、清重试态、持久化并回传验证结果。
   const recordPageTimerProof = async (result, minutes, verification) => {
+    if (!automationWriteIsCurrent()) return staleAutomationResult();
     const targetAt = Number(result.targetAt);
     if (!Number.isSafeInteger(targetAt) || targetAt <= Date.now()) {
       return finishFailure({
@@ -1629,17 +2105,19 @@ async function setPageTimer(minutes, { retryOnFailure = true, targetAt = 0 } = {
         error: '页面定时器未返回有效的未来绝对目标时间'
       }, 'invalid-target');
     }
+    await chrome.alarms.clear('ac-page-timer-retry');
+    if (!automationWriteIsCurrent()) return staleAutomationResult();
     schedule.pageTimerTargetAt = targetAt;
     schedule.pageTimerError = '';
     schedule.pageTimerRetryAt = 0;
     schedule.pageTimerRetryMinutes = 0;
-    await chrome.alarms.clear('ac-page-timer-retry');
     await persistSchedule('setPageTimer-success');
     console.log(`[AC扩展] 页面定时器已由新鲜页面确认: ${verification.value} (安全网)`);
     return { ...result, verified: true, verification };
   };
 
   try {
+    if (!automationWriteIsCurrent()) return staleAutomationResult();
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
     let tab = tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded) || null;
 
@@ -1657,11 +2135,12 @@ async function setPageTimer(minutes, { retryOnFailure = true, targetAt = 0 } = {
     const contentReady = await ensureContentScriptLoaded(tab.id);
     if (!contentReady) throw new Error('AC 页面 content script 未就绪');
 
-    const result = await sendMessageToExactACHome(tab.id, {
+    const result = await sendSerializedPageTimerMessage(tab.id, {
       action: 'setTimer',
       minutes,
       targetAt
-    });
+    }, automationRevision, shutdownRevision);
+    if (result?.automationStale || result?.shutdownStale) return result;
     if (!result?.success) {
       return await finishFailure(result || { success: false, error: t('bgPageTimerFailed') }, 'failed');
     }
@@ -1671,7 +2150,15 @@ async function setPageTimer(minutes, { retryOnFailure = true, targetAt = 0 } = {
       return await finishFailure({ success: false, error: '页面定时器未返回可验证的目标时间' }, 'empty-value');
     }
 
-    const verification = await verifyPageTimerPersistence(expectedValue);
+    const verification = await verifyPageTimerPersistence(expectedValue, {
+      automationRevision,
+      shutdownRevision
+    });
+    if (verification.automationStale
+        || verification.shutdownStale
+        || !automationWriteIsCurrent()) {
+      return staleAutomationResult();
+    }
     if (!verification.success) {
       return await finishFailure({
         success: false,
@@ -1690,8 +2177,23 @@ async function setPageTimer(minutes, { retryOnFailure = true, targetAt = 0 } = {
   }
 }
 
+async function clearSupersededTimerBasedShutdownRetry() {
+  invalidateTimerBasedShutdown();
+  schedule.pageTimerRetryAt = 0;
+  schedule.pageTimerRetryMinutes = 0;
+  await chrome.alarms.clear('ac-page-timer-retry');
+  await persistSchedule(
+    'clear-superseded-timer-based-shutdown-retry',
+    { syncFromLiveAlarm: false }
+  );
+}
+
 async function requestTimerBasedShutdown(reason = '', minutes = 1) {
-  if (isPageTimerProofFresh(schedule)) {
+  const shutdownRevision = claimTimerBasedShutdown();
+  const requestedMinutes = Math.max(1, sanitizeMinutes(minutes, 1));
+  const latestReusableTargetAt = Date.now() + requestedMinutes * 60000 + 90000;
+  if (isPageTimerProofFresh(schedule)
+      && Number(schedule.pageTimerTargetAt) <= latestReusableTargetAt) {
     console.log(`[AC扩展] ${reason}: 页面关机定时器已正确设置 (${schedule.pageTimerMinutes} 分钟)，无需点击或重设`);
     return {
       success: true,
@@ -1711,7 +2213,13 @@ async function requestTimerBasedShutdown(reason = '', minutes = 1) {
     await chrome.alarms.clear('ac-page-timer-retry');
   }
 
+  if (!isTimerBasedShutdownCurrent(shutdownRevision)) {
+    return { success: false, shutdownStale: true, error: '关机请求已失效', reason };
+  }
   const status = await getCurrentACStatus();
+  if (!isTimerBasedShutdownCurrent(shutdownRevision)) {
+    return { success: false, shutdownStale: true, error: '关机请求已失效', reason };
+  }
   if (status?.isOn === false) {
     if (hadStaleProof) {
       await persistSchedule(`${reason}-clear-stale-page-timer-proof`);
@@ -1719,10 +2227,11 @@ async function requestTimerBasedShutdown(reason = '', minutes = 1) {
     return { success: true, alreadyDone: true, timerBased: true, reason };
   }
 
-  const result = await setPageTimer(minutes);
+  const result = await setPageTimer(requestedMinutes, { shutdownRevision });
+  if (result?.shutdownStale) return result;
   if (result?.success) {
-    console.log(`[AC扩展] ${reason}: 已请求页面定时器在 ${minutes} 分钟后关机（不点击开关）`);
-    return { success: true, timerBased: true, minutes, result, reason };
+    console.log(`[AC扩展] ${reason}: 已请求页面定时器在 ${requestedMinutes} 分钟后关机（不点击开关）`);
+    return { success: true, timerBased: true, minutes: requestedMinutes, result, reason };
   }
 
   return {
@@ -1751,10 +2260,16 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     await ensureOffscreen();
     // 间隔模式下的 storage 一致性校准:PWM 步骤漏写 storage 时,1 分钟内会被这里纠正。
     // 这样诊断面板看到的 storage.nextTriggerAt 永远不会落后 live ac-pwm 超过 1 分钟。
-    if (schedule.enabled) {
+    if (isAutomationAllowed()) {
       try {
+        const automationRevision = pwmRuntimeRevision;
         const liveAlarm = await chrome.alarms.get('ac-pwm');
-        const triggerPlan = await persistReconciledPwmTrigger(liveAlarm, 'badge-tick-sync', PWM_TRIGGER_NEXT_ONLY_OPTIONS);
+        const triggerPlan = await persistReconciledPwmTrigger(
+          liveAlarm,
+          'badge-tick-sync',
+          PWM_TRIGGER_NEXT_ONLY_OPTIONS,
+          automationRevision
+        );
         if (triggerPlan) {
           console.log(`[AC扩展] badge-tick: 已同步 nextTriggerAt ← live alarm (${new Date(triggerPlan.liveScheduledTime).toLocaleTimeString()})`);
         }
@@ -1764,7 +2279,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       }
     }
     // delayInMinutes 是一次性的，触发后重新创建
-    if (schedule.enabled) await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+    if (isAutomationAllowed()) await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     return;
   }
   
@@ -1778,12 +2293,16 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     } catch (e) {
       console.error('[AC扩展] PWM 步骤执行失败:', e);
       void appendDiagnosticLog('error', 'alarm-ac-pwm', e);
-      if (schedule.enabled) {
+      if (isAutomationAllowed()) {
+        const automationRevision = pwmRuntimeRevision;
         const delay = Math.max(1, schedule.pwmState === 'on' ? schedule.onMinutes : schedule.offMinutes);
-        await createAlarm('ac-pwm', { delayInMinutes: delay });
-        schedule.alarmCreatedAt = Date.now();
-        schedule.alarmDelayMinutes = delay;
-        setNextTriggerAt(schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000);
+        const alarmCreated = await createPwmAlarmWithVerify(
+          delay,
+          'onAlarm-error-recovery',
+          automationRevision
+        );
+        if (alarmCreated === false) return;
+        if (!isAutomationOperationCurrent(automationRevision)) return;
         await persistSchedule('onAlarm-error-recovery');
       }
     }
@@ -1795,7 +2314,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       // v0.5.10：看门狗每 5 分钟尝试从打开的 AC 页面读取 page timer。
       //         page timer 现为跨设备主同步通道——不再限制 pwmState='on'。
       //         无 AC 页面则静默跳过；5 分钟间隔避免频繁读 DOM。
-      if (schedule.enabled) {
+      if (isAutomationAllowed()) {
         tryAdoptPageTimer('watchdog').catch(e => /* 不阻塞闹钟流程 */ {});
       }
     } catch (e) {
@@ -1831,10 +2350,11 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
 
   if (alarm.name === 'ac-page-timer-retry') {
     if (schedule.pageTimerRetryAt) {
-      const retryMinutes = schedule.pageTimerRetryMinutes
-        || schedule.pageTimerMinutes
-        || (schedule.enabled ? schedule.onMinutes : 1);
-      await setPageTimer(retryMinutes);
+      if (isAutomationAllowed()) {
+        await clearSupersededTimerBasedShutdownRetry();
+        return;
+      }
+      await requestTimerBasedShutdown('page-timer-retry', 1);
     }
   }
 
@@ -1958,9 +2478,25 @@ async function getExactACHomeTab(tabId) {
   }
 }
 
-async function sendMessageToExactACHome(tabId, message, { timeoutMs = 0 } = {}) {
+async function sendMessageToExactACHome(
+  tabId,
+  message,
+  {
+    timeoutMs = 0,
+    requireAutomationAllowed = false,
+    automationRevision = null
+  } = {}
+) {
   const tab = await getExactACHomeTab(tabId);
   if (!tab) throw new Error('拒绝向非精确 AC home 标签发送消息');
+  if (requireAutomationAllowed && message?.action === 'on') {
+    const automaticOnIsCurrent = automationRevision === null
+      ? isAutomationAllowed()
+      : isAutomationOperationCurrent(automationRevision);
+    if (!automaticOnIsCurrent) {
+      throw new Error('运行时段外已暂停自动开启');
+    }
+  }
 
   const responsePromise = chrome.tabs.sendMessage(tabId, message);
   if (!(timeoutMs > 0)) return responsePromise;
@@ -1980,17 +2516,53 @@ async function sendMessageToExactACHome(tabId, message, { timeoutMs = 0 } = {}) 
   }
 }
 
+async function cancelAutomaticOnRequests() {
+  const tabs = await chrome.tabs.query({
+    url: 'https://w5.ab.ust.hk/njggt/app/*'
+  });
+  await Promise.all(tabs
+    .filter(tab => isACHomePageTab(tab) && Number.isInteger(tab?.id))
+    .map(async tab => {
+      try {
+        await sendMessageToExactACHome(tab.id, {
+          action: 'cancelAutomaticOn'
+        });
+      } catch (_) {
+        // 没有正在运行的 content listener 时无需恢复或注入。
+      }
+    }));
+}
+
 // ----- 切换 AC 状态 -----
-async function toggleAC(action, { notAfterAt = 0 } = {}) {
+async function toggleAC(
+  action,
+  {
+    notAfterAt = 0,
+    requireAutomationAllowed = false,
+    automationRevision = null
+  } = {}
+) {
   const requestedNotAfterAt = notAfterAt === 0
     ? 0
     : Number(notAfterAt);
+  const requestedRequiresAutomation = action === 'on' && requireAutomationAllowed === true;
+  const requestedAutomationRevision = requestedRequiresAutomation
+    ? automationRevision
+    : null;
   if (requestedNotAfterAt !== 0 && !Number.isSafeInteger(requestedNotAfterAt)) {
     return { success: false, error: '自动开启窗口截止时间无效' };
   }
+  const requestedAutomationIsCurrent = requestedAutomationRevision === null
+    ? isAutomationAllowed()
+    : isAutomationOperationCurrent(requestedAutomationRevision);
+  if (requestedRequiresAutomation && !requestedAutomationIsCurrent) {
+    return { success: false, automationPausedByActiveHours: true, error: '运行时段外已暂停自动开启' };
+  }
   if (acToggleInFlight) {
     if (acToggleInFlightAction === action
-        && acToggleInFlightNotAfterAt === requestedNotAfterAt) {
+        && acToggleInFlightNotAfterAt === requestedNotAfterAt
+      && acToggleInFlightRequiresAutomation === requestedRequiresAutomation
+      && acToggleInFlightAutomationRevision === requestedAutomationRevision) {
       console.log(`[AC扩展] 合并重复的 toggleAC(${action}) 请求`);
       return acToggleInFlight;
     }
@@ -2003,13 +2575,21 @@ async function toggleAC(action, { notAfterAt = 0 } = {}) {
 
   acToggleInFlightAction = action;
   acToggleInFlightNotAfterAt = requestedNotAfterAt;
-  acToggleInFlight = toggleACOnce(action, { notAfterAt: requestedNotAfterAt });
+  acToggleInFlightRequiresAutomation = requestedRequiresAutomation;
+  acToggleInFlightAutomationRevision = requestedAutomationRevision;
+  acToggleInFlight = toggleACOnce(action, {
+    notAfterAt: requestedNotAfterAt,
+    requireAutomationAllowed: requestedRequiresAutomation,
+    automationRevision: requestedAutomationRevision
+  });
   try {
     return await acToggleInFlight;
   } finally {
     acToggleInFlight = null;
     acToggleInFlightAction = null;
     acToggleInFlightNotAfterAt = 0;
+    acToggleInFlightRequiresAutomation = false;
+    acToggleInFlightAutomationRevision = null;
   }
 }
 
@@ -2138,9 +2718,24 @@ async function attemptACToggleWithRecovery(
 
 async function sendACToggleMessage(tabId, action, options = {}) {
   const notAfterAt = Number(options?.notAfterAt) || 0;
+  if (action === 'on'
+      && options?.requireAutomationAllowed === true
+    && (options?.automationRevision === null
+      ? !isAutomationAllowed()
+      : !isAutomationOperationCurrent(options?.automationRevision))) {
+    return {
+      success: false,
+      tabId,
+      automationPausedByActiveHours: true,
+      error: '运行时段外已暂停自动开启'
+    };
+  }
   const result = await sendMessageToExactACHome(tabId, {
     action,
     ...(notAfterAt > 0 ? { notAfterAt } : {})
+  }, {
+    requireAutomationAllowed: options?.requireAutomationAllowed === true,
+    automationRevision: options?.automationRevision ?? null
   });
   console.log(`[AC扩展] ${action} 命令返回:`, result);
   if (!result?.success) {
@@ -2262,8 +2857,8 @@ async function getCurrentPageTimer() {
 
 async function ensureScheduleClock() {
   await loadScheduleFromStorage();
+  if (!isAutomationAllowed()) return;
   await backfillNextTriggerAt(false);
-  if (!schedule.enabled) return;
   // 间隔模式
   const existingAlarm = await chrome.alarms.get('ac-pwm');
   if (getLiveAlarmEndMs(existingAlarm)) {
@@ -2294,6 +2889,7 @@ async function ensureScheduleClock() {
 }
 
 async function repairScheduleClock() {
+  const automationRevision = pwmRuntimeRevision;
   // 提取（Fowler Extract Function）：当前为 ON 时的关机过渡——先保留 ON 安全检查点，新鲜页确认定时器后才恢复 OFF。
   async function tryArmOffTransition(status) {
     // 先保留“下一步 ON”的安全检查点；只有新鲜页面确认关机定时器后，
@@ -2322,12 +2918,32 @@ async function repairScheduleClock() {
       : schedule.onMinutes;
     const timerResult = await setPageTimer(timerMinutes, {
       retryOnFailure: false,
+      automationRevision,
       ...(smartTargetAt > 0 ? { targetAt: smartTargetAt } : {})
     });
+    if (await abortStaleAutomation(
+      automationRevision,
+      'repair-page-timer-active-hours-paused'
+    )) {
+      return { success: false, reason: '运行时段外暂停', schedule };
+    }
     if (!timerResult?.success) {
       schedule.pageTimerError = `时钟修复时页面关机定时器未确认：${timerResult?.error || '未知错误'}；保持 on 相位，1 分钟后重试`;
-      await createPwmAlarmWithVerify(1, 'repair-pageTimer-failed');
+      const alarmCreated = await createPwmAlarmWithVerify(
+        1,
+        'repair-pageTimer-failed',
+        automationRevision
+      );
+      if (alarmCreated === false) {
+        return { success: false, reason: '运行时段外暂停', schedule };
+      }
       await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+      if (await abortStaleAutomation(
+        automationRevision,
+        'repair-retry-active-hours-paused'
+      )) {
+        return { success: false, reason: '运行时段外暂停', schedule };
+      }
       await persistSchedule('repairScheduleClock-pageTimer-failed');
       await updateBadge();
       return { success: false, reason: schedule.pageTimerError, schedule: { ...schedule, actualStatus: status } };
@@ -2335,12 +2951,23 @@ async function repairScheduleClock() {
     return null;
   }
 
-  if (!schedule.enabled) {
-    return { success: false, reason: '定时未启用', schedule };
+  if (!schedule.enabled
+      || (typeof isAutomationAllowed === 'function' && !isAutomationAllowed())) {
+    return {
+      success: false,
+      reason: schedule.enabled ? '运行时段外暂停' : '定时未启用',
+      schedule
+    };
   }
 
   // 间隔模式
   const restored = await restoreIntervalAlarmFromStorage('repair: 按已记录绝对触发时间恢复 PWM 闹钟');
+  if (await abortStaleAutomation(
+    automationRevision,
+    'repair-restore-active-hours-paused'
+  )) {
+    return { success: false, reason: '运行时段外暂停', schedule };
+  }
   if (restored) {
     await updateBadge();
     const status = await getCurrentACStatus();
@@ -2348,6 +2975,12 @@ async function repairScheduleClock() {
   }
 
   const status = await getCurrentACStatus();
+  if (await abortStaleAutomation(
+    automationRevision,
+    'repair-status-active-hours-paused'
+  )) {
+    return { success: false, reason: '运行时段外暂停', schedule };
+  }
   const currentOn = typeof status?.isOn === 'boolean'
     ? status.isOn
     : schedule.pwmState !== 'on';
@@ -2362,8 +2995,21 @@ async function repairScheduleClock() {
   const repairPlan = currentOn
     ? { nextTriggerAt: schedule.pageTimerTargetAt }
     : { nextTriggerAt: Date.now() + delay * 60000 };
-  await createPwmAlarmFromPlan(repairPlan, 'repair');
+  const alarmCreated = await createPwmAlarmFromPlan(
+    repairPlan,
+    'repair',
+    automationRevision
+  );
+  if (alarmCreated === false) {
+    return { success: false, reason: '运行时段外暂停', schedule };
+  }
   await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+  if (await abortStaleAutomation(
+    automationRevision,
+    'repair-commit-active-hours-paused'
+  )) {
+    return { success: false, reason: '运行时段外暂停', schedule };
+  }
   await persistSchedule('repairScheduleClock-interval');
   await updateBadge();
 
@@ -2529,6 +3175,13 @@ async function getScheduleSnapshot(lite = false) {
     // getSchedule/getScheduleLite 是 popup 的普通轮询入口，必须保持只读。
     // live alarm 或旧相对字段只能补充本次返回快照；持久化自愈留给 init、
     // watchdog 和用户主动触发的诊断，避免打开 popup 改变下一次 PWM 调度。
+    if (snapshot._automationPausedByActiveHours) {
+      snapshot.nextTriggerAt = 0;
+      snapshot.alarmCreatedAt = 0;
+      snapshot.alarmDelayMinutes = 0;
+      return;
+    }
+
     if (!snapshot.nextTriggerAt) {
       const legacyEnd = getLegacyAlarmEndMs();
       if (legacyEnd) snapshot.nextTriggerAt = legacyEnd;
@@ -2546,7 +3199,7 @@ async function getScheduleSnapshot(lite = false) {
     );
     const nextBoundary = liveAlarmEnd || (storedAlarmEnd > Date.now() ? storedAlarmEnd : 0);
 
-    if (snapshot.enabled && nextBoundary) {
+    if (snapshot.enabled && !snapshot._automationPausedByActiveHours && nextBoundary) {
       const remainingMs = nextBoundary - Date.now();
       if (remainingMs > 0) {
         snapshot._nextBoundary = nextBoundary;
@@ -2559,6 +3212,11 @@ async function getScheduleSnapshot(lite = false) {
   const alarm = await chrome.alarms.get('ac-pwm');
   const liveAlarmEnd = getLiveAlarmEndMs(alarm);
   const snapshot = { ...schedule };
+  const insideActiveHours = typeof isWithinActiveHours === 'function'
+    ? isWithinActiveHours()
+    : true;
+  snapshot._insideActiveHours = insideActiveHours;
+  snapshot._automationPausedByActiveHours = schedule.enabled && !insideActiveHours;
 
   enrichScheduleSnapshot(snapshot, alarm, liveAlarmEnd);
 
@@ -2569,7 +3227,8 @@ async function getScheduleSnapshot(lite = false) {
 
   const status = await mergeBalanceReading(await getCurrentACStatus());
   // 弹窗轮询只读展示，不在这里改写 storage 或重建闹钟，避免重新打开弹窗时漂移触发时间。
-  if (typeof status?.isOn === 'boolean' && snapshot.enabled) {
+  if (typeof status?.isOn === 'boolean'
+      && snapshot.enabled && !snapshot._automationPausedByActiveHours) {
     snapshot._effectivePwmState = status.isOn ? 'off' : 'on';
   }
   return { ...snapshot, actualStatus: status };
@@ -2584,13 +3243,38 @@ async function toggleNowAndSync(action) {
     setNextTriggerAt(0);
     schedule.alarmCreatedAt = 0;
     schedule.alarmDelayMinutes = 0;
-    await chrome.alarms.clear('ac-pwm');
+    await clearPwmAlarm(automationRevision);
 
-    const timerResult = await setPageTimer(schedule.onMinutes, { retryOnFailure: false });
+    const timerResult = await setPageTimer(schedule.onMinutes, {
+      retryOnFailure: false,
+      automationRevision
+    });
+    if (await abortStaleAutomation(
+      automationRevision,
+      'toggle-page-timer-active-hours-paused'
+    )) {
+      const status = await getCurrentACStatus();
+      return { success: true, schedule: { ...schedule, actualStatus: status } };
+    }
     if (!timerResult?.success) {
       schedule.pageTimerError = `手动开机后页面关机定时器未确认：${timerResult?.error || '未知错误'}；保持 on 相位，1 分钟后重试`;
-      await createPwmAlarmWithVerify(1, 'toggle-pageTimer-failed');
+      const alarmCreated = await createPwmAlarmWithVerify(
+        1,
+        'toggle-pageTimer-failed',
+        automationRevision
+      );
+      if (alarmCreated === false) {
+        const status = await getCurrentACStatus();
+        return { success: true, schedule: { ...schedule, actualStatus: status } };
+      }
       await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+      if (await abortStaleAutomation(
+        automationRevision,
+        'toggle-retry-active-hours-paused'
+      )) {
+        const status = await getCurrentACStatus();
+        return { success: true, schedule: { ...schedule, actualStatus: status } };
+      }
       await persistSchedule('toggleNowAndSync-pageTimer-failed');
       await updateBadge();
       const status = await getCurrentACStatus();
@@ -2615,6 +3299,7 @@ async function toggleNowAndSync(action) {
     };
   }
 
+  const automationWasAllowed = isAutomationAllowed();
   const toggleResult = await toggleAC('on');
 
   if (!toggleResult?.success) {
@@ -2626,10 +3311,11 @@ async function toggleNowAndSync(action) {
     };
   }
 
-  if (!schedule.enabled) {
+  if (!automationWasAllowed || !isAutomationAllowed()) {
     const status = await getCurrentACStatus();
     return { success: true, schedule: { ...schedule, actualStatus: status }, result: toggleResult };
   }
+  const automationRevision = pwmRuntimeRevision;
 
   // 间隔模式
   const currentOn = action === 'on';
@@ -2646,8 +3332,23 @@ async function toggleNowAndSync(action) {
   const togglePlan = currentOn
     ? { nextTriggerAt: schedule.pageTimerTargetAt }
     : { nextTriggerAt: Date.now() + delay * 60000 };
-  await createPwmAlarmFromPlan(togglePlan, 'toggle');
+  const alarmCreated = await createPwmAlarmFromPlan(
+    togglePlan,
+    'toggle',
+    automationRevision
+  );
+  if (alarmCreated === false) {
+    const status = await getCurrentACStatus();
+    return { success: true, schedule: { ...schedule, actualStatus: status }, result: toggleResult };
+  }
   await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+  if (await abortStaleAutomation(
+    automationRevision,
+    'toggle-commit-active-hours-paused'
+  )) {
+    const status = await getCurrentACStatus();
+    return { success: true, schedule: { ...schedule, actualStatus: status }, result: toggleResult };
+  }
   await persistSchedule('toggleNowAndSync-interval');
   await updateBadge();
 
@@ -2659,15 +3360,46 @@ async function ensureDiagnosticAlarms() {
   await loadScheduleFromStorage();
 
   if (!schedule.enabled) {
-    await chrome.alarms.clear('ac-badge-tick');
-    await chrome.alarms.clear('ac-watchdog');
+    await clearAutomationRuntimeAlarmsWhileBlocked();
+    if (isAutomationAllowed()) return ensureDiagnosticAlarms();
     await chrome.alarms.clear('ac-smart-weather');
+    if (schedule.enabled) return ensureDiagnosticAlarms();
     return {
       success: true,
       enabled: false,
       repaired: false,
       schedule: { ...schedule },
       alarms: { badge: null, watchdog: null, pwm: null, smartWeather: null }
+    };
+  }
+
+  if (!isAutomationAllowed()) {
+    await clearAutomationRuntimeAlarmsWhileBlocked();
+    if (isAutomationAllowed()) return ensureDiagnosticAlarms();
+    let smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
+    if (schedule.smartMode?.enabled && !smartWeatherAlarm) {
+      await rescheduleSmartWeatherAlarm();
+      smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
+    }
+    if (isAutomationAllowed()) return ensureDiagnosticAlarms();
+    return {
+      success: true,
+      enabled: true,
+      automationPausedByActiveHours: true,
+      repaired: false,
+      schedule: {
+        ...schedule,
+        _insideActiveHours: false,
+        _automationPausedByActiveHours: true
+      },
+      alarms: {
+        badge: null,
+        watchdog: null,
+        pwm: null,
+        smartWeather: smartWeatherAlarm
+          ? { scheduledTime: smartWeatherAlarm.scheduledTime }
+          : null
+      }
     };
   }
 
@@ -2702,10 +3434,16 @@ async function ensureDiagnosticAlarms() {
 
   badgeAlarm = await chrome.alarms.get('ac-badge-tick');
   watchdogAlarm = await chrome.alarms.get('ac-watchdog');
+  const diagnosticRevision = pwmRuntimeRevision;
   pwmAlarm = await chrome.alarms.get('ac-pwm');
 
   // 活闹钟存在但 storage 可能缺失 nextTriggerAt → 直接回写（不依赖 syncStoredTriggerFromAlarm 的边界判断）
-  const triggerPlan = await persistReconciledPwmTrigger(pwmAlarm, 'ensureDiagnosticAlarms', PWM_TRIGGER_NEXT_ONLY_OPTIONS);
+  const triggerPlan = await persistReconciledPwmTrigger(
+    pwmAlarm,
+    'ensureDiagnosticAlarms',
+    PWM_TRIGGER_NEXT_ONLY_OPTIONS,
+    diagnosticRevision
+  );
   if (triggerPlan) {
     repaired = true;
   }
@@ -2786,20 +3524,35 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
     if (msg.type === 'updateSchedule') {
       // 提取（Fowler Extract Function）：用户停用路径——B1 顺序：先持久化"已关闭"状态再执行关机。
-      const shutdownAfterScheduleDisable = async () => {
+      const shutdownAfterScheduleDisable = async ({ activeHoursPause = false } = {}) => {
         await resetDisabledPwmRuntime();
         // B1: 先持久化"已关闭"状态，再执行关机 — 确保即便 toggleAC 因 SW 终止而丢失，状态已写入 storage
-        await persistSchedule('updateSchedule');
-        const offResult = await requestTimerBasedShutdown('schedule-disabled');
+        if (activeHoursPause) {
+          await persistSchedule('updateSchedule-active-hours-paused', { syncFromLiveAlarm: false });
+        } else {
+          await persistSchedule('updateSchedule');
+        }
+        const offResult = activeHoursPause
+          ? await requestTimerBasedShutdown('schedule-active-hours-paused')
+          : await requestTimerBasedShutdown('schedule-disabled');
         if (!offResult?.success) {
-          schedule.pageTimerError = `定时已关闭，但页面关机定时器未确认：${offResult?.error || '未知错误'}`;
+          schedule.pageTimerError = `${activeHoursPause ? '运行时段外已暂停' : '定时已关闭'}，但页面关机定时器未确认：${offResult?.error || '未知错误'}`;
         }
         return offResult;
       };
 
       const wasEnabled = schedule.enabled;
+      const wasAutomationAllowed = isAutomationAllowed();
+      const previousActiveHours = JSON.stringify(schedule.activeHours);
       // 防止 restart 泄漏到 schedule 对象中；手动时长单独取出，智能模式下不上送覆盖。
-      const { restart, onMinutes: manualOn, offMinutes: manualOff, ...data } = msg.data;
+      const {
+        restart,
+        onMinutes: manualOn,
+        offMinutes: manualOff,
+        _insideActiveHours,
+        _automationPausedByActiveHours,
+        ...data
+      } = msg.data;
       // 智能模式开启时，on/off 时长是派生值（控制边界消费预计算天气快照）。
       // 弹窗在智能模式下已隐藏手动时长输入，其上送的 manualOn/manualOff 是过期值，直接覆盖会
       // 污染 storage（余额估算、诊断面板、过期闹钟恢复都会读到错误时长，让灵敏度滑块看似无效）。
@@ -2831,19 +3584,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       // 天气只由 :10/:50 的 ac-smart-weather 预取（setupAlarms 已调度），此处不即时拉取。
 
+      const activeHoursChanged = previousActiveHours !== JSON.stringify(schedule.activeHours);
+      const automationAllowed = isAutomationAllowed();
       let offResult = null;
       if (!schedule.enabled) {
-        offResult = await shutdownAfterScheduleDisable();
-      } else if (!wasEnabled || restart) {
+        if (wasEnabled) {
+          offResult = await shutdownAfterScheduleDisable();
+        }
+      } else if (!automationAllowed
+          && (wasAutomationAllowed || !wasEnabled || activeHoursChanged || restart)) {
+        offResult = await shutdownAfterScheduleDisable({ activeHoursPause: true });
+      } else if (automationAllowed && (!wasAutomationAllowed || restart)) {
         schedule.pwmState = 'on';
         // 不在这里 clear nextTriggerAt——让接下来的 runPwmStep() 用正确值覆写。
         // 如果在这里清零，storage 会被写入 nextTriggerAt=0，弹窗读到就会显示缺失。
       }
 
       await persistSchedule('updateSchedule');
-      await setupAlarms(schedule.enabled && (!wasEnabled || restart));
+      await setupAlarms(automationAllowed && (!wasAutomationAllowed || restart));
       // 管理看门狗和每分钟 PWM 心跳闹钟
-      if (schedule.enabled) {
+      if (isAutomationAllowed()) {
         await createAlarm('ac-watchdog', { periodInMinutes: 5 });
       }
       // active hours 边界闹钟：每次 schedule 改变都重新调度

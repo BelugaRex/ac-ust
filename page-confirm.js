@@ -64,15 +64,33 @@
   let acStateRequestInFlight = null;
   let acStateRequestTarget = null;
   let acStateRequestNotAfterAt = 0;
+  let automaticOnCancellationRevision = 0;
+
+  window.addEventListener('__AC_EXTENSION_CANCEL_AUTOMATIC_ON__', () => {
+    automaticOnCancellationRevision += 1;
+  });
 
   window.addEventListener('__AC_EXTENSION_TOGGLE_AC__', async (event) => {
     const { requestId, action, notAfterAt = 0 } = event.detail || {};
-    if (!requestId || (action !== 'on' && action !== 'off')) return;
+    if (!requestId || action !== 'on') {
+      if (requestId) {
+        window.dispatchEvent(new CustomEvent('__AC_EXTENSION_TOGGLE_AC_RESULT__', {
+          detail: {
+            requestId,
+            action,
+            success: false,
+            verified: false,
+            error: 'OFF 操作已禁用；自动关机只允许使用 Power-off after',
+            via: 'main-world-ensureACState'
+          }
+        }));
+      }
+      return;
+    }
 
-    const needOn = action === 'on';
     let result;
     try {
-      result = await requestACState(needOn, notAfterAt);
+      result = await requestACState(true, notAfterAt);
     } catch (error) {
       // ensureACState 异常时也必须回包，否则隔离世界会静默等满超时拿到 null，
       // 并误触发后台的「刷新恢复」链路。这里显式回失败，让上层可诊断。
@@ -154,8 +172,9 @@
     }
 
     acStateRequestTarget = targetState;
-  acStateRequestNotAfterAt = requestedNotAfterAt;
-  ensureACState.notAfterAt = requestedNotAfterAt;
+    acStateRequestNotAfterAt = requestedNotAfterAt;
+    ensureACState.notAfterAt = requestedNotAfterAt;
+    ensureACState.cancellationRevision = automaticOnCancellationRevision;
     acStateRequestInFlight = ensureACState(targetState);
     try {
       return await acStateRequestInFlight;
@@ -164,6 +183,7 @@
       acStateRequestTarget = null;
       acStateRequestNotAfterAt = 0;
       ensureACState.notAfterAt = 0;
+      ensureACState.cancellationRevision = automaticOnCancellationRevision;
     }
   }
 
@@ -194,10 +214,13 @@
       };
     }
     function getOnWindowError() {
+      if (ensureACState.cancellationRevision !== automaticOnCancellationRevision) {
+        return '请求已被后台取消';
+      }
       const notAfterAt = Number(ensureACState.notAfterAt) || 0;
       if (!targetState || notAfterAt === 0) return '';
       if (!Number.isSafeInteger(notAfterAt)) return '自动开启窗口截止时间无效';
-      return Date.now() >= notAfterAt ? '智能自动开启窗口已结束' : '';
+      return Date.now() >= notAfterAt ? '自动开启窗口已结束' : '';
     }
 
     const current = getACStatusInPageWorld();
@@ -247,9 +270,14 @@
 
     const dialogConfirmed = await clickConfirmDialogInPageWorld(
       5000,
-      Number(ensureACState.notAfterAt) || 0
+      Number(ensureACState.notAfterAt) || 0,
+      ensureACState.cancellationRevision
     );
     const afterClick = getACStatusInPageWorld();
+    const afterClickWindowError = getOnWindowError();
+    if (afterClickWindowError) {
+      return failureResult(afterClick, clickCount + 1, afterClickWindowError);
+    }
     const reachedTarget = typeof afterClick.isOn === 'boolean' && afterClick.isOn === targetState;
     const afterClickMessage = `[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(afterClick)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}`;
     if (reachedTarget) {
@@ -299,7 +327,11 @@
     }
   }
 
-  async function clickConfirmDialogInPageWorld(timeoutMs, notAfterAt = 0) {
+  async function clickConfirmDialogInPageWorld(
+    timeoutMs,
+    notAfterAt = 0,
+    cancellationRevision = automaticOnCancellationRevision
+  ) {
     const start = Date.now();
     const confirmTexts = [
       '确定', '确认', '开启', '打开', '启用', '是',
@@ -315,6 +347,10 @@
         || cls.includes('btn-confirm');
     };
     while (Date.now() - start <= timeoutMs) {
+      if (cancellationRevision !== automaticOnCancellationRevision) {
+        console.warn('[AC扩展] ensureACState: 自动开启请求已被后台取消');
+        return false;
+      }
       const buttons = Array.from(document.querySelectorAll(
         '.ant-modal-confirm-btns button, .ant-modal button, .ant-popconfirm-buttons button, '
         + '[role="dialog"] button, [role="alertdialog"] button, .ui.modal button, .ui.modal .actions button, .modal button'
@@ -326,7 +362,7 @@
       if (btn) {
         if (notAfterAt !== 0
             && (!Number.isSafeInteger(notAfterAt) || Date.now() >= notAfterAt)) {
-          console.warn('[AC扩展] ensureACState: 确认弹窗出现时智能自动开启窗口已结束，不再点击确认');
+          console.warn('[AC扩展] ensureACState: 确认弹窗出现时自动开启窗口已结束，不再点击确认');
           return false;
         }
         clickElementOnceInPageWorld(btn);

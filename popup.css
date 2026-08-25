@@ -868,11 +868,13 @@ a:focus-visible,
   font-weight: 400;
 }
 
-/* 循环定时与智能控制平级互斥：折叠容器 */
+/* 三个平级设置区段：各 body 与下一段 header 之间使用同一软分隔线。 */
+#activeHoursBody,
 #timerBody {
   border-bottom: 1px solid var(--separator);
 }
 
+#activeHoursBody[hidden],
 #timerBody[hidden],
 #smartBody[hidden] {
   display: none;

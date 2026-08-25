@@ -74,9 +74,16 @@ const smartSensitivity = document.getElementById('smartSensitivity');
 const smartSensitivityValue = document.getElementById('smartSensitivityValue');
 const timerBody = document.getElementById('timerBody');
 const smartBody = document.getElementById('smartBody');
+const activeHoursSection = document.getElementById('activeHoursSection');
+const activeHoursBody = document.getElementById('activeHoursBody')
+  || document.querySelector('#activeHoursSection .field-grid');
 const smartSuggested = document.getElementById('smartSuggested');
 const smartTeq = document.getElementById('smartTeq');
 const smartUpdated = document.getElementById('smartUpdated');
+
+if (activeHoursSection?.parentElement === timerBody) {
+  timerBody.before(activeHoursSection);
+}
 
 // popup 打开期间保持与 Service Worker 的长连接。
 // 这样用户盯着弹窗时，后台不会只靠一次性 sendMessage 存活。
@@ -139,6 +146,7 @@ function syncActiveHoursUI() {
   activeHoursToggle.checked = currentActiveHours.enabled;
   activeHoursStart.value = currentActiveHours.start;
   activeHoursEnd.value = currentActiveHours.end;
+  activeHoursBody.hidden = !currentActiveHours.enabled;
   activeHoursStart.disabled = !currentActiveHours.enabled;
   activeHoursEnd.disabled = !currentActiveHours.enabled;
 }
@@ -171,6 +179,16 @@ function commitActiveHours() {
   // 读取 UI 值并提交到 background
   const startVal = activeHoursStart.value || '08:00';
   const endVal = activeHoursEnd.value || '23:00';
+  const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+  const invalidRange = activeHoursToggle.checked
+    && (!timePattern.test(startVal) || !timePattern.test(endVal) || startVal >= endVal);
+  const validationMessage = invalidRange ? t('activeHoursInvalid') : '';
+  activeHoursStart.setCustomValidity(validationMessage);
+  activeHoursEnd.setCustomValidity(validationMessage);
+  if (invalidRange) {
+    activeHoursEnd.reportValidity();
+    return;
+  }
   currentActiveHours = {
     enabled: activeHoursToggle.checked,
     start: startVal,
@@ -322,6 +340,18 @@ function attachCachedActualStatus(schedule) {
   return schedule;
 }
 
+function isAutomationPausedByActiveHours(schedule, now = new Date()) {
+  if (!schedule?.enabled || schedule.activeHours?.enabled !== true) return false;
+  const start = String(schedule.activeHours.start || '').match(/^(\d{2}):(\d{2})$/);
+  const end = String(schedule.activeHours.end || '').match(/^(\d{2}):(\d{2})$/);
+  if (!start || !end) return true;
+  const startMinutes = Number(start[1]) * 60 + Number(start[2]);
+  const endMinutes = Number(end[1]) * 60 + Number(end[2]);
+  if (startMinutes >= endMinutes || endMinutes > 24 * 60 - 1) return true;
+  const currentMinutes = now.getHours() * 60 + now.getMinutes();
+  return currentMinutes < startMinutes || currentMinutes >= endMinutes;
+}
+
 async function refreshStatus() {
   if (IS_STATIC_PREVIEW) {
     updateCountdownDisplay(staticPreviewSchedule, {
@@ -358,6 +388,9 @@ async function refreshStatus() {
     if (stored.ac_schedule) {
       const alarm = await chrome.alarms.get("ac-pwm");
       const fallbackSchedule = attachCachedActualStatus({ ...stored.ac_schedule });
+      const pausedByActiveHours = isAutomationPausedByActiveHours(fallbackSchedule);
+      fallbackSchedule._insideActiveHours = !pausedByActiveHours;
+      fallbackSchedule._automationPausedByActiveHours = pausedByActiveHours;
       updateCountdownDisplay(fallbackSchedule, alarm);
     }
   }
@@ -454,11 +487,13 @@ function formatBalanceExhaustionAt(displayAt, locale) {
 
 function updateCountdownDisplay(schedule, alarm) {
   renderBalanceEstimate(schedule);
+  idleDisplay.textContent = t('acIdle');
   // 同步智能模式启用状态（跨设备 sync / 后台变更后保持 UI 一致；不覆盖灵敏度，避免拖动滑块时跳回）
   if (schedule && typeof schedule.smartMode === 'object') {
     currentSmartMode.enabled = !!schedule.smartMode.enabled;
   }
-  if (!schedule || !schedule.enabled) {
+  const pausedByActiveHours = schedule?._automationPausedByActiveHours === true;
+  if (!schedule || (!schedule.enabled && !pausedByActiveHours)) {
     currentScheduleEnabled = false;
     syncModeUI();
     // 定时未启用
@@ -473,8 +508,11 @@ function updateCountdownDisplay(schedule, alarm) {
 
   currentScheduleEnabled = true;
   syncModeUI();
-  idleDisplay.style.display = 'none';
-  countdownDisplay.style.display = 'flex';
+  idleDisplay.style.display = pausedByActiveHours ? 'flex' : 'none';
+  countdownDisplay.style.display = pausedByActiveHours ? 'none' : 'flex';
+  if (pausedByActiveHours) {
+    idleDisplay.textContent = t('activeHoursOutside');
+  }
 
   // 优先级：full 路径 _effectivePwmState（页面真实状态反推）> lite 路径合并的
   // cached actualStatus 反推 > 兜底 pwmState。fallback 加 cached 反推是为了
@@ -512,6 +550,12 @@ function updateCountdownDisplay(schedule, alarm) {
     acStateText.textContent = t('acStopped');
     updateSafetynetWarning('');
     announceState(t('acStopped'));
+  }
+
+  if (pausedByActiveHours) {
+    updateSafetynetWarning('');
+    announceState(t('activeHoursOutside'));
+    return;
   }
 
   // 计算并渲染 hero 倒计时（提取自 updateCountdownDisplay，Fowler Extract Function）
@@ -555,7 +599,7 @@ async function updateSchedule(enabled, restart = false) {
     clockMode: false,  // v0.5.x 起固定间隔模式
     onMinutes: readPositiveMinutes(onMinutesInput, 30),
     offMinutes: readPositiveMinutes(offMinutesInput, 30),
-    activeHours: { ...currentActiveHours },  // v0.5.x: PWM 运行时段
+    activeHours: { ...currentActiveHours },  // 两种自动控制共用的运行时段
     smartMode: { ...currentSmartMode },      // v0.8.0: 智能模式（灵敏度 + 开关）
     restart
   };
@@ -851,6 +895,8 @@ btnDiagnose.addEventListener('click', async () => {
       ? bg.schedule
       : (bg || {});
     let s = { ...storedSchedule, ...(ensured?.schedule || {}), ...bgSchedule };
+    const automationPausedByActiveHours = s._automationPausedByActiveHours === true
+      || isAutomationPausedByActiveHours(s);
     let effectiveNextTriggerAt = s.nextTriggerAt || 0;
 
     // 1.5 自愈:storage.nextTriggerAt 缺失或已过期,但 live ac-pwm 在未来(间隔模式 + enabled),
@@ -863,6 +909,7 @@ btnDiagnose.addEventListener('click', async () => {
     let pwmAlarmEarly = await chrome.alarms.get('ac-pwm');
     let selfHealed = false;
     if (s.enabled === true
+      && !automationPausedByActiveHours
         && s.clockMode === false
         && storedIsStale
         && pwmAlarmEarly?.scheduledTime
@@ -893,7 +940,8 @@ btnDiagnose.addEventListener('click', async () => {
     add(s.enabled === true, t('diagnoseEnabledPrefix') + s.enabled + ' (' + (s.enabled ? t('diagnoseOn') : t('diagnoseOff')) + ')');
     add(!!s.mode, t('diagnoseMode') + (s.mode || '?'));
     add(s.clockMode !== undefined, t('diagnoseClockMode') + (s.clockMode ? t('diagnoseClock') : t('diagnoseInterval')));
-    if (s.clockMode === false && s.enabled && !effectiveNextTriggerAt) {
+    if (s.clockMode === false && s.enabled
+      && !automationPausedByActiveHours && !effectiveNextTriggerAt) {
       add(false, t('diagnoseMissingTrigger'));
     } else if (effectiveNextTriggerAt) {
       const repairedLabel = selfHealed
@@ -902,34 +950,27 @@ btnDiagnose.addEventListener('click', async () => {
       add(true, t('diagnoseTriggerTime') + new Date(effectiveNextTriggerAt).toLocaleTimeString() + repairedLabel);
     }
 
-    // 2. 检查闹钟 — 优先用后台自愈结果，若仍缺失则弹窗直接补建
+    // 2. 检查闹钟 — 运行闹钟只允许后台自愈，确保创建前后都复核运行时段门禁。
     let alarms = await chrome.alarms.getAll();
     const pwmAlarm = ensured?.alarms?.pwm || alarms.find(a => a.name === 'ac-pwm');
-    add(!!pwmAlarm, t('diagnosePwmExists') + (pwmAlarm ? t('diagnosePwmTrigger') + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
-    if (pwmAlarm && s.clockMode === false && !effectiveNextTriggerAt) {
-      add(false, t('diagnosePwmSync'));
-    } else if (pwmAlarm && effectiveNextTriggerAt) {
-      add(areDiagnosticTriggersAligned(pwmAlarm.scheduledTime, effectiveNextTriggerAt), t('diagnosePwmSync') + (selfHealed ? t('diagnosePopHealed') : ''));
-    }
+    if (automationPausedByActiveHours) {
+      add(true, t('diagnoseAutomationPaused'));
+    } else {
+      add(!!pwmAlarm, t('diagnosePwmExists') + (pwmAlarm ? t('diagnosePwmTrigger') + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
+      if (pwmAlarm && s.clockMode === false && !effectiveNextTriggerAt) {
+        add(false, t('diagnosePwmSync'));
+      } else if (pwmAlarm && effectiveNextTriggerAt) {
+        add(areDiagnosticTriggersAligned(pwmAlarm.scheduledTime, effectiveNextTriggerAt), t('diagnosePwmSync') + (selfHealed ? t('diagnosePopHealed') : ''));
+      }
 
-    let badgeAlarm = ensured?.alarms?.badge || alarms.find(a => a.name === 'ac-badge-tick') || await chrome.alarms.get('ac-badge-tick');
-    // 兜底：弹窗直接补建（不依赖后台往返）
-    if (!badgeAlarm && s.enabled) {
-      try { await chrome.alarms.clear('ac-badge-tick'); } catch (_) {}
-      await chrome.alarms.create('ac-badge-tick', { delayInMinutes: 1 });
-      await new Promise(r => setTimeout(r, 150)); // 等待 alarm 写入
-      badgeAlarm = await chrome.alarms.get('ac-badge-tick');
-    }
-    add(!!badgeAlarm, t('diagnoseBadgeAlarm') + (badgeAlarm ? t('diagnoseBadgeRebuilt') + new Date(badgeAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
+      const badgeAlarm = ensured?.alarms?.badge
+        || alarms.find(a => a.name === 'ac-badge-tick');
+      add(!!badgeAlarm, t('diagnoseBadgeAlarm') + (badgeAlarm ? t('diagnoseBadgeRebuilt') + new Date(badgeAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
 
-    let watchdogAlarm = ensured?.alarms?.watchdog || alarms.find(a => a.name === 'ac-watchdog');
-    if (!watchdogAlarm && s.enabled) {
-      try { await chrome.alarms.clear('ac-watchdog'); } catch (_) {}
-      await chrome.alarms.create('ac-watchdog', { periodInMinutes: 5 });
-      await new Promise(r => setTimeout(r, 150));
-      watchdogAlarm = await chrome.alarms.get('ac-watchdog');
+      const watchdogAlarm = ensured?.alarms?.watchdog
+        || alarms.find(a => a.name === 'ac-watchdog');
+      add(!!watchdogAlarm, t('diagnoseWatchdog') + (watchdogAlarm ? t('diagnoseBadgeRebuilt') + new Date(watchdogAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
     }
-    add(!!watchdogAlarm, t('diagnoseWatchdog') + (watchdogAlarm ? t('diagnoseBadgeRebuilt') + new Date(watchdogAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
 
     // 2.0c 智能模式天气预取链路：ac-smart-weather one-shot 闹钟 + ac_smart_weather 缓存新鲜度。
     // v0.8.0 智能模式新增，此前诊断漏检——闹钟丢失后天气冻结、等效温度/建议分钟数不再更新却无红灯。
@@ -960,7 +1001,7 @@ btnDiagnose.addEventListener('click', async () => {
       }
     }
 
-    // 2.1 PWM 运行时段(同日 white-list)与 ac-active-boundary 闹钟(指北固定 5 闹钟之一)。
+    // 2.1 全局运行时段(同日 white-list)与 ac-active-boundary 闹钟(指北固定 5 闹钟之一)。
     // activeHours.enabled=false 表示全天运行,无边界闹钟是预期,显示透明绿。
     if (s.activeHours?.enabled === true) {
       add(true, t('diagnoseActiveHoursOn', s.activeHours.start || '?', s.activeHours.end || '?'));
@@ -1085,7 +1126,9 @@ btnDiagnose.addEventListener('click', async () => {
       const memNext = sw.memorySchedule?.nextTriggerAt || 0;
       const storedNext = storedSchedule.nextTriggerAt || 0;
       const memLive = sw.liveAlarmScheduledTime || 0;
-      if (areDiagnosticTriggersAligned(memLive, memNext, storedNext)) {
+      if (automationPausedByActiveHours) {
+        // 暂停态预期没有 PWM 时钟，不把三方全空误报为失步。
+      } else if (areDiagnosticTriggersAligned(memLive, memNext, storedNext)) {
         add(true, t('diagnoseTriMatch', fmt(memLive)));
       } else {
         add(false, t('diagnoseTriMismatch', fmt(memLive), fmt(memNext), fmt(storedNext)));

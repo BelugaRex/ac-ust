@@ -329,7 +329,15 @@ async function verifySourceRules(config) {
   for (const rule of config.sourceRules) {
     for (const relativePath of rule.files) {
       const source = stripCommentsAndStrings(await readRepositoryFile(relativePath));
-      for (const forbiddenPattern of rule.forbidPatterns) {
+      for (const requiredPattern of rule.requirePatterns || []) {
+        const match = new RegExp(requiredPattern, 'm').exec(source);
+        check(
+          !!match,
+          rule.name,
+          match ? '' : `${relativePath} does not match /${requiredPattern}/`
+        );
+      }
+      for (const forbiddenPattern of rule.forbidPatterns || []) {
         const match = new RegExp(forbiddenPattern, 'm').exec(source);
         check(
           !match,
