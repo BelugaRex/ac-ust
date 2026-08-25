@@ -11,6 +11,11 @@
   "acOff": { "message": "Timer off" },
 
   "pwmSettings": { "message": "Cycle timer" },
+  "automationSettingsLabel": { "message": "Automatic control", "description": "Shared settings group for cycle timer and smart control" },
+  "automationScopeHint": { "message": "Active hours apply to both cycle timer and smart control", "description": "Clarifies the scope of active hours" },
+  "automationModeLabel": { "message": "Automation mode", "description": "Heading for the mutually exclusive mode selector" },
+  "automationModeExclusive": { "message": "Choose one", "description": "Clarifies that the two automation modes are mutually exclusive" },
+  "automationModeHint": { "message": "Choose one mode; switching turns the other one off", "description": "Explains mutually exclusive mode switching" },
   "activeHoursLabel": { "message": "Active hours", "description": "Checkbox label for the global active-hours gate applied to automatic control" },
   "activeHoursWithin": { "message": "Active", "description": "Automatic control is currently within its global active-hours gate" },
   "activeHoursOutside": { "message": "Paused outside active hours", "description": "Automatic control is paused by the global active-hours gate" },

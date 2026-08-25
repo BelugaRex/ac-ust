@@ -361,6 +361,156 @@ input {
 .settings-card {
   margin-bottom: 0;
 }
+.automation-heading {
+  padding: 9px 14px 8px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--separator);
+}
+
+.automation-heading h2 {
+  color: var(--text);
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 20px;
+}
+
+.automation-heading p {
+  margin-top: 2px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.active-hours-section {
+  border-bottom: 1px solid var(--separator);
+}
+
+#activeHoursSectionHeader {
+  min-height: 34px;
+  padding-top: 6px;
+  padding-bottom: 4px;
+  border-bottom: 0;
+}
+
+#activeHoursSectionHeader h3 {
+  font-size: 13px;
+  line-height: 18px;
+}
+
+#activeHoursBody {
+  padding-top: 2px;
+}
+
+.mode-section {
+  min-width: 0;
+  padding: 9px 14px 10px;
+  border: 0;
+}
+
+.mode-heading {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 18px;
+}
+
+.mode-exclusive {
+  margin-left: auto;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--surface-secondary);
+  color: var(--text-secondary);
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+}
+
+.mode-hint {
+  margin: 2px 0 7px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 15px;
+}
+
+.mode-segment {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 2px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface-secondary);
+}
+
+.mode-choice {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  min-width: 0;
+  height: 32px;
+  padding: 0 7px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 16px;
+  transition: background var(--transition), box-shadow var(--transition), color var(--transition), transform var(--transition);
+}
+
+.mode-choice:hover:not(:disabled):not([aria-pressed="true"]) {
+  background: var(--field);
+  color: var(--text);
+}
+
+.mode-choice[aria-pressed="true"] {
+  background: var(--surface);
+  color: var(--accent);
+  box-shadow: 0 0 0 1px var(--border);
+}
+
+.mode-choice-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 9px;
+  line-height: 1;
+  visibility: hidden;
+}
+
+.mode-choice[aria-pressed="true"] .mode-choice-mark {
+  visibility: visible;
+}
+
+.mode-choice:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+.mode-choice:disabled {
+  cursor: wait;
+  opacity: 0.5;
+}
+
+.mode-choice:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.mode-detail {
+  margin-top: 8px;
+}
 
 .settings-header,
 .section-heading {
@@ -868,14 +1018,7 @@ a:focus-visible,
   font-weight: 400;
 }
 
-/* 三个平级设置区段：各 body 与下一段 header 之间使用同一软分隔线。 */
-#activeHoursBody,
-#timerBody {
-  border-bottom: 1px solid var(--separator);
-}
-
 #activeHoursBody[hidden],
-#timerBody[hidden],
-#smartBody[hidden] {
+.mode-detail[hidden] {
   display: none;
 }

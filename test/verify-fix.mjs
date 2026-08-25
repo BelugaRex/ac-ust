@@ -773,12 +773,16 @@ async function runTests() {
       && /\.hero-countdown\s*\{[^}]*?align-items:\s*baseline/.test(popupCssNoComments),
     '状态卡保持中性表面，状态由语义圆点表达；倒计时数字和说明按基线连续阅读');
   assertPass(popupHtml.includes('class="visually-hidden" id="timerToggleState"')
-      && !popupHtml.includes('class="toggle-state" id="timerToggleState"'),
-    '主开关状态保留给辅助技术，但不再与拨杆重复显示');
+      && popupHtml.includes('class="visually-hidden" id="smartModeToggleState"'),
+    '两种自动模式的状态变化保留给辅助技术，但不与可见选中态重复显示');
   assertPass(/id="activeHoursRow"[\s\S]*?for="activeHoursToggle"[\s\S]*?class="toggle-switch"/.test(popupHtml)
       && /for="activeHoursStart"[\s\S]*?id="activeHoursStart"[\s\S]*?for="activeHoursEnd"[\s\S]*?id="activeHoursEnd"/.test(popupHtml)
       && !popupHtml.includes('id="activeHoursStatus"'),
     '运行时段主行含标签与拨杆，开始/结束字段保留完整无障碍名称');
+  assertPass(popupHtml.includes('data-i18n="automationSettingsLabel"')
+      && popupHtml.includes('id="automationScopeHint" data-i18n="automationScopeHint"')
+      && /class="active-hours-section"[^>]*aria-describedby="automationScopeHint"/.test(popupHtml),
+    '自动控制组显式说明运行时段同时约束两种自动模式，并把该说明关联到运行时段区段');
   assertPass((popupHtml.match(/class="field-grid"/g) || []).length === 2
       && (popupHtml.match(/class="field"/g) || []).length === 4
       && /\.field-grid\s*\{[^}]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*?gap:\s*10px/.test(popupCssNoComments),
@@ -787,8 +791,15 @@ async function runTests() {
     '四个字段统一填满列宽，使用 32px 控件高度和 13px 数字');
   assertPass(/\.toggle-switch\s*\{[^}]*?width:\s*36px[^}]*?height:\s*20px/.test(popupCssNoComments)
       && /\.toggle-switch::after\s*\{[^}]*?inset:\s*-11px\s+-4px/.test(popupCssNoComments)
-      && (popupHtml.match(/class="toggle-switch"/g) || []).length === 3,
-    '三个拨杆（主开关/运行时段/智能控制）统一为 36×20px，并通过绝对命中区达到桌面指针目标要求');
+      && (popupHtml.match(/class="toggle-switch"/g) || []).length === 1,
+    '仅运行时段保留 36×20px 二元拨杆，并通过绝对命中区达到桌面指针目标要求');
+  assertPass((popupHtml.match(/class="mode-choice"/g) || []).length === 2
+      && /class="mode-segment" role="group"[\s\S]*?<button[^>]*id="timerToggle"[^>]*aria-pressed="false"[\s\S]*?<button[^>]*id="smartModeToggle"[^>]*aria-pressed="false"/.test(popupHtml)
+      && !/<input[^>]*id="(?:timerToggle|smartModeToggle)"/.test(popupHtml)
+      && /\.mode-segment\s*\{[^}]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/.test(popupCssNoComments)
+      && /\.mode-choice\[aria-pressed="true"\]\s*\{[^}]*?background:\s*var\(--surface\)/.test(popupCssNoComments)
+      && popupHtml.includes('class="mode-choice-mark" aria-hidden="true">✓</span>'),
+    '循环定时与智能控制使用等宽二选一分段控件，持续选中态同时包含表面、边框与勾选标记');
   assertPass((popupHtml.match(/class="number-field"/g) || []).length === 2
       && (popupHtml.match(/class="field-unit" data-i18n="unitMinutes"/g) || []).length === 2
       && /\.field-unit\s*\{[^}]*?position:\s*absolute[^}]*?pointer-events:\s*none/.test(popupCssNoComments),
@@ -3434,11 +3445,11 @@ return { reapplySmartSensitivityNow };`
     '12F-2: popup 对 full、lite 与后台异常回退统一合并缓存，不再让单次响应隐藏 Est');
 
   assertPass(popupHtml.includes('data-i18n-aria-label="helpTooltip"')
-      && popupHtml.includes('aria-labelledby="pwmSettingsTitle"')
-      && popupHtml.includes('aria-describedby="timerToggleState"')
+      && /id="timerToggle"[^>]*aria-pressed="false"[^>]*aria-describedby="timerToggleState"/.test(popupHtml)
+      && /id="smartModeToggle"[^>]*aria-pressed="false"[^>]*aria-describedby="smartModeToggleState"/.test(popupHtml)
       && popupHtml.includes('for="onMinutes"')
       && popupHtml.includes('for="offMinutes"'),
-    '12F: 帮助、开关和分钟输入均有程序化可访问名称');
+    '12F: 帮助、两个分段选择按钮和分钟输入均有程序化可访问名称与状态');
   assertPass(/id="helpLink"[^>]*href="https:\/\/github\.com\/BelugaRex\/ac-ust\/issues\/new\/choose"[^>]*target="_blank"[^>]*rel="noopener"/.test(popupHtml),
     '12F-1: 顶部问号打开 GitHub Issue 模板选择页，并保留安全的新标签页行为');
   const bugIssueForm = fs.readFileSync(path.join(ROOT, '.github', 'ISSUE_TEMPLATE', 'bug_report.yml'), 'utf8');
@@ -4171,10 +4182,13 @@ return { reapplySmartSensitivityNow };`
       && !activeHoursPolicy.isAutomationAllowed(),
     '16C-1: 跨午夜或 start>=end 的非法运行时段必须 fail-closed，不能意外放开自动控制');
 
+  const automationHeadingIndex = popupHtml.indexOf('class="automation-heading"');
+  const activeHoursSectionIndex = popupHtml.indexOf('class="active-hours-section"');
   const activeHoursHeaderIndex = popupHtml.indexOf('id="activeHoursSectionHeader"');
   const activeHoursBodyIndex = popupHtml.indexOf('id="activeHoursBody"');
-  const timerHeaderIndex = popupHtml.indexOf('id="timerSectionHeader"');
-  const smartHeaderIndex = popupHtml.indexOf('id="smartSectionHeader"');
+  const modeSectionIndex = popupHtml.indexOf('class="mode-section"');
+  const timerChoiceIndex = popupHtml.indexOf('id="timerToggle"');
+  const smartChoiceIndex = popupHtml.indexOf('id="smartModeToggle"');
   const syncActiveHoursUiSource = extractSourceSection(
     popupSource,
     'function syncActiveHoursUI() {',
@@ -4187,41 +4201,24 @@ return { reapplySmartSensitivityNow };`
     '\nfunction commitActiveHours() {',
     'syncModeUI'
   );
-  const settingsCardStart16 = popupHtml.indexOf('<div class="settings-card">');
-  const directSettingChildIds16 = [];
-  if (settingsCardStart16 >= 0) {
-    const divTokenPattern16 = /<\/?div\b[^>]*>/g;
-    divTokenPattern16.lastIndex = settingsCardStart16;
-    let divDepth16 = 0;
-    let divToken16;
-    while ((divToken16 = divTokenPattern16.exec(popupHtml))) {
-      const token16 = divToken16[0];
-      if (token16.startsWith('</')) {
-        divDepth16 -= 1;
-        if (divDepth16 === 0) break;
-        continue;
-      }
-      if (divDepth16 === 1) {
-        const id16 = /\bid="([^"]+)"/.exec(token16)?.[1];
-        if (id16) directSettingChildIds16.push(id16);
-      }
-      divDepth16 += 1;
-    }
-  }
-  assertPass(activeHoursHeaderIndex >= 0
+  assertPass(automationHeadingIndex >= 0
+      && activeHoursSectionIndex > automationHeadingIndex
+      && activeHoursHeaderIndex > activeHoursSectionIndex
       && activeHoursBodyIndex > activeHoursHeaderIndex
-      && timerHeaderIndex > activeHoursBodyIndex
-      && smartHeaderIndex > timerHeaderIndex
-      && directSettingChildIds16.join(',') === [
-        'activeHoursSectionHeader',
-        'activeHoursBody',
-        'timerSectionHeader',
-        'timerBody',
-        'smartSectionHeader',
-        'smartBody',
-        'scheduleHintPin'
-      ].join(','),
-    '16D: 运行时段是循环定时与智能控制之前的独立同级区块');
+      && modeSectionIndex > activeHoursBodyIndex
+      && timerChoiceIndex > modeSectionIndex
+      && smartChoiceIndex > timerChoiceIndex
+      && /<section class="active-hours-section"[\s\S]*?id="activeHoursSectionHeader"[\s\S]*?id="activeHoursBody"[\s\S]*?<\/section>\s*<fieldset class="mode-section"/.test(popupHtml)
+      && /class="mode-heading"[\s\S]*?data-i18n="automationModeExclusive"[\s\S]*?class="mode-segment" role="group"/.test(popupHtml),
+    '16D: 自动控制先声明共同作用域，再把运行时段与二选一模式按父子层级分组');
+  assertPass(syncModeUiSource.includes("timerToggle.setAttribute('aria-pressed', String(timerOn));")
+      && syncModeUiSource.includes("smartModeToggle.setAttribute('aria-pressed', String(smartOn));")
+      && syncModeUiSource.includes('timerBody.hidden = !timerOn;')
+      && syncModeUiSource.includes('smartBody.hidden = !smartOn;')
+      && popupSource.includes("timerToggle.addEventListener('click', async () => {")
+      && popupSource.includes("smartModeToggle.addEventListener('click', async () => {")
+      && popupSource.includes('currentSmartMode.enabled = false;  // 模式互斥：选循环定时 → 关智能控制'),
+    '16D-1: 两个分段按钮同步持久选中态并保持原有互斥、折叠与再次点击关闭语义');
   assertPass(syncActiveHoursUiSource.includes('activeHoursBody.hidden = !currentActiveHours.enabled;')
       && !syncModeUiSource.includes('activeHoursBody')
       && !syncModeUiSource.includes('activeHoursToggle'),

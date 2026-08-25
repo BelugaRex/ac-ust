@@ -11,6 +11,11 @@
   "acOff": { "message": "定时已关闭", "description": "定时功能已关闭的状态文字" },
 
   "pwmSettings": { "message": "循环定时", "description": "弹窗 PWM 设置区段标题" },
+  "automationSettingsLabel": { "message": "自动控制", "description": "循环定时与智能控制的共同设置组标题" },
+  "automationScopeHint": { "message": "运行时段同时约束循环定时与智能控制", "description": "说明运行时段作用于两种自动模式" },
+  "automationModeLabel": { "message": "自动模式", "description": "互斥自动模式分段控件标题" },
+  "automationModeExclusive": { "message": "二选一", "description": "提示循环定时与智能控制不能同时启用" },
+  "automationModeHint": { "message": "选择一种模式；切换会自动关闭另一种", "description": "解释自动模式互斥切换行为" },
   "activeHoursLabel": { "message": "运行时段", "description": "全局自动控制运行时段门禁的复选框标签" },
   "activeHoursWithin": { "message": "运行中", "description": "当前处于全局自动控制运行时段内的状态微标" },
   "activeHoursOutside": { "message": "时段外暂停", "description": "全局自动控制因处于运行时段外而暂停的状态文案" },

@@ -1236,8 +1236,15 @@
     </div>
     <p class="visually-hidden" id="statusAnnouncement" role="status" aria-live="polite" aria-atomic="true"></p>
 
-    <!-- Settings card: active hours, cycle timer and smart control as peer sections -->
+    <!-- Settings card: global active-hours scope + mutually exclusive automation modes -->
     <div class="settings-card">
+      <div class="automation-heading">
+        <div>
+          <h2 data-i18n="automationSettingsLabel"></h2>
+          <p id="automationScopeHint" data-i18n="automationScopeHint"></p>
+        </div>
+      </div>
+      <section class="active-hours-section" aria-labelledby="activeHoursRow" aria-describedby="automationScopeHint">
       <div class="settings-header" id="activeHoursSectionHeader">
         <h3 id="activeHoursRow">
           <label for="activeHoursToggle" data-i18n="activeHoursLabel"></label>
@@ -1261,18 +1268,27 @@
           </div>
         </div>
       </div>
-      <div class="settings-header" id="timerSectionHeader">
-        <h3 id="pwmSettingsTitle" data-i18n="pwmSettings"></h3>
-        <div class="toggle-area">
-          <span class="visually-hidden" id="timerToggleState" data-i18n="timerDisabled" aria-live="polite" aria-atomic="true"></span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="timerToggle" aria-labelledby="pwmSettingsTitle" aria-describedby="timerToggleState">
-            <span class="toggle-slider"></span>
-          </label>
+      </section>
+      <fieldset class="mode-section" aria-describedby="automationModeHint">
+        <legend class="mode-heading" id="automationModeLabel">
+          <span data-i18n="automationModeLabel"></span>
+          <span class="mode-exclusive" data-i18n="automationModeExclusive"></span>
+        </legend>
+        <p class="mode-hint" id="automationModeHint" data-i18n="automationModeHint"></p>
+        <span class="visually-hidden" id="timerToggleState" data-i18n="timerDisabled" aria-live="polite" aria-atomic="true"></span>
+        <span class="visually-hidden" id="smartModeToggleState" data-i18n="timerDisabled" aria-live="polite" aria-atomic="true"></span>
+        <div class="mode-segment" role="group" aria-labelledby="automationModeLabel">
+          <button type="button" class="mode-choice" id="timerToggle" aria-pressed="false" aria-describedby="timerToggleState">
+            <span id="pwmSettingsTitle" data-i18n="pwmSettings"></span>
+            <span class="mode-choice-mark" aria-hidden="true">✓</span>
+          </button>
+          <button type="button" class="mode-choice" id="smartModeToggle" aria-pressed="false" aria-describedby="smartModeToggleState">
+            <span id="smartModeTitle" data-i18n="smartModeLabel"></span>
+            <span class="mode-choice-mark" aria-hidden="true">✓</span>
+          </button>
         </div>
-      </div>
-      <div id="timerBody" role="group" aria-labelledby="pwmSettingsTitle">
-        <div class="setting-group" id="intervalInputs">
+      <div class="mode-detail" id="timerBody" role="group" aria-labelledby="pwmSettingsTitle">
+        <div id="intervalInputs">
           <div class="field-grid">
             <div class="field">
               <label class="field-label" for="onMinutes" data-i18n="onMinutesLabel"></label>
@@ -1291,17 +1307,7 @@
           </div>
         </div>
       </div>
-      <div class="settings-header" id="smartSectionHeader">
-        <h3 id="smartModeTitle" data-i18n="smartModeLabel"></h3>
-        <div class="toggle-area">
-          <span class="visually-hidden" id="smartModeToggleState" data-i18n="timerDisabled" aria-live="polite" aria-atomic="true"></span>
-          <label class="toggle-switch">
-            <input type="checkbox" id="smartModeToggle" aria-labelledby="smartModeTitle" aria-describedby="smartModeToggleState">
-            <span class="toggle-slider"></span>
-          </label>
-        </div>
-      </div>
-      <div class="setting-group smart-body" id="smartBody" role="group" aria-labelledby="smartModeTitle">
+      <div class="mode-detail smart-body" id="smartBody" role="group" aria-labelledby="smartModeTitle">
           <div class="smart-slider-row">
             <span class="smart-end" data-i18n="smartModeWeak"></span>
             <div class="smart-slider-wrap">
@@ -1325,6 +1331,7 @@
             </div>
           </div>
       </div>
+      </fieldset>
       <div class="settings-hint" id="scheduleHintPin" data-i18n="scheduleHintPinTab"></div>
     </div>
 

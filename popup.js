@@ -102,8 +102,6 @@ let currentScheduleEnabled = false;
 let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
 let currentSmartMode = { enabled: false, sensitivity: 5 };
 let lastAnnouncedState = '';
-let _toggleProgrammatic = false; // 防止程序同步 timerToggle 时触发 onChange 循环
-let _smartProgrammatic = false;  // 防止程序同步 smartModeToggle 时触发 onChange 循环
 
 function updateSmartSensitivityBubble() {
   const value = Number(smartSensitivity.value);
@@ -155,22 +153,18 @@ function syncModeUI() {
   const smartOn = currentSmartMode.enabled;
   const timerOn = currentScheduleEnabled && !smartOn;
 
-  _toggleProgrammatic = true;
-  timerToggle.checked = timerOn;
+  timerToggle.setAttribute('aria-pressed', String(timerOn));
   timerToggleState.textContent = timerOn ? t('timerEnabled') : t('timerDisabled');
-  _toggleProgrammatic = false;
 
-  _smartProgrammatic = true;
-  smartModeToggle.checked = smartOn;
+  smartModeToggle.setAttribute('aria-pressed', String(smartOn));
   smartModeToggleState.textContent = smartOn ? t('timerEnabled') : t('timerDisabled');
-  _smartProgrammatic = false;
 
   // 灵敏度滑块始终可调，便于在开启智能控制前预设偏好
   smartSensitivity.value = String(currentSmartMode.sensitivity);
   requestAnimationFrame(updateSmartSensitivityBubble);
 
-  // 折叠：各自开关关闭时隐藏对应 body。智能控制开 → 循环定时关（其 body 折叠）；
-  // 循环定时开 → 智能控制关（其 body 折叠）；两者都关 → 两个 body 都折叠。
+  // 折叠：未选中的模式隐藏对应 body。智能控制与循环定时互斥；
+  // 两者都未选中时，两个 body 都折叠。
   timerBody.hidden = !timerOn;
   smartBody.hidden = !smartOn;
 }
@@ -276,9 +270,8 @@ async function updateSmartReadout() {
   }
 }
 
-smartModeToggle.addEventListener('change', async () => {
-  if (_smartProgrammatic) return;
-  const enabled = smartModeToggle.checked;
+smartModeToggle.addEventListener('click', async () => {
+  const enabled = smartModeToggle.getAttribute('aria-pressed') !== 'true';
   currentSmartMode.enabled = enabled;
   currentScheduleEnabled = enabled;  // 智能控制开 = 自动控制开；关 = 自动控制全关（与循环定时互斥）
   syncModeUI();
@@ -650,13 +643,12 @@ async function updateSchedule(enabled, restart = false) {
   await applyScheduleUpdateResponse(response);
 }
 
-// ----- 定时拨动开关（双向同步 toggle） -----
-timerToggle.addEventListener('change', async () => {
-  if (_toggleProgrammatic) return; // 程序同步，不触发 updateSchedule
-  const enabled = timerToggle.checked;
+// ----- 自动模式分段选择（循环定时与智能控制互斥） -----
+timerToggle.addEventListener('click', async () => {
+  const enabled = timerToggle.getAttribute('aria-pressed') !== 'true';
   currentScheduleEnabled = enabled;
   if (enabled) {
-    currentSmartMode.enabled = false;  // 平级互斥：开循环定时 → 关智能控制
+    currentSmartMode.enabled = false;  // 模式互斥：选循环定时 → 关智能控制
   }
   syncModeUI();
   timerToggle.disabled = true; // 防止双击
