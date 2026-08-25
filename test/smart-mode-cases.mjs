@@ -224,7 +224,7 @@ export function runSmartModeCases(assertPass) {
       && consumedPreparedDecision.onMinutes === preparedDecision.onMinutes
       && consumedPreparedDecision.offMinutes === preparedDecision.offMinutes
       && consumedPreparedDecision.usedPreparedSensitivity === true,
-    'smart-plan: :10 预取生成目标 :30 快照，并在同一边界按原灵敏度直接消费');
+    'smart-plan: :20 预取生成目标 :30 快照，并在同一边界按原灵敏度直接消费');
 
   const sensitivityChangedDecision = smartMode.consumeSmartWeatherDecision(
     preparedDecision,

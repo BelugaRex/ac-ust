@@ -310,13 +310,13 @@ function computeTriggerAlignment(schedule, liveScheduledTime, opts) {
   return { nextAligned, legacyAligned, requireLegacyAlignment };
 }
 
-// 智能天气预取槽只接受精确 :10/:50，并分别绑定下一 :30/:00 控制边界。
+// 智能天气预取槽只接受精确 :20/:50，并分别绑定下一 :30/:00 控制边界。
 function smartWeatherTargetBoundaryAt(prefetchAt) {
   const value = Number(prefetchAt);
   if (!Number.isSafeInteger(value)) return 0;
   const d = new Date(value);
   if (d.getSeconds() !== 0 || d.getMilliseconds() !== 0) return 0;
-  if (d.getMinutes() === 10) {
+  if (d.getMinutes() === 20) {
     d.setMinutes(30, 0, 0);
     return d.getTime();
   }
@@ -328,22 +328,22 @@ function smartWeatherTargetBoundaryAt(prefetchAt) {
   return 0;
 }
 
-// 返回严格晚于 now 的下一次 :10/:50 一次性预取计划。
+// 返回严格晚于 now 的下一次 :20/:50 一次性预取计划。
 function planNextSmartWeatherPrefetch(now = Date.now()) {
   const nowMs = Number.isFinite(Number(now)) ? Number(now) : Date.now();
-  const nextTen = new Date(nowMs);
-  nextTen.setMinutes(10, 0, 0);
+  const nextTwenty = new Date(nowMs);
+  nextTwenty.setMinutes(20, 0, 0);
   const nextFifty = new Date(nowMs);
   nextFifty.setMinutes(50, 0, 0);
 
   let prefetchAt;
-  if (nextTen.getTime() > nowMs) {
-    prefetchAt = nextTen.getTime();
+  if (nextTwenty.getTime() > nowMs) {
+    prefetchAt = nextTwenty.getTime();
   } else if (nextFifty.getTime() > nowMs) {
     prefetchAt = nextFifty.getTime();
   } else {
-    nextTen.setHours(nextTen.getHours() + 1);
-    prefetchAt = nextTen.getTime();
+    nextTwenty.setHours(nextTwenty.getHours() + 1);
+    prefetchAt = nextTwenty.getTime();
   }
   return {
     prefetchAt,

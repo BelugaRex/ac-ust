@@ -3043,7 +3043,7 @@ async function runTests() {
         < smartWeatherAlarmBody.indexOf('await prepareSmartWeatherForBoundary(boundaryAt)')
       && setupAlarmsForWeatherBody.includes('await rescheduleSmartWeatherAlarm();')
       && diagnosticWeatherRecoveryBody.includes('await rescheduleSmartWeatherAlarm();'),
-    '11F-0: 天气任务使用严格未来的 :10/:50 one-shot，触发后先推进且启动/诊断可恢复');
+    '11F-0: 天气任务使用严格未来的 :20/:50 one-shot，触发后先推进且启动/诊断可恢复');
   assertPass(smartWeatherPreparationBody.includes('getSmartWeather({ force: true })')
       && countOccurrences(backgroundSource, 'getSmartWeather(') === 2
       && countOccurrences(backgroundSource, 'fetchSmartWeather(') === 2
@@ -4488,7 +4488,7 @@ return { reapplySmartSensitivityNow };`
   const rescheduleActiveBoundaryBody16 = extractSourceSection(
     backgroundSource,
     'async function rescheduleActiveBoundary() {',
-    '\n// 调度下一次 :10/:50 天气预取',
+    '\n// 调度下一次 :20/:50 天气预取',
     'rescheduleActiveBoundary exact deadline'
   );
   assertPass(rescheduleActiveBoundaryBody16.includes(

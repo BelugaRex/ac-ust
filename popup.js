@@ -260,7 +260,7 @@ async function updateSmartReadout() {
     const stored = await chrome.storage.local.get('ac_smart_weather');
     const weather = stored.ac_smart_weather;
 
-    // 天气只由后台 :10/:50 one-shot 预取，popup 仅读缓存展示。
+    // 天气只由后台 :20/:50 one-shot 预取，popup 仅读缓存展示。
     if (!weather || !Number.isFinite(Number(weather.temperature))) {
       renderSmartReadout(null, weather || null);
       return;

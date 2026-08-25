@@ -33,24 +33,25 @@ export function runPwmPhaseCases(assertPass) {
     'PWM phase module 导出规划函数、天气预取槽与半点对齐函数'
   );
 
-  // 智能天气在 :10/:50 预取并绑定下一 :30/:00 控制边界；调度始终严格晚于 now。
+  // 智能天气在 :20/:50 预取并绑定下一 :30/:00 控制边界；调度始终严格晚于 now。
   const hourTime = (h, m, s = 0, ms = 0) => new Date(2026, 7, 17, h, m, s, ms).getTime();
   const prefetchCases = [
-    [hourTime(14, 9, 59, 999), hourTime(14, 10), hourTime(14, 30)],
-    [hourTime(14, 10), hourTime(14, 50), hourTime(15, 0)],
+    [hourTime(14, 19, 59, 999), hourTime(14, 20), hourTime(14, 30)],
+    [hourTime(14, 20), hourTime(14, 50), hourTime(15, 0)],
     [hourTime(14, 49, 59, 999), hourTime(14, 50), hourTime(15, 0)],
-    [hourTime(14, 50), hourTime(15, 10), hourTime(15, 30)],
-    [hourTime(23, 50), hourTime(24, 10), hourTime(24, 30)]
+    [hourTime(14, 50), hourTime(15, 20), hourTime(15, 30)],
+    [hourTime(23, 50), hourTime(24, 20), hourTime(24, 30)]
   ];
   assertPass(prefetchCases.every(([input, prefetchAt, boundaryAt]) => {
     const plan = planNextSmartWeatherPrefetch(input);
     return plan.prefetchAt === prefetchAt && plan.boundaryAt === boundaryAt;
-  }), 'planNextSmartWeatherPrefetch: :10/:50 严格未来交替并正确跨小时/跨日');
-  assertPass(smartWeatherTargetBoundaryAt(hourTime(14, 10)) === hourTime(14, 30)
+  }), 'planNextSmartWeatherPrefetch: :20/:50 严格未来交替并正确跨小时/跨日');
+  assertPass(smartWeatherTargetBoundaryAt(hourTime(14, 20)) === hourTime(14, 30)
       && smartWeatherTargetBoundaryAt(hourTime(14, 50)) === hourTime(15, 0)
-      && smartWeatherTargetBoundaryAt(hourTime(14, 10, 0, 1)) === 0
+      && smartWeatherTargetBoundaryAt(hourTime(14, 20, 0, 1)) === 0
+      && smartWeatherTargetBoundaryAt(hourTime(14, 10)) === 0
       && smartWeatherTargetBoundaryAt(hourTime(14, 30)) === 0,
-    'smartWeatherTargetBoundaryAt: 仅接受精确 :10/:50 槽并映射到 :30/:00');
+    'smartWeatherTargetBoundaryAt: 仅接受精确 :20/:50 槽并映射到 :30/:00');
 
   // 智能模式半点对齐：nextHalfHourBoundary 驱动 30 分钟控制周期。
   assertPass(nextHalfHourBoundary(hourTime(13, 10)) === hourTime(13, 30),

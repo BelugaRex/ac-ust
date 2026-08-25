@@ -95,7 +95,7 @@
   "diagnoseWatchdog": { "message": "ac-watchdog (every 5 min)" },
   "diagnoseSmartModeOn": { "message": "Smart control on (cycle timer off by mutual-exclusion design)" },
   "diagnoseSmartModeOff": { "message": "Smart control off (equivalent temp N/A)" },
-  "diagnoseSmartWeatherAlarm": { "message": "ac-smart-weather prefetch alarm (next :10/:50)" },
+  "diagnoseSmartWeatherAlarm": { "message": "ac-smart-weather prefetch alarm (next :20/:50)" },
   "diagnoseSmartWeatherAlarmMissing": { "message": "ac-smart-weather prefetch alarm missing (future boundary plans won't be prepared)" },
   "diagnoseSmartWeatherFresh": { "message": "weather cache fresh ($1 min ago)" },
   "diagnoseSmartWeatherStale": { "message": "weather cache stale ($1 min ago, likely not refreshing)" },

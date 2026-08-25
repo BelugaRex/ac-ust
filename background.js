@@ -250,7 +250,7 @@ async function rescheduleActiveBoundary() {
   await createAlarm('ac-active-boundary', { when: next });
 }
 
-// 调度下一次 :10/:50 天气预取（智能模式启用时；否则清除闹钟）。
+// 调度下一次 :20/:50 天气预取（智能模式启用时；否则清除闹钟）。
 async function rescheduleSmartWeatherAlarm() {
   try {
     await chrome.alarms.clear('ac-smart-weather');
@@ -1847,7 +1847,7 @@ async function runPwmStep() {
     await loadScheduleFromStorage();
     if (!isAutomationAllowed()) return;
 
-    // 智能模式：只消费 :10/:50 为当前控制边界准备的本地快照，不等待天气网络。
+    // 智能模式：只消费 :20/:50 为当前控制边界准备的本地快照，不等待天气网络。
     await applyPreparedSmartModeDurations();
     if (await abortStaleAutomation(
       automationRevision,
@@ -3702,7 +3702,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           sensitivity: normalizeSmartSensitivity(data.smartMode.sensitivity)
         };
       }
-      // 天气只由 :10/:50 的 ac-smart-weather 预取（setupAlarms 已调度），此处不即时拉取。
+      // 天气只由 :20/:50 的 ac-smart-weather 预取（setupAlarms 已调度），此处不即时拉取。
 
       const activeHoursChanged = previousActiveHours !== JSON.stringify(schedule.activeHours);
       const automationAllowed = isAutomationAllowed();
