@@ -2045,6 +2045,8 @@ async function runTests() {
     'appendDiagnosticLog',
     'console',
     'AC_PAGE',
+    'isAutomationAllowed',
+    'isAutomationOperationCurrent',
     `${toggleRecoverySource}; return { _toggleOnExistingTab };`
   );
   const quietConsole = { log() {}, warn() {}, error() {} };
@@ -2094,7 +2096,7 @@ async function runTests() {
       && recoveryCalls.wait === 1 && recoveryCalls.ensure === 2 && recoveryCalls.get >= 4,
     '9J-3: 恢复链路恰好发送两次、刷新和等待各一次，并在两轮操作前后复核精确 home');
 
-  const ordinaryCalls = { send: 0, reload: 0 };
+  const ordinaryCalls = { send: 0, reload: 0, diagnostic: [] };
   const ordinaryChrome = {
     tabs: {
       async sendMessage() {
@@ -2114,16 +2116,21 @@ async function runTests() {
     async tabId => ordinaryChrome.tabs.get(tabId),
     async () => null,
     async (tabId, message) => ordinaryChrome.tabs.sendMessage(tabId, message),
-    ignoreDiagnosticLog,
+    (...args) => { ordinaryCalls.diagnostic.push(args); },
     quietConsole,
     'https://w5.ab.ust.hk/njggt/app/home'
   );
   const ordinaryFailure = await ordinaryHarness._toggleOnExistingTab(
     { id: 42, url: 'https://w5.ab.ust.hk/njggt/app/home' }, 'on');
+  const ordinaryRecoveryDiagnostics = ordinaryCalls.diagnostic.filter(
+    entry => entry?.[1] === 'toggle-refresh-recovery'
+  );
   assertPass(ordinaryFailure.success === false
       && ordinaryFailure.recoveredByPageRefresh === true
-      && ordinaryCalls.send === 2 && ordinaryCalls.reload === 1,
-    '9J-4: 普通连接持续失败时有限递归恰好刷新一次、发送两次后停止');
+      && ordinaryCalls.send === 2 && ordinaryCalls.reload === 1
+      && ordinaryRecoveryDiagnostics.length === 1
+      && ordinaryRecoveryDiagnostics[0]?.[0] === 'error',
+    '9J-4: 普通连接持续失败时恰好刷新一次、发送两次，并保留一次恢复 ERROR');
 
   const rejectedCalls = { send: 0, reload: 0 };
   const rejectedChrome = {
@@ -2157,6 +2164,92 @@ async function runTests() {
   assertPass(rejectedRecovery.success === true && rejectedRecovery.recoveredByPageRefresh === true
       && rejectedCalls.send === 2 && rejectedCalls.reload === 1,
     '9J-5: 主世界明确返回未开启时也刷新 home，等待页面就绪后仅重试一次');
+
+  const expiredRecoveryCalls = { send: 0, reload: 0, wait: 0, diagnostic: [] };
+  const expiredRecoveryChrome = {
+    tabs: {
+      async sendMessage() {
+        expiredRecoveryCalls.send += 1;
+        return { success: false, error: '自动开启窗口已结束' };
+      },
+      async reload() { expiredRecoveryCalls.reload += 1; },
+      async get(tabId) {
+        return { id: tabId, url: 'https://w5.ab.ust.hk/njggt/app/home', status: 'complete' };
+      }
+    }
+  };
+  const expiredRecoveryHarness = loadToggleRecovery(
+    expiredRecoveryChrome,
+    async () => { expiredRecoveryCalls.wait += 1; return true; },
+    () => true,
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
+    async () => true,
+    async tabId => expiredRecoveryChrome.tabs.get(tabId),
+    async () => null,
+    async (tabId, message) => expiredRecoveryChrome.tabs.sendMessage(tabId, message),
+    (...args) => { expiredRecoveryCalls.diagnostic.push(args); },
+    quietConsole,
+    'https://w5.ab.ust.hk/njggt/app/home',
+    () => true,
+    () => true
+  );
+  const expiredRecovery = await expiredRecoveryHarness._toggleOnExistingTab(
+    { id: 47, url: 'https://w5.ab.ust.hk/njggt/app/home' },
+    'on',
+    {
+      notAfterAt: Date.now() - 1,
+      requireAutomationAllowed: true,
+      automationRevision: 9
+    }
+  );
+  assertPass(expiredRecovery.success === false
+      && expiredRecovery.error === '自动开启窗口已结束'
+      && expiredRecoveryCalls.send === 1
+      && expiredRecoveryCalls.reload === 0
+      && expiredRecoveryCalls.wait === 0
+      && expiredRecoveryCalls.diagnostic.length === 0,
+    '9J-5A: 智能 ON 截止已过属于终止结果，后台零刷新、零导航且不写恢复 ERROR');
+
+  const pausedRecoveryCalls = { send: 0, reload: 0, diagnostic: [] };
+  const pausedRecoveryChrome = {
+    tabs: {
+      async sendMessage() { pausedRecoveryCalls.send += 1; return { success: true }; },
+      async reload() { pausedRecoveryCalls.reload += 1; },
+      async get(tabId) {
+        return { id: tabId, url: 'https://w5.ab.ust.hk/njggt/app/home', status: 'complete' };
+      }
+    }
+  };
+  const pausedRecoveryHarness = loadToggleRecovery(
+    pausedRecoveryChrome,
+    async () => true,
+    () => true,
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
+    async () => true,
+    async tabId => pausedRecoveryChrome.tabs.get(tabId),
+    async () => null,
+    async (tabId, message) => pausedRecoveryChrome.tabs.sendMessage(tabId, message),
+    (...args) => { pausedRecoveryCalls.diagnostic.push(args); },
+    quietConsole,
+    'https://w5.ab.ust.hk/njggt/app/home',
+    () => true,
+    () => false
+  );
+  const pausedRecovery = await pausedRecoveryHarness._toggleOnExistingTab(
+    { id: 48, url: 'https://w5.ab.ust.hk/njggt/app/home' },
+    'on',
+    {
+      notAfterAt: Date.now() + 60000,
+      requireAutomationAllowed: true,
+      automationRevision: 10
+    }
+  );
+  assertPass(pausedRecovery.success === false
+      && pausedRecovery.automationPausedByActiveHours === true
+      && pausedRecoveryCalls.send === 0
+      && pausedRecoveryCalls.reload === 0
+      && pausedRecoveryCalls.diagnostic.length === 0,
+    '9J-5B: 自动控制 revision 已失效属于终止结果，后台不发送、不刷新且不写恢复 ERROR');
 
   const driftCalls = { send: 0, reload: 0, update: 0, wait: 0 };
   let driftUrl = 'https://w5.ab.ust.hk/njggt/app/home';

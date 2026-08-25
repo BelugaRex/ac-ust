@@ -2738,6 +2738,16 @@ async function _toggleOnExistingTab(tab, action, options = {}) {
   return attemptACToggleWithRecovery(tab.id, action, 1, '', options);
 }
 
+function isTerminalACToggleRecoveryResult(action, result, options = {}, now = Date.now()) {
+  if (action !== 'on') return false;
+  if (result?.automationPausedByActiveHours === true) return true;
+
+  const notAfterAt = Number(options?.notAfterAt);
+  return Number.isSafeInteger(notAfterAt)
+    && notAfterAt > 0
+    && now >= notAfterAt;
+}
+
 async function attemptACToggleOnExactHome(tabId, action, options = {}) {
   if (!await getExactACHomeTab(tabId)) {
     return {
@@ -2793,8 +2803,9 @@ async function attemptACToggleWithRecovery(
   options = {}
 ) {
   const result = await attemptACToggleOnExactHome(tabId, action, options);
-  if (result.success || result.invalidTarget || refreshesRemaining <= 0) {
-    if (!result.success && initialError) {
+  const terminalResult = isTerminalACToggleRecoveryResult(action, result, options);
+  if (result.success || result.invalidTarget || terminalResult || refreshesRemaining <= 0) {
+    if (!result.success && initialError && !terminalResult) {
       void appendDiagnosticLog('error', 'toggle-refresh-recovery', new Error(result.error));
     }
     return initialError
