@@ -936,8 +936,88 @@ function appendRecentDiagnosticLogLines(lines, entries, nowMs = Date.now()) {
     const level = entry.level === 'warn' ? 'WARN' : 'ERROR';
     const source = String(entry.source || 'unknown').slice(0, 80);
     const message = String(entry.message || '').slice(0, 300);
-    lines.push(`⚠️ ${time} [${level}/${source}] ${message}`);
+    lines.push(`🕘 ${time} [HISTORY ${level}/${source}] ${message}`);
   });
+}
+
+const DIAGNOSTIC_LEVEL_SYMBOLS = Object.freeze({
+  ok: '✅',
+  info: 'ℹ️',
+  warning: '⚠️',
+  repaired: '🛠️',
+  error: '❌'
+});
+
+function createDiagnosticReport(translate) {
+  const detailLines = [];
+  const findings = [];
+
+  function add(ok, message, metadata = {}) {
+    const requestedLevel = String(metadata.level || '');
+    const level = Object.hasOwn(DIAGNOSTIC_LEVEL_SYMBOLS, requestedLevel)
+      ? requestedLevel
+      : (ok ? 'ok' : 'error');
+    const isFinding = level === 'error' || level === 'warning' || level === 'repaired';
+    const code = String(metadata.code || (isFinding ? 'DIAG-UNCLASSIFIED' : '')).slice(0, 80);
+    const codeLabel = code && level !== 'ok' ? ` [${code}]` : '';
+    detailLines.push(`${DIAGNOSTIC_LEVEL_SYMBOLS[level]}${codeLabel} ${message}`);
+
+    if (isFinding && !findings.some(item => item.code === code)) {
+      findings.push({
+        code,
+        level,
+        domain: String(metadata.domain || translate('diagnoseDomainGeneral')),
+        message: String(message),
+        action: String(metadata.action || ''),
+        priority: Number.isFinite(Number(metadata.priority)) ? Number(metadata.priority) : 100
+      });
+    }
+  }
+
+  function getSummaryLines() {
+    const errorCount = findings.filter(item => item.level === 'error').length;
+    const warningCount = findings.filter(item => item.level === 'warning').length;
+    const repairedCount = findings.filter(item => item.level === 'repaired').length;
+    const summaryLines = [translate('diagnoseSummary', errorCount, warningCount, repairedCount)];
+    const activeIssues = findings
+      .filter(item => item.level === 'error' || item.level === 'warning')
+      .sort((left, right) => (
+        (left.level === right.level ? 0 : (left.level === 'error' ? -1 : 1))
+        || left.priority - right.priority
+      ));
+    const primary = activeIssues[0];
+    if (primary) {
+      summaryLines.push(translate(
+        'diagnosePrimaryIssue',
+        primary.code,
+        primary.domain,
+        primary.message
+      ));
+      if (primary.action) summaryLines.push(translate('diagnoseNextStep', primary.action));
+    } else if (repairedCount > 0) {
+      const repaired = findings
+        .filter(item => item.level === 'repaired')
+        .sort((left, right) => left.priority - right.priority)[0];
+      summaryLines.push(translate(
+        'diagnosePrimaryRepair',
+        repaired.code,
+        repaired.domain,
+        repaired.message
+      ));
+    } else {
+      summaryLines.push(translate('diagnoseSummaryHealthy'));
+    }
+    summaryLines.push(translate('diagnoseDetails'));
+    return summaryLines;
+  }
+
+  function getCompletionLevel() {
+    if (findings.some(item => item.level === 'error')) return 'error';
+    if (findings.some(item => item.level === 'warning')) return 'warning';
+    return 'success';
+  }
+
+  return { detailLines, findings, add, getSummaryLines, getCompletionLevel };
 }
 
 function projectPersistentSchedule(scheduleSnapshot) {
@@ -958,8 +1038,9 @@ btnDiagnose.addEventListener('click', async () => {
   showStatus(t('diagnoseInProgress'), '');
   btnDiagnose.disabled = true;
   
-  const lines = [];
-  function add(ok, msg) { lines.push((ok ? '✅' : '❌') + ' ' + msg); }
+  const report = createDiagnosticReport(t);
+  const lines = report.detailLines;
+  const add = report.add;
   // fmt 提升到顶层:此前 4.5 段局部 const fmt (if 块作用域) + 5 段 const fmt2 typo (调用写 fmt) 双声明
   // 引致 SW success 分支 ReferenceError。手里 mock 没跑该分支,潜伏至 v0.6.7 实测。
   const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';
@@ -974,18 +1055,93 @@ btnDiagnose.addEventListener('click', async () => {
   lines.push(t('diagnoseBrowser') + browserName + ' ' + browserVer);
   
   try {
-    const ensured = await sendDiagnosticRuntimeMessage({ type: 'ensureDiagnostics' });
-    const bg = await sendDiagnosticRuntimeMessage({ type: 'getSchedule' });
+    let ensured = null;
+    try {
+      ensured = await sendDiagnosticRuntimeMessage({ type: 'ensureDiagnostics' });
+      if (ensured?.success === false && ensured.error) {
+        add(false, t('diagnoseEnsureFailed') + String(ensured.error).slice(0, 80), {
+          code: 'SCHED-REPAIR-FAILED',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 10
+        });
+      }
+    } catch (e) {
+      add(false, t('diagnoseEnsureFailed') + (e.message || '').slice(0, 80), {
+        code: 'SCHED-REPAIR-FAILED',
+        domain: t('diagnoseDomainScheduler'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 10
+      });
+    }
+
+    let bg = null;
+    let bgProbeFailed = false;
+    try {
+      bg = await sendDiagnosticRuntimeMessage({ type: 'getSchedule' });
+      if (bg?.success === false) {
+        bgProbeFailed = true;
+        add(false, t('diagnoseScheduleReadFailed') + String(bg.error || '?').slice(0, 80), {
+          code: 'SW-SNAPSHOT-FAILED',
+          domain: t('diagnoseDomainBackground'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 5
+        });
+      }
+    } catch (e) {
+      bgProbeFailed = true;
+      add(false, t('diagnoseScheduleReadFailed') + (e.message || '').slice(0, 80), {
+        code: 'SW-SNAPSHOT-FAILED',
+        domain: t('diagnoseDomainBackground'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 5
+      });
+    }
 
     // 1. 检查 storage / 后台权威快照
-    const stored = await chrome.storage.local.get('ac_schedule');
-    const storedSchedule = stored.ac_schedule || {};
+    let stored = {};
+    let storageReadOk = false;
+    try {
+      stored = await chrome.storage.local.get('ac_schedule');
+      storageReadOk = true;
+      add(true, t('diagnoseStorageRW'));
+    } catch (e) {
+      add(false, t('diagnoseStorageReadFailed') + (e.message || '').slice(0, 80), {
+        code: 'CFG-STORAGE-READ-FAILED',
+        domain: t('diagnoseDomainConfig'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 0
+      });
+    }
+    const storedScheduleExists = storageReadOk
+      && stored?.ac_schedule
+      && typeof stored.ac_schedule === 'object';
+    const storedSchedule = storedScheduleExists ? stored.ac_schedule : {};
+    if (storageReadOk && !storedScheduleExists) {
+      add(false, t('diagnoseScheduleMissing'), {
+        level: 'warning',
+        code: 'CFG-SCHEDULE-MISSING',
+        domain: t('diagnoseDomainConfig'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 20
+      });
+    }
     const bgSchedule = bg?.success === false && bg?.schedule
       ? bg.schedule
       : (bg || {});
     let s = { ...storedSchedule, ...(ensured?.schedule || {}), ...bgSchedule };
     const automationPausedByActiveHours = s._automationPausedByActiveHours === true
       || isAutomationPausedByActiveHours(s);
+    const automationEnabled = s.enabled === true;
+    const repairedItems = new Set(Array.isArray(ensured?.repairs) ? ensured.repairs : []);
+    const clearedAlarmCount = [...repairedItems]
+      .filter(item => item.endsWith('-alarm-cleared')).length;
+    const leakedRuntimeAlarmCount = [
+      ensured?.alarms?.pwm,
+      ensured?.alarms?.badge,
+      ensured?.alarms?.watchdog,
+      ...(!automationEnabled ? [ensured?.alarms?.smartWeather] : [])
+    ].filter(Boolean).length;
     let effectiveNextTriggerAt = s.nextTriggerAt || 0;
 
     // 1.5 自愈:storage.nextTriggerAt 缺失或已过期,但 live ac-pwm 在未来(间隔模式 + enabled),
@@ -1021,58 +1177,217 @@ btnDiagnose.addEventListener('click', async () => {
         effectiveNextTriggerAt = s.nextTriggerAt || 0;
         selfHealed = true;
       } catch (e) {
-        add(false, t('diagnoseSelfHealFail') + (e.message||'').slice(0,60));
+        add(false, t('diagnoseSelfHealFail') + (e.message||'').slice(0,60), {
+          code: 'SCHED-TRIGGER-REPAIR-FAILED',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 10
+        });
       }
     }
 
-    add(!!storedSchedule, t('diagnoseStorageRW'));
-    add(s.enabled === true, t('diagnoseEnabledPrefix') + s.enabled + ' (' + (s.enabled ? t('diagnoseOn') : t('diagnoseOff')) + ')');
-    add(!!s.mode, t('diagnoseMode') + (s.mode || '?'));
-    add(s.clockMode !== undefined, t('diagnoseClockMode') + (s.clockMode ? t('diagnoseClock') : t('diagnoseInterval')));
+    add(true, t('diagnoseEnabledPrefix') + s.enabled + ' (' + (s.enabled ? t('diagnoseOn') : t('diagnoseOff')) + ')',
+      automationEnabled ? {} : {
+        level: 'info',
+        code: 'CFG-AUTOMATION-OFF',
+        domain: t('diagnoseDomainConfig')
+      });
+    add(!!s.mode, t('diagnoseMode') + (s.mode || '?'), {
+      code: 'CFG-MODE-MISSING',
+      domain: t('diagnoseDomainConfig'),
+      action: t('diagnoseActionReloadExtension'),
+      priority: 15
+    });
+    add(s.clockMode !== undefined, t('diagnoseClockMode') + (s.clockMode === undefined
+      ? '?'
+      : (s.clockMode ? t('diagnoseClock') : t('diagnoseInterval'))), {
+      code: 'CFG-CLOCK-MISSING',
+      domain: t('diagnoseDomainConfig'),
+      action: t('diagnoseActionReloadExtension'),
+      priority: 15
+    });
     if (s.clockMode === false && s.enabled
       && !automationPausedByActiveHours && !effectiveNextTriggerAt) {
-      add(false, t('diagnoseMissingTrigger'));
+      add(false, t('diagnoseMissingTrigger'), {
+        code: 'SCHED-TRIGGER-MISSING',
+        domain: t('diagnoseDomainScheduler'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 10
+      });
     } else if (effectiveNextTriggerAt) {
       const repairedLabel = selfHealed
         ? t('diagnosePopHealed')
         : (storedSchedule.nextTriggerAt === effectiveNextTriggerAt ? '' : t('diagnoseBgWriteback'));
-      add(true, t('diagnoseTriggerTime') + new Date(effectiveNextTriggerAt).toLocaleTimeString() + repairedLabel);
+      const triggerWasRepaired = selfHealed || repairedItems.has('pwm-trigger');
+      add(true, t('diagnoseTriggerTime') + new Date(effectiveNextTriggerAt).toLocaleTimeString() + repairedLabel,
+        triggerWasRepaired ? {
+          level: 'repaired',
+          code: 'SCHED-TRIGGER-REPAIRED',
+          domain: t('diagnoseDomainScheduler'),
+          priority: 20
+        } : {});
     }
 
     // 2. 检查闹钟 — 运行闹钟只允许后台自愈，确保创建前后都复核运行时段门禁。
     let alarms = await chrome.alarms.getAll();
     const pwmAlarm = ensured?.alarms?.pwm || alarms.find(a => a.name === 'ac-pwm');
-    if (automationPausedByActiveHours) {
-      add(true, t('diagnoseAutomationPaused'));
+    if (!automationEnabled) {
+      if (leakedRuntimeAlarmCount) {
+        add(false, t('diagnoseRuntimeAlarmsLeaked', leakedRuntimeAlarmCount), {
+          code: 'SCHED-RUNTIME-ALARMS-LEAKED',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 0
+        });
+      } else {
+        add(true, clearedAlarmCount
+          ? t('diagnoseRuntimeAlarmsCleared', clearedAlarmCount)
+          : t('diagnoseRuntimeAlarmsInactive'), {
+          level: clearedAlarmCount ? 'repaired' : 'info',
+          code: clearedAlarmCount ? 'SCHED-RUNTIME-ALARMS-CLEARED' : 'SCHED-RUNTIME-INACTIVE',
+          domain: t('diagnoseDomainScheduler')
+        });
+      }
+    } else if (automationPausedByActiveHours) {
+      if (leakedRuntimeAlarmCount) {
+        add(false, t('diagnoseRuntimeAlarmsLeaked', leakedRuntimeAlarmCount), {
+          code: 'SCHED-RUNTIME-ALARMS-LEAKED',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 0
+        });
+      } else {
+        add(true, clearedAlarmCount
+          ? t('diagnoseRuntimeAlarmsCleared', clearedAlarmCount)
+          : t('diagnoseAutomationPaused'), {
+          level: clearedAlarmCount ? 'repaired' : 'info',
+          code: clearedAlarmCount ? 'SCHED-RUNTIME-ALARMS-CLEARED' : 'SCHED-ACTIVE-HOURS-PAUSED',
+          domain: t('diagnoseDomainScheduler')
+        });
+      }
     } else {
-      add(!!pwmAlarm, t('diagnosePwmExists') + (pwmAlarm ? t('diagnosePwmTrigger') + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
+      const pwmWasRepaired = repairedItems.has('pwm-alarm');
+      add(!!pwmAlarm, pwmAlarm
+        ? t('diagnosePwmExists') + t('diagnosePwmTrigger') + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')'
+        : t('diagnosePwmMissing'),
+        pwmAlarm ? (pwmWasRepaired ? {
+          level: 'repaired',
+          code: 'SCHED-PWM-REPAIRED',
+          domain: t('diagnoseDomainScheduler'),
+          priority: 10
+        } : {}) : {
+          code: 'SCHED-PWM-MISSING',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 5
+        });
       if (pwmAlarm && s.clockMode === false && !effectiveNextTriggerAt) {
-        add(false, t('diagnosePwmSync'));
+        add(false, t('diagnosePwmDesync'), {
+          code: 'SCHED-PWM-DESYNC',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 5
+        });
       } else if (pwmAlarm && effectiveNextTriggerAt) {
-        add(areDiagnosticTriggersAligned(pwmAlarm.scheduledTime, effectiveNextTriggerAt), t('diagnosePwmSync') + (selfHealed ? t('diagnosePopHealed') : ''));
+        const pwmAligned = areDiagnosticTriggersAligned(pwmAlarm.scheduledTime, effectiveNextTriggerAt);
+        add(pwmAligned, t(pwmAligned ? 'diagnosePwmSync' : 'diagnosePwmDesync') + (selfHealed ? t('diagnosePopHealed') : ''), {
+          code: 'SCHED-PWM-DESYNC',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 5
+        });
       }
 
       const badgeAlarm = ensured?.alarms?.badge
         || alarms.find(a => a.name === 'ac-badge-tick');
-      add(!!badgeAlarm, t('diagnoseBadgeAlarm') + (badgeAlarm ? t('diagnoseBadgeRebuilt') + new Date(badgeAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
+      const badgeWasRepaired = repairedItems.has('badge-alarm');
+      add(!!badgeAlarm, t('diagnoseBadgeAlarm') + (badgeAlarm
+        ? t(badgeWasRepaired ? 'diagnoseAlarmRebuilt' : 'diagnoseAlarmScheduled')
+          + new Date(badgeAlarm.scheduledTime).toLocaleTimeString() + ')'
+        : t('diagnoseAlarmMissing')), badgeAlarm ? (badgeWasRepaired ? {
+          level: 'repaired',
+          code: 'SCHED-BADGE-REPAIRED',
+          domain: t('diagnoseDomainScheduler'),
+          priority: 30
+        } : {}) : {
+          level: 'warning',
+          code: 'SCHED-BADGE-MISSING',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 40
+        });
 
       const watchdogAlarm = ensured?.alarms?.watchdog
         || alarms.find(a => a.name === 'ac-watchdog');
-      add(!!watchdogAlarm, t('diagnoseWatchdog') + (watchdogAlarm ? t('diagnoseBadgeRebuilt') + new Date(watchdogAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
+      const watchdogWasRepaired = repairedItems.has('watchdog-alarm');
+      add(!!watchdogAlarm, t('diagnoseWatchdog') + (watchdogAlarm
+        ? t(watchdogWasRepaired ? 'diagnoseAlarmRebuilt' : 'diagnoseAlarmScheduled')
+          + new Date(watchdogAlarm.scheduledTime).toLocaleTimeString() + ')'
+        : t('diagnoseAlarmMissing')), watchdogAlarm ? (watchdogWasRepaired ? {
+          level: 'repaired',
+          code: 'SCHED-WATCHDOG-REPAIRED',
+          domain: t('diagnoseDomainScheduler'),
+          priority: 30
+        } : {}) : {
+          level: 'warning',
+          code: 'SCHED-WATCHDOG-MISSING',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 40
+        });
     }
 
     // 2.0c 智能模式天气预取链路：ac-smart-weather one-shot 闹钟 + ac_smart_weather 缓存新鲜度。
     // v0.8.0 智能模式新增，此前诊断漏检——闹钟丢失后天气冻结、等效温度/建议分钟数不再更新却无红灯。
     // 后台 ensureDiagnostics 已在上方补建；此处仅展示状态与缓存新鲜度，不重复补建。
     const smartOnDiag = !!s.smartMode?.enabled;
-    if (!smartOnDiag) {
-      add(true, t('diagnoseSmartModeOff'));
+    if (!automationEnabled && smartOnDiag) {
+      add(true, t('diagnoseSmartModeDormant'), {
+        level: 'info',
+        code: 'WEATHER-SMART-MODE-DORMANT',
+        domain: t('diagnoseDomainWeather')
+      });
+    } else if (!smartOnDiag) {
+      add(true, t('diagnoseSmartModeOff'), {
+        level: 'info',
+        code: 'WEATHER-SMART-MODE-OFF',
+        domain: t('diagnoseDomainWeather')
+      });
     } else {
       add(true, t('diagnoseSmartModeOn'));
       const smartWeatherAlarm = ensured?.alarms?.smartWeather || alarms.find(a => a.name === 'ac-smart-weather');
-      add(!!smartWeatherAlarm, t('diagnoseSmartWeatherAlarm') + (smartWeatherAlarm
-        ? t('diagnoseBadgeRebuilt') + new Date(smartWeatherAlarm.scheduledTime).toLocaleTimeString() + ')'
-        : ' ' + t('diagnoseSmartWeatherAlarmMissing')));
+      const smartWeatherWasRepaired = repairedItems.has('smart-weather-alarm');
+      const smartWeatherAt = Number(smartWeatherAlarm?.scheduledTime) || 0;
+      const smartWeatherDate = smartWeatherAt ? new Date(smartWeatherAt) : null;
+      const smartWeatherSlotValid = !!smartWeatherDate
+        && smartWeatherDate.getSeconds() === 0
+        && smartWeatherDate.getMilliseconds() === 0
+        && (smartWeatherDate.getMinutes() === 20 || smartWeatherDate.getMinutes() === 50);
+      if (!smartWeatherAlarm) {
+        add(false, t('diagnoseSmartWeatherAlarm') + ' ' + t('diagnoseSmartWeatherAlarmMissing'), {
+          code: 'WEATHER-ALARM-MISSING',
+          domain: t('diagnoseDomainWeather'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 20
+        });
+      } else if (!smartWeatherSlotValid) {
+        add(false, t('diagnoseSmartWeatherSlotMismatch', smartWeatherDate.toLocaleTimeString()), {
+          level: 'warning',
+          code: 'WEATHER-SLOT-MISMATCH',
+          domain: t('diagnoseDomainWeather'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 30
+        });
+      } else {
+        add(true, t('diagnoseSmartWeatherAlarm')
+          + t(smartWeatherWasRepaired ? 'diagnoseAlarmRebuilt' : 'diagnoseAlarmScheduled')
+          + smartWeatherDate.toLocaleTimeString() + ')', smartWeatherWasRepaired ? {
+          level: 'repaired',
+          code: 'WEATHER-ALARM-REPAIRED',
+          domain: t('diagnoseDomainWeather'),
+          priority: 30
+        } : {});
+      }
 
       const weatherRes = await chrome.storage.local.get('ac_smart_weather');
       const weatherCache = weatherRes.ac_smart_weather;
@@ -1083,10 +1398,22 @@ btnDiagnose.addEventListener('click', async () => {
         if (ageMs <= 60 * 60000) {
           add(true, t('diagnoseSmartWeatherFresh', ageMin));
         } else {
-          add(false, t('diagnoseSmartWeatherStale', ageMin));
+          add(false, t('diagnoseSmartWeatherStale', ageMin), {
+            level: 'warning',
+            code: 'WEATHER-CACHE-STALE',
+            domain: t('diagnoseDomainWeather'),
+            action: t('diagnoseActionWaitWeather'),
+            priority: 50
+          });
         }
       } else {
-        add(false, t('diagnoseSmartWeatherNoCache'));
+        add(false, t('diagnoseSmartWeatherNoCache'), {
+          level: 'warning',
+          code: 'WEATHER-CACHE-MISSING',
+          domain: t('diagnoseDomainWeather'),
+          action: t('diagnoseActionWaitWeather'),
+          priority: 50
+        });
       }
     }
 
@@ -1094,10 +1421,23 @@ btnDiagnose.addEventListener('click', async () => {
     // activeHours.enabled=false 表示全天运行,无边界闹钟是预期,显示透明绿。
     if (s.activeHours?.enabled === true) {
       add(true, t('diagnoseActiveHoursOn', s.activeHours.start || '?', s.activeHours.end || '?'));
-      const boundaryAlarm = alarms.find(a => a.name === 'ac-active-boundary') || await chrome.alarms.get('ac-active-boundary');
-      add(!!boundaryAlarm, t('diagnoseActiveBoundary') + (boundaryAlarm ? t('diagnoseBadgeRebuilt') + new Date(boundaryAlarm.scheduledTime).toLocaleTimeString() + ')' : ' ' + t('diagnoseActiveBoundaryMissing')));
+      if (automationEnabled) {
+        const boundaryAlarm = alarms.find(a => a.name === 'ac-active-boundary') || await chrome.alarms.get('ac-active-boundary');
+        add(!!boundaryAlarm, boundaryAlarm
+          ? t('diagnoseActiveBoundary') + t('diagnoseAlarmScheduled') + new Date(boundaryAlarm.scheduledTime).toLocaleTimeString() + ')'
+          : t('diagnoseActiveBoundaryMissing'), {
+          code: 'SCHED-ACTIVE-BOUNDARY-MISSING',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 15
+        });
+      }
     } else {
-      add(true, t('diagnoseActiveHoursOff'));
+      add(true, t('diagnoseActiveHoursOff'), {
+        level: 'info',
+        code: 'CFG-ACTIVE-HOURS-OFF',
+        domain: t('diagnoseDomainConfig')
+      });
     }
 
     // 2.2 heartbeat: storage __heartbeat 每 20s 写一次(background.js runHeartbeat)。
@@ -1111,49 +1451,130 @@ btnDiagnose.addEventListener('click', async () => {
       if (hbAgeMs !== null && hbAgeMs < 60 * 1000) {
         add(true, t('diagnoseHeartbeat', hbAge));
       } else {
-        add(false, t('diagnoseHeartbeatStale', hbAge));
+        add(false, t('diagnoseHeartbeatStale', hbAge), {
+          level: 'warning',
+          code: 'SW-HEARTBEAT-STALE',
+          domain: t('diagnoseDomainBackground'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 60
+        });
       }
     }
 
     if (pwmAlarm && s.alarmCreatedAt && s.alarmDelayMinutes) {
       const dueAt = s.alarmCreatedAt + s.alarmDelayMinutes * 60000;
       const overdue = dueAt <= Date.now();
-      add(!overdue, t('diagnoseAlarmNotExpired') + new Date(dueAt).toLocaleTimeString() + ')');
+      add(!overdue, t(overdue ? 'diagnoseAlarmExpired' : 'diagnoseAlarmNotExpired') + new Date(dueAt).toLocaleTimeString() + ')', {
+        code: 'SCHED-DEADLINE-EXPIRED',
+        domain: t('diagnoseDomainScheduler'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 10
+      });
     }
 
     // 3. 检查 AC 页面
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
     const exactHomeTabs = tabs.filter(tab => tab.url === 'https://w5.ab.ust.hk/njggt/app/home');
     const exactHomeTab = exactHomeTabs.find(tab => !tab.discarded) || null;
-    add(exactHomeTabs.length > 0, t('diagnoseTabOpen') + exactHomeTabs.length + t('diagnoseTabCount'));
+    add(exactHomeTabs.length > 0, t('diagnoseTabOpen') + exactHomeTabs.length + t('diagnoseTabCount'),
+      exactHomeTabs.length > 0 ? {} : {
+        level: automationEnabled ? 'warning' : 'info',
+        code: 'PAGE-HOME-MISSING',
+        domain: t('diagnoseDomainPage'),
+        action: t('diagnoseActionOpenACPage'),
+        priority: 40
+      });
+    if (exactHomeTabs.length > 0 && !exactHomeTab) {
+      add(false, t('diagnoseTabDiscarded'), {
+        level: automationEnabled ? 'warning' : 'info',
+        code: 'PAGE-HOME-DISCARDED',
+        domain: t('diagnoseDomainPage'),
+        action: t('diagnoseActionOpenACPage'),
+        priority: 40
+      });
+    }
     if (exactHomeTab) {
       add(true, t('diagnoseTabNotDiscarded'));
       try {
         const status = bgSchedule.actualStatus;
         const statusAccepted = !!status && status.success !== false && status.invalidTarget !== true;
-        add(statusAccepted, t('diagnoseContentOK'));
-        add(statusAccepted && typeof status.isOn === 'boolean', t('diagnoseAcReadable') + (status?.isOn ? 'ON' : 'OFF'));
+        add(statusAccepted, statusAccepted
+          ? t('diagnoseContentOK')
+          : t('diagnoseContentNoResponse') + String(status?.error || '?').slice(0, 60), {
+          code: 'PAGE-CONTENT-UNREACHABLE',
+          domain: t('diagnoseDomainPage'),
+          action: t('diagnoseActionReloadACPage'),
+          priority: 10
+        });
+        if (statusAccepted) {
+          add(typeof status.isOn === 'boolean', t('diagnoseAcReadable') + (typeof status.isOn === 'boolean'
+            ? (status.isOn ? 'ON' : 'OFF')
+            : '?'), {
+            code: 'PAGE-AC-UNREADABLE',
+            domain: t('diagnoseDomainPage'),
+            action: t('diagnoseActionReloadACPage'),
+            priority: 15
+          });
+        }
         if (statusAccepted && status?.disabled) {
-          add(false, t('diagnoseAcDisabled'));
+          add(false, t('diagnoseAcDisabled'), {
+            level: automationEnabled ? 'error' : 'warning',
+            code: 'PAGE-AC-DISABLED',
+            domain: t('diagnoseDomainPage'),
+            action: t('diagnoseActionOpenACPage'),
+            priority: 10
+          });
         }
       } catch (e) {
-        add(false, t('diagnoseContentNoResponse') + (e.message||'').slice(0,60));
+        add(false, t('diagnoseContentNoResponse') + (e.message||'').slice(0,60), {
+          code: 'PAGE-CONTENT-UNREACHABLE',
+          domain: t('diagnoseDomainPage'),
+          action: t('diagnoseActionReloadACPage'),
+          priority: 10
+        });
       }
     }
 
     // 4. 后台状态
     try {
-      add(!!bg, t('diagnoseSWOK'));
-      add(bg.clockMode !== undefined, t('diagnoseClockSync') + (bg.clockMode ? t('diagnoseClock') : t('diagnoseInterval')));
+      const bgAccepted = !!bg && bg.success !== false;
+      if (!bgProbeFailed) {
+        add(bgAccepted, t(bgAccepted ? 'diagnoseSWOK' : 'diagnoseSWNoResponse'), {
+          code: 'SW-SNAPSHOT-FAILED',
+          domain: t('diagnoseDomainBackground'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 5
+        });
+      }
+      if (bgAccepted) {
+        add(bg.clockMode !== undefined, t('diagnoseClockSync') + (bg.clockMode === undefined
+          ? '?'
+          : (bg.clockMode ? t('diagnoseClock') : t('diagnoseInterval'))), {
+          code: 'SW-CLOCK-SNAPSHOT-MISSING',
+          domain: t('diagnoseDomainBackground'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 15
+        });
+      }
       // PWM 失败提示:runPwmStep 验证失败时会写 pageTimerError。
       // 主动展示在诊断面板,方便定位"到时间没关/没开"的根因。
       if (s.pageTimerError) {
-        add(false, t('diagnosePwmError') + String(s.pageTimerError).slice(0, 120));
+        add(false, t('diagnosePwmError') + String(s.pageTimerError).slice(0, 120), {
+          code: 'SAFETY-TIMER-FAILED',
+          domain: t('diagnoseDomainSafety'),
+          action: t('diagnoseActionCheckTimer'),
+          priority: 0
+        });
       } else {
         add(true, t('diagnosePwmErrorEmpty'));
       }
     } catch (e) {
-      add(false, t('diagnoseSWNoResponse'));
+      add(false, t('diagnoseSWNoResponse'), {
+        code: 'SW-SNAPSHOT-FAILED',
+        domain: t('diagnoseDomainBackground'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 5
+      });
     }
 
     // 4.5. v0.5.10 page timer 跨设备主同步通道诊断
@@ -1165,15 +1586,42 @@ btnDiagnose.addEventListener('click', async () => {
           const localNext = effectiveNextTriggerAt || s.nextTriggerAt || 0;
           add(true, t('diagnosePageTimerExpr', pt.value, fmt(localNext), s.pwmState));
         } else if (pt?.success === false || pt?.invalidTarget === true) {
-          add(false, t('diagnosePageTimerFail') + String(pt.error || '').slice(0,60));
+          add(false, t('diagnosePageTimerFail') + String(pt.error || '').slice(0,60), {
+            code: 'SAFETY-TIMER-READ-FAILED',
+            domain: t('diagnoseDomainSafety'),
+            action: t('diagnoseActionCheckTimer'),
+            priority: 10
+          });
         } else {
-          add(true, t('diagnosePageTimerEmpty'));
+          const pageTimerRequired = automationEnabled
+            && !automationPausedByActiveHours
+            && (s.pwmState === 'off' || bgSchedule.actualStatus?.isOn === true);
+          add(!pageTimerRequired, t(pageTimerRequired ? 'diagnosePageTimerMissing' : 'diagnosePageTimerEmpty'),
+            pageTimerRequired ? {
+              code: 'SAFETY-TIMER-MISSING',
+              domain: t('diagnoseDomainSafety'),
+              action: t('diagnoseActionCheckTimer'),
+              priority: 0
+            } : {
+              level: 'info',
+              code: 'SAFETY-TIMER-EMPTY',
+              domain: t('diagnoseDomainSafety')
+            });
         }
       } catch (e) {
-        add(false, t('diagnosePageTimerFail') + (e.message||'').slice(0,60));
+        add(false, t('diagnosePageTimerFail') + (e.message||'').slice(0,60), {
+          code: 'SAFETY-TIMER-READ-FAILED',
+          domain: t('diagnoseDomainSafety'),
+          action: t('diagnoseActionCheckTimer'),
+          priority: 10
+        });
       }
     } else if (s.enabled) {
-      add(true, t('diagnosePageTimerPending'));
+      add(true, t('diagnosePageTimerPending'), {
+        level: 'info',
+        code: 'SAFETY-TIMER-NOT-CHECKED',
+        domain: t('diagnoseDomainSafety')
+      });
     }
 
     // 4.6 ac-page-timer-retry 闹钟(指北固定 5 闹钟之一,此前诊断漏检)。
@@ -1184,9 +1632,26 @@ btnDiagnose.addEventListener('click', async () => {
       const retryAlarm = alarms.find(a => a.name === 'ac-page-timer-retry') || await chrome.alarms.get('ac-page-timer-retry');
       const retryAt = retryAlarm?.scheduledTime || 0;
       const retryStr = retryAt ? new Date(retryAt).toLocaleTimeString() : '?';
-      add(!!retryAlarm, t('diagnosePageTimerRetry', retryStr, retryMin));
+      add(!!retryAlarm, retryAlarm
+        ? t('diagnosePageTimerRetry', retryStr, retryMin)
+        : t('diagnosePageTimerRetryAlarmMissing', retryMin), retryAlarm ? {
+        level: 'warning',
+        code: 'SAFETY-TIMER-RETRYING',
+        domain: t('diagnoseDomainSafety'),
+        action: t('diagnoseActionCheckTimer'),
+        priority: 20
+      } : {
+        code: 'SAFETY-RETRY-ALARM-MISSING',
+        domain: t('diagnoseDomainSafety'),
+        action: t('diagnoseActionCheckTimer'),
+        priority: 5
+      });
     } else {
-      add(true, t('diagnosePageTimerRetryNone'));
+      add(true, t('diagnosePageTimerRetryNone'), {
+        level: 'info',
+        code: 'SAFETY-NO-RETRY',
+        domain: t('diagnoseDomainSafety')
+      });
     }
 
     // 5. SW 状态可观测性:启动时间 / init 完成时间 / 内存 schedule 与 storage 是否一致
@@ -1205,33 +1670,78 @@ btnDiagnose.addEventListener('click', async () => {
       // SW 响应成功:显示三方一致校验
       const swAgeSec = Math.round((sw.swAgeMs || 0) / 1000);
       const initAgeSec = sw.initAgeMs >= 0 ? Math.round(sw.initAgeMs / 1000) : -1;
-      add(sw.initCompleted, t('diagnoseSWInitDone', swAgeSec, initAgeSec));
+      add(sw.initCompleted, t(sw.initCompleted ? 'diagnoseSWInitDone' : 'diagnoseSWInitPending', swAgeSec, initAgeSec), {
+        code: 'SW-INIT-INCOMPLETE',
+        domain: t('diagnoseDomainBackground'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 5
+      });
       // L2 offscreen 长连接保活页(阶段58):每分钟 badge-tick 顺带 ensureOffscreen 重建。
       // 三态兼容:v0.6.7+ SW 返回 offscreenAlive 真值(true/false);旧 SW 不返回该字段(undefined),
       // 视为 SW 跑旧代码,不打红灯避免误导用户以为 offscreen 失效。
-      add(sw.offscreenAlive !== false, sw.offscreenAlive === true
-        ? t('diagnoseOffscreenPresent')
-        : (sw.offscreenAlive === false ? t('diagnoseOffscreenMissing') : t('diagnoseOffscreenUnknown')));
+      if (sw.offscreenAlive === true) {
+        add(true, t('diagnoseOffscreenPresent'));
+      } else if (sw.offscreenAlive === false) {
+        add(false, t('diagnoseOffscreenMissing'), {
+          level: 'warning',
+          code: 'SW-OFFSCREEN-MISSING',
+          domain: t('diagnoseDomainBackground'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 70
+        });
+      } else {
+        add(true, t('diagnoseOffscreenUnknown'), {
+          level: 'info',
+          code: 'SW-OFFSCREEN-UNKNOWN',
+          domain: t('diagnoseDomainBackground')
+        });
+      }
       const memNext = sw.memorySchedule?.nextTriggerAt || 0;
       const storedNext = storedSchedule.nextTriggerAt || 0;
       const memLive = sw.liveAlarmScheduledTime || 0;
-      if (automationPausedByActiveHours) {
-        // 暂停态预期没有 PWM 时钟，不把三方全空误报为失步。
+      if (!automationEnabled || automationPausedByActiveHours) {
+        // 停用／暂停态预期没有 PWM 时钟，不把三方全空误报为失步。
       } else if (areDiagnosticTriggersAligned(memLive, memNext, storedNext)) {
         add(true, t('diagnoseTriMatch', fmt(memLive)));
       } else {
-        add(false, t('diagnoseTriMismatch', fmt(memLive), fmt(memNext), fmt(storedNext)));
+        add(false, t('diagnoseTriMismatch', fmt(memLive), fmt(memNext), fmt(storedNext)), {
+          code: 'SCHED-THREE-WAY-DESYNC',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 5
+        });
       }
     } else if (selfHealed) {
       // SW 没响应(可能跑旧代码),但 popup 已自愈 storage 接管 — 功能不受影响,显示绿灯
-      add(true, t('diagnosePopHealedSw'));
+      add(false, t('diagnosePopHealedSw'), {
+        level: 'warning',
+        code: 'SW-STATUS-DEGRADED',
+        domain: t('diagnoseDomainBackground'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 50
+      });
     } else if (sw && sw.success === false) {
-      add(false, t('diagnoseGetSwFailed') + (sw.error||'?').slice(0,80));
+      add(false, t('diagnoseGetSwFailed') + (sw.error||'?').slice(0,80), {
+        code: 'SW-STATUS-FAILED',
+        domain: t('diagnoseDomainBackground'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 0
+      });
     } else if (sw) {
-      add(false, t('diagnoseGetSwAbnormal') + JSON.stringify(sw).slice(0,80));
+      add(false, t('diagnoseGetSwAbnormal') + JSON.stringify(sw).slice(0,80), {
+        code: 'SW-STATUS-FAILED',
+        domain: t('diagnoseDomainBackground'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 0
+      });
     } else {
       // SW 完全无响应且 popup 未自愈 — 这是真问题
-      add(false, t('diagnoseGetSwNone'));
+      add(false, t('diagnoseGetSwNone'), {
+        code: 'SW-STATUS-FAILED',
+        domain: t('diagnoseDomainBackground'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 0
+      });
     }
 
     // 6. 构建时间戳:让用户/诊断能直接判断扩展实际加载的是哪次 build
@@ -1250,7 +1760,13 @@ btnDiagnose.addEventListener('click', async () => {
     if (testMsg && !testMsg.startsWith('pwmSettings')) {
       add(true, t('diagnoseI18nOK', i18nLang, testMsg.slice(0,20)));
     } else {
-      add(false, t('diagnoseI18nNoTrans', i18nLang, testMsg));
+      add(false, t('diagnoseI18nNoTrans', i18nLang, testMsg), {
+        level: 'warning',
+        code: 'I18N-TRANSLATION-MISSING',
+        domain: t('diagnoseDomainGeneral'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 90
+      });
     }
 
     // 8. 最近后台异常：只读本机有界环形日志，并入现有复制诊断报告。
@@ -1259,15 +1775,33 @@ btnDiagnose.addEventListener('click', async () => {
       const diagnosticStorage = await chrome.storage.local.get('ac_diagnostic_log');
       appendRecentDiagnosticLogLines(lines, diagnosticStorage?.ac_diagnostic_log);
     } catch (e) {
-      add(false, t('diagnoseRecentErrorsReadFailed') + (e.message || '').slice(0, 80));
+      add(false, t('diagnoseRecentErrorsReadFailed') + (e.message || '').slice(0, 80), {
+        level: 'warning',
+        code: 'DIAG-HISTORY-READ-FAILED',
+        domain: t('diagnoseDomainGeneral'),
+        action: t('diagnoseActionCopyReport'),
+        priority: 95
+      });
     }
   } catch (e) {
-    lines.push('❌ ' + t('diagnoseException') + (e.message||'').slice(0,80));
+    add(false, t('diagnoseException') + (e.message||'').slice(0,80), {
+      code: 'DIAG-UNEXPECTED',
+      domain: t('diagnoseDomainGeneral'),
+      action: t('diagnoseActionCopyReport'),
+      priority: 0
+    });
   } finally {
-    renderDiagnoseResult(lines);
-    lastDiagLines = lines.slice();
+    const reportLines = [...report.getSummaryLines(), '', ...lines];
+    renderDiagnoseResult(reportLines);
+    lastDiagLines = reportLines.slice();
     if (btnCopyDiag) btnCopyDiag.hidden = false;
     btnDiagnose.disabled = false;
-    showStatus(t('diagnoseComplete'), 'success');
+    const completionLevel = report.getCompletionLevel();
+    showStatus(
+      t(completionLevel === 'error'
+        ? 'diagnoseCompleteIssues'
+        : (completionLevel === 'warning' ? 'diagnoseCompleteWarnings' : 'diagnoseComplete')),
+      completionLevel === 'warning' ? '' : completionLevel
+    );
   }
 });

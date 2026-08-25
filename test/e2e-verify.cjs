@@ -9,7 +9,8 @@
 // 3. 打开 chrome-extension://<id>/popup.html
 // 4. 点击 #btnDiagnose 按钮
 // 5. 读取 #diagnoseResult 的实际文本输出
-// 6. 断言两个红灯都已消除并显示对应绿灯；修复可由后台诊断或 popup 兜底完成
+// 6. 断言摘要能定位首要问题并给出下一步，同时两个旧红灯都已消除；
+//    修复可由后台诊断或 popup 兜底完成
 
 const { chromium } = require('playwright');
 const crypto = require('crypto');
@@ -295,6 +296,17 @@ async function run() {
       const prefix = message?.split(/\$\d+/)[0];
       return prefix && text.includes(`${marker} ${prefix}`);
     });
+    const hasLocalizedPrefix = (text, key) => [zhCN, en].some(messages => {
+      const message = messages[key]?.message;
+      const prefix = message?.split(/\$\d+/)[0];
+      return prefix && text.includes(prefix);
+    });
+    assert(hasLocalizedPrefix(diagnoseText, 'diagnoseSummary'),
+      '诊断顶部显示 error/warning/repaired 汇总');
+    assert(diagnoseText.includes('[PAGE-HOME-MISSING]'),
+      '未打开冷气主页时显示稳定故障码 PAGE-HOME-MISSING');
+    assert(hasLocalizedPrefix(diagnoseText, 'diagnoseNextStep'),
+      '首要问题后显示唯一下一步建议');
     // 关键断言:两个红灯都消除
     assert(!hasDiagnosticLine('❌', 'diagnoseMissingTrigger'),
       '红灯 #1 已消除:诊断输出不再报告 storage 绝对触发时间缺失');
@@ -302,8 +314,9 @@ async function run() {
       '红灯 #2 已消除:诊断输出不再报告 ac-pwm 与 storage 不同步');
     // 修复可能由 ensureDiagnostics 后台先行完成，也可能由 popup 兜底完成；
     // 责任方不影响用户可见契约，关键是两条诊断均转绿且 storage 已真实写回。
-    assert(hasDiagnosticLine('✅', 'diagnoseTriggerTime'),
-      '绿灯出现:storage 绝对触发时间已恢复');
+    assert(hasDiagnosticLine('✅', 'diagnoseTriggerTime')
+        || diagnoseText.includes('[SCHED-TRIGGER-REPAIRED]'),
+      'storage 绝对触发时间已恢复，并在本次发生修复时明确标记 repaired');
     assert(hasDiagnosticLine('✅', 'diagnosePwmSync'),
       '绿灯出现:ac-pwm 与 storage 触发时间已同步');
     // storage 实际被写入
@@ -485,6 +498,8 @@ async function run() {
     assert(recoveredReceiverState.pageTimer?.found === true
         && recoveredReceiverState.pageTimer?.value === null,
       'page timer 诊断复用同一后台恢复入口并读取空定时器状态');
+    assert(recoveryDiagnoseText.includes('[SAFETY-TIMER-MISSING]'),
+      'AC 已开启但页面定时器为空时定位为 SAFETY-TIMER-MISSING 安全故障');
     assert(directProbeAfterRecovery.ok === true
         && directProbeAfterRecovery.status?.balanceMinutes === 156,
       '恢复后真实 content script 接收端持续响应');
@@ -494,6 +509,8 @@ async function run() {
     assert(hasDiagnosticLine('✅', 'diagnoseContentOK')
         || [zhCN, en].some(messages => recoveryDiagnoseText.includes(`✅ ${messages.diagnoseContentOK?.message}`)),
       '恢复后的 popup 诊断将 content script 标记为正常');
+    assert(!recoveryDiagnoseText.includes('[PAGE-HOME-MISSING]'),
+      '精确 home 已恢复后不再保留 PAGE-HOME-MISSING 当前问题');
     assert(recoveryDiagnosticState.buttonDisabled === false
         && recoveryDiagnosticState.text.length > 100
         && ![zhCN, en].some(messages => recoveryDiagnosticState.text.includes(messages.diagnoseInProgress?.message || ''))

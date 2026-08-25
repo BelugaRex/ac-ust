@@ -3477,84 +3477,123 @@ async function toggleNowAndSync(action) {
 
 async function ensureDiagnosticAlarms() {
   await loadScheduleFromStorage();
+  const repairs = [];
+  const snapshotAlarm = alarm => alarm ? {
+    scheduledTime: Number(alarm.scheduledTime) || 0,
+    ...(Number.isFinite(Number(alarm.periodInMinutes))
+      ? { periodInMinutes: Number(alarm.periodInMinutes) }
+      : {})
+  } : null;
+  const snapshotNamedAlarms = async () => ({
+    badge: snapshotAlarm(await chrome.alarms.get('ac-badge-tick')),
+    watchdog: snapshotAlarm(await chrome.alarms.get('ac-watchdog')),
+    pwm: snapshotAlarm(await chrome.alarms.get('ac-pwm')),
+    smartWeather: snapshotAlarm(await chrome.alarms.get('ac-smart-weather'))
+  });
+  const recordClearedAlarmRepairs = (before, after) => {
+    const names = {
+      badge: 'badge-alarm-cleared',
+      watchdog: 'watchdog-alarm-cleared',
+      pwm: 'pwm-alarm-cleared',
+      smartWeather: 'smart-weather-alarm-cleared'
+    };
+    Object.entries(names).forEach(([key, repair]) => {
+      if (before?.[key] && !after?.[key]) repairs.push(repair);
+    });
+  };
 
   if (!schedule.enabled) {
+    const beforeAlarms = await snapshotNamedAlarms();
     await clearAutomationRuntimeAlarmsWhileBlocked();
     if (isAutomationAllowed()) return ensureDiagnosticAlarms();
     await chrome.alarms.clear('ac-smart-weather');
     if (schedule.enabled) return ensureDiagnosticAlarms();
+    const afterAlarms = await snapshotNamedAlarms();
+    recordClearedAlarmRepairs(beforeAlarms, afterAlarms);
     return {
-      success: true,
+      success: Object.values(afterAlarms).every(alarm => !alarm),
       enabled: false,
-      repaired: false,
+      repaired: repairs.length > 0,
+      before: beforeAlarms,
+      repairs,
       schedule: { ...schedule },
-      alarms: { badge: null, watchdog: null, pwm: null, smartWeather: null }
+      alarms: afterAlarms
     };
   }
 
   if (!isAutomationAllowed()) {
+    const beforeAlarms = await snapshotNamedAlarms();
     await clearAutomationRuntimeAlarmsWhileBlocked();
     if (isAutomationAllowed()) return ensureDiagnosticAlarms();
     let smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
     if (schedule.smartMode?.enabled && !smartWeatherAlarm) {
       await rescheduleSmartWeatherAlarm();
       smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
+      if (smartWeatherAlarm) repairs.push('smart-weather-alarm');
     }
     if (isAutomationAllowed()) return ensureDiagnosticAlarms();
+    const afterAlarms = await snapshotNamedAlarms();
+    recordClearedAlarmRepairs(beforeAlarms, afterAlarms);
     return {
-      success: true,
+      success: !afterAlarms.badge
+        && !afterAlarms.watchdog
+        && !afterAlarms.pwm
+        && (!schedule.smartMode?.enabled || !!afterAlarms.smartWeather),
       enabled: true,
       automationPausedByActiveHours: true,
-      repaired: false,
+      repaired: repairs.length > 0,
+      before: beforeAlarms,
+      repairs,
       schedule: {
         ...schedule,
         _insideActiveHours: false,
         _automationPausedByActiveHours: true
       },
-      alarms: {
-        badge: null,
-        watchdog: null,
-        pwm: null,
-        smartWeather: smartWeatherAlarm
-          ? { scheduledTime: smartWeatherAlarm.scheduledTime }
-          : null
-      }
+      alarms: afterAlarms
     };
   }
 
-  let repaired = false;
-
   let badgeAlarm = await chrome.alarms.get('ac-badge-tick');
-  if (!badgeAlarm || badgeAlarm.scheduledTime <= Date.now()) {
-    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-    repaired = true;
-  }
-
   let watchdogAlarm = await chrome.alarms.get('ac-watchdog');
-  if (!watchdogAlarm) {
-    await createAlarm('ac-watchdog', { periodInMinutes: 5 });
-    repaired = true;
+  let pwmAlarm = await chrome.alarms.get('ac-pwm');
+  let smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
+  const beforeAlarms = {
+    badge: snapshotAlarm(badgeAlarm),
+    watchdog: snapshotAlarm(watchdogAlarm),
+    pwm: snapshotAlarm(pwmAlarm),
+    smartWeather: snapshotAlarm(smartWeatherAlarm)
+  };
+
+  if (!badgeAlarm || badgeAlarm.scheduledTime <= Date.now()) {
+    if (await createAlarm('ac-badge-tick', { delayInMinutes: 1 })) {
+      repairs.push('badge-alarm');
+    }
   }
 
-  let pwmAlarm = await chrome.alarms.get('ac-pwm');
+  if (!watchdogAlarm) {
+    if (await createAlarm('ac-watchdog', { periodInMinutes: 5 })) {
+      repairs.push('watchdog-alarm');
+    }
+  }
+
+  const pwmNeededRepair = !pwmAlarm || pwmAlarm.scheduledTime <= Date.now() - 60000;
   if (!pwmAlarm || pwmAlarm.scheduledTime <= Date.now() - 60000) {
     await ensureScheduleClock();
-    repaired = true;
   }
 
   // 智能模式天气闹钟自愈：ac-smart-weather 是 v0.8.0 新增闹钟，不在既有 5 闹钟
   // 自愈清单里；丢失后天气缓存冻结，等效温度/建议分钟数不再更新。与 badge-tick/watchdog 一样补建。
-  let smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
   if (schedule.smartMode?.enabled && !smartWeatherAlarm) {
     await rescheduleSmartWeatherAlarm();
     smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
-    repaired = true;
+    if (smartWeatherAlarm) repairs.push('smart-weather-alarm');
   }
 
   badgeAlarm = await chrome.alarms.get('ac-badge-tick');
   watchdogAlarm = await chrome.alarms.get('ac-watchdog');
   const diagnosticRevision = pwmRuntimeRevision;
   pwmAlarm = await chrome.alarms.get('ac-pwm');
+  if (pwmNeededRepair && pwmAlarm) repairs.push('pwm-alarm');
 
   // 活闹钟存在但 storage 可能缺失 nextTriggerAt → 直接回写（不依赖 syncStoredTriggerFromAlarm 的边界判断）
   const triggerPlan = await persistReconciledPwmTrigger(
@@ -3564,13 +3603,18 @@ async function ensureDiagnosticAlarms() {
     diagnosticRevision
   );
   if (triggerPlan) {
-    repaired = true;
+    repairs.push('pwm-trigger');
   }
 
   return {
-    success: !!badgeAlarm && !!pwmAlarm,
+    success: !!badgeAlarm
+      && !!watchdogAlarm
+      && !!pwmAlarm
+      && (!schedule.smartMode?.enabled || !!smartWeatherAlarm),
     enabled: true,
-    repaired,
+    repaired: repairs.length > 0,
+    before: beforeAlarms,
+    repairs,
     schedule: { ...schedule },
     alarms: {
       badge: badgeAlarm ? { scheduledTime: badgeAlarm.scheduledTime } : null,

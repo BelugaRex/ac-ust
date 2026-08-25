@@ -3967,6 +3967,19 @@ return { reapplySmartSensitivityNow };`
       && ensureDiagnosticAlarmsBody.includes('await rescheduleSmartWeatherAlarm();')
       && ensureDiagnosticAlarmsBody.includes('smartWeather: smartWeatherAlarm ? { scheduledTime: smartWeatherAlarm.scheduledTime } : null'),
     '13M-2: 诊断自愈补建 ac-smart-weather（智能模式天气闹钟）并回传 alarm 状态');
+  assertPass(ensureDiagnosticAlarmsBody.includes('const repairs = [];')
+      && ensureDiagnosticAlarmsBody.includes("repairs.push('badge-alarm')")
+      && ensureDiagnosticAlarmsBody.includes("repairs.push('watchdog-alarm')")
+      && ensureDiagnosticAlarmsBody.includes("repairs.push('pwm-alarm')")
+      && ensureDiagnosticAlarmsBody.includes("repairs.push('pwm-trigger')")
+      && ensureDiagnosticAlarmsBody.includes("repairs.push('smart-weather-alarm')")
+      && ensureDiagnosticAlarmsBody.includes("'pwm-alarm-cleared'")
+      && ensureDiagnosticAlarmsBody.includes("'badge-alarm-cleared'")
+      && ensureDiagnosticAlarmsBody.includes("'watchdog-alarm-cleared'")
+      && ensureDiagnosticAlarmsBody.includes("'smart-weather-alarm-cleared'")
+      && ensureDiagnosticAlarmsBody.includes('before: beforeAlarms')
+      && ensureDiagnosticAlarmsBody.includes('repairs,'),
+    '13M-3: 诊断自愈返回修复前闹钟快照与逐项 repairs，不再用总布尔值掩盖根因');
   assertPass(persistScheduleBody.includes('reconcilePwmTrigger(schedule, liveAlarm, PWM_TRIGGER_NEXT_ONLY_OPTIONS)')
       && persistScheduleBody.includes('if (!schedule.smartMode?.enabled) schedule.smartOnBoundaryAt = 0;')
       && !persistScheduleBody.includes('persistReconciledPwmTrigger(')
@@ -4098,6 +4111,140 @@ return { reapplySmartSensitivityNow };`
         && popupSource.includes('hbAgeMs < 60 * 1000'),
       '14P-2: 天气与 heartbeat 判定比较原始毫秒，不比较已取整显示值');
   }
+
+  const diagnosticReportStart = popupSource.indexOf('const DIAGNOSTIC_LEVEL_SYMBOLS =');
+  const diagnosticReportEnd = popupSource.indexOf('\nfunction projectPersistentSchedule', diagnosticReportStart);
+  const diagnosticReportSource = diagnosticReportStart >= 0 && diagnosticReportEnd > diagnosticReportStart
+    ? popupSource.slice(diagnosticReportStart, diagnosticReportEnd)
+    : '';
+  const createDiagnosticReport = diagnosticReportSource
+    ? new Function(`${diagnosticReportSource}; return createDiagnosticReport;`)()
+    : null;
+  assertPass(typeof createDiagnosticReport === 'function',
+    '14Q-0: popup 提供纯 finding reporter，统一严重度、稳定代码、摘要与完成状态');
+  if (typeof createDiagnosticReport === 'function') {
+    const translateDiagnostic14Q = (key, ...subs) => ({
+      diagnoseSummary: `SUMMARY ${subs.join('/')}`,
+      diagnoseSummaryHealthy: 'HEALTHY',
+      diagnosePrimaryIssue: `PRIMARY ${subs.join('|')}`,
+      diagnosePrimaryRepair: `REPAIR ${subs.join('|')}`,
+      diagnoseNextStep: `NEXT ${subs[0]}`,
+      diagnoseDetails: 'DETAILS'
+    })[key] || key;
+    const report14Q = createDiagnosticReport(translateDiagnostic14Q);
+    report14Q.add(true, 'automatic control inactive', {
+      level: 'info', code: 'CFG-AUTOMATION-OFF', domain: 'config'
+    });
+    report14Q.add(false, 'ac-pwm missing', {
+      level: 'error', code: 'SCHED-PWM-MISSING', domain: 'scheduler',
+      action: 'reload extension', priority: 10
+    });
+    report14Q.add(false, 'weather stale', {
+      level: 'warning', code: 'WEATHER-CACHE-STALE', domain: 'weather',
+      action: 'wait for prefetch', priority: 30
+    });
+    report14Q.add(true, 'badge rebuilt', {
+      level: 'repaired', code: 'SCHED-BADGE-REPAIRED', domain: 'scheduler', priority: 20
+    });
+    report14Q.add(false, 'ac-pwm still missing', {
+      level: 'error', code: 'SCHED-PWM-MISSING', domain: 'scheduler',
+      action: 'reload extension', priority: 10
+    });
+    report14Q.add(true, 'scheduler healthy', {
+      code: 'SCHED-HEALTH-CHECK-FAILED', domain: 'scheduler'
+    });
+    const summary14Q = report14Q.getSummaryLines();
+    assertPass(report14Q.detailLines[0].startsWith('ℹ️ [CFG-AUTOMATION-OFF]')
+        && report14Q.detailLines[1].startsWith('❌ [SCHED-PWM-MISSING]')
+        && report14Q.detailLines[2].startsWith('⚠️ [WEATHER-CACHE-STALE]')
+        && report14Q.detailLines[3].startsWith('🛠️ [SCHED-BADGE-REPAIRED]')
+        && report14Q.detailLines[5] === '✅ scheduler healthy'
+        && summary14Q[0] === 'SUMMARY 1/1/1'
+        && summary14Q[1].includes('SCHED-PWM-MISSING')
+        && summary14Q[2] === 'NEXT reload extension'
+        && report14Q.findings.filter(item => item.code === 'SCHED-PWM-MISSING').length === 1
+        && report14Q.getCompletionLevel() === 'error',
+      '14Q-1: 当前 error/warning/repaired 分开计数，同码症状不重复计数，首要根因按优先级显示证据与唯一下一步');
+
+    const healthyReport14Q = createDiagnosticReport(translateDiagnostic14Q);
+    healthyReport14Q.add(true, 'automatic control inactive', {
+      level: 'info', code: 'CFG-AUTOMATION-OFF', domain: 'config'
+    });
+    assertPass(healthyReport14Q.getSummaryLines().includes('HEALTHY')
+        && healthyReport14Q.getCompletionLevel() === 'success'
+        && healthyReport14Q.findings.length === 0,
+      '14Q-2: 预期停用只显示 info，不制造当前问题或修复建议');
+
+    const repairedReport14Q = createDiagnosticReport(translateDiagnostic14Q);
+    repairedReport14Q.add(true, 'watchdog rebuilt', {
+      level: 'repaired', code: 'SCHED-WATCHDOG-REPAIRED', domain: 'scheduler', priority: 10
+    });
+    assertPass(repairedReport14Q.getSummaryLines().some(line => line.includes('SCHED-WATCHDOG-REPAIRED'))
+        && repairedReport14Q.getCompletionLevel() === 'success',
+      '14Q-2b: 仅有自动修复时摘要显示修复项，但当前完成状态仍为健康');
+  }
+
+  const diagnosticFindingLocaleKeys = [
+    'diagnoseSummary',
+    'diagnoseSummaryHealthy',
+    'diagnosePrimaryIssue',
+    'diagnosePrimaryRepair',
+    'diagnoseNextStep',
+    'diagnoseDetails',
+    'diagnoseCompleteIssues',
+    'diagnoseCompleteWarnings',
+    'diagnoseDomainGeneral',
+    'diagnoseDomainConfig',
+    'diagnoseDomainScheduler',
+    'diagnoseDomainBackground',
+    'diagnoseDomainWeather',
+    'diagnoseDomainPage',
+    'diagnoseDomainSafety',
+    'diagnoseActionCopyReport',
+    'diagnoseActionReloadExtension',
+    'diagnoseActionOpenACPage',
+    'diagnoseActionReloadACPage',
+    'diagnoseActionCheckTimer',
+    'diagnoseActionWaitWeather',
+    'diagnoseEnsureFailed',
+    'diagnoseScheduleReadFailed',
+    'diagnoseStorageReadFailed',
+    'diagnoseScheduleMissing',
+    'diagnoseRuntimeAlarmsInactive',
+    'diagnoseAlarmRebuilt',
+    'diagnoseAlarmScheduled',
+    'diagnoseSmartWeatherSlotMismatch',
+    'diagnoseTabDiscarded',
+    'diagnoseSmartModeDormant',
+    'diagnosePwmMissing',
+    'diagnosePwmDesync',
+    'diagnoseAlarmMissing',
+    'diagnoseAlarmExpired',
+    'diagnoseSWInitPending',
+    'diagnosePageTimerRetryAlarmMissing',
+    'diagnosePageTimerMissing',
+    'diagnoseRuntimeAlarmsCleared',
+    'diagnoseRuntimeAlarmsLeaked'
+  ];
+  assertPass(diagnosticFindingLocaleKeys.every(key => zhCN[key]?.message && en[key]?.message)
+      && diagnoseHandlerSource.includes("code: 'CFG-AUTOMATION-OFF'")
+      && diagnoseHandlerSource.includes("code: 'SCHED-PWM-MISSING'")
+      && diagnoseHandlerSource.includes("code: 'PAGE-HOME-MISSING'")
+      && diagnoseHandlerSource.includes("code: 'SW-STATUS-FAILED'")
+      && diagnoseHandlerSource.includes("code: 'SAFETY-TIMER-FAILED'")
+      && diagnoseHandlerSource.includes("code: 'SAFETY-TIMER-MISSING'")
+      && diagnoseHandlerSource.includes("code: 'SCHED-RUNTIME-ALARMS-LEAKED'")
+      && diagnoseHandlerSource.includes("s.pwmState === 'off' || bgSchedule.actualStatus?.isOn === true")
+      && diagnoseHandlerSource.includes("code: 'WEATHER-SLOT-MISMATCH'")
+      && diagnoseHandlerSource.includes('ensured?.success === false && ensured.error')
+      && diagnoseHandlerSource.includes('if (!bgProbeFailed)')
+      && diagnoseHandlerSource.includes('if (!automationEnabled)')
+      && diagnoseHandlerSource.includes('if (!automationEnabled && smartOnDiag)')
+      && diagnoseHandlerSource.includes('if (automationEnabled)')
+      && diagnoseHandlerSource.includes('if (!automationEnabled || automationPausedByActiveHours)')
+      && diagnoseHandlerSource.includes("level: automationEnabled ? 'warning' : 'info'")
+      && diagnoseHandlerSource.includes('report.getSummaryLines()'),
+    '14Q-3: 关键故障域使用稳定 code/action，停用态跳过运行闹钟并由双语摘要定位首要问题');
 
   // ===== 用例 15: 持久化脱敏诊断日志 =====
   beginSuite('用例 15：脱敏诊断日志', '\n\n=== 用例 15: 持久化脱敏诊断日志 ===\n');
@@ -4247,6 +4394,7 @@ return { reapplySmartSensitivityNow };`
     assertPass(recentLines.length === 6
         && recentLines[0] === 'RECENT ERRORS 8/5'
         && recentLines[1].includes('equal-new')
+        && recentLines[1].includes('[HISTORY WARN/equal-new]')
         && recentLines[2].includes('equal-old')
         && recentLines[5].includes('source-17')
         && emptyRecentLines[0] === '✅ NO RECENT ERRORS'
@@ -4758,6 +4906,9 @@ return { reapplySmartSensitivityNow };`
     activeHours: { enabled: true, start: '08:00', end: '23:00' }
   };
   const ensureDiagnosticClears16 = [];
+  const ensureDiagnosticPausedAlarmNames16 = new Set([
+    'ac-pwm', 'ac-badge-tick', 'ac-watchdog'
+  ]);
   let ensureDiagnosticSmartWeatherExists16 = false;
   let ensureDiagnosticSmartWeatherRepairs16 = 0;
   const ensureDiagnosticPaused16 = new Function(
@@ -4770,14 +4921,20 @@ return { reapplySmartSensitivityNow };`
     () => false,
     {
       alarms: {
-        async clear(name) { ensureDiagnosticClears16.push(name); return true; },
+        async clear(name) {
+          ensureDiagnosticClears16.push(name);
+          ensureDiagnosticPausedAlarmNames16.delete(name);
+          return true;
+        },
         async get(name) {
           if (name === 'ac-smart-weather') {
             return ensureDiagnosticSmartWeatherExists16
               ? { name, scheduledTime: Date.now() + 60_000 }
               : undefined;
           }
-          return { name, scheduledTime: Date.now() + 60_000 };
+          return ensureDiagnosticPausedAlarmNames16.has(name)
+            ? { name, scheduledTime: Date.now() + 60_000 }
+            : undefined;
         }
       }
     },
@@ -4787,6 +4944,8 @@ return { reapplySmartSensitivityNow };`
     },
     async () => {
       ensureDiagnosticClears16.push('ac-pwm', 'ac-badge-tick', 'ac-watchdog');
+      ['ac-pwm', 'ac-badge-tick', 'ac-watchdog']
+        .forEach(name => ensureDiagnosticPausedAlarmNames16.delete(name));
       return true;
     }
   );
@@ -4796,10 +4955,16 @@ return { reapplySmartSensitivityNow };`
       && !ensureDiagnosticClears16.includes('ac-smart-weather')
       && !ensureDiagnosticClears16.includes('ac-page-timer-retry')
       && ensureDiagnosticSmartWeatherRepairs16 === 1
+      && ['pwm-alarm-cleared', 'badge-alarm-cleared', 'watchdog-alarm-cleared', 'smart-weather-alarm']
+        .every(repair => ensureDiagnosticPausedResult16.repairs.includes(repair))
+      && ensureDiagnosticPausedResult16.repaired === true
       && ensureDiagnosticPausedResult16.alarms.smartWeather?.scheduledTime > Date.now(),
-    '16L: 后台诊断在时段外清除泄漏的运行闹钟，同时恢复天气预取并保留关机重试');
+    '16L: 后台诊断在时段外逐项记录清理的泄漏闹钟，同时恢复天气预取并保留关机重试');
 
   const ensureDiagnosticDisabledClears16 = [];
+  const ensureDiagnosticDisabledAlarmNames16 = new Set([
+    'ac-pwm', 'ac-badge-tick', 'ac-watchdog', 'ac-smart-weather'
+  ]);
   const ensureDiagnosticDisabled16 = new Function(
     'schedule', 'loadScheduleFromStorage', 'isAutomationAllowed', 'chrome',
     'clearAutomationRuntimeAlarmsWhileBlocked',
@@ -4814,11 +4979,22 @@ return { reapplySmartSensitivityNow };`
     () => false,
     {
       alarms: {
-        async clear(name) { ensureDiagnosticDisabledClears16.push(name); return true; }
+        async clear(name) {
+          ensureDiagnosticDisabledClears16.push(name);
+          ensureDiagnosticDisabledAlarmNames16.delete(name);
+          return true;
+        },
+        async get(name) {
+          return ensureDiagnosticDisabledAlarmNames16.has(name)
+            ? { name, scheduledTime: Date.now() + 60_000 }
+            : undefined;
+        }
       }
     },
     async () => {
       ensureDiagnosticDisabledClears16.push('ac-pwm', 'ac-badge-tick', 'ac-watchdog');
+      ['ac-pwm', 'ac-badge-tick', 'ac-watchdog']
+        .forEach(name => ensureDiagnosticDisabledAlarmNames16.delete(name));
       return true;
     }
   );
@@ -4826,8 +5002,13 @@ return { reapplySmartSensitivityNow };`
   assertPass(ensureDiagnosticDisabledResult16.enabled === false
       && ['ac-pwm', 'ac-badge-tick', 'ac-watchdog', 'ac-smart-weather']
         .every(name => ensureDiagnosticDisabledClears16.includes(name))
-      && !ensureDiagnosticDisabledClears16.includes('ac-page-timer-retry'),
-    '16L-1: 后台诊断在用户停用时也清除泄漏运行闹钟，但保留页面关机重试');
+      && !ensureDiagnosticDisabledClears16.includes('ac-page-timer-retry')
+      && ['pwm-alarm-cleared', 'badge-alarm-cleared', 'watchdog-alarm-cleared', 'smart-weather-alarm-cleared']
+        .every(repair => ensureDiagnosticDisabledResult16.repairs.includes(repair))
+      && ensureDiagnosticDisabledResult16.repaired === true
+      && Object.values(ensureDiagnosticDisabledResult16.before).every(Boolean)
+      && Object.values(ensureDiagnosticDisabledResult16.alarms).every(value => value === null),
+    '16L-1: 后台诊断在用户停用时逐项记录已清理闹钟并返回前后证据，同时保留页面关机重试');
 
   const blockedRuntimeCleanupBody16 = extractSourceSection(
     backgroundSource,
