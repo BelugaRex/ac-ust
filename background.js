@@ -132,6 +132,9 @@ function releasePwmStepOwnership(automationRevision) {
   lastPwmStepAt = Date.now();
   pwmStepRunning = false;
   pwmStepRunningRevision = null;
+  if (smartReapplyPending && !smartReapplyInFlight) {
+    void waitUntil(runSmartReapplyLoop());
+  }
   return true;
 }
 
@@ -322,6 +325,40 @@ const SMART_WEATHER_URLS = Object.freeze({
 const SMART_WEATHER_TTL_MS = 60 * 60 * 1000;
 let smartWeatherInFlight = null;
 let smartReapplyInFlight = false;  // 滑块松开后即时重设 Power-off after 的单飞守卫
+let smartReapplyPending = false;
+let scheduleUpdateChain = Promise.resolve();
+
+function runSerializedScheduleUpdate(operation) {
+  const current = scheduleUpdateChain.then(operation, operation);
+  scheduleUpdateChain = current.catch(() => {});
+  return current;
+}
+
+async function runSmartReapplyLoop() {
+  smartReapplyInFlight = true;
+  let deferredUntilPwmRelease = false;
+  try {
+    do {
+      smartReapplyPending = false;
+      try {
+        const outcome = await reapplySmartSensitivityNow();
+        if (outcome?.deferred) {
+          smartReapplyPending = true;
+          if (!pwmStepRunning) continue;
+          deferredUntilPwmRelease = true;
+          break;
+        }
+        if (outcome?.retry) smartReapplyPending = true;
+      } catch (e) {
+        console.warn('[AC扩展] 滑块灵敏度即时应用失败:', e?.message);
+        void appendDiagnosticLog('warn', 'reapply-smart-now', e);
+      }
+    } while (smartReapplyPending);
+  } finally {
+    smartReapplyInFlight = false;
+    if (!deferredUntilPwmRelease) smartReapplyPending = false;
+  }
+}
 
 async function fetchSmartWeatherResource(resourceName, responseType) {
   const response = await fetch(SMART_WEATHER_URLS[resourceName], { cache: 'no-store' });
@@ -487,7 +524,7 @@ async function applyPreparedSmartModeDurations() {
 async function reapplySmartSensitivityNow() {
   if ((typeof isAutomationAllowed === 'function' && !isAutomationAllowed())
       || !schedule.smartMode?.enabled) return;
-  if (pwmStepRunning) return;  // 避免与正在执行的 PWM 步骤并发操作页面定时器
+  if (pwmStepRunning) return { deferred: true };  // PWM 释放后尾随重算
 
   const wasOnPhase = schedule.pwmState === 'off';
   const oldPwmState = schedule.pwmState;
@@ -499,14 +536,15 @@ async function reapplySmartSensitivityNow() {
 
   const weather = await readStoredSmartWeather();
   if ((typeof isAutomationAllowed === 'function' && !isAutomationAllowed())
-      || !schedule.smartMode?.enabled || pwmStepRunning
-      || pwmRuntimeRevision !== oldPwmRuntimeRevision
+      || !schedule.smartMode?.enabled) return;
+  if (pwmStepRunning) return { deferred: true };
+  if (pwmRuntimeRevision !== oldPwmRuntimeRevision
       || schedule.pwmState !== oldPwmState
       || (Number(schedule.onMinutes) || 0) !== oldOnMinutes
       || (Number(schedule.offMinutes) || 0) !== oldOffMinutes
       || (Number(schedule.nextTriggerAt) || 0) !== oldTriggerAt
       || (Number(schedule.smartOnBoundaryAt) || 0) !== oldSmartBoundaryAt) {
-    return;
+    return { retry: true };
   }
   const suggested = computeSmartOnMinutes({
     sensitivity: schedule.smartMode.sensitivity,
@@ -1053,7 +1091,12 @@ async function persistSchedule(reason = '', options = {}) {
 // 优雅降级：用户未登录浏览器同步 / sync 配额超限 / 企业策略禁用 → 异常被静默吞掉，
 // 行为退化为现有本地 storage 模式（无回归）。
 
-const _syncOpLock = { busy: false };
+const _syncOpLock = {
+  busy: false,
+  pending: false,
+  pendingReason: '',
+  pendingRemote: null
+};
 
 // 把当前内存 schedule 瘦化后写入 chrome.storage.sync。
 // reason 用于日志。失败静默降级。
@@ -1077,6 +1120,11 @@ async function syncScheduleToSync(reason = '') {
 // 注意：调用方需要保证不并发（_syncOpLock 守卫）。
 async function applySyncedPhase(remote, reason = '') {
   if (!remote || typeof remote !== 'object') return false;
+  const remoteSyncedAt = Number(remote.syncedAt) || 0;
+  if (remoteSyncedAt > 0 && remoteSyncedAt <= lastSyncedAt) {
+    console.log(`[AC扩展] sync ↓ ${reason}: 忽略陈旧或自回环快照 syncedAt=${remoteSyncedAt}`);
+    return false;
+  }
 
   // 提取（Fowler Extract Function）：同步停用路径——B1 顺序：先 persist 停用状态，再走页面定时器关机。
   async function shutdownAfterSyncDisable({ activeHoursPause = false } = {}) {
@@ -1226,25 +1274,77 @@ async function applySyncedPhase(remote, reason = '') {
 // 传 explicitRemote 可跳过读取（onChanged 已传入 newValue）；否则从 sync store 读。
 async function tryAdoptSyncedState(reason = '', explicitRemote = null) {
   if (_syncOpLock.busy) {
-    console.log(`[AC扩展] sync 合并跳过（上次仍在处理）: ${reason}`);
+    _syncOpLock.pending = true;
+    _syncOpLock.pendingReason = reason;
+    if (explicitRemote && typeof explicitRemote === 'object') {
+      const pendingAt = Number(_syncOpLock.pendingRemote?.syncedAt) || 0;
+      const incomingAt = Number(explicitRemote.syncedAt) || 0;
+      if (!_syncOpLock.pendingRemote || !pendingAt || !incomingAt || incomingAt >= pendingAt) {
+        _syncOpLock.pendingRemote = explicitRemote;
+      }
+    }
+    console.log(`[AC扩展] sync 合并排队（上次仍在处理）: ${reason}`);
     return false;
   }
   _syncOpLock.busy = true;
+  let applied = false;
+  let requestReason = reason;
+  let remote = explicitRemote;
+  let readAttempts = 0;
   try {
-    let remote = explicitRemote;
-    if (!remote && chrome.storage?.sync) {
-      try {
-        const got = await chrome.storage.sync.get(SYNC_KEY);
-        remote = got?.[SYNC_KEY] || null;
-      } catch (e) {
-        console.warn('[AC扩展] sync 读取失败:', e?.message);
-        return false;
+    while (true) {
+      if (!remote && chrome.storage?.sync) {
+        try {
+          const got = await chrome.storage.sync.get(SYNC_KEY);
+          remote = got?.[SYNC_KEY] || null;
+          readAttempts = 0;
+        } catch (e) {
+          console.warn('[AC扩展] sync 读取失败:', e?.message);
+          remote = null;
+          if (readAttempts < 1) {
+            readAttempts += 1;
+            continue;
+          }
+        }
       }
+      if (remote) {
+        const candidate = remote;
+        const candidateReason = requestReason;
+        const pendingSupersedesCandidate = () => {
+          const candidateAt = Number(candidate.syncedAt) || 0;
+          const pendingAt = Number(_syncOpLock.pendingRemote?.syncedAt) || 0;
+          return _syncOpLock.pending
+            && (!candidateAt || !pendingAt || pendingAt >= candidateAt);
+        };
+        try {
+          const changed = await runSerializedScheduleUpdate(() => {
+            // 等待共享队列期间若已有更新到达，旧快照尚未产生副作用，直接淘汰。
+            if (pendingSupersedesCandidate()) return false;
+            return applySyncedPhase(candidate, candidateReason);
+          });
+          applied = changed || applied;
+        } catch (e) {
+          console.warn('[AC扩展] sync 合并失败:', e?.message);
+          void appendDiagnosticLog('warn', 'sync-adopt', e);
+          if (!pendingSupersedesCandidate()) throw e;
+        }
+      }
+      if (!_syncOpLock.pending) return applied;
+
+      // busy 期间的事件只作为“有更新”信号；重新读取 sync 区，避免事件副本
+      // 被后到的自回环覆盖。优先消费事件携带的最新快照；缺失时才重读 sync 区。
+      requestReason = _syncOpLock.pendingReason || 'pending-sync';
+      remote = _syncOpLock.pendingRemote;
+      _syncOpLock.pending = false;
+      _syncOpLock.pendingReason = '';
+      _syncOpLock.pendingRemote = null;
+      readAttempts = 0;
     }
-    if (!remote) return false;
-    return await applySyncedPhase(remote, reason);
   } finally {
     _syncOpLock.busy = false;
+    _syncOpLock.pending = false;
+    _syncOpLock.pendingReason = '';
+    _syncOpLock.pendingRemote = null;
   }
 }
 
@@ -2188,12 +2288,20 @@ async function clearSupersededTimerBasedShutdownRetry() {
   );
 }
 
+function canReusePageTimerProof(state, requestedMinutes, now) {
+  const targetAt = Number(state?.pageTimerTargetAt);
+  const latestTargetAt = now + requestedMinutes * 60000 + 90000;
+  return Number.isFinite(targetAt)
+    && targetAt > now
+    && targetAt <= latestTargetAt
+    && isPageTimerProofFresh(state, { now });
+}
+
 async function requestTimerBasedShutdown(reason = '', minutes = 1) {
   const shutdownRevision = claimTimerBasedShutdown();
   const requestedMinutes = Math.max(1, sanitizeMinutes(minutes, 1));
-  const latestReusableTargetAt = Date.now() + requestedMinutes * 60000 + 90000;
-  if (isPageTimerProofFresh(schedule)
-      && Number(schedule.pageTimerTargetAt) <= latestReusableTargetAt) {
+  const now = Date.now();
+  if (canReusePageTimerProof(schedule, requestedMinutes, now)) {
     console.log(`[AC扩展] ${reason}: 页面关机定时器已正确设置 (${schedule.pageTimerMinutes} 分钟)，无需点击或重设`);
     return {
       success: true,
@@ -3523,6 +3631,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     await initReady;
 
     if (msg.type === 'updateSchedule') {
+      await runSerializedScheduleUpdate(async () => {
       // 提取（Fowler Extract Function）：用户停用路径——B1 顺序：先持久化"已关闭"状态再执行关机。
       const shutdownAfterScheduleDisable = async ({ activeHoursPause = false } = {}) => {
         await resetDisabledPwmRuntime();
@@ -3612,19 +3721,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // 在 sendResponse 之前完成推送，让 popup 拿到已推送的状态（虽然异步到达对端有时延）。
       await syncScheduleToSync('updateSchedule');
       sendResponse({ success: true, schedule, offResult });
+      });
       return;
     }
     if (msg.type === 'reapplySmartNow') {
-      // 滑块松开后的即时反馈：立即应答，不阻塞 popup；重设在后台 waitUntil 保活执行。
-      sendResponse({ success: true, accepted: !smartReapplyInFlight });
-      if (!smartReapplyInFlight) {
-        smartReapplyInFlight = true;
-        waitUntil(reapplySmartSensitivityNow())
-          .catch((e) => {
-            console.warn('[AC扩展] 滑块灵敏度即时应用失败:', e?.message);
-            void appendDiagnosticLog('warn', 'reapply-smart-now', e);
-          })
-          .finally(() => { smartReapplyInFlight = false; });
+      // 滑块松开后的即时反馈：正在执行时记录 trailing rerun，不丢弃最后一次灵敏度。
+      const queued = smartReapplyInFlight;
+      if (queued) smartReapplyPending = true;
+      sendResponse({ success: true, accepted: true, queued });
+      if (!queued) {
+        waitUntil(runSmartReapplyLoop());
       }
       return;
     }

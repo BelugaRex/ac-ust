@@ -1,6 +1,7 @@
 // ============================================================
 // Page Script - 注入到网页主环境
-// 负责接管页面自身的 window.confirm，content script 的隔离环境无法做到这一点
+// 负责在扩展发起的 AC ON 点击栈内处理页面原生对话框，
+// 并在主世界中完成唯一 AC 开关与确认框的语义定位。
 // ============================================================
 
 (() => {
@@ -31,29 +32,6 @@
       if (!isExtensionCode('', event?.reason?.stack)) return;
       reportPageError('page-confirm-unhandledrejection', event?.reason?.message || String(event?.reason));
     });
-  }
-
-  if (!window.__AC_EXTENSION_DIALOG_PATCHED__) {
-    window.__AC_EXTENSION_DIALOG_PATCHED__ = true;
-
-    const originalConfirm = window.confirm.bind(window);
-    const originalAlert = window.alert.bind(window);
-    const originalPrompt = window.prompt.bind(window);
-
-    window.confirm = function(message) {
-      console.log('[AC扩展] 已自动确认原生 confirm 弹窗:', message);
-      return true;
-    };
-
-    window.alert = function(message) {
-      console.log('[AC扩展] 已自动关闭原生 alert 弹窗:', message);
-    };
-
-    window.prompt = function(message, defaultValue = '') {
-      console.log('[AC扩展] 已自动处理原生 prompt 弹窗:', message);
-      return defaultValue;
-    };
-
   }
 
   if (window.__AC_EXTENSION_TOGGLE_PATCHED__) return;
@@ -130,7 +108,9 @@
     if (text.includes('ON')) return { isOn: true, disabled, source: 'main-world-text' };
     if (text.includes('OFF')) return { isOn: false, disabled, source: 'main-world-text' };
 
-    const input = sw.querySelector?.('input[type="checkbox"]');
+    const input = sw.matches?.('input[type="checkbox"]')
+      ? sw
+      : sw.querySelector?.('input[type="checkbox"]');
     if (input) return { isOn: !!input.checked, disabled, source: 'main-world-input' };
 
     return { isOn: null, disabled, error: '主世界无法判断 AC 状态' };
@@ -290,28 +270,35 @@
   }
 
   function findACSwitchInPageWorld() {
-    const labels = Array.from(document.querySelectorAll('small'));
-    for (const small of labels) {
-      const text = (small.textContent || '').trim();
-      if (text === 'Air Conditioning Status' || text === 'AirConditioning Status') {
-        let container = small.closest('[class*="row"]') || small.closest('div[style*="flex"]') || small.parentElement?.parentElement;
-        for (let i = 0; i < 10 && container; i++) {
-          const antSwitch = container.querySelector('button.ant-switch[role="switch"]');
-          if (antSwitch) return antSwitch;
-          container = container.parentElement;
+    return findUniqueACControlInPageWorld(
+      'button.ant-switch[role="switch"], .ui.toggle.checkbox input[type="checkbox"]'
+    );
+  }
+
+  function findUniqueACControlInPageWorld(selector) {
+    const labels = Array.from(document.querySelectorAll('small, label, span, div'))
+      .filter(label => label.children.length === 0 && isACStatusLabelInPageWorld(label.textContent));
+    const matches = new Set();
+
+    for (const label of labels) {
+      let container = label.parentElement;
+      for (let depth = 0; depth < 10 && container; depth++) {
+        const candidates = Array.from(container.querySelectorAll(selector));
+        if (candidates.length === 1) {
+          matches.add(candidates[0]);
+          break;
         }
+        // 向上只会扩大范围；当前语义区已含多个候选时不再猜测。
+        if (candidates.length > 1) break;
+        container = container.parentElement;
       }
     }
 
-    const switches = Array.from(document.querySelectorAll('button.ant-switch[role="switch"]'));
-    if (switches.length === 1) return switches[0];
-    for (const sw of switches) {
-      const text = (sw.closest('[style*="flex"]') || sw.parentElement?.parentElement || sw.parentElement || sw).textContent || '';
-      if (text.includes('Air Conditioning') || text.includes('AC')) return sw;
-    }
+    return matches.size === 1 ? matches.values().next().value : null;
+  }
 
-    const legacy = document.querySelector('.ui.toggle.checkbox input[type="checkbox"]') || document.querySelector('.ui.toggle.checkbox');
-    return legacy || switches[0] || null;
+  function isACStatusLabelInPageWorld(text) {
+    return /^air\s*conditioning\s+status$/i.test(String(text || '').trim());
   }
 
   function clickElementOnceInPageWorld(element) {
@@ -319,11 +306,41 @@
     element.scrollIntoView?.({ block: 'center', inline: 'center' });
     element.focus?.();
     try {
-      element.click();
+      withScopedNativeDialogsInPageWorld(() => element.click());
       return true;
     } catch (error) {
       console.warn('[AC扩展] 单次 click() 失败:', error?.message || String(error));
       return false;
+    }
+  }
+
+  // 原生 confirm/alert/prompt 只在扩展的同步点击调用栈内代理。
+  // 无论 click() 成功或抛异常，finally 都恢复页面当前的原函数引用。
+  function withScopedNativeDialogsInPageWorld(clickAction) {
+    const previousConfirm = window.confirm;
+    const previousAlert = window.alert;
+    const previousPrompt = window.prompt;
+    const scopedConfirm = (message) => {
+      console.log('[AC扩展] 已自动确认本次 AC ON 的原生 confirm:', message);
+      return true;
+    };
+    const scopedAlert = (message) => {
+      console.log('[AC扩展] 已自动关闭本次 AC ON 的原生 alert:', message);
+    };
+    const scopedPrompt = (message, defaultValue = '') => {
+      console.log('[AC扩展] 已自动处理本次 AC ON 的原生 prompt:', message);
+      return defaultValue;
+    };
+
+    window.confirm = scopedConfirm;
+    window.alert = scopedAlert;
+    window.prompt = scopedPrompt;
+    try {
+      return clickAction();
+    } finally {
+      if (window.confirm === scopedConfirm) window.confirm = previousConfirm;
+      if (window.alert === scopedAlert) window.alert = previousAlert;
+      if (window.prompt === scopedPrompt) window.prompt = previousPrompt;
     }
   }
 
@@ -346,27 +363,59 @@
         || cls.includes('btn-primary')
         || cls.includes('btn-confirm');
     };
+    const isVisibleDialog = (dialog) => {
+      for (let node = dialog; node; node = node.parentElement) {
+        const cls = String(node.className || '');
+        const style = String(node.getAttribute?.('style') || '');
+        if (node.hidden
+            || node.getAttribute?.('aria-hidden') === 'true'
+            || /(?:^|\s)(?:ant-modal-hidden|ant-popover-hidden|hidden)(?:\s|$)/.test(cls)
+            || /display\s*:\s*none|visibility\s*:\s*hidden/i.test(style)) {
+          return false;
+        }
+      }
+      return true;
+    };
+    const isACDialog = (dialog) => (
+      /air\s*conditioning|aircondition(?:ing)?|\ba\s*\/\s*c\b|\bAC\b|空调/i
+        .test(dialog.textContent || '')
+    );
+    const findUniqueACDialog = () => {
+      const allDialogs = Array.from(new Set(document.querySelectorAll(
+        '.ant-modal-confirm, .ant-popconfirm, [role="alertdialog"], [role="dialog"], '
+        + '.ui.modal, .modal'
+      ))).filter(dialog => isVisibleDialog(dialog) && isACDialog(dialog));
+      // 同一弹窗可能同时命中 role 和 class；只保留最内层语义容器。
+      const innermostDialogs = allDialogs.filter(dialog => !allDialogs.some(
+        other => other !== dialog && dialog.contains?.(other)
+      ));
+      return innermostDialogs.length === 1 ? innermostDialogs[0] : null;
+    };
     while (Date.now() - start <= timeoutMs) {
       if (cancellationRevision !== automaticOnCancellationRevision) {
         console.warn('[AC扩展] ensureACState: 自动开启请求已被后台取消');
         return false;
       }
-      const buttons = Array.from(document.querySelectorAll(
-        '.ant-modal-confirm-btns button, .ant-modal button, .ant-popconfirm-buttons button, '
-        + '[role="dialog"] button, [role="alertdialog"] button, .ui.modal button, .ui.modal .actions button, .modal button'
-      ));
-      const btn = buttons.find((button) => {
+      if (notAfterAt !== 0
+          && (!Number.isSafeInteger(notAfterAt) || Date.now() >= notAfterAt)) {
+        console.warn('[AC扩展] ensureACState: 等待确认框时自动开启窗口已结束');
+        return false;
+      }
+      const dialog = findUniqueACDialog();
+      const buttons = dialog ? Array.from(dialog.querySelectorAll('button')) : [];
+      const confirmButtons = buttons.filter((button) => {
         const text = (button.textContent || '').trim();
-        return confirmTexts.includes(text) || isPrimaryButton(button);
+        const enabled = button.disabled !== true
+          && !button.hasAttribute?.('disabled')
+          && button.getAttribute?.('aria-disabled') !== 'true';
+        return enabled && (confirmTexts.includes(text) || isPrimaryButton(button));
       });
-      if (btn) {
-        if (notAfterAt !== 0
-            && (!Number.isSafeInteger(notAfterAt) || Date.now() >= notAfterAt)) {
-          console.warn('[AC扩展] ensureACState: 确认弹窗出现时自动开启窗口已结束，不再点击确认');
-          return false;
-        }
-        clickElementOnceInPageWorld(btn);
-        return true;
+      if (confirmButtons.length > 1) {
+        console.warn('[AC扩展] ensureACState: AC 确认框存在多个确认候选，拒绝猜测');
+        return false;
+      }
+      if (confirmButtons.length === 1) {
+        return clickElementOnceInPageWorld(confirmButtons[0]);
       }
       await sleepInPageWorld(200);
     }

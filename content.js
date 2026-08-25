@@ -140,7 +140,11 @@ if (!self.__AC_CONTENT_ERROR_REPORTED__) {
 
 // ----- 获取当前 AC 状态 -----
 function getACStatus() {
-  const antSwitch = findAntACSwitch();
+  const switchControl = findACSwitch();
+  if (!switchControl) return { isOn: null, error: '未唯一找到 AC 开关元素' };
+  const antSwitch = switchControl.matches?.('button.ant-switch[role="switch"]')
+    ? switchControl
+    : null;
   if (antSwitch) {
     const disabled = isAntACSwitchDisabled(antSwitch);
     const checked = antSwitch.getAttribute('aria-checked');
@@ -153,7 +157,7 @@ function getACStatus() {
     if (text.includes('OFF')) return { isOn: false, disabled, source: 'ant-switch-text' };
   }
 
-  return getLegacyACStatus();
+  return getLegacyACStatus(switchControl);
 }
 
 // 基于 DOM 的 disabled 状态判定，而非余额数值：free mode 下余额为 0 也不禁用。
@@ -165,34 +169,9 @@ function isAntACSwitchDisabled(sw) {
     || String(sw.className || '').includes('ant-switch-disabled');
 }
 
-// 提取（Fowler Extract Function）：旧版页面 Semantic UI toggle 的状态扫描与兜底匹配。
-function getLegacyACStatus() {
-  // 旧版页面: 通过 DOM 判断 Semantic UI toggle 状态
-  const checkboxes = document.querySelectorAll('.ui.toggle.checkbox input[type="checkbox"]');
-  for (const cb of checkboxes) {
-    // 确认是 AC 开关（附近有 "Air Conditioning" 文本）
-    const parent = cb.closest('.row') || cb.closest('[class*="column"]');
-    if (parent) {
-      const text = parent.textContent || '';
-      if (text.includes('Air Conditioning') || text.includes('ON') || text.includes('OFF')) {
-        return { isOn: cb.checked };
-      }
-    }
-    // 也检查最近的包含 ON/OFF 文本的元素
-    const nearby = cb.parentElement?.parentElement?.parentElement;
-    if (nearby) {
-      const text = nearby.textContent || '';
-      if (text.includes('Air Conditioning')) {
-        return { isOn: cb.checked };
-      }
-    }
-  }
-  
-  // 方法2: 查找所有 toggle checkbox
-  if (checkboxes.length > 0) {
-    return { isOn: checkboxes[0].checked, note: '最佳匹配' };
-  }
-  
+// 提取（Fowler Extract Function）：读取已经 AC 语义唯一定位的旧版开关。
+function getLegacyACStatus(legacySwitch) {
+  if (legacySwitch) return { isOn: !!legacySwitch.checked, source: 'legacy-semantic-switch' };
   return { isOn: null, error: '未找到 AC 开关元素' };
 }
 
@@ -409,7 +388,9 @@ function setNativeInputValue(input, value) {
 }
 
 async function typeTimeIntoPickerInput(input, value) {
-  const picker = input.closest('.ant-picker') || input;
+  const control = findPowerOffTimerControl();
+  if (!control || control.input !== input) return false;
+  const picker = control.picker;
   const hadReadonly = input.hasAttribute('readonly');
   // 受控 AntD picker 单次模拟输入可能被 React 中途回退；有限重试提高可靠性。
   const MAX_TYPING_ATTEMPTS = 3;
@@ -433,6 +414,9 @@ async function typeTimeIntoPickerInput(input, value) {
 // 单次模拟手动输入。成功判定同时接受 value 与 title 命中目标 HH:MM：
 // 受控 picker 可能只把确认值写到二者之一，避免只读时序差异误报「输入框未接受时间」。
 async function typeOnceIntoPickerInput(picker, input, value) {
+  const control = findPowerOffTimerControl();
+  if (!control || control.input !== input || control.picker !== picker) return false;
+  const visibleDropdownsBefore = new Set(findVisiblePickerDropdowns());
   input.removeAttribute('readonly');
   picker.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
   picker.click();
@@ -458,9 +442,9 @@ async function typeOnceIntoPickerInput(picker, input, value) {
   input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
   await sleep(300);
 
-  const okButton = document.querySelector('.ant-picker-dropdown:not(.ant-picker-dropdown-hidden) .ant-picker-ok button:not([disabled])');
-  if (okButton) {
-    okButton.click();
+  const okResult = clickUniquePowerOffPickerOk(control, visibleDropdownsBefore);
+  if (!okResult.accepted) return false;
+  if (okResult.clicked) {
     await sleep(300);
   }
 
@@ -471,65 +455,34 @@ async function typeOnceIntoPickerInput(picker, input, value) {
 
 // ----- 查找 AC 开关 DOM 元素 -----
 function findACSwitch() {
-  const antSwitch = findAntACSwitch();
-  if (antSwitch) return antSwitch;
-
-  // 查找包含 "Air Conditioning" 文本的区域，然后找其中的 toggle checkbox
-  const allElements = document.querySelectorAll('*');
-  for (const el of allElements) {
-    if (el.children.length === 0 && el.textContent?.trim() === 'Air Conditioning Status') {
-      // 向上找包含 toggle checkbox 的父容器
-      let container = el.parentElement;
-      for (let i = 0; i < 10 && container; i++) {
-        const toggle = container.querySelector('.ui.toggle.checkbox');
-        if (toggle) return toggle;
-        container = container.parentElement;
-      }
-    }
-  }
-  
-  // 备用: 直接找页面上唯一的 toggle checkbox
-  const toggles = document.querySelectorAll('.ui.toggle.checkbox');
-  if (toggles.length === 1) return toggles[0];
-  
-  // 如果有多个，找包含 ON/OFF 文本的那个
-  for (const toggle of toggles) {
-    const text = toggle.textContent || '';
-    if ((text.includes('ON') || text.includes('OFF')) && toggle.querySelector('input[type="checkbox"]')) {
-      return toggle;
-    }
-  }
-  
-  return toggles.length > 0 ? toggles[0] : null;
+  return findUniqueACControl(
+    'button.ant-switch[role="switch"], .ui.toggle.checkbox input[type="checkbox"]'
+  );
 }
 
-function findAntACSwitch() {
-  const statusLabels = Array.from(document.querySelectorAll('small'));
-  for (const small of statusLabels) {
-    const text = (small.textContent || '').trim();
-    if (text === 'Air Conditioning Status' || text === 'AirConditioning Status') {
-      let container = small.closest('[class*="row"]') || small.closest('div[style*="flex"]') || small.parentElement?.parentElement;
-      for (let i = 0; i < 8 && container; i++) {
-        const antSwitch = container.querySelector('button.ant-switch[role="switch"]');
-        if (antSwitch) return antSwitch;
-        container = container.parentElement;
+function findUniqueACControl(selector) {
+  const labels = Array.from(document.querySelectorAll('small, label, span, div'))
+    .filter(label => label.children.length === 0 && isACStatusLabel(label.textContent));
+  const matches = new Set();
+
+  for (const label of labels) {
+    let container = label.parentElement;
+    for (let depth = 0; depth < 10 && container; depth++) {
+      const candidates = Array.from(container.querySelectorAll(selector));
+      if (candidates.length === 1) {
+        matches.add(candidates[0]);
+        break;
       }
+      if (candidates.length > 1) break;
+      container = container.parentElement;
     }
   }
 
-  const antSwitches = document.querySelectorAll('button.ant-switch[role="switch"]');
-  if (antSwitches.length === 1) return antSwitches[0];
-  if (antSwitches.length > 1) {
-    for (const sw of antSwitches) {
-      const parentText = (sw.closest('[class*="row"]') || sw.parentElement?.parentElement || sw.parentElement || sw)?.textContent || '';
-      if (parentText.includes('Air Conditioning') || parentText.includes('AC')) {
-        return sw;
-      }
-    }
-    return antSwitches[0];
-  }
+  return matches.size === 1 ? matches.values().next().value : null;
+}
 
-  return null;
+function isACStatusLabel(text) {
+  return /^air\s*conditioning\s+status$/i.test(String(text || '').trim());
 }
 
 // ----- 设置页面自带的定时关闭（作为保险）-----
@@ -559,7 +512,15 @@ async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
       return { success: false, error: t('contentInputRejected', String(value)) };
     }
 
-    const confirmedValue = (pickerInput.value || pickerInput.getAttribute('title') || value).trim();
+    // 写入完成后再用同一语义定位器复核，DOM 漂移或歧义时不产生成功证明。
+    if (findPowerOffTimerInput() !== pickerInput) {
+      return { success: false, error: 'Power-off after 控件在写入期间发生歧义' };
+    }
+
+    const confirmedValue = (pickerInput.value || pickerInput.getAttribute('title') || '').trim();
+    if (confirmedValue !== value) {
+      return { success: false, error: t('contentInputRejected', String(value)) };
+    }
     return {
       success: true,
       hours,
@@ -613,34 +574,94 @@ function computePageTimerTarget(totalMinutes, nowMs = Date.now(), requestedTarge
 
 // 找到 "Power-off after" 旁的定时器输入框
 function findPowerOffTimerInput() {
-  // 方法1: 通过 "Power-off after" 文本定位
-  const labels = Array.from(document.querySelectorAll('small, div, span'));
+  return findPowerOffTimerControl()?.input || null;
+}
+
+function findPowerOffTimerControl() {
+  const labels = Array.from(document.querySelectorAll('small, label, div, span'))
+    .filter(label => label.children.length === 0 && isPowerOffAfterLabel(label.textContent));
+  const controls = new Map();
+
   for (const label of labels) {
-    if (label.children.length === 0 && /power.off\s*after/i.test(label.textContent || '')) {
-      // 向上找到包含 ant-picker 的容器
-      let container = label.parentElement;
-      for (let i = 0; i < 8 && container; i++) {
-        const input = container.querySelector('.ant-picker input');
-        if (input) return input;
-        container = container.parentElement;
+    let container = label.parentElement;
+    for (let depth = 0; depth < 8 && container; depth++) {
+      const candidates = Array.from(container.querySelectorAll('.ant-picker'))
+        .map((picker) => {
+          const inputs = Array.from(picker.querySelectorAll('input'))
+            .filter(input => String(input.type || '').toLowerCase() !== 'hidden');
+          return inputs.length === 1 ? { label, container, picker, input: inputs[0] } : null;
+        })
+        .filter(Boolean);
+      if (candidates.length === 1) {
+        controls.set(candidates[0].input, candidates[0]);
+        break;
       }
+      if (candidates.length > 1) break;
+      container = container.parentElement;
     }
   }
 
-  // 方法2: 直接找页面上唯一的 ant-picker input
-  const pickerInputs = document.querySelectorAll('.ant-picker input');
-  if (pickerInputs.length === 1) return pickerInputs[0];
+  return controls.size === 1 ? controls.values().next().value : null;
+}
 
-  // 方法3: 在包含 "Power-off" 文本的附近区域找
-  const body = document.body.textContent || '';
-  if (/power.off\s*after/i.test(body)) {
-    for (const input of pickerInputs) {
-      const parentText = (input.closest('[style*="flex"]') || input.parentElement?.parentElement?.parentElement)?.textContent || '';
-      if (/power.off/i.test(parentText)) return input;
+function isPowerOffAfterLabel(text) {
+  return /^power[\s-]*off\s+after\s*:?$/i.test(String(text || '').trim());
+}
+
+function findVisiblePickerDropdowns() {
+  return Array.from(document.querySelectorAll('.ant-picker-dropdown')).filter((dropdown) => {
+    const cls = String(dropdown.className || '');
+    const style = String(dropdown.getAttribute?.('style') || '');
+    return !dropdown.hidden
+      && dropdown.getAttribute?.('aria-hidden') !== 'true'
+      && !cls.includes('ant-picker-dropdown-hidden')
+      && !/display\s*:\s*none|visibility\s*:\s*hidden/i.test(style);
+  });
+}
+
+function resolvePowerOffPickerDropdown(control, visibleBefore) {
+  const relationIds = new Set();
+  for (const element of [control.input, control.picker]) {
+    for (const attribute of ['aria-controls', 'aria-owns']) {
+      String(element.getAttribute?.(attribute) || '').split(/\s+/).filter(Boolean)
+        .forEach(id => relationIds.add(id));
     }
   }
+  const visible = findVisiblePickerDropdowns();
+  const linked = Array.from(relationIds)
+    .map(id => document.getElementById?.(id))
+    .filter(element => element?.matches?.('.ant-picker-dropdown'))
+    .filter(element => visible.includes(element));
+  if (linked.length > 1) return { dropdown: null, ambiguous: true };
+  if (linked.length === 1) return { dropdown: linked[0], ambiguous: false };
 
-  return pickerInputs.length > 0 ? pickerInputs[0] : null;
+  const newlyVisible = visible.filter(dropdown => !visibleBefore.has(dropdown));
+  if (newlyVisible.length > 1) return { dropdown: null, ambiguous: true };
+  if (newlyVisible.length === 1) return { dropdown: newlyVisible[0], ambiguous: false };
+
+  const pickerOwnsFocus = document.activeElement === control.input
+    || control.input.getAttribute?.('aria-expanded') === 'true';
+  if (pickerOwnsFocus && visibleBefore.size === 0 && visible.length === 1) {
+    return { dropdown: visible[0], ambiguous: false };
+  }
+  return { dropdown: null, ambiguous: visible.length > 0 };
+}
+
+function clickUniquePowerOffPickerOk(control, visibleBefore) {
+  const { dropdown, ambiguous } = resolvePowerOffPickerDropdown(control, visibleBefore);
+  if (ambiguous) {
+    console.warn('[AC扩展] Power-off after 下拉层无法唯一关联，拒绝猜测 OK');
+    return { accepted: false, clicked: false };
+  }
+  if (!dropdown) return { accepted: true, clicked: false };
+
+  const buttons = Array.from(dropdown.querySelectorAll('.ant-picker-ok button:not([disabled])'));
+  if (buttons.length > 1) {
+    console.warn('[AC扩展] Power-off after 下拉层有多个 OK，拒绝猜测');
+    return { accepted: false, clicked: false };
+  }
+  if (buttons.length === 1) buttons[0].click();
+  return { accepted: true, clicked: buttons.length === 1 };
 }
 
 // ----- v0.5.10: 读取页面已设置的 "Power-off after" 定时器值（跨设备主同步通道） -----

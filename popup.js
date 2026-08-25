@@ -102,6 +102,14 @@ let currentScheduleEnabled = false;
 let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
 let currentSmartMode = { enabled: false, sensitivity: 5 };
 let lastAnnouncedState = '';
+let scheduleUpdateChain = Promise.resolve();
+let scheduleUpdateRevision = 0;
+let pendingScheduleUpdates = 0;
+let modeSwitchInFlight = false;
+
+function hasPendingScheduleUpdate() {
+  return pendingScheduleUpdates > 0;
+}
 
 function updateSmartSensitivityBubble() {
   const value = Number(smartSensitivity.value);
@@ -271,12 +279,21 @@ async function updateSmartReadout() {
 }
 
 smartModeToggle.addEventListener('click', async () => {
+  if (modeSwitchInFlight) return;
   const enabled = smartModeToggle.getAttribute('aria-pressed') !== 'true';
   currentSmartMode.enabled = enabled;
   currentScheduleEnabled = enabled;  // 智能控制开 = 自动控制开；关 = 自动控制全关（与循环定时互斥）
   syncModeUI();
-  await updateSchedule(enabled, true);
-  await updateSmartReadout();
+  const pendingMessage = t(enabled ? 'timerEnabling' : 'timerDisabling');
+  smartModeToggleState.textContent = pendingMessage;
+  setModeSwitchBusy(true, pendingMessage);
+  try {
+    await updateSchedule(enabled, true);
+    await updateSmartReadout();
+  } finally {
+    syncModeUI();
+    setModeSwitchBusy(false);
+  }
 });
 
 smartSensitivity.addEventListener('input', () => {
@@ -286,13 +303,31 @@ smartSensitivity.addEventListener('input', () => {
   void updateSmartReadout();
 });
 
+async function requestSmartReapplyNow() {
+  try {
+    const result = await chrome.runtime.sendMessage({ type: 'reapplySmartNow' });
+    if (!result?.success || result.accepted !== true) {
+      showStatus(t('statusError'), 'error');
+    }
+    return result;
+  } catch (error) {
+    showStatus(t('statusError'), 'error');
+    return { success: false, accepted: false, error: error?.message || String(error) };
+  }
+}
+
 smartSensitivity.addEventListener('change', async () => {
   // 释放滑块：先持久化灵敏度，再通知后台立即重设当前 ON 相位的 Power-off after。
   currentSmartMode.sensitivity = normalizeSmartSensitivity(smartSensitivity.value);
   syncModeUI();
-  await updateSchedule(currentScheduleEnabled, false);
+  let updateResult = await updateSchedule(currentScheduleEnabled, false);
+  if (!updateResult?.success) return;
+  if (updateResult.superseded) {
+    updateResult = await waitForLatestScheduleUpdateResult();
+  }
+  if (!updateResult?.success || updateResult.superseded) return;
   if (!IS_STATIC_PREVIEW && currentSmartMode.enabled && currentScheduleEnabled) {
-    chrome.runtime.sendMessage({ type: 'reapplySmartNow' }).catch(() => {});
+    await requestSmartReapplyNow();
   }
 });
 
@@ -346,6 +381,9 @@ function isAutomationPausedByActiveHours(schedule, now = new Date()) {
 }
 
 async function refreshStatus() {
+  if (hasPendingScheduleUpdate()) return;
+  const refreshRevision = scheduleUpdateRevision;
+
   if (IS_STATIC_PREVIEW) {
     updateCountdownDisplay(staticPreviewSchedule, {
       scheduledTime: staticPreviewSchedule.nextTriggerAt
@@ -362,6 +400,7 @@ async function refreshStatus() {
       chrome.runtime.sendMessage({ type: msgType }),
       chrome.alarms.get('ac-pwm')
     ]);
+    if (hasPendingScheduleUpdate() || refreshRevision !== scheduleUpdateRevision) return;
 
     // getSchedule 正常返回 snapshot；异常时后台可能返回 { success:false, schedule }。
     const schedule = response?.success === false && response?.schedule
@@ -377,9 +416,12 @@ async function refreshStatus() {
 
     updateCountdownDisplay(schedule, alarm);
   } catch (e) {
+    if (hasPendingScheduleUpdate() || refreshRevision !== scheduleUpdateRevision) return;
     const stored = await chrome.storage.local.get("ac_schedule");
+    if (hasPendingScheduleUpdate() || refreshRevision !== scheduleUpdateRevision) return;
     if (stored.ac_schedule) {
       const alarm = await chrome.alarms.get("ac-pwm");
+      if (hasPendingScheduleUpdate() || refreshRevision !== scheduleUpdateRevision) return;
       const fallbackSchedule = attachCachedActualStatus({ ...stored.ac_schedule });
       const pausedByActiveHours = isAutomationPausedByActiveHours(fallbackSchedule);
       fallbackSchedule._insideActiveHours = !pausedByActiveHours;
@@ -413,7 +455,10 @@ function renderBalanceEstimate(schedule) {
     offMinutes: schedule?.offMinutes
   });
   const displayAt = Number(estimate?.displayAt);
-  if (!schedule?.enabled || !Number.isFinite(balance) || balance < 0
+  const pausedByActiveHours = schedule?._automationPausedByActiveHours === true
+    || isAutomationPausedByActiveHours(schedule);
+  if (!schedule?.enabled || pausedByActiveHours
+      || !Number.isFinite(balance) || balance < 0
       || !Number.isFinite(displayAt)) {
     hideBalanceEstimate();
     return;
@@ -586,6 +631,7 @@ function readPositiveMinutes(input, fallback) {
 
 // ----- 更新定时设置 -----
 async function updateSchedule(enabled, restart = false) {
+  const updateRevision = ++scheduleUpdateRevision;
   const data = {
     enabled,
     mode: 'pwm',
@@ -599,66 +645,117 @@ async function updateSchedule(enabled, restart = false) {
 
   onMinutesInput.value = data.onMinutes;
   offMinutesInput.value = data.offMinutes;
+  pendingScheduleUpdates += 1;
 
-  if (IS_STATIC_PREVIEW) {
-    Object.assign(staticPreviewSchedule, data, {
-      actualStatus: { isOn: enabled },
-      pwmState: enabled ? 'off' : 'on',
-      nextTriggerAt: enabled ? Date.now() + data.onMinutes * 60 * 1000 : 0
+  const operation = scheduleUpdateChain
+    .catch(() => {})
+    .then(async () => {
+      try {
+        if (IS_STATIC_PREVIEW) {
+          Object.assign(staticPreviewSchedule, data, {
+            actualStatus: { isOn: data.enabled },
+            pwmState: data.enabled ? 'off' : 'on',
+            nextTriggerAt: data.enabled ? Date.now() + data.onMinutes * 60 * 1000 : 0
+          });
+          const superseded = updateRevision !== scheduleUpdateRevision;
+          if (!superseded) {
+            currentScheduleEnabled = data.enabled;
+            updateCountdownDisplay(staticPreviewSchedule, {
+              scheduledTime: staticPreviewSchedule.nextTriggerAt
+            });
+            showStatus(data.enabled ? t('statusOnOK') : t('statusClosedOK'), 'success');
+          }
+          return { success: true, superseded };
+        }
+
+        const response = await chrome.runtime.sendMessage({
+          type: 'updateSchedule',
+          data
+        });
+        const superseded = updateRevision !== scheduleUpdateRevision;
+        if (superseded) return { ...response, superseded: true };
+        if (!response?.success) {
+          showStatus(t('statusError'), 'error');
+          return { ...response, success: false, superseded: false };
+        }
+
+        currentScheduleEnabled = data.enabled;
+        // background 已负责关闭路径；popup 不再发送第二次 toggleNow。
+        showStatus(
+          t(data.enabled
+            ? (data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK')
+            : 'statusClosedOK'),
+          'success'
+        );
+
+        const alarm = await chrome.alarms.get('ac-pwm');
+        if (updateRevision === scheduleUpdateRevision) {
+          updateCountdownDisplay(attachCachedActualStatus(response.schedule), alarm);
+        }
+        return { ...response, superseded: updateRevision !== scheduleUpdateRevision };
+      } catch (error) {
+        const superseded = updateRevision !== scheduleUpdateRevision;
+        if (!superseded) showStatus(t('statusError'), 'error');
+        return {
+          success: false,
+          superseded,
+          error: error?.message || String(error)
+        };
+      }
     });
-    currentScheduleEnabled = enabled;
-    updateCountdownDisplay(staticPreviewSchedule, {
-      scheduledTime: staticPreviewSchedule.nextTriggerAt
-    });
-    showStatus(enabled ? t('statusOnOK') : t('statusClosedOK'), 'success');
-    return;
+
+  scheduleUpdateChain = operation.catch(() => {});
+  try {
+    return await operation;
+  } finally {
+    pendingScheduleUpdates -= 1;
   }
+}
 
-  // 提取（Fowler Extract Function）：后台 updateSchedule 响应的本地应用——状态文案与倒计时刷新。
-  async function applyScheduleUpdateResponse(response) {
-    if (!response?.success) {
-      showStatus(t('statusError'), 'error');
-      return;
+async function waitForLatestScheduleUpdateResult() {
+  while (true) {
+    const observedRevision = scheduleUpdateRevision;
+    const observedOperation = scheduleUpdateChain;
+    const result = await observedOperation;
+    if (observedRevision === scheduleUpdateRevision
+        && observedOperation === scheduleUpdateChain) {
+      return result;
     }
-
-    currentScheduleEnabled = data.enabled;
-
-    // 手动开关冷气（定时已关时会自动关机）
-    if (!data.enabled) {
-      // B1: background 的 updateSchedule handler 已经负责关机，
-      // popup 不再发第二次 toggleNow（避免双击噪音）
-      showStatus(t('statusClosedOK'), 'success');
-    } else {
-      showStatus(t(data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK'), 'success');
-    }
-
-    const alarm = await chrome.alarms.get('ac-pwm');
-    updateCountdownDisplay(attachCachedActualStatus(response.schedule), alarm);
   }
+}
 
-  const response = await chrome.runtime.sendMessage({
-    type: 'updateSchedule',
-    data: data
-  });
-  await applyScheduleUpdateResponse(response);
+function setModeSwitchBusy(busy, message = '') {
+  modeSwitchInFlight = busy;
+  for (const toggle of [timerToggle, smartModeToggle]) {
+    toggle.disabled = busy;
+    if (busy) toggle.setAttribute('aria-busy', 'true');
+    else toggle.removeAttribute('aria-busy');
+  }
+  if (busy) {
+    statusDiv.setAttribute('aria-busy', 'true');
+    showStatus(message, '');
+  } else {
+    statusDiv.removeAttribute('aria-busy');
+  }
 }
 
 // ----- 自动模式分段选择（循环定时与智能控制互斥） -----
 timerToggle.addEventListener('click', async () => {
+  if (modeSwitchInFlight) return;
   const enabled = timerToggle.getAttribute('aria-pressed') !== 'true';
   currentScheduleEnabled = enabled;
   if (enabled) {
     currentSmartMode.enabled = false;  // 模式互斥：选循环定时 → 关智能控制
   }
   syncModeUI();
-  timerToggle.disabled = true; // 防止双击
-  timerToggleState.textContent = enabled ? t('timerEnabling') : t('timerDisabling');
-  timerToggle.setAttribute('aria-busy', 'true');
+  const pendingMessage = t(enabled ? 'timerEnabling' : 'timerDisabling');
+  timerToggleState.textContent = pendingMessage;
+  setModeSwitchBusy(true, pendingMessage);
   try {
     await updateSchedule(enabled, true);
   } finally {
-    timerToggle.disabled = false;
-    timerToggle.removeAttribute('aria-busy');
+    syncModeUI();
+    setModeSwitchBusy(false);
   }
 });
 
@@ -1174,4 +1271,3 @@ btnDiagnose.addEventListener('click', async () => {
     showStatus(t('diagnoseComplete'), 'success');
   }
 });
-

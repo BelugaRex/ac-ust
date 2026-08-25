@@ -553,7 +553,8 @@ async function runTests() {
     '排版层级固定为 11/12/13/14/15px，26px 仅用于倒计时主数字');
   const popupJs = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
   assertPass(popupJs.includes('const timerOn = currentScheduleEnabled && !smartOn;')
-      && popupJs.includes("showStatus(t(data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK'), 'success');")
+      && popupJs.includes("'statusSmartOnOK'")
+      && popupJs.includes("'statusOnOK'")
       && popupJs.includes("add(true, t('diagnoseSmartModeOn'))")
       && zhCN.statusSmartOnOK?.message === '智能控制已开启'
       && zhCN.diagnoseOn?.message === '自动控制已启用'
@@ -1297,7 +1298,7 @@ async function runTests() {
     '9C: 每次 click 后等待 10 秒再递归复查');
   assertPass(countOccurrences(ensureBody, 'clickElementOnceInPageWorld(sw)') === 1,
     '9D: ensureACState 每轮只有一个 AC 开关点击调用点');
-  assertPass(countOccurrences(pageConfirmSource, 'element.click();') === 1,
+  assertPass(countOccurrences(pageConfirmSource, 'element.click()') === 1,
     '9E: 主世界统一点击 helper 只执行一次 element.click()');
   assertPass(!pageConfirmSource.includes('new PointerEvent')
       && !pageConfirmSource.includes('new MouseEvent')
@@ -1306,11 +1307,100 @@ async function runTests() {
   assertPass(pageConfirmSource.includes('acStateRequestInFlight')
       && pageConfirmSource.includes('合并重复的'),
     '9G: 主世界同目标并发请求复用 single-flight Promise');
-  assertPass(pageConfirmSource.includes('__AC_EXTENSION_DIALOG_PATCHED__')
-      && pageConfirmSource.includes('window.confirm = function(message)')
-      && pageConfirmSource.includes('window.alert = function(message)')
-      && pageConfirmSource.includes('window.prompt = function(message, defaultValue'),
-    '9G-1: 主世界保留原生 confirm/alert/prompt 自动接管与幂等守卫');
+  const scopedClickStart = pageConfirmSource.indexOf('function clickElementOnceInPageWorld(element)');
+  const scopedClickEnd = pageConfirmSource.indexOf('\n  async function clickConfirmDialogInPageWorld(', scopedClickStart);
+  const scopedClickSource = scopedClickStart >= 0 && scopedClickEnd > scopedClickStart
+    ? pageConfirmSource.slice(scopedClickStart, scopedClickEnd)
+    : '';
+  const originalConfirm9G = () => false;
+  const originalAlert9G = () => 'original-alert';
+  const originalPrompt9G = () => 'original-prompt';
+  const scopedWindow9G = {
+    confirm: originalConfirm9G,
+    alert: originalAlert9G,
+    prompt: originalPrompt9G
+  };
+  const scopedDialogs9G = new Function(
+    'window', 'console',
+    `${scopedClickSource}; return { clickElementOnceInPageWorld };`
+  )(scopedWindow9G, testConsole);
+  let scopedValues9G = null;
+  const scopedClickResult9G = scopedDialogs9G.clickElementOnceInPageWorld({
+    click() {
+      scopedValues9G = [
+        scopedWindow9G.confirm('AC ON'),
+        scopedWindow9G.alert('AC ON'),
+        scopedWindow9G.prompt('AC ON', 'kept')
+      ];
+    }
+  });
+  const throwingClickResult9G = scopedDialogs9G.clickElementOnceInPageWorld({
+    click() { throw new Error('synthetic click failure'); }
+  });
+  assertPass(scopedClickResult9G === true
+      && scopedValues9G?.[0] === true
+      && scopedValues9G?.[1] === undefined
+      && scopedValues9G?.[2] === 'kept'
+      && throwingClickResult9G === false
+      && scopedWindow9G.confirm === originalConfirm9G
+      && scopedWindow9G.alert === originalAlert9G
+      && scopedWindow9G.prompt === originalPrompt9G
+      && !pageConfirmSource.includes('__AC_EXTENSION_DIALOG_PATCHED__'),
+    '9G-1: 原生对话框只在单次 AC click 调用栈内接管，成功或异常后均恢复页面函数');
+  const pageSwitchLocatorSource9G = extractSourceSection(
+    pageConfirmSource,
+    'function findACSwitchInPageWorld() {',
+    '\n\n  function clickElementOnceInPageWorld(element) {',
+    'main-world unique AC switch locator'
+  );
+  const contentSwitchLocatorSource9G = extractSourceSection(
+    contentSource,
+    'function findACSwitch() {',
+    '\n\n// ----- 设置页面自带的定时关闭（作为保险）-----',
+    'isolated-world unique AC switch locator'
+  );
+  const makeSemanticSwitchDocument9G = (groups = []) => {
+    const labels = groups.map(({ text = 'Air Conditioning Status', controls }) => {
+      const container = {
+        parentElement: null,
+        querySelectorAll() { return controls; }
+      };
+      return { children: [], textContent: text, parentElement: container };
+    });
+    return {
+      querySelectorAll() { return labels; }
+    };
+  };
+  const loadPageSwitchLocator9G = document => new Function(
+    'document',
+    `${pageSwitchLocatorSource9G}; return findACSwitchInPageWorld;`
+  )(document);
+  const loadContentSwitchLocator9G = document => new Function(
+    'document',
+    `${contentSwitchLocatorSource9G}; return findACSwitch;`
+  )(document);
+  const semanticSwitch9G = { id: 'semantic-ac-switch' };
+  const otherSwitch9G = { id: 'other-switch' };
+  const uniqueSwitchDocument9G = makeSemanticSwitchDocument9G([
+    { controls: [semanticSwitch9G] }
+  ]);
+  const ambiguousSwitchDocument9G = makeSemanticSwitchDocument9G([
+    { controls: [semanticSwitch9G, otherSwitch9G] }
+  ]);
+  const duplicateSwitchDocument9G = makeSemanticSwitchDocument9G([
+    { controls: [semanticSwitch9G] },
+    { controls: [otherSwitch9G] }
+  ]);
+  const unlabeledSwitchDocument9G = makeSemanticSwitchDocument9G([]);
+  assertPass(loadPageSwitchLocator9G(uniqueSwitchDocument9G)() === semanticSwitch9G
+      && loadContentSwitchLocator9G(uniqueSwitchDocument9G)() === semanticSwitch9G
+      && loadPageSwitchLocator9G(ambiguousSwitchDocument9G)() === null
+      && loadContentSwitchLocator9G(ambiguousSwitchDocument9G)() === null
+      && loadPageSwitchLocator9G(duplicateSwitchDocument9G)() === null
+      && loadContentSwitchLocator9G(duplicateSwitchDocument9G)() === null
+      && loadPageSwitchLocator9G(unlabeledSwitchDocument9G)() === null
+      && loadContentSwitchLocator9G(unlabeledSwitchDocument9G)() === null,
+    '9G-1A: 主世界与隔离世界只接受 Air Conditioning Status 语义区内唯一开关，歧义或无标签均失败关闭');
   // 主世界 toggle 握手异常也必须回包：否则隔离世界静默等满超时拿到 null，
   // 误触发后台刷新恢复。隔离世界超时也放宽到 90s 容纳慢异步 confirm + 最多 3 次点击。
   assertPass(pageConfirmSource.includes('result = await requestACState(true, notAfterAt);')
@@ -1421,6 +1511,104 @@ async function runTests() {
       && expiredConfirmResult === false
       && expiredConfirmClickCalls === 0,
     '9G-5: 禁用开关或智能 ON 窗口已结束时，开关与确认按钮均零点击');
+  const makeConfirmButton9G = ({ text = 'Confirm', disabled = false } = {}) => ({
+    textContent: text,
+    className: 'ant-btn-primary',
+    disabled,
+    hasAttribute: attribute => attribute === 'disabled' && disabled,
+    getAttribute: () => null
+  });
+  const makeConfirmDialog9G = (text, buttons) => ({
+    textContent: text,
+    className: 'ant-modal-confirm',
+    hidden: false,
+    getAttribute: () => null,
+    contains: () => false,
+    querySelectorAll: selector => selector === 'button' ? buttons : []
+  });
+  const runConfirmDialogCase9G = async dialogs => {
+    let nowCalls = 0;
+    let clickCalls = 0;
+    const { clickConfirmDialogInPageWorld: clickConfirm9G } = new Function(
+      'document', 'Date', 'clickElementOnceInPageWorld', 'sleepInPageWorld',
+      'automaticOnCancellationRevision', 'console',
+      `${confirmFnSource}; return { clickConfirmDialogInPageWorld };`
+    )(
+      { querySelectorAll: () => dialogs },
+      { now: () => nowCalls++ < 2 ? 0 : 1 },
+      () => { clickCalls += 1; return true; },
+      async () => {},
+      0,
+      testConsole
+    );
+    const result = await clickConfirm9G(0, 0, 0);
+    return { result, clickCalls };
+  };
+  const runDelayedConfirmDialogCase9G = async dialog => {
+    let nowCalls = 0;
+    let queryCalls = 0;
+    let clickCalls = 0;
+    const { clickConfirmDialogInPageWorld: clickConfirm9G } = new Function(
+      'document', 'Date', 'clickElementOnceInPageWorld', 'sleepInPageWorld',
+      'automaticOnCancellationRevision', 'console',
+      `${confirmFnSource}; return { clickConfirmDialogInPageWorld };`
+    )(
+      { querySelectorAll: () => (++queryCalls === 1 ? [] : [dialog]) },
+      { now: () => nowCalls++ < 2 ? 0 : 100 },
+      () => { clickCalls += 1; return true; },
+      async () => {},
+      0,
+      testConsole
+    );
+    const result = await clickConfirm9G(500, 0, 0);
+    return { result, clickCalls, queryCalls };
+  };
+  const uniqueACDialog9G = await runConfirmDialogCase9G([
+    makeConfirmDialog9G('Turn on Air Conditioning?', [makeConfirmButton9G()])
+  ]);
+  const unrelatedDialog9G = await runConfirmDialogCase9G([
+    makeConfirmDialog9G('Delete this saved item?', [makeConfirmButton9G()])
+  ]);
+  const multipleACDialogs9G = await runConfirmDialogCase9G([
+    makeConfirmDialog9G('Air Conditioning A', [makeConfirmButton9G()]),
+    makeConfirmDialog9G('Air Conditioning B', [makeConfirmButton9G()])
+  ]);
+  const multipleConfirmButtons9G = await runConfirmDialogCase9G([
+    makeConfirmDialog9G('Air Conditioning', [makeConfirmButton9G(), makeConfirmButton9G()])
+  ]);
+  const disabledConfirmButton9G = await runConfirmDialogCase9G([
+    makeConfirmDialog9G('Air Conditioning', [makeConfirmButton9G({ disabled: true })])
+  ]);
+  const hiddenPopoverDialog9G = makeConfirmDialog9G(
+    'Air Conditioning',
+    [makeConfirmButton9G()]
+  );
+  hiddenPopoverDialog9G.className += ' ant-popover-hidden';
+  const hiddenPopover9G = await runConfirmDialogCase9G([hiddenPopoverDialog9G]);
+  const hiddenAncestorDialog9G = makeConfirmDialog9G(
+    'Air Conditioning',
+    [makeConfirmButton9G()]
+  );
+  hiddenAncestorDialog9G.parentElement = {
+    className: 'ant-popover ant-popover-hidden',
+    hidden: false,
+    parentElement: null,
+    getAttribute: () => null
+  };
+  const hiddenAncestor9G = await runConfirmDialogCase9G([hiddenAncestorDialog9G]);
+  const delayedACDialog9G = await runDelayedConfirmDialogCase9G(
+    makeConfirmDialog9G('Turn on Air Conditioning?', [makeConfirmButton9G()])
+  );
+  assertPass(uniqueACDialog9G.result === true && uniqueACDialog9G.clickCalls === 1
+      && unrelatedDialog9G.result === false && unrelatedDialog9G.clickCalls === 0
+      && multipleACDialogs9G.result === false && multipleACDialogs9G.clickCalls === 0
+      && multipleConfirmButtons9G.result === false && multipleConfirmButtons9G.clickCalls === 0
+      && disabledConfirmButton9G.result === false && disabledConfirmButton9G.clickCalls === 0
+      && hiddenPopover9G.result === false && hiddenPopover9G.clickCalls === 0
+      && hiddenAncestor9G.result === false && hiddenAncestor9G.clickCalls === 0
+      && delayedACDialog9G.result === true && delayedACDialog9G.clickCalls === 1
+      && delayedACDialog9G.queryCalls === 2,
+    '9G-5A: 只点击轮询期内唯一可见 AC 确认框；隐藏、无关、重复或禁用候选均零点击');
   let cancelledEnsureClickCalls = 0;
   const { ensureACState: ensureCancelled } = loadEnsure(
     () => ({ isOn: false, disabled: false, source: 'main-world-ant-switch' }),
@@ -1438,7 +1626,7 @@ async function runTests() {
   assertPass(cancelledEnsureResult.success === false
       && cancelledEnsureResult.error.includes('请求已被后台取消')
       && cancelledEnsureClickCalls === 0,
-    '9G-5A: 后台取消旧自动 ON 后，主世界递归在下一次点击前立即停止');
+    '9G-5B: 后台取消旧自动 ON 后，主世界递归在下一次点击前立即停止');
   // 9G-6: 反证——启用开关（free mode 下余额为 0 也不禁用）不被误判禁用，仍走完整点击链路。
   let enabledEnsureClickCalls = 0;
   const { ensureACState: ensureEnabled } = loadEnsure(
@@ -1642,6 +1830,152 @@ async function runTests() {
         && contentSource.includes('actualDelayMinutes,'),
       '9M-4: content setTimer 响应回传 targetAt 与实际延迟给后台');
   }
+  const powerOffLocatorSource9M = extractSourceSection(
+    contentSource,
+    'function findPowerOffTimerInput() {',
+    '\n\n// ----- v0.5.10: 读取页面已设置的 "Power-off after" 定时器值',
+    'Power-off after unique picker locator'
+  );
+  const makePickerGroup9M = (pickerCount = 1, text = 'Power-off after') => {
+    const inputs = Array.from({ length: pickerCount }, (_, index) => ({
+      id: `picker-input-${index}`,
+      type: 'text',
+      getAttribute: () => null
+    }));
+    const pickers = inputs.map((input, index) => ({
+      id: `picker-${index}`,
+      getAttribute: () => null,
+      querySelectorAll: selector => selector === 'input' ? [input] : []
+    }));
+    const container = {
+      parentElement: null,
+      querySelectorAll: selector => selector === '.ant-picker' ? pickers : []
+    };
+    return {
+      label: { children: [], textContent: text, parentElement: container },
+      inputs,
+      pickers
+    };
+  };
+  const makePickerDocument9M = (groups, dropdowns = [], activeElement = null) => ({
+    activeElement,
+    querySelectorAll(selector) {
+      if (selector === 'small, label, div, span') return groups.map(group => group.label);
+      if (selector === '.ant-picker-dropdown') return dropdowns;
+      return [];
+    },
+    getElementById: () => null
+  });
+  const loadPickerLocator9M = document => new Function(
+    'document', 'console',
+    `${powerOffLocatorSource9M}; return {
+      findPowerOffTimerInput,
+      findPowerOffTimerControl,
+      clickUniquePowerOffPickerOk
+    };`
+  )(document, testConsole);
+  const uniquePickerGroup9M = makePickerGroup9M(1);
+  const uniquePickerLocator9M = loadPickerLocator9M(
+    makePickerDocument9M([uniquePickerGroup9M])
+  );
+  const ambiguousPickerGroup9M = makePickerGroup9M(2);
+  const duplicatePickerGroupA9M = makePickerGroup9M(1);
+  const duplicatePickerGroupB9M = makePickerGroup9M(1);
+  assertPass(uniquePickerLocator9M.findPowerOffTimerInput() === uniquePickerGroup9M.inputs[0]
+      && loadPickerLocator9M(makePickerDocument9M([])).findPowerOffTimerInput() === null
+      && loadPickerLocator9M(
+        makePickerDocument9M([ambiguousPickerGroup9M])
+      ).findPowerOffTimerInput() === null
+      && loadPickerLocator9M(
+        makePickerDocument9M([duplicatePickerGroupA9M, duplicatePickerGroupB9M])
+      ).findPowerOffTimerInput() === null,
+    '9M-5: Power-off after 只接受唯一语义区内唯一 picker；无标签、同区多个或重复语义区均失败关闭');
+
+  const makeVisiblePickerDropdown9M = (buttons) => ({
+    className: 'ant-picker-dropdown',
+    hidden: false,
+    getAttribute: () => null,
+    matches: selector => selector === '.ant-picker-dropdown',
+    querySelectorAll: () => buttons
+  });
+  let uniquePickerOkClicks9M = 0;
+  const uniquePickerOkButton9M = { click: () => { uniquePickerOkClicks9M += 1; } };
+  const uniqueDropdown9M = makeVisiblePickerDropdown9M([uniquePickerOkButton9M]);
+  const linkedPickerDocument9M = makePickerDocument9M(
+    [uniquePickerGroup9M],
+    [uniqueDropdown9M],
+    uniquePickerGroup9M.inputs[0]
+  );
+  const linkedPickerLocator9M = loadPickerLocator9M(linkedPickerDocument9M);
+  const linkedPickerControl9M = linkedPickerLocator9M.findPowerOffTimerControl();
+  const uniqueOkResult9M = linkedPickerLocator9M.clickUniquePowerOffPickerOk(
+    linkedPickerControl9M,
+    new Set()
+  );
+  let explicitlyLinkedPickerOkClicks9M = 0;
+  const explicitlyLinkedGroup9M = makePickerGroup9M(1);
+  const explicitlyLinkedDropdown9M = makeVisiblePickerDropdown9M([{
+    click: () => { explicitlyLinkedPickerOkClicks9M += 1; }
+  }]);
+  explicitlyLinkedDropdown9M.id = 'power-off-dropdown';
+  explicitlyLinkedGroup9M.inputs[0].getAttribute = attribute => (
+    attribute === 'aria-controls' ? explicitlyLinkedDropdown9M.id : null
+  );
+  explicitlyLinkedGroup9M.pickers[0].getAttribute = attribute => (
+    attribute === 'aria-owns' ? explicitlyLinkedDropdown9M.id : null
+  );
+  const explicitlyLinkedDocument9M = makePickerDocument9M(
+    [explicitlyLinkedGroup9M],
+    [explicitlyLinkedDropdown9M]
+  );
+  explicitlyLinkedDocument9M.getElementById = id => (
+    id === explicitlyLinkedDropdown9M.id ? explicitlyLinkedDropdown9M : null
+  );
+  const explicitlyLinkedLocator9M = loadPickerLocator9M(explicitlyLinkedDocument9M);
+  const explicitlyLinkedOkResult9M = explicitlyLinkedLocator9M.clickUniquePowerOffPickerOk(
+    explicitlyLinkedLocator9M.findPowerOffTimerControl(),
+    new Set([explicitlyLinkedDropdown9M])
+  );
+  let preExistingUnrelatedOkClicks9M = 0;
+  const preExistingUnrelatedDropdown9M = makeVisiblePickerDropdown9M([{
+    click: () => { preExistingUnrelatedOkClicks9M += 1; }
+  }]);
+  const preExistingUnrelatedLocator9M = loadPickerLocator9M(makePickerDocument9M(
+    [uniquePickerGroup9M],
+    [preExistingUnrelatedDropdown9M],
+    uniquePickerGroup9M.inputs[0]
+  ));
+  const preExistingUnrelatedResult9M = preExistingUnrelatedLocator9M.clickUniquePowerOffPickerOk(
+    preExistingUnrelatedLocator9M.findPowerOffTimerControl(),
+    new Set([preExistingUnrelatedDropdown9M])
+  );
+  let ambiguousPickerOkClicks9M = 0;
+  const ambiguousDropdowns9M = [
+    makeVisiblePickerDropdown9M([{ click: () => { ambiguousPickerOkClicks9M += 1; } }]),
+    makeVisiblePickerDropdown9M([{ click: () => { ambiguousPickerOkClicks9M += 1; } }])
+  ];
+  const ambiguousDropdownLocator9M = loadPickerLocator9M(makePickerDocument9M(
+    [uniquePickerGroup9M],
+    ambiguousDropdowns9M,
+    uniquePickerGroup9M.inputs[0]
+  ));
+  const ambiguousOkResult9M = ambiguousDropdownLocator9M.clickUniquePowerOffPickerOk(
+    ambiguousDropdownLocator9M.findPowerOffTimerControl(),
+    new Set()
+  );
+  assertPass(uniqueOkResult9M.accepted === true
+      && uniqueOkResult9M.clicked === true
+      && uniquePickerOkClicks9M === 1
+      && explicitlyLinkedOkResult9M.accepted === true
+      && explicitlyLinkedOkResult9M.clicked === true
+      && explicitlyLinkedPickerOkClicks9M === 1
+      && preExistingUnrelatedResult9M.accepted === false
+      && preExistingUnrelatedResult9M.clicked === false
+      && preExistingUnrelatedOkClicks9M === 0
+      && ambiguousOkResult9M.accepted === false
+      && ambiguousOkResult9M.clicked === false
+      && ambiguousPickerOkClicks9M === 0,
+    '9M-6: picker portal 仅点击显式关联或唯一新 dropdown；既有无关层与多个新层均零点击');
   const verificationStartForReload = backgroundSource.indexOf('async function verifyPageTimerPersistence(');
   const verificationEndForReload = backgroundSource.indexOf('\n// 关机定时器设置失败时', verificationStartForReload);
   const verifySectionForReload = verificationStartForReload >= 0 && verificationEndForReload > verificationStartForReload
@@ -4461,9 +4795,381 @@ return { reapplySmartSensitivityNow };`
       && !diagnoseHandlerSource.includes("chrome.alarms.create('ac-watchdog'"),
     '16M-1: popup 诊断只委派后台自愈，不绕过最终门禁直接创建运行闹钟');
 
+  const serializedScheduleUpdateSourceF90 = extractSourceSection(
+    backgroundSource,
+    'function runSerializedScheduleUpdate(operation) {',
+    '\n\nasync function runSmartReapplyLoop()',
+    'serialized schedule mutation coordinator'
+  );
+  const runSerializedScheduleUpdateF90 = new Function(
+    `let scheduleUpdateChain = Promise.resolve();
+    ${serializedScheduleUpdateSourceF90}; return runSerializedScheduleUpdate;`
+  )();
+  const tryAdoptSyncedStateSourceF90 = extractSourceSection(
+    backgroundSource,
+    "async function tryAdoptSyncedState(reason = '', explicitRemote = null) {",
+    '\n\n// ----- v0.5.10: 页面定时器作为跨设备主同步通道 -----',
+    'sync latest mailbox'
+  );
+  const loadTryAdoptSyncedStateF90 = ({ chrome, applySyncedPhase }) => new Function(
+    'chrome', 'SYNC_KEY', 'applySyncedPhase', 'runSerializedScheduleUpdate',
+    'appendDiagnosticLog', 'console',
+    `const _syncOpLock = {
+      busy: false,
+      pending: false,
+      pendingReason: '',
+      pendingRemote: null
+    };
+    ${tryAdoptSyncedStateSourceF90}; return tryAdoptSyncedState;`
+  )(
+    chrome,
+    'ac_schedule_sync_test',
+    applySyncedPhase,
+    runSerializedScheduleUpdateF90,
+    () => {},
+    testConsole
+  );
+
+  let releaseActualUpdateF90;
+  let markActualUpdateStartedF90;
+  const actualUpdateGateF90 = new Promise(resolve => { releaseActualUpdateF90 = resolve; });
+  const actualUpdateStartedF90 = new Promise(resolve => { markActualUpdateStartedF90 = resolve; });
+  const actualUpdatePersistReasonsF90 = [];
+  const actualUpdateResponsesF90 = [];
+  const actualUpdateHarnessF90 = new Function(
+    'runSerializedScheduleUpdate', 'persistSchedule', 'setupAlarms',
+    'syncScheduleToSync', 'resetDisabledPwmRuntime', 'requestTimerBasedShutdown',
+    'createAlarm', 'rescheduleActiveBoundary',
+    `let schedule = {
+      enabled: false,
+      mode: 'pwm',
+      clockMode: false,
+      onMinutes: 15,
+      offMinutes: 45,
+      pwmState: 'on',
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    };
+    let smartReapplyInFlight = false;
+    let smartReapplyPending = false;
+    function isAutomationAllowed() { return schedule.enabled; }
+    function sanitizeMinutes(value, fallback) {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) && parsed >= 1 ? parsed : fallback;
+    }
+    function normalizeSmartSensitivity(value) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? Math.max(0, Math.min(10, parsed)) : 5;
+    }
+    async function dispatch(msg, sendResponse) {
+      ${updateScheduleBody}
+    }
+    return {
+      dispatch,
+      state: () => ({ ...schedule })
+    };`
+  )(
+    runSerializedScheduleUpdateF90,
+    async reason => {
+      actualUpdatePersistReasonsF90.push(reason);
+      if (actualUpdatePersistReasonsF90.length === 1) {
+        markActualUpdateStartedF90();
+        await actualUpdateGateF90;
+      }
+    },
+    async () => {},
+    async () => {},
+    async () => {},
+    async () => ({ success: true }),
+    async () => {},
+    () => {}
+  );
+  let latestRemoteF90 = { syncedAt: 2, enabled: false };
+  let syncReadsF90 = 0;
+  const adoptedStatesF90 = [];
+  const tryAdoptSyncedStateF90 = loadTryAdoptSyncedStateF90({
+    chrome: {
+      storage: {
+        sync: {
+          async get(key) {
+            syncReadsF90 += 1;
+            return { [key]: latestRemoteF90 };
+          }
+        }
+      }
+    },
+    applySyncedPhase: async (remote) => {
+      adoptedStatesF90.push(remote.enabled);
+      return true;
+    }
+  });
+  const firstActualUpdateF90 = actualUpdateHarnessF90.dispatch({
+    type: 'updateSchedule',
+    data: {
+      enabled: true,
+      restart: true,
+      onMinutes: 15,
+      offMinutes: 45,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  }, response => { actualUpdateResponsesF90.push(response); });
+  await actualUpdateStartedF90;
+  const secondActualUpdateF90 = actualUpdateHarnessF90.dispatch({
+    type: 'updateSchedule',
+    data: {
+      enabled: false,
+      restart: true,
+      onMinutes: 15,
+      offMinutes: 45,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  }, response => { actualUpdateResponsesF90.push(response); });
+  const syncOwnerF90 = tryAdoptSyncedStateF90(
+    'remote-enable',
+    { syncedAt: 1, enabled: true }
+  );
+  const queuedSyncF90 = tryAdoptSyncedStateF90(
+    'remote-disable-event',
+    { syncedAt: 2, enabled: false }
+  );
+  await Promise.resolve();
+  const queuesBlockedBehindActualUpdateF90 = actualUpdatePersistReasonsF90.length === 1
+    && actualUpdateHarnessF90.state().enabled === true
+    && actualUpdateResponsesF90.length === 0
+    && adoptedStatesF90.length === 0;
+  releaseActualUpdateF90();
+  const [, , syncOwnerResultF90, queuedSyncResultF90] = await Promise.all([
+    firstActualUpdateF90,
+    secondActualUpdateF90,
+    syncOwnerF90,
+    queuedSyncF90
+  ]);
+  assertPass(queuesBlockedBehindActualUpdateF90
+      && syncOwnerResultF90 === true
+      && queuedSyncResultF90 === false
+      && actualUpdateResponsesF90.length === 2
+      && actualUpdateHarnessF90.state().enabled === false
+      && syncReadsF90 === 0
+      && adoptedStatesF90.join(',') === 'false'
+      && applySyncedPhaseBody.includes('remoteSyncedAt <= lastSyncedAt'),
+    '16M-2: 真实 updateSchedule 分支与 sync 共用事务队列；等待期淘汰旧 enable，仅采纳 mailbox 最新 disable');
+
+  let releaseFailingSyncApplyF90;
+  let markFailingSyncApplyStartedF90;
+  const failingSyncApplyGateF90 = new Promise(resolve => { releaseFailingSyncApplyF90 = resolve; });
+  const failingSyncApplyStartedF90 = new Promise(resolve => { markFailingSyncApplyStartedF90 = resolve; });
+  const syncApplyOrderF90 = [];
+  const tryAdoptFailingSyncedStateF90 = loadTryAdoptSyncedStateF90({
+    chrome: { storage: { sync: { async get() { return {}; } } } },
+    applySyncedPhase: async remote => {
+      if (remote.enabled) {
+        syncApplyOrderF90.push('enable:start');
+        markFailingSyncApplyStartedF90();
+        await failingSyncApplyGateF90;
+        syncApplyOrderF90.push('enable:end');
+        throw new Error('stale enable failed');
+      }
+      syncApplyOrderF90.push('disable:start');
+      return true;
+    }
+  });
+  const failingSyncOwnerF90 = tryAdoptFailingSyncedStateF90(
+    'remote-enable-in-flight',
+    { syncedAt: 3, enabled: true }
+  );
+  await failingSyncApplyStartedF90;
+  const afterFailureSyncF90 = tryAdoptFailingSyncedStateF90(
+    'remote-disable-after-failure',
+    { syncedAt: 4, enabled: false }
+  );
+  await Promise.resolve();
+  const syncApplyStayedSerialF90 = syncApplyOrderF90.join(',') === 'enable:start';
+  releaseFailingSyncApplyF90();
+  const [failingSyncResultF90, afterFailureSyncResultF90] = await Promise.all([
+    failingSyncOwnerF90,
+    afterFailureSyncF90
+  ]);
+  assertPass(syncApplyStayedSerialF90
+      && failingSyncResultF90 === true
+      && afterFailureSyncResultF90 === false
+      && syncApplyOrderF90.join(',') === 'enable:start,enable:end,disable:start',
+    '16M-2A: sync busy 期间绝不并发 apply；首轮异常后仍串行消费最新 pending 快照');
+
+  let retrySyncReadsF90 = 0;
+  const retrySyncAppliedF90 = [];
+  const tryAdoptWithReadRetryF90 = loadTryAdoptSyncedStateF90({
+    chrome: {
+      storage: {
+        sync: {
+          async get(key) {
+            retrySyncReadsF90 += 1;
+            if (retrySyncReadsF90 === 1) throw new Error('transient sync read');
+            return { [key]: { syncedAt: 5, enabled: false } };
+          }
+        }
+      }
+    },
+    applySyncedPhase: async remote => {
+      retrySyncAppliedF90.push(remote.enabled);
+      return true;
+    }
+  });
+  const retrySyncResultF90 = await tryAdoptWithReadRetryF90('init-read-retry');
+  assertPass(retrySyncResultF90 === true
+      && retrySyncReadsF90 === 2
+      && retrySyncAppliedF90.join(',') === 'false',
+    '16M-2B: sync 读取瞬时失败会有界重试一次，不静默丢失最后快照');
+
+  let releaseNewerFailingSyncF90;
+  let markNewerFailingSyncStartedF90;
+  const newerFailingSyncGateF90 = new Promise(resolve => { releaseNewerFailingSyncF90 = resolve; });
+  const newerFailingSyncStartedF90 = new Promise(resolve => { markNewerFailingSyncStartedF90 = resolve; });
+  const outOfOrderSyncAppliesF90 = [];
+  const tryAdoptOutOfOrderSyncF90 = loadTryAdoptSyncedStateF90({
+    chrome: { storage: { sync: { async get() { return {}; } } } },
+    applySyncedPhase: async remote => {
+      outOfOrderSyncAppliesF90.push(remote.syncedAt);
+      if (remote.syncedAt === 7) {
+        markNewerFailingSyncStartedF90();
+        await newerFailingSyncGateF90;
+        throw new Error('newer snapshot failed');
+      }
+      return true;
+    }
+  });
+  const newerFailingSyncF90 = tryAdoptOutOfOrderSyncF90(
+    'newer-in-flight',
+    { syncedAt: 7, enabled: true }
+  );
+  await newerFailingSyncStartedF90;
+  const olderPendingSyncF90 = tryAdoptOutOfOrderSyncF90(
+    'older-arrived-late',
+    { syncedAt: 6, enabled: false }
+  );
+  releaseNewerFailingSyncF90();
+  const [newerFailureOutcomeF90, olderPendingOutcomeF90] = await Promise.allSettled([
+    newerFailingSyncF90,
+    olderPendingSyncF90
+  ]);
+  assertPass(newerFailureOutcomeF90.status === 'rejected'
+      && olderPendingOutcomeF90.status === 'fulfilled'
+      && olderPendingOutcomeF90.value === false
+      && outOfOrderSyncAppliesF90.join(',') === '7',
+    '16M-2C: 乱序到达的旧 pending 不会掩盖较新 sync 失败或触发旧 config 副作用');
+
+  const releasePwmOwnershipSourceF90 = extractSourceSection(
+    backgroundSource,
+    'function releasePwmStepOwnership(automationRevision) {',
+    '\n\nconst AUTOMATION_RUNTIME_ALARMS',
+    'PWM ownership release smart trailing hook'
+  );
+  const smartReapplyLoopSourceF90 = extractSourceSection(
+    backgroundSource,
+    'async function runSmartReapplyLoop() {',
+    '\n\nasync function fetchSmartWeatherResource',
+    'smart reapply trailing loop'
+  );
+  const loadSmartReapplyHarnessF90 = (
+    reapplySmartSensitivityNow,
+    initialPwmStepRunning,
+    waitUntil
+  ) => new Function(
+    'reapplySmartSensitivityNow', 'initialPwmStepRunning', 'waitUntil',
+    'appendDiagnosticLog', 'console', 'Date',
+    `let smartReapplyInFlight = false;
+    let smartReapplyPending = false;
+    let pwmStepRunning = initialPwmStepRunning;
+    let pwmStepRunningRevision = initialPwmStepRunning ? 7 : null;
+    let pwmRuntimeRevision = 7;
+    let lastPwmStepAt = 0;
+    ${releasePwmOwnershipSourceF90}
+    ${smartReapplyLoopSourceF90}
+    async function dispatch(msg, sendResponse) {
+      ${updateScheduleBody}
+    }
+    return {
+      run: runSmartReapplyLoop,
+      dispatch,
+      release: () => releasePwmStepOwnership(7),
+      state: () => ({ smartReapplyInFlight, smartReapplyPending, pwmStepRunning })
+    };`
+  )(
+    reapplySmartSensitivityNow,
+    initialPwmStepRunning,
+    waitUntil,
+    () => {},
+    testConsole,
+    Date
+  );
+  let releaseTrailingReapplyF90;
+  let markTrailingReapplyStartedF90;
+  const trailingReapplyGateF90 = new Promise(resolve => { releaseTrailingReapplyF90 = resolve; });
+  const trailingReapplyStartedF90 = new Promise(resolve => { markTrailingReapplyStartedF90 = resolve; });
+  let trailingReapplyCallsF90 = 0;
+  let trailingWaitPromiseF90 = null;
+  const trailingHarnessF90 = loadSmartReapplyHarnessF90(
+    async () => {
+      trailingReapplyCallsF90 += 1;
+      if (trailingReapplyCallsF90 === 1) {
+        markTrailingReapplyStartedF90();
+        await trailingReapplyGateF90;
+      }
+    },
+    false,
+    promise => {
+      trailingWaitPromiseF90 = Promise.resolve(promise);
+      return trailingWaitPromiseF90;
+    }
+  );
+  const firstTrailingResponsesF90 = [];
+  const secondTrailingResponsesF90 = [];
+  await trailingHarnessF90.dispatch(
+    { type: 'reapplySmartNow' },
+    response => { firstTrailingResponsesF90.push(response); }
+  );
+  await trailingReapplyStartedF90;
+  await trailingHarnessF90.dispatch(
+    { type: 'reapplySmartNow' },
+    response => { secondTrailingResponsesF90.push(response); }
+  );
+  releaseTrailingReapplyF90();
+  await trailingWaitPromiseF90;
+
+  let pwmDeferredRunF90 = null;
+  let pwmDeferredCallsF90 = 0;
+  const pwmDeferredHarnessF90 = loadSmartReapplyHarnessF90(
+    async () => {
+      pwmDeferredCallsF90 += 1;
+      return pwmDeferredCallsF90 === 1 ? { deferred: true } : undefined;
+    },
+    true,
+    promise => {
+      pwmDeferredRunF90 = Promise.resolve(promise);
+      return pwmDeferredRunF90;
+    }
+  );
+  await pwmDeferredHarnessF90.run();
+  const deferredStateF90 = pwmDeferredHarnessF90.state();
+  const releasedPwmF90 = pwmDeferredHarnessF90.release();
+  await pwmDeferredRunF90;
+  assertPass(trailingReapplyCallsF90 === 2
+      && firstTrailingResponsesF90[0]?.accepted === true
+      && firstTrailingResponsesF90[0]?.queued === false
+      && secondTrailingResponsesF90[0]?.accepted === true
+      && secondTrailingResponsesF90[0]?.queued === true
+      && trailingHarnessF90.state().smartReapplyInFlight === false
+      && trailingHarnessF90.state().smartReapplyPending === false
+      && deferredStateF90.smartReapplyPending === true
+      && releasedPwmF90 === true
+      && pwmDeferredCallsF90 === 2
+      && pwmDeferredHarnessF90.state().smartReapplyPending === false,
+    '16M-3: 真实 reapplySmartNow 分支在 single-flight 与 PWM 占用期间均保留尾随重算');
+
   const requestTimerBasedShutdownSource16 = extractSourceSection(
     backgroundSource,
-    'async function requestTimerBasedShutdown(reason = \'\', minutes = 1) {',
+    'function canReusePageTimerProof(state, requestedMinutes, now) {',
     '\n// ----- 闹钟触发时执行 -----',
     'requestTimerBasedShutdown deadline'
   );
@@ -4479,6 +5185,7 @@ return { reapplySmartSensitivityNow };`
       pageTimerRetryMinutes: 0
     };
     const timerCalls16 = [];
+    const freshnessNowCalls16 = [];
     let currentShutdownRevision16 = 0;
     const requestTimerBasedShutdown16 = new Function(
       'schedule', 'isPageTimerProofFresh', 'getCurrentACStatus',
@@ -4488,7 +5195,10 @@ return { reapplySmartSensitivityNow };`
       `${requestTimerBasedShutdownSource16}; return requestTimerBasedShutdown;`
     )(
       shutdownSchedule16,
-      schedule => syncHelpers.isPageTimerProofFresh(schedule, { now: shutdownNow16 }),
+      (state, options) => {
+        freshnessNowCalls16.push(options?.now);
+        return syncHelpers.isPageTimerProofFresh(state, options);
+      },
       async () => {
         if (invalidateDuringStatus) currentShutdownRevision16 += 1;
         return { isOn: true };
@@ -4515,10 +5225,11 @@ return { reapplySmartSensitivityNow };`
       testConsole
     );
     const result16 = await requestTimerBasedShutdown16('active-hours-test', 1);
-    return { result16, timerCalls16 };
+    return { result16, timerCalls16, freshnessNowCalls16 };
   };
   const lateProofShutdown16 = await runShutdownProofCase16(shutdownNow16 + 20 * 60_000);
   const nearProofShutdown16 = await runShutdownProofCase16(shutdownNow16 + 60_000);
+  const expiredProofShutdown16 = await runShutdownProofCase16(shutdownNow16 - 60_000);
   const staleShutdown16 = await runShutdownProofCase16(
     shutdownNow16 + 20 * 60_000,
     { invalidateDuringStatus: true }
@@ -4526,7 +5237,11 @@ return { reapplySmartSensitivityNow };`
   assertPass(lateProofShutdown16.timerCalls16.join(',') === '1'
       && lateProofShutdown16.result16.alreadyArmed !== true
       && nearProofShutdown16.timerCalls16.length === 0
-      && nearProofShutdown16.result16.alreadyArmed === true,
+      && nearProofShutdown16.result16.alreadyArmed === true
+      && expiredProofShutdown16.timerCalls16.join(',') === '1'
+      && expiredProofShutdown16.result16.alreadyArmed !== true
+      && nearProofShutdown16.freshnessNowCalls16.length === 1
+      && nearProofShutdown16.freshnessNowCalls16[0] === shutdownNow16,
     '16N: 退出时段只复用足够早的页面关机证明，不把 20 分钟后的旧定时器当作 1 分钟安全停机');
   assertPass(staleShutdown16.result16.shutdownStale === true
       && staleShutdown16.timerCalls16.length === 0,
@@ -4550,12 +5265,303 @@ return { reapplySmartSensitivityNow };`
       && pausedDiagnosticResult16.storage_after.nextTriggerAt === 0,
     '16O: popup 暂停态不会从泄漏的 live ac-pwm 回填 storage 时钟');
 
+  const popupUpdateScheduleSourceF90 = extractSourceSection(
+    popupJs,
+    'async function updateSchedule(enabled, restart = false) {',
+    '\n\nfunction setModeSwitchBusy(busy, message = \'\') {',
+    'popup serialized updateSchedule'
+  );
+  let releaseFirstPopupUpdateF90;
+  let markFirstPopupUpdateStartedF90;
+  const firstPopupUpdateGateF90 = new Promise(resolve => { releaseFirstPopupUpdateF90 = resolve; });
+  const firstPopupUpdateStartedF90 = new Promise(resolve => { markFirstPopupUpdateStartedF90 = resolve; });
+  const popupUpdateMessagesF90 = [];
+  const popupRenderedSchedulesF90 = [];
+  const popupStatusesF90 = [];
+  const popupUpdateHarnessF90 = new Function(
+    'readPositiveMinutes', 'onMinutesInput', 'offMinutesInput',
+    'currentActiveHours', 'currentSmartMode', 'IS_STATIC_PREVIEW',
+    'staticPreviewSchedule', 'updateCountdownDisplay', 'showStatus', 't',
+    'chrome', 'attachCachedActualStatus',
+    `let scheduleUpdateChain = Promise.resolve();
+    let scheduleUpdateRevision = 0;
+    let pendingScheduleUpdates = 0;
+    let currentScheduleEnabled = false;
+    ${popupUpdateScheduleSourceF90}
+    return {
+      updateSchedule,
+      state: () => ({ pendingScheduleUpdates, currentScheduleEnabled })
+    };`
+  )(
+    (input, fallback) => {
+      const value = Number.parseInt(input.value, 10);
+      return Number.isFinite(value) && value >= 1 ? value : fallback;
+    },
+    { value: '15' },
+    { value: '45' },
+    { enabled: true, start: '08:00', end: '23:00' },
+    { enabled: false, sensitivity: 5 },
+    false,
+    {},
+    schedule => { popupRenderedSchedulesF90.push(schedule); },
+    (message, type) => { popupStatusesF90.push({ message, type }); },
+    key => key,
+    {
+      runtime: {
+        async sendMessage(message) {
+          popupUpdateMessagesF90.push(message);
+          if (popupUpdateMessagesF90.length === 1) {
+            markFirstPopupUpdateStartedF90();
+            return firstPopupUpdateGateF90;
+          }
+          return { success: true, schedule: { enabled: message.data.enabled, id: 'latest' } };
+        }
+      },
+      alarms: { async get() { return { name: 'ac-pwm', scheduledTime: 123 }; } }
+    },
+    schedule => schedule
+  );
+  const firstPopupUpdateF90 = popupUpdateHarnessF90.updateSchedule(false, true);
+  await firstPopupUpdateStartedF90;
+  const secondPopupUpdateF90 = popupUpdateHarnessF90.updateSchedule(true, true);
+  await Promise.resolve();
+  const popupSendsBeforeReleaseF90 = popupUpdateMessagesF90.length;
+  releaseFirstPopupUpdateF90({ success: true, schedule: { enabled: false, id: 'stale' } });
+  const [firstPopupResultF90, secondPopupResultF90] = await Promise.all([
+    firstPopupUpdateF90,
+    secondPopupUpdateF90
+  ]);
+  assertPass(popupSendsBeforeReleaseF90 === 1
+      && popupUpdateMessagesF90.map(message => message.data.enabled).join(',') === 'false,true'
+      && firstPopupResultF90.superseded === true
+      && secondPopupResultF90.success === true
+      && secondPopupResultF90.superseded === false
+      && popupRenderedSchedulesF90.length === 1
+      && popupRenderedSchedulesF90[0]?.id === 'latest'
+      && popupStatusesF90.length === 1
+      && popupUpdateHarnessF90.state().pendingScheduleUpdates === 0
+      && popupUpdateHarnessF90.state().currentScheduleEnabled === true,
+    '16O-1: popup updateSchedule 严格串行，旧响应不回写 UI，最终状态属于最后一次命令');
+
+  const waitForLatestUpdateSourceF90 = extractSourceSection(
+    popupJs,
+    'async function waitForLatestScheduleUpdateResult() {',
+    '\n\nfunction setModeSwitchBusy',
+    'popup latest update result waiter'
+  );
+  let releaseObservedUpdateF90;
+  const observedUpdateGateF90 = new Promise(resolve => { releaseObservedUpdateF90 = resolve; });
+  const latestUpdateFailureF90 = { success: false, superseded: false, error: 'latest failed' };
+  const waitForLatestUpdateHarnessF90 = new Function(
+    'initialOperation',
+    `let scheduleUpdateRevision = 1;
+    let scheduleUpdateChain = initialOperation;
+    ${waitForLatestUpdateSourceF90}
+    return {
+      wait: waitForLatestScheduleUpdateResult,
+      replaceWithFailure() {
+        scheduleUpdateRevision += 1;
+        scheduleUpdateChain = Promise.resolve({
+          success: false,
+          superseded: false,
+          error: 'latest failed'
+        });
+      }
+    };`
+  )(observedUpdateGateF90);
+  const latestUpdateResultPromiseF90 = waitForLatestUpdateHarnessF90.wait();
+  waitForLatestUpdateHarnessF90.replaceWithFailure();
+  releaseObservedUpdateF90({ success: true, superseded: true });
+  const latestUpdateResultF90 = await latestUpdateResultPromiseF90;
+  assertPass(JSON.stringify(latestUpdateResultF90) === JSON.stringify(latestUpdateFailureF90)
+      && popupJs.includes('updateResult = await waitForLatestScheduleUpdateResult();')
+      && popupJs.includes('if (!updateResult?.success || updateResult.superseded) return;'),
+    '16O-1A: superseded 灵敏度提交等待稳定 revision；最终写失败时不发送 reapplySmartNow');
+
+  let releasePopupPollF90;
+  let markPopupPollStartedF90;
+  const popupPollGateF90 = new Promise(resolve => { releasePopupPollF90 = resolve; });
+  const popupPollStartedF90 = new Promise(resolve => { markPopupPollStartedF90 = resolve; });
+  let popupPollRenderCallsF90 = 0;
+  let popupPollStorageReadsF90 = 0;
+  const popupPollHarnessF90 = new Function(
+    'IS_STATIC_PREVIEW', 'staticPreviewSchedule', 'updateCountdownDisplay',
+    'updateSmartReadout', 'chrome', 'attachCachedActualStatus',
+    'isAutomationPausedByActiveHours',
+    `let pollCount = 0;
+    let scheduleUpdateRevision = 0;
+    let pendingScheduleUpdates = 0;
+    function hasPendingScheduleUpdate() { return pendingScheduleUpdates > 0; }
+    ${refreshStatusBody12}
+    return {
+      refreshStatus,
+      beginUpdate() { scheduleUpdateRevision += 1; pendingScheduleUpdates += 1; }
+    };`
+  )(
+    false,
+    {},
+    () => { popupPollRenderCallsF90 += 1; },
+    () => {},
+    {
+      runtime: {
+        async sendMessage() {
+          markPopupPollStartedF90();
+          return popupPollGateF90;
+        }
+      },
+      alarms: { async get() { return null; } },
+      storage: {
+        local: {
+          async get() {
+            popupPollStorageReadsF90 += 1;
+            return {};
+          }
+        }
+      }
+    },
+    schedule => schedule,
+    () => false
+  );
+  const popupPollF90 = popupPollHarnessF90.refreshStatus();
+  await popupPollStartedF90;
+  popupPollHarnessF90.beginUpdate();
+  releasePopupPollF90({ enabled: false });
+  await popupPollF90;
+  assertPass(popupPollRenderCallsF90 === 0 && popupPollStorageReadsF90 === 0,
+    '16O-2: 已在途的轮询若遇到本地提交 revision 变化，必须丢弃旧快照且不走 storage 回退');
+
+  const balanceEstimateSourceF90 = extractSourceSection(
+    popupJs,
+    'function renderBalanceEstimate(schedule) {',
+    '\n\n// 提取（Fowler Extract Function）：余额预计 DOM 应用',
+    'paused balance estimate rendering'
+  );
+  let hiddenBalanceEstimatesF90 = 0;
+  let shownBalanceEstimatesF90 = 0;
+  const renderBalanceEstimateF90 = new Function(
+    'estimateBalanceExhaustion', 'hideBalanceEstimate',
+    'isAutomationPausedByActiveHours', 'I18n', 'formatBalanceExhaustionAt',
+    'isBalanceEstimateUrgent', 'showBalanceEstimate',
+    `${balanceEstimateSourceF90}; return renderBalanceEstimate;`
+  )(
+    () => ({ displayAt: 123, usableWallMinutes: 60 }),
+    () => { hiddenBalanceEstimatesF90 += 1; },
+    schedule => schedule.activeHours?.enabled === true,
+    { getLang: () => 'en' },
+    () => ({ shortAt: 'Today 12:00', fullAt: 'Today 12:00' }),
+    () => false,
+    () => { shownBalanceEstimatesF90 += 1; }
+  );
+  renderBalanceEstimateF90({
+    enabled: true,
+    balanceMinutes: 60,
+    onMinutes: 15,
+    offMinutes: 45,
+    _automationPausedByActiveHours: true
+  });
+  renderBalanceEstimateF90({
+    enabled: true,
+    balanceMinutes: 60,
+    onMinutes: 15,
+    offMinutes: 45,
+    activeHours: { enabled: true, start: '08:00', end: '23:00' }
+  });
+  assertPass(hiddenBalanceEstimatesF90 === 2 && shownBalanceEstimatesF90 === 0,
+    '16O-3: 运行时段暂停（后台瞬态字段或本地回退推导）时隐藏 Est. until');
+
+  const modeSwitchBusySourceF90 = extractSourceSection(
+    popupJs,
+    "function setModeSwitchBusy(busy, message = '') {",
+    '\n\n// ----- 自动模式分段选择',
+    'mode switch busy feedback'
+  );
+  const makeBusyControlF90 = () => {
+    const attributes = new Map();
+    return {
+      disabled: false,
+      setAttribute(name, value) { attributes.set(name, value); },
+      removeAttribute(name) { attributes.delete(name); },
+      hasAttribute(name) { return attributes.has(name); }
+    };
+  };
+  const timerBusyControlF90 = makeBusyControlF90();
+  const smartBusyControlF90 = makeBusyControlF90();
+  const statusBusyControlF90 = makeBusyControlF90();
+  const modeBusyMessagesF90 = [];
+  const modeBusyHarnessF90 = new Function(
+    'timerToggle', 'smartModeToggle', 'statusDiv', 'showStatus',
+    `let modeSwitchInFlight = false;
+    ${modeSwitchBusySourceF90}
+    return {
+      setModeSwitchBusy,
+      state: () => modeSwitchInFlight
+    };`
+  )(
+    timerBusyControlF90,
+    smartBusyControlF90,
+    statusBusyControlF90,
+    (message, type) => { modeBusyMessagesF90.push({ message, type }); }
+  );
+  modeBusyHarnessF90.setModeSwitchBusy(true, 'Enabling');
+  const busyAppliedF90 = modeBusyHarnessF90.state() === true
+    && timerBusyControlF90.disabled && smartBusyControlF90.disabled
+    && timerBusyControlF90.hasAttribute('aria-busy')
+    && smartBusyControlF90.hasAttribute('aria-busy')
+    && statusBusyControlF90.hasAttribute('aria-busy');
+  modeBusyHarnessF90.setModeSwitchBusy(false);
+  assertPass(busyAppliedF90
+      && modeBusyHarnessF90.state() === false
+      && !timerBusyControlF90.disabled && !smartBusyControlF90.disabled
+      && !timerBusyControlF90.hasAttribute('aria-busy')
+      && !smartBusyControlF90.hasAttribute('aria-busy')
+      && !statusBusyControlF90.hasAttribute('aria-busy')
+      && modeBusyMessagesF90[0]?.message === 'Enabling',
+    '16O-4: 模式提交期间循环定时与智能控制同时锁定并暴露短暂 busy 状态，完成后一起恢复');
+
+  const smartReapplyRequestSourceF90 = extractSourceSection(
+    popupJs,
+    'async function requestSmartReapplyNow() {',
+    "\n\nsmartSensitivity.addEventListener('change'",
+    'popup smart reapply response handling'
+  );
+  const runSmartReapplyRequestF90 = async responseOrError => {
+    const statuses = [];
+    const request = new Function(
+      'chrome', 'showStatus', 't',
+      `${smartReapplyRequestSourceF90}; return requestSmartReapplyNow;`
+    )(
+      {
+        runtime: {
+          async sendMessage(message) {
+            if (responseOrError instanceof Error) throw responseOrError;
+            return { ...responseOrError, messageType: message.type };
+          }
+        }
+      },
+      (message, type) => { statuses.push({ message, type }); },
+      key => key
+    );
+    return { result: await request(), statuses };
+  };
+  const rejectedReapplyF90 = await runSmartReapplyRequestF90({ success: true, accepted: false });
+  const failedReapplyF90 = await runSmartReapplyRequestF90(new Error('worker unavailable'));
+  const acceptedReapplyF90 = await runSmartReapplyRequestF90({ success: true, accepted: true });
+  assertPass(rejectedReapplyF90.statuses.length === 1
+      && failedReapplyF90.statuses.length === 1
+      && failedReapplyF90.result.success === false
+      && acceptedReapplyF90.statuses.length === 0
+      && acceptedReapplyF90.result.accepted === true
+      && acceptedReapplyF90.result.messageType === 'reapplySmartNow',
+    '16O-5: popup 等待并检查 reapplySmartNow 响应，拒绝或异常时显示错误而非静默丢弃');
+
   let pausedFallbackRendered16 = null;
   const refreshPausedFallback16 = new Function(
     'IS_STATIC_PREVIEW', 'staticPreviewSchedule', 'updateCountdownDisplay',
     'updateSmartReadout', 'chrome', 'attachCachedActualStatus',
     'isAutomationPausedByActiveHours',
     `let pollCount = 0;
+    let scheduleUpdateRevision = 0;
+    function hasPendingScheduleUpdate() { return false; }
     ${refreshStatusBody12}; return refreshStatus;`
   )(
     false,
@@ -4591,7 +5597,7 @@ return { reapplySmartSensitivityNow };`
       && pausedFallbackRendered16?._insideActiveHours === false
       && pausedFallbackRendered16?.enabled === true
       && pausedFallbackRendered16?.smartMode?.enabled === true,
-    '16O-1: 后台消息失败时 popup 从 storage 回退也重建暂停态，并保留智能模式启用意图');
+    '16O-6: 后台消息失败时 popup 从 storage 回退也重建暂停态，并保留智能模式启用意图');
 
   const automationGateSites16 = [
     ['init', initBody13],
@@ -4917,6 +5923,10 @@ return { reapplySmartSensitivityNow };`
     let pwmStepRunningRevision = null;
     let pwmRuntimeRevision = 0;
     let lastPwmStepAt = 0;
+    let smartReapplyPending = false;
+    let smartReapplyInFlight = false;
+    function waitUntil() {}
+    async function runSmartReapplyLoop() {}
     ${pwmStepOwnershipSource16}
     return {
       isCurrentPwmStepRunning,
