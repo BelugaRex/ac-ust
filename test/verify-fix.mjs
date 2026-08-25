@@ -794,7 +794,7 @@ async function runTests() {
       && (popupHtml.match(/class="toggle-switch"/g) || []).length === 1,
     '仅运行时段保留 36×20px 二元拨杆，并通过绝对命中区达到桌面指针目标要求');
   assertPass((popupHtml.match(/class="mode-choice"/g) || []).length === 2
-      && /class="mode-segment" role="group"[\s\S]*?<button[^>]*id="timerToggle"[^>]*aria-pressed="false"[\s\S]*?<button[^>]*id="smartModeToggle"[^>]*aria-pressed="false"/.test(popupHtml)
+      && /<fieldset class="mode-section">\s*<legend class="visually-hidden"[^>]*>[\s\S]*?class="mode-segment"[\s\S]*?<button[^>]*id="timerToggle"[^>]*aria-pressed="false"[\s\S]*?<button[^>]*id="smartModeToggle"[^>]*aria-pressed="false"/.test(popupHtml)
       && !/<input[^>]*id="(?:timerToggle|smartModeToggle)"/.test(popupHtml)
       && /\.mode-segment\s*\{[^}]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/.test(popupCssNoComments)
       && /\.mode-choice\[aria-pressed="true"\]\s*\{[^}]*?background:\s*var\(--surface\)/.test(popupCssNoComments)
@@ -4209,8 +4209,11 @@ return { reapplySmartSensitivityNow };`
       && timerChoiceIndex > modeSectionIndex
       && smartChoiceIndex > timerChoiceIndex
       && /<section class="active-hours-section"[\s\S]*?id="activeHoursSectionHeader"[\s\S]*?id="activeHoursBody"[\s\S]*?<\/section>\s*<fieldset class="mode-section"/.test(popupHtml)
-      && /class="mode-heading"[\s\S]*?data-i18n="automationModeExclusive"[\s\S]*?class="mode-segment" role="group"/.test(popupHtml),
-    '16D: 自动控制先声明共同作用域，再把运行时段与二选一模式按父子层级分组');
+      && /<fieldset class="mode-section">\s*<legend class="visually-hidden" id="automationModeLabel" data-i18n="automationModeLabel"><\/legend>[\s\S]*?class="mode-segment"/.test(popupHtml)
+      && !popupHtml.includes('role="group" aria-labelledby="automationModeLabel"')
+      && !popupHtml.includes('automationModeExclusive')
+      && !popupHtml.includes('automationModeHint'),
+    '16D: 自动控制先声明共同作用域；分段控件保留无障碍分组名，不重复显示二选一说明');
   assertPass(syncModeUiSource.includes("timerToggle.setAttribute('aria-pressed', String(timerOn));")
       && syncModeUiSource.includes("smartModeToggle.setAttribute('aria-pressed', String(smartOn));")
       && syncModeUiSource.includes('timerBody.hidden = !timerOn;')

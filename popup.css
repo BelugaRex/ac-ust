@@ -407,35 +407,6 @@ input {
   border: 0;
 }
 
-.mode-heading {
-  display: flex;
-  align-items: center;
-  width: 100%;
-  padding: 0;
-  color: var(--text);
-  font-size: 13px;
-  font-weight: 600;
-  line-height: 18px;
-}
-
-.mode-exclusive {
-  margin-left: auto;
-  padding: 0 6px;
-  border-radius: 999px;
-  background: var(--surface-secondary);
-  color: var(--text-secondary);
-  font-size: 10px;
-  font-weight: 600;
-  line-height: 16px;
-}
-
-.mode-hint {
-  margin: 2px 0 7px;
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 15px;
-}
-
 .mode-segment {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
