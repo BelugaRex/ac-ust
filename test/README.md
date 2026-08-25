@@ -1,11 +1,12 @@
 # 测试目录
 
-AC-UST 是无依赖的纯 JS Chrome/Edge 扩展,测试分两层,各自职责清晰:
+AC-UST 是无依赖的纯 JS Chrome/Edge 扩展，测试分三层，各自职责清晰：
 
 ## 分层策略
 
 | 层级 | 谁负责 | 工具 | 用途 |
 |------|--------|------|------|
+| 架构契约 | 开发者(自动化) | Node | 验证依赖方向、运行入口、动态注入和打包清单 |
 | 代码层(单元/逻辑) | 开发者(自动化) | Node + mock chrome API | 验证 popup.js / background.js 的逻辑分支正确性 |
 | 浏览器层(端到端) | **用户手动** | Edge + 真实 AC 页面 | 验证扩展在真实环境的行为(灯转色、闹钟、PWM 循环) |
 
@@ -16,9 +17,20 @@ AC-UST 是无依赖的纯 JS Chrome/Edge 扩展,测试分两层,各自职责清�
 
 ## 测试脚本
 
-### `verify-fix.mjs`(代码层,日常 CI 用)
+### `verify-architecture.mjs`（架构契约）
 
-**用途**:用 mock chrome API 模拟用户场景,验证 popup.js 诊断面板的自愈逻辑。
+**用途**：以根目录 `architecture.config.json` 为唯一契约，验证上下文边界、接口方向、脚本加载顺序和运行时打包文件。
+
+```bash
+node tools/verify-architecture.mjs
+```
+
+### `verify-fix.mjs`(代码层 + 产物契约,日常 CI 用)
+
+**用途**：统一运行纯决策、mock 编排、源码安全契约、popup/i18n 和构建产物回归。主入口保留完整断言总数与退出码，内部纯决策套件按领域拆分：
+
+- `pwm-phase-cases.mjs`：PWM、天气预取槽与智能半点规划。
+- `smart-mode-cases.mjs`：智能分钟数、天气解析、精度和降雨边界。
 
 **前置条件**:
 - Node.js 20（在仓库根目录运行 `nvm install && nvm use`）
@@ -28,6 +40,12 @@ AC-UST 是无依赖的纯 JS Chrome/Edge 扩展,测试分两层,各自职责清�
 **运行**:
 ```bash
 node test/verify-fix.mjs
+```
+
+默认只输出各套件摘要、失败项和总计；需要完整场景快照及逐条 PASS/FAIL 时运行：
+
+```bash
+node test/verify-fix.mjs --verbose
 ```
 
 **验证内容**:
@@ -51,7 +69,7 @@ node test/verify-fix.mjs
 
 `test/fixtures/power-off-after-states.json` 是从真实页面 DOM 样本提取的脱敏 fixture：已设定时 `.ant-picker input` 的 `value/title` 都是 `HH:MM` 且 AC 为 ON；页面关机后两者清空且 AC 为 OFF。它锁定 content script 的读取依据，不含账号、房间或余额信息。
 
-每次修改 popup.js 诊断逻辑或 background.js 自愈路径后,都应先跑这个测试再 commit。
+每次修改扩展逻辑、UI 契约或构建产物后，都应先跑这个测试再 commit。
 
 ### `verify-icon.py`(图标契约,涉及图标时跑)
 

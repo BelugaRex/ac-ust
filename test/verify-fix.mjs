@@ -10,6 +10,7 @@ import billingHelpers from '../billing-helpers.js';
 import pwmPhase from '../pwm-phase.js';
 import smartMode from '../smart-mode.js';
 import { runPwmPhaseCases } from './pwm-phase-cases.mjs';
+import { runSmartModeCases } from './smart-mode-cases.mjs';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -232,6 +233,31 @@ async function runDiagnosticSelfHeal(chrome, opts = {}) {
 // ----- 跑测试用例 -----
 async function runTests() {
   const results = [];
+  const verbose = process.argv.includes('--verbose') || process.env.TEST_VERBOSE === '1';
+  const suiteOrder = [];
+  let currentSuite = '';
+
+  const verboseLog = (...args) => {
+    if (verbose) console.log(...args);
+  };
+  const testConsole = verbose ? console : { log() {}, warn() {}, error() {} };
+  const setSuite = (name) => {
+    currentSuite = name;
+    if (!suiteOrder.includes(name)) suiteOrder.push(name);
+  };
+  const beginSuite = (name, heading) => {
+    setSuite(name);
+    verboseLog(heading);
+  };
+  const assertPass = (cond, name) => {
+    const pass = !!cond;
+    if (verbose) {
+      verboseLog(`${pass ? '✅ PASS' : '❌ FAIL'}  ${name}`);
+    } else if (!pass) {
+      console.log(`❌ FAIL  [${currentSuite}] ${name}`);
+    }
+    results.push({ suite: currentSuite, name, pass });
+  };
 
   // 用例 1:用户实际报告的场景(storage.nextTriggerAt 过期 + ac-pwm 在未来 + 间隔 + enabled)
   // 这模拟 SW 跑旧代码、storage 没跟上闹钟推进的情况(v0.4.34 新触发条件:不只 0,过期也触发)
@@ -250,322 +276,36 @@ async function runTests() {
   };
   const { chrome, _storage } = createMockChrome(initialSchedule, pwmTime);
 
-  console.log('\n=== 用例 1:用户报告场景(storage.nextTriggerAt 已过期 + ac-pwm 在未来 + 间隔模式) ===\n');
-  console.log('初始 storage.nextTriggerAt =', initialSchedule.nextTriggerAt, '(已过期 24 分钟)');
-  console.log('live ac-pwm.scheduledTime =', new Date(pwmTime).toLocaleTimeString(), '(timestamp:', pwmTime + ')');
-  console.log('');
+  beginSuite('用例 1：诊断自愈',
+    '\n=== 用例 1:用户报告场景(storage.nextTriggerAt 已过期 + ac-pwm 在未来 + 间隔模式) ===\n');
+  verboseLog('初始 storage.nextTriggerAt =', initialSchedule.nextTriggerAt, '(已过期 24 分钟)');
+  verboseLog('live ac-pwm.scheduledTime =', new Date(pwmTime).toLocaleTimeString(), '(timestamp:', pwmTime + ')');
+  verboseLog('');
 
   const before = (await chrome.storage.local.get('ac_schedule')).ac_schedule;
-  console.log('修复前 storage:', { nextTriggerAt: before.nextTriggerAt, alarmCreatedAt: before.alarmCreatedAt });
+  verboseLog('修复前 storage:', { nextTriggerAt: before.nextTriggerAt, alarmCreatedAt: before.alarmCreatedAt });
 
   const result = await runDiagnosticSelfHeal(chrome);
 
-  console.log('\n--- 诊断输出 ---');
-  for (const line of result.lines) console.log(line);
+  verboseLog('\n--- 诊断输出 ---');
+  for (const line of result.lines) verboseLog(line);
 
   const after = result.storage_after;
-  console.log('\n修复后 storage:', {
+  verboseLog('\n修复后 storage:', {
     nextTriggerAt: after.nextTriggerAt,
     nextTriggerAt_time: new Date(after.nextTriggerAt).toLocaleTimeString(),
     alarmCreatedAt: after.alarmCreatedAt ? new Date(after.alarmCreatedAt).toLocaleTimeString() : 0,
     alarmDelayMinutes: after.alarmDelayMinutes?.toFixed(2)
   });
 
-  // 断言
-  const assertPass = (cond, name) => {
-    const tag = cond ? '✅ PASS' : '❌ FAIL';
-    console.log(`${tag}  ${name}`);
-    results.push({ name, pass: !!cond });
-  };
-
-  console.log('\n\n=== PWM phase 纯决策接口 ===\n');
+  beginSuite('PWM 纯决策', '\n\n=== PWM phase 纯决策接口 ===\n');
   runPwmPhaseCases(assertPass);
 
-  console.log('\n\n=== 智能控制纯决策接口 (v0.8.0) ===\n');
-  // K 映射（档位 0→0.30，档位 10→1.30）
-  assertPass(Math.abs(smartMode.sensitivityToK(0) - 0.30) < 1e-9, 'smart: K(档位0)=0.30');
-  assertPass(Math.abs(smartMode.sensitivityToK(10) - 1.30) < 1e-9, 'smart: K(档位10)=1.30');
-  assertPass(Math.abs(smartMode.sensitivityToK(5) - 0.80) < 1e-9, 'smart: K(档位5)=0.80');
-  assertPass(smartMode.sensitivityToK(-1) === 0.30, 'smart: K 下限截断到 0.30');
-  assertPass(smartMode.sensitivityToK(11) === 1.30, 'smart: K 上限截断到 1.30');
-  assertPass(smartMode.sensitivityToK(undefined) === 0.30, 'smart: K 非法输入回退 0.30');
+  beginSuite('智能控制纯决策', '\n\n=== 智能控制纯决策接口 (v0.8.0) ===\n');
+  runSmartModeCases(assertPass);
 
-  const normalizeSmartSensitivity = smartMode.normalizeSmartSensitivity;
-  assertPass(typeof normalizeSmartSensitivity === 'function',
-    'smart: 灵敏度兼容归一化由 smart-mode.js 提供共享纯函数');
-  if (typeof normalizeSmartSensitivity === 'function') {
-    assertPass([
-      [undefined, 5],
-      [Number.NaN, 5],
-      [-1, 0],
-      [4.5, 5],
-      [10, 10],
-      [50, 5],
-      [100, 10]
-    ].every(([input, expected]) => normalizeSmartSensitivity(input) === expected),
-    'smart: 灵敏度归一化覆盖非法值、边界、四舍五入与旧版 0~100 值');
-  }
-
-  // 水汽压（Magnus 公式）
-  assertPass(Math.abs(smartMode.vaporPressureFromDewPoint(25) - 31.67) < 0.5,
-    'smart: 露点 25°C → 水汽压 ≈31.7 hPa');
-
-  // 等效室外温度 Teq
-  const smartTeq = smartMode.equivalentTemperature(30, 24, 1.5);
-  assertPass(Math.abs(smartTeq - 34.79) < 0.5, 'smart: Teq = T + 0.33e - 0.70Wind - 4');
-
-  // 主入口：默认场景
-  const smartDefault = smartMode.computeSmartOnMinutes({
-    sensitivity: 5, temperature: 30, dewPoint: 24, windSpeedMs: 1.5, rainMm: 0
-  });
-  assertPass(smartDefault.valid === true && smartDefault.onMinutes === 14 && smartDefault.offMinutes === 16,
-    'smart: 默认场景 on=14/off=16（30 分钟周期开关互补）');
-
-  const smartPrecise = smartMode.computeSmartOnMinutes({
-    sensitivity: 10,
-    temperature: 32.3,
-    dewPoint: 10,
-    windSpeedMs: 0,
-    rainMm: 0
-  });
-  assertPass(smartPrecise.valid === true
-      && Math.abs(smartPrecise.tRaw - 21.03) < 0.02
-      && !Number.isInteger(smartPrecise.tRaw)
-      && smartPrecise.onMinutes === 21
-      && smartPrecise.offMinutes === 9,
-    'smart: K/天气/Teq/tRaw 保留浮点，仅最终 onMinutes 量化供显示与控制');
-
-  // 降雨修正：0~30 mm/h 后段更陡的归一化指数曲线，黄雨阈值及以上最多减半
-  const expectedRainFactor = (rainMm) => {
-    const normalizedRain = Math.min(1, Math.max(0, rainMm / 30));
-    const normalizedImpact = (Math.exp(2 * normalizedRain) - 1) / (Math.exp(2) - 1);
-    return 1 - 0.5 * normalizedImpact;
-  };
-  const expectedRainFactors = [
-    [0, 1],
-    [5, expectedRainFactor(5)],
-    [10, expectedRainFactor(10)],
-    [15, expectedRainFactor(15)],
-    [20, expectedRainFactor(20)],
-    [25, expectedRainFactor(25)],
-    [30, 0.5],
-    [60, 0.5]
-  ];
-  assertPass(expectedRainFactors.every(([rainMm, expected]) => (
-    Math.abs(smartMode.rainOnTimeFactor(rainMm) - expected) < 1e-9
-  )), 'smart: 雨量 0~30mm/h 按 α=2 归一化指数曲线降到 50%');
-
-  const rainFactorSamples = Array.from({ length: 301 }, (_, index) => (
-    smartMode.rainOnTimeFactor(index / 10)
-  ));
-  assertPass(rainFactorSamples.every((factor, index) => (
-    factor >= 0.5 && factor <= 1
-      && (index === 0 || factor < rainFactorSamples[index - 1])
-  )), 'smart: 0~30mm/h 全区间连续单调递减且倍率始终为 0.5~1');
-  const fiveMillimeterDrops = [0, 5, 10, 15, 20, 25, 30]
-    .map(rainMm => smartMode.rainOnTimeFactor(rainMm))
-    .slice(1)
-    .map((factor, index, factors) => (
-      (index === 0 ? 1 : factors[index - 1]) - factor
-    ));
-  assertPass(fiveMillimeterDrops.every((drop, index) => (
-    index === 0 || drop > fiveMillimeterDrops[index - 1]
-  )), 'smart: 每增加 5mm 的开启时间折减随雨势增强而严格增大');
-  assertPass(Math.abs(
-    smartMode.rainOnTimeFactor(5.0001) - smartMode.rainOnTimeFactor(5)
-  ) < 1e-5
-      && smartMode.rainOnTimeFactor(5.0001) > 0.5,
-    'smart: 旧 5mm 阈值附近无阶跃，不会刚超过 5mm 就直接减半');
-  assertPass([
-    -1,
-    null,
-    undefined,
-    '',
-    Number.NaN
-  ].every(rainMm => smartMode.rainOnTimeFactor(rainMm) === 1),
-  'smart: 负数或缺失/非法雨量按无雨处理，不意外缩短开启时间');
-
-  const hotRawOnMinutes = smartMode.rawOnMinutes(1.30, 40.5);
-  const hotRainMinutes = [0, 5, 10, 15, 20, 25, 30].map(rainMm => (
-    smartMode.finalizeRainAdjustedOnMinutes(hotRawOnMinutes, rainMm)
-  ));
-  assertPass(Math.abs(hotRawOnMinutes - 26.325) < 1e-9
-      && hotRainMinutes.join(',') === '25,24,23,22,20,17,13',
-    'smart: Teq=40.5/档位10 小雨温和、暴雨加速折减，黄雨为 13/30');
-
-  const rainFinalizationCases = [4.4, 4.6, 5, 6, 7, 8, 9, 10, 14, 25, 26.325];
-  assertPass(rainFinalizationCases.every((tRaw) => {
-    const dry = smartMode.finalizeRainAdjustedOnMinutes(tRaw, 0);
-    const yellowRain = smartMode.finalizeRainAdjustedOnMinutes(tRaw, 30);
-    return yellowRain <= dry
-      && yellowRain >= Math.ceil(dry * 0.5)
-      && (yellowRain === 0 || yellowRain >= 5);
-  }), 'smart: 最终分钟数叠加压缩机死区后仍最多减半，非零开启至少 5 分钟');
-
-  const smartRain = smartMode.computeSmartOnMinutes({
-    sensitivity: 5, temperature: 30, dewPoint: 24, windSpeedMs: 1.5, rainMm: 10
-  });
-  assertPass(smartRain.onMinutes === 13
-      && Math.abs(smartRain.rainFactor - expectedRainFactor(10)) < 1e-9,
-    'smart: 10mm/h 仅温和折减，较大雨量才加速接近减半');
-
-  // 压缩机保护：1~4 分钟 → 强制 0
-  assertPass(smartMode.clampAndRoundOnMinutes(1.0) === 0, 'smart: 压缩机保护 1 → 0');
-  assertPass(smartMode.clampAndRoundOnMinutes(2.2) === 0, 'smart: 压缩机保护 2.2 → 0');
-  assertPass(smartMode.clampAndRoundOnMinutes(4.0) === 0, 'smart: 压缩机保护 4 → 0');
-  assertPass(smartMode.clampAndRoundOnMinutes(0.4) === 0, 'smart: 0.4 舍入 0');
-  assertPass(smartMode.clampAndRoundOnMinutes(5.2) === 5, 'smart: 5.2 舍入 5');
-  assertPass(smartMode.clampAndRoundOnMinutes(25) === 25
-      && smartMode.clampAndRoundOnMinutes(26) === 25
-      && smartMode.clampAndRoundOnMinutes(70) === 25,
-    'smart: 开启上限截断 25，30 分钟周期至少保留 5 分钟关闭窗口');
-  assertPass(smartMode.clampAndRoundOnMinutes(-5) === 0, 'smart: 下限截断 0');
-
-  // 冷天 → Teq 低 → 开启分钟数减少
-  const smartCold = smartMode.computeSmartOnMinutes({
-    sensitivity: 5, temperature: 18, dewPoint: 10, windSpeedMs: 3, rainMm: 0
-  });
-  assertPass(smartCold.valid === true && smartCold.onMinutes === 6,
-    'smart: 冷天 Teq 低 → on=6');
-
-  // 极热 + 满灵敏度 → 25/5（30 分钟周期）
-  const smartHot = smartMode.computeSmartOnMinutes({
-    sensitivity: 10, temperature: 33, dewPoint: 26, windSpeedMs: 0, rainMm: 0
-  });
-  assertPass(smartHot.onMinutes === 25 && smartHot.offMinutes === 5,
-    'smart: 极热满灵敏度 on=25/off=5，避免短时间关机后重启');
-
-  // 非法天气 → valid=false（调用方退化为手动时长）
-  const smartBad = smartMode.computeSmartOnMinutes({
-    sensitivity: 5, temperature: null, dewPoint: 24, windSpeedMs: 1.5, rainMm: 0
-  });
-  assertPass(smartBad.valid === false, 'smart: 非法天气 valid=false');
-
-  // 露点逆推（Magnus）：由气温 + 湿度推导露点（HKO 开放数据不直接提供露点）
-  const smartDew = smartMode.deriveDewPoint(30, 80);
-  assertPass(smartDew !== null && Math.abs(smartDew - 26.2) < 0.5,
-    'smart: deriveDewPoint(30°C, 80%) ≈ 26.2°C');
-
-  // 将军澳 JKB 多源解析：同站温湿度、风速 km/h→m/s、站点雨量，不混用西贡区值
-  const hkoWeather = smartMode.parseTseungKwanOWeather({
-    temperatureCsv: '\uFEFFDate time,Automatic Weather Station,Air Temperature(degree Celsius)\r\n'
-      + '202608241510,Sai Kung,33.3\r\n202608241510,Tseung Kwan O,32.6\r\n',
-    humidityCsv: 'Date time,Automatic Weather Station,Relative Humidity(percent)\n'
-      + '202608241510,HK Observatory,73\n202608241510,Tseung Kwan O,67\n',
-    windCsv: 'Date time,Automatic Weather Station,Direction,Speed,Gust\n'
-      + '202608241510,Sai Kung,South,10,21\n202608241510,Tseung Kwan O,Southwest,16,26\n',
-    rainfallData: {
-      hourlyRainfall: [
-        { automaticWeatherStation: 'Sai Kung', value: '40', unit: 'mm' },
-        { automaticWeatherStation: 'Tseung Kwan O', value: '6', unit: 'mm' }
-      ]
-    }
-  });
-  assertPass(hkoWeather !== null
-      && hkoWeather.temperature === 32.6
-      && hkoWeather.relativeHumidity === 67
-      && Math.abs(hkoWeather.windSpeedMs - 16 / 3.6) < 1e-9
-      && hkoWeather.rainMm === 6
-      && Number.isFinite(hkoWeather.dewPoint),
-    'smart: JKB 四源解析使用同站温湿度/风/雨量并推导露点');
-
-  assertPass(smartMode.parseTseungKwanOWeather({
-    temperatureCsv: 'Date time,Automatic Weather Station,Temperature\n202608241510,Sai Kung,33.3\n',
-    humidityCsv: 'Date time,Automatic Weather Station,Humidity\n202608241510,Tseung Kwan O,67\n'
-  }) === null, 'smart: 缺少 JKB 气温时拒绝借用其他站点');
-
-  const preparedBoundary = new Date(2026, 7, 24, 16, 30, 0, 0).getTime();
-  const preparedWeather = {
-    fetchedAt: preparedBoundary - 20 * 60_000,
-    temperature: 32.6,
-    relativeHumidity: 67,
-    dewPoint: 25.8,
-    windSpeedMs: 16 / 3.6,
-    rainMm: 6,
-    stale: false,
-    error: ''
-  };
-  const preparedDecision = smartMode.prepareSmartWeatherDecision({
-    boundaryAt: preparedBoundary,
-    preparedAt: preparedBoundary - 10 * 60_000,
-    sensitivity: 5,
-    weather: preparedWeather
-  });
-  const consumedPreparedDecision = smartMode.consumeSmartWeatherDecision(
-    preparedDecision,
-    { boundaryAt: preparedBoundary, sensitivity: 5 }
-  );
-  assertPass(preparedDecision?.schemaVersion === 1
-      && preparedDecision.boundaryAt === preparedBoundary
-      && preparedDecision.preparedAt === preparedBoundary - 10 * 60_000
-      && preparedDecision.fetchedAt === preparedWeather.fetchedAt
-      && preparedDecision.sensitivity === 5
-      && preparedDecision.weather.temperature === preparedWeather.temperature
-      && consumedPreparedDecision?.valid === true
-      && consumedPreparedDecision.onMinutes === preparedDecision.onMinutes
-      && consumedPreparedDecision.offMinutes === preparedDecision.offMinutes
-      && consumedPreparedDecision.usedPreparedSensitivity === true,
-    'smart-plan: :10 预取生成目标 :30 快照，并在同一边界按原灵敏度直接消费');
-
-  const sensitivityChangedDecision = smartMode.consumeSmartWeatherDecision(
-    preparedDecision,
-    { boundaryAt: preparedBoundary, sensitivity: 10 }
-  );
-  assertPass(sensitivityChangedDecision?.valid === true
-      && sensitivityChangedDecision.preparedSensitivity === 5
-      && sensitivityChangedDecision.usedPreparedSensitivity === false
-      && sensitivityChangedDecision.onMinutes !== preparedDecision.onMinutes,
-    'smart-plan: 快照保存原始天气，边界消费可按当前灵敏度纯本地重算');
-
-  const stalePreparedWeather = {
-    ...preparedWeather,
-    fetchedAt: preparedBoundary - smartMode.SMART_MODE.WEATHER_PLAN_MAX_AGE_MS - 1
-  };
-  assertPass(smartMode.consumeSmartWeatherDecision(null, {
-    boundaryAt: preparedBoundary,
-    sensitivity: 5
-  }) === null
-      && smartMode.consumeSmartWeatherDecision(preparedDecision, {
-        boundaryAt: preparedBoundary + 30 * 60_000,
-        sensitivity: 5
-      }) === null
-      && smartMode.consumeSmartWeatherDecision({ ...preparedDecision, schemaVersion: 2 }, {
-        boundaryAt: preparedBoundary,
-        sensitivity: 5
-      }) === null
-      && smartMode.prepareSmartWeatherDecision({
-        boundaryAt: preparedBoundary,
-        preparedAt: preparedBoundary - 10 * 60_000,
-        sensitivity: 5,
-        weather: stalePreparedWeather
-      }) === null
-      && smartMode.prepareSmartWeatherDecision({
-        boundaryAt: preparedBoundary,
-        preparedAt: preparedBoundary - 10 * 60_000,
-        sensitivity: 5,
-        weather: { ...preparedWeather, stale: true }
-      }) === null
-      && smartMode.prepareSmartWeatherDecision({
-        boundaryAt: preparedBoundary,
-        preparedAt: preparedBoundary - 10 * 60_000,
-        sensitivity: 5,
-        weather: { ...preparedWeather, error: 'network failed' }
-      }) === null
-      && smartMode.prepareSmartWeatherDecision({
-        boundaryAt: preparedBoundary,
-        preparedAt: preparedBoundary - 10 * 60_000,
-        sensitivity: 5,
-        weather: { ...preparedWeather, fetchedAt: preparedBoundary - 9 * 60_000 }
-      }) === null
-      && smartMode.prepareSmartWeatherDecision({
-        boundaryAt: preparedBoundary,
-        preparedAt: preparedBoundary,
-        sensitivity: 5,
-        weather: preparedWeather
-      }) === null,
-    'smart-plan: 缺失、错槽、旧 schema、陈旧/错误天气与未来时间全部拒绝');
-
-  console.log('\n--- 断言 ---');
+  setSuite('用例 1：诊断自愈');
+  verboseLog('\n--- 断言 ---');
   assertPass(result.selfHealed === true, 'selfHealed 标志为 true(自愈触发)');
   assertPass(after.nextTriggerAt === pwmTime, 'storage.nextTriggerAt 被修复为 ac-pwm.scheduledTime');
   assertPass(after.alarmCreatedAt > 0, 'alarmCreatedAt 已写入');
@@ -616,27 +356,27 @@ async function runTests() {
     'popup 真实持久化投影保留 schedule 数据并剥离余额与所有下划线运行态字段');
 
   // 用例 2:storage 已有正确 nextTriggerAt,不应触发自愈
-  console.log('\n\n=== 用例 2:storage 已有正确值(不该触发自愈) ===\n');
+  beginSuite('用例 2：已有正确状态', '\n\n=== 用例 2:storage 已有正确值(不该触发自愈) ===\n');
   const initialSchedule2 = { ...initialSchedule, nextTriggerAt: pwmTime };
   const mock2 = createMockChrome(initialSchedule2, pwmTime);
   const result2 = await runDiagnosticSelfHeal(mock2.chrome);
-  for (const line of result2.lines) console.log(line);
-  console.log('');
+  for (const line of result2.lines) verboseLog(line);
+  verboseLog('');
   assertPass(result2.selfHealed === false, '已有正确值时不触发自愈(selfHealed=false)');
   assertPass(!result2.lines.some(l => l.startsWith('❌')),
     '用例 2 无任何红灯');
 
   // 用例 3:非间隔模式(时钟模式),不该触发自愈
-  console.log('\n\n=== 用例 3:时钟模式(不该触发自愈) ===\n');
+  beginSuite('用例 3：时钟模式', '\n\n=== 用例 3:时钟模式(不该触发自愈) ===\n');
   const initialSchedule3 = { ...initialSchedule, clockMode: true };
   const mock3 = createMockChrome(initialSchedule3, pwmTime);
   const result3 = await runDiagnosticSelfHeal(mock3.chrome);
-  for (const line of result3.lines) console.log(line);
-  console.log('');
+  for (const line of result3.lines) verboseLog(line);
+  verboseLog('');
   assertPass(result3.selfHealed === false, '时钟模式不触发自愈');
 
   // 用例 4:SW 不响应 getSwStatus(模拟跑旧代码)+ popup 自愈成功 → getSwStatus 那行应显示绿灯
-  console.log('\n\n=== 用例 4:SW 不响应 getSwStatus + popup 自愈成功 ===\n');
+  beginSuite('用例 4：Service Worker 降级', '\n\n=== 用例 4:SW 不响应 getSwStatus + popup 自愈成功 ===\n');
   const initialSchedule4 = { ...initialSchedule, nextTriggerAt: staleTime };
   const mock4 = createMockChrome(initialSchedule4, pwmTime);
   // 让 SW 不响应 getSwStatus(模拟旧代码无此 handler)
@@ -653,8 +393,8 @@ async function runTests() {
     return undefined;
   };
   const result4 = await runDiagnosticSelfHeal(mock4.chrome);
-  for (const line of result4.lines) console.log(line);
-  console.log('');
+  for (const line of result4.lines) verboseLog(line);
+  verboseLog('');
   // 自愈应触发,getSwStatus 那行应该是绿灯(popup 已接管)
   assertPass(result4.selfHealed === true, '用例 4 自愈触发');
   assertPass(!result4.lines.some(l => l.startsWith('❌')),
@@ -663,7 +403,8 @@ async function runTests() {
     '用例 4 显示 "popup 已接管 storage 自愈" 绿灯');
 
   // ===== 用例 5: i18n fetch-based 加载器 — 验证用户报告的三个坏键 =====
-  console.log('\n\n=== 用例 5:i18n 翻译加载 (用户报告 acStopped/countdownInterval 显示为 key name) ===\n');
+  beginSuite('用例 5：i18n、页面逻辑与产物契约',
+    '\n\n=== 用例 5:i18n 翻译加载 (用户报告 acStopped/countdownInterval 显示为 key name) ===\n');
 
   // 加载真实的 messages.json
   const zhCN = JSON.parse(fs.readFileSync(path.join(ROOT, '_locales', 'zh_CN', 'messages.json'), 'utf8'));
@@ -685,7 +426,7 @@ async function runTests() {
 
   // 5a: acStopped 必须返回中文，不能是 "acStopped"
   const acStopped_zh = t(zhCN, 'acStopped');
-  console.log('  zh_CN acStopped →', JSON.stringify(acStopped_zh));
+  verboseLog('  zh_CN acStopped →', JSON.stringify(acStopped_zh));
   assertPass(acStopped_zh !== 'acStopped',
     'acStopped 不再返回 key name (zh_CN)');
   assertPass(acStopped_zh.includes('冷气') || acStopped_zh.includes('关闭'),
@@ -693,7 +434,7 @@ async function runTests() {
 
   // 5c: countdownCaption 带占位符替换
   const cd_zh = t(zhCN, 'countdownCaption', '关闭');
-  console.log('  zh_CN countdownCaption(关闭) →', JSON.stringify(cd_zh));
+  verboseLog('  zh_CN countdownCaption(关闭) →', JSON.stringify(cd_zh));
   assertPass(cd_zh !== 'countdownCaption',
     'countdownCaption 不再返回 key name (zh_CN)');
   assertPass(cd_zh.includes('关闭'),
@@ -703,7 +444,7 @@ async function runTests() {
 
   // 5d: 英文翻译也覆盖同样的 key（Crowdin 双向对齐）
   const acStopped_en = t(en, 'acStopped');
-  console.log('  en acStopped →', JSON.stringify(acStopped_en));
+  verboseLog('  en acStopped →', JSON.stringify(acStopped_en));
   assertPass(acStopped_en !== 'acStopped',
     'acStopped 英文翻译存在 (非 key name)');
   assertPass(acStopped_en !== acStopped_zh,
@@ -713,14 +454,14 @@ async function runTests() {
   const popupHtml = fs.readFileSync(path.join(ROOT, 'popup.html'), 'utf8');
   const distPopupHtml = fs.readFileSync(path.join(ROOT, 'dist', 'popup.html'), 'utf8');
   const dataI18nKeys = [...popupHtml.matchAll(/data-i18n="([^"]+)"/g)].map(m => m[1]);
-  console.log('  popup.html data-i18n keys:', dataI18nKeys.join(', '));
+  verboseLog('  popup.html data-i18n keys:', dataI18nKeys.join(', '));
   for (const key of dataI18nKeys) {
     assertPass(!!zhCN[key] && !!en[key],
       `popup.html data-i18n="${key}" 在中英文 messages.json 中存在`);
   }
 
   const dataI18nAriaLabelKeys = [...popupHtml.matchAll(/data-i18n-aria-label="([^"]+)"/g)].map(m => m[1]);
-  console.log('  popup.html data-i18n-aria-label keys:', dataI18nAriaLabelKeys.join(', '));
+  verboseLog('  popup.html data-i18n-aria-label keys:', dataI18nAriaLabelKeys.join(', '));
   for (const key of dataI18nAriaLabelKeys) {
     assertPass(!!zhCN[key] && !!en[key],
       `popup.html data-i18n-aria-label="${key}" 在中英文 messages.json 中存在`);
@@ -1004,7 +745,8 @@ async function runTests() {
     '5i: 预计墙钟可用时间不超过24小时才触发余额提醒');
 
   // ===== 用例 6: v0.5.6 sync-helpers 跨设备同步纯函数 =====
-  console.log('\n\n=== 用例 6: sync-helpers 跨设备同步纯函数 (v0.5.6) ===\n');
+  beginSuite('用例 6：跨设备同步纯函数',
+    '\n\n=== 用例 6: sync-helpers 跨设备同步纯函数 (v0.5.6) ===\n');
 
   const {
     composeSyncPayload,
@@ -1141,7 +883,8 @@ async function runTests() {
   //   测试策略：复刻 background.js applySyncedPhase 的核心决策（与现有 case 1-4
   //   复刻 popup.js 诊断函数同模式），把对 setupAlarms/createAlarm/clear/page timer
   //   等编排调用记录到一个 calls 数组，断言三个场景的调用序列正确。
-  console.log('\n\n=== 用例 7: applySyncedPhase 编排路径 (enabled 翻转核心修复) ===\n');
+  beginSuite('用例 7：跨设备相位编排',
+    '\n\n=== 用例 7: applySyncedPhase 编排路径 (enabled 翻转核心修复) ===\n');
 
   // 复刻 applySyncedPhase 决策核心——只保留决策 + 编排调用记录，省略 chrome.* 真实副作用
   function applySyncedPhase_testHarness(localSchedule, remote, mockCtx) {
@@ -1222,7 +965,7 @@ async function runTests() {
     activeHours: { enabled: false, start: '08:00', end: '23:00' },
     pwmState: 'on', nextTriggerAt: futureT7, syncedAt: 1000 };
   const r7A = applySyncedPhase_testHarness(local7A, remote7A, { now: Date.now(), calls: [], lastSyncedAt: 0 });
-  console.log('  7A (false→true, 有相位) calls:', r7A.calls.join(','));
+  verboseLog('  7A (false→true, 有相位) calls:', r7A.calls.join(','));
   assertPass(r7A.schedule.enabled === true, '7A: schedule.enabled 被采纳为 true');
   assertPass(r7A.schedule.nextTriggerAt === futureT7, '7A: nextTriggerAt 被采纳为远端相位');
   assertPass(r7A.calls.includes('create-ac-pwm-when'), '7A: 用绝对时间创建 ac-pwm (when)');
@@ -1237,7 +980,7 @@ async function runTests() {
     activeHours: { enabled: false, start: '08:00', end: '23:00' },
     pwmState: 'on', nextTriggerAt: 0, syncedAt: 1000 };
   const r7B = applySyncedPhase_testHarness(local7A, remote7B, { now: Date.now(), calls: [], lastSyncedAt: 0 });
-  console.log('  7B (false→true, 无相位) calls:', r7B.calls.join(','));
+  verboseLog('  7B (false→true, 无相位) calls:', r7B.calls.join(','));
   assertPass(r7B.schedule.enabled === true, '7B: schedule.enabled 被采纳为 true');
   assertPass(r7B.calls.includes('setupAlarms-startImmediately'),
     '7B: 无相位的 enabled 翻为 true 必须调用 setupAlarms(true) 本地起新轮（核心修复）');
@@ -1255,7 +998,7 @@ async function runTests() {
     activeHours: { enabled: false, start: '08:00', end: '23:00' },
     pwmState: 'off', nextTriggerAt: futureT7, syncedAt: 1000 };
   const r7C = applySyncedPhase_testHarness(local7C, remote7C, { now: Date.now(), calls: [], lastSyncedAt: 0 });
-  console.log('  7C (true→false) calls:', r7C.calls.join(','));
+  verboseLog('  7C (true→false) calls:', r7C.calls.join(','));
   assertPass(r7C.schedule.enabled === false, '7C: schedule.enabled 被采纳为 false');
   assertPass(r7C.calls.includes('clear-ac-pwm'), '7C: 清 ac-pwm');
   assertPass(r7C.calls.includes('clear-ac-watchdog'), '7C: 清 ac-watchdog');
@@ -1276,7 +1019,7 @@ async function runTests() {
     activeHours: { enabled: true, start: '09:00', end: '21:00' },
     pwmState: 'off', nextTriggerAt: futureT7, syncedAt: 1000 };
   const r7D = applySyncedPhase_testHarness(local7D, remote7D, { now: Date.now(), calls: [], lastSyncedAt: 0 });
-  console.log('  7D (activeHours 变更) calls:', r7D.calls.join(','));
+  verboseLog('  7D (activeHours 变更) calls:', r7D.calls.join(','));
   assertPass(r7D.calls.includes('rescheduleActiveBoundary'),
     '7D: activeHours 变更 → 重排 ac-active-boundary');
   assertPass(r7D.schedule.activeHours.enabled === true && r7D.schedule.activeHours.start === '09:00',
@@ -1286,7 +1029,8 @@ async function runTests() {
   // v0.5.10: page timer 升为跨设备主同步通道（UST 服务器已确认跨设备同步），
   // chrome.storage.sync 降为同浏览器生态补充（Chrome/Edge 账号同步互不互通）。
   // 同时修正了 v0.5.7 的 pwmState 条件 bug（之前仅 pwmState='on' 才采纳，已改双向）。
-  console.log('\n\n=== 用例 8: page timer 跨设备 phase 校验纯函数 (v0.5.10) ===\n');
+  beginSuite('用例 8：页面定时器相位校验',
+    '\n\n=== 用例 8: page timer 跨设备 phase 校验纯函数 (v0.5.10) ===\n');
 
   // 固定时戳基线：now = 2024-01-15 14:00:00
   const now8 = new Date(2024, 0, 15, 14, 0, 0, 0).getTime();
@@ -1382,7 +1126,8 @@ async function runTests() {
   // ===== 用例 9: v0.5.12 AC 开关单一递归收敛链路 =====
   // 真实 AntD 点击仍需 Edge 手动验证；这里锁定会导致重复提示音的源码结构不变量：
   // 主世界每轮只 click 一次、10 秒后递归复查，background/content 不再叠加第二套点击重试。
-  console.log('\n\n=== 用例 9: AC 开关单一递归收敛链路 (v0.5.12) ===\n');
+  beginSuite('用例 9：AC 开关递归收敛',
+    '\n\n=== 用例 9: AC 开关单一递归收敛链路 (v0.5.12) ===\n');
 
   const backgroundSource = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
   const contentSource = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
@@ -1616,7 +1361,7 @@ async function runTests() {
   const loadEnsure = new Function(
     'getACStatusInPageWorld', 'waitForACSwitchInPageWorld', 'clickElementOnceInPageWorld',
     'clickConfirmDialogInPageWorld', 'sleepInPageWorld', 'MAX_AC_SWITCH_CLICKS', 'AC_STATE_SETTLE_MS',
-    'automaticOnCancellationRevision',
+    'automaticOnCancellationRevision', 'console',
     `${ensureFnSource}; return { ensureACState };`
   );
   const { ensureACState } = loadEnsure(
@@ -1627,7 +1372,8 @@ async function runTests() {
     async () => {},
     3,
     10000,
-    0
+    0,
+    testConsole
   );
   ensureACState.cancellationRevision = 0;
   const disabledEnsureResult = await ensureACState(true);
@@ -1640,7 +1386,8 @@ async function runTests() {
     async () => {},
     3,
     10000,
-    0
+    0,
+    testConsole
   );
   ensureExpiredWindow.notAfterAt = Date.now() - 1;
   ensureExpiredWindow.cancellationRevision = 0;
@@ -1654,14 +1401,15 @@ async function runTests() {
   const confirmDeadlineAt = Date.now();
   const { clickConfirmDialogInPageWorld } = new Function(
     'document', 'Date', 'clickElementOnceInPageWorld', 'sleepInPageWorld',
-    'automaticOnCancellationRevision',
+    'automaticOnCancellationRevision', 'console',
     `${confirmFnSource}; return { clickConfirmDialogInPageWorld };`
   )(
     { querySelectorAll: () => [{ textContent: 'Confirm', className: '' }] },
     { now: () => confirmDeadlineAt },
     () => { expiredConfirmClickCalls += 1; return true; },
     async () => {},
-    0
+    0,
+    testConsole
   );
   const expiredConfirmResult = await clickConfirmDialogInPageWorld(5000, confirmDeadlineAt, 0);
   assertPass(disabledEnsureResult.success === false
@@ -1682,7 +1430,8 @@ async function runTests() {
     async () => {},
     3,
     10000,
-    1
+    1,
+    testConsole
   );
   ensureCancelled.cancellationRevision = 0;
   const cancelledEnsureResult = await ensureCancelled(true);
@@ -1700,7 +1449,8 @@ async function runTests() {
     async () => {},
     3,
     10000,
-    0
+    0,
+    testConsole
   );
   ensureEnabled.cancellationRevision = 0;
   const enabledEnsureResult = await ensureEnabled(true);
@@ -2646,7 +2396,8 @@ async function runTests() {
   // 防止 v0.5.12 "OFF 零点击" 策略下的「忘记关机」回归：ON 路径推进 pwmState
   // 前 MUST 确认 setPageTimer 成功；失败时保持 pwmState='on' + 提前 return，
   // 不允许把未推进的相位 sync 给对端。pwmBody 在用例 9 中已读出。
-  console.log('\n\n=== 用例 10: 关机不可漏接口契约 (v0.7.0) ===\n');
+  beginSuite('用例 10：关机安全契约',
+    '\n\n=== 用例 10: 关机不可漏接口契约 (v0.7.0) ===\n');
 
   const plannerNow10 = 1_700_000_000_000;
   const plannerOnSchedule10 = {
@@ -2732,7 +2483,8 @@ async function runTests() {
   // ===== 用例 11: v0.5.13 新鲜页面定时器确认与旁路保护 =====
   // DOM 实测：已设置时 .ant-picker input 的 value/title 均为 HH:MM，关机后均为空。
   // 不能把当前 React 页面刚写入的 value 当作服务器持久化成功；必须从全新页面再读一次。
-  console.log('\n\n=== 用例 11: 新鲜页面定时器确认与旁路保护 (v0.5.13) ===\n');
+  beginSuite('用例 11：页面定时器确认',
+    '\n\n=== 用例 11: 新鲜页面定时器确认与旁路保护 (v0.5.13) ===\n');
 
   const verifyStart = backgroundSource.indexOf('async function verifyPageTimerPersistence(');
   const verifyEnd = backgroundSource.indexOf('\n// 关机定时器设置失败时', verifyStart);
@@ -3183,7 +2935,8 @@ return { reapplySmartSensitivityNow };`
     '11N: 后台 live-alarm 校准点不再保留手写漂移判断或字段修正副本');
 
   // ===== 用例 12: 审计修复回归（只读轮询、HIG、发布与安装） =====
-  console.log('\n\n=== 用例 12: 审计修复回归（只读轮询、HIG、发布与安装） ===\n');
+  beginSuite('用例 12：审计回归',
+    '\n\n=== 用例 12: 审计修复回归（只读轮询、HIG、发布与安装） ===\n');
 
   const snapshotStart = backgroundSource.indexOf('// 弹窗 est（Est. until）依赖 full 轮询带回的页面余额。');
   const snapshotEnd = backgroundSource.indexOf('\nasync function toggleNowAndSync', snapshotStart);
@@ -3524,7 +3277,8 @@ return { reapplySmartSensitivityNow };`
     '12J: Chrome Web Store 提交目录齐全，版本/ZIP 与 manifest 同步，图片尺寸正确且商店图标等同运行图标');
 
   // ===== 用例 13: PWM 持久化恢复独立于 popup 轮询 =====
-  console.log('\n\n=== 用例 13: PWM 持久化恢复独立于 popup 轮询 ===\n');
+  beginSuite('用例 13：PWM 持久化恢复',
+    '\n\n=== 用例 13: PWM 持久化恢复独立于 popup 轮询 ===\n');
 
   const initStart13 = backgroundSource.indexOf('async function init() {');
   const initEnd13 = backgroundSource.indexOf('\n// ----- 设置/更新 PWM 循环闹钟 -----', initStart13);
@@ -3794,7 +3548,7 @@ return { reapplySmartSensitivityNow };`
     '13N: persistSchedule 防递归与 getScheduleSnapshot 只读路径继续直接调用 planner');
 
   // ===== 用例 14: 清晰与低干扰弹窗回归 =====
-  console.log('\n\n=== 用例 14: 清晰与低干扰弹窗回归 ===\n');
+  beginSuite('用例 14：低干扰弹窗', '\n\n=== 用例 14: 清晰与低干扰弹窗回归 ===\n');
 
   const popupSource = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
   assertPass(popupHtml.includes('id="statusAnnouncement" role="status" aria-live="polite"')
@@ -3919,7 +3673,7 @@ return { reapplySmartSensitivityNow };`
   }
 
   // ===== 用例 15: 持久化脱敏诊断日志 =====
-  console.log('\n\n=== 用例 15: 持久化脱敏诊断日志 ===\n');
+  beginSuite('用例 15：脱敏诊断日志', '\n\n=== 用例 15: 持久化脱敏诊断日志 ===\n');
 
   const diagnosticLogStart = backgroundSource.indexOf("const DIAGNOSTIC_LOG_KEY = 'ac_diagnostic_log';");
   const diagnosticLogEnd = backgroundSource.indexOf('\n// 跨设备同步：', diagnosticLogStart);
@@ -4143,7 +3897,8 @@ return { reapplySmartSensitivityNow };`
     '15I: 后台接收内容脚本错误回传并写入本机诊断日志');
 
   // ===== 用例 16: 运行时段作为两种自动控制的全局门禁 =====
-  console.log('\n\n=== 用例 16: 运行时段全局门禁与竞态收口 ===\n');
+  beginSuite('用例 16：运行时段全局门禁',
+    '\n\n=== 用例 16: 运行时段全局门禁与竞态收口 ===\n');
 
   const activeHoursPolicySource = extractSourceSection(
     backgroundSource,
@@ -4729,7 +4484,7 @@ return { reapplySmartSensitivityNow };`
       'schedule', 'isPageTimerProofFresh', 'getCurrentACStatus',
       'clearPageTimerProofState', 'chrome', 'persistSchedule', 'setPageTimer',
       'claimTimerBasedShutdown', 'isTimerBasedShutdownCurrent',
-      'sanitizeMinutes', 'Date',
+      'sanitizeMinutes', 'Date', 'console',
       `${requestTimerBasedShutdownSource16}; return requestTimerBasedShutdown;`
     )(
       shutdownSchedule16,
@@ -4756,7 +4511,8 @@ return { reapplySmartSensitivityNow };`
         const parsed = Number.parseInt(value, 10);
         return Number.isFinite(parsed) && parsed >= 1 ? parsed : fallback;
       },
-      { now: () => shutdownNow16 }
+      { now: () => shutdownNow16 },
+      testConsole
     );
     const result16 = await requestTimerBasedShutdown16('active-hours-test', 1);
     return { result16, timerCalls16 };
@@ -5256,13 +5012,26 @@ return { reapplySmartSensitivityNow };`
   // 汇总
   const passCount = results.filter(r => r.pass).length;
   const totalCount = results.length;
-  console.log(`\n\n=== 测试汇总: ${passCount}/${totalCount} 通过 ===`);
+  console.log('\n=== 套件汇总 ===');
+  for (const suite of suiteOrder) {
+    const suiteResults = results.filter(result => result.suite === suite);
+    if (suiteResults.length === 0) continue;
+    const suitePassCount = suiteResults.filter(result => result.pass).length;
+    const status = suitePassCount === suiteResults.length ? '✅' : '❌';
+    console.log(`${status} ${suite}: ${suitePassCount}/${suiteResults.length}`);
+  }
+  console.log(`=== 测试汇总: ${passCount}/${totalCount} 通过 ===`);
   if (passCount !== totalCount) {
     console.log('失败项:');
-    results.filter(r => !r.pass).forEach(r => console.log('  - ' + r.name));
+    for (const suite of suiteOrder) {
+      const failures = results.filter(result => result.suite === suite && !result.pass);
+      if (failures.length === 0) continue;
+      console.log(`  ${suite}:`);
+      failures.forEach(result => console.log(`    - ${result.name}`));
+    }
     process.exit(1);
   } else {
-    console.log('✅ 所有断言通过。popup 自愈 + 跨设备同步 + page timer 新鲜页面确认 + 关机重试 + 单一递归点击链路全部 OK。');
+    console.log('✅ 所有套件通过。');
   }
 }
 
