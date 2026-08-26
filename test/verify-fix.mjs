@@ -1367,6 +1367,12 @@ async function runTests() {
     ? backgroundSource.slice(newTabStart, newTabEnd)
     : '';
 
+  const getReadyTabStart = backgroundSource.indexOf('async function getReadyACTab(');
+  const getReadyTabEnd = backgroundSource.indexOf('\nasync function waitForTabReady', getReadyTabStart);
+  const getReadyTabBody = getReadyTabStart >= 0 && getReadyTabEnd > getReadyTabStart
+    ? backgroundSource.slice(getReadyTabStart, getReadyTabEnd)
+    : '';
+
   const setTimerStart = backgroundSource.indexOf('async function setPageTimer(');
   const setTimerEnd = backgroundSource.indexOf('\nasync function requestTimerBasedShutdown', setTimerStart);
   const setTimerBody = setTimerStart >= 0 && setTimerEnd > setTimerStart
@@ -2293,6 +2299,11 @@ async function runTests() {
       && newTabBody.includes('ac-close-tab-${tabId}')
       && !newTabBody.includes('if (result?.success)'),
     '9Q: 自动创建的开机标签无论成功失败都会安排回收');
+  assertPass(countOccurrences(
+    getReadyTabBody,
+    'await waitForTabReady(tab.id, timeoutMs, isACHomePageTab);'
+  ) === 2,
+    '9Q-1: 新建／候选开机页两条等待都只接受 complete 的精确 home，业务子页不得抢跑');
 
   const toggleRecoveryStart = backgroundSource.indexOf('async function _toggleOnExistingTab');
   const toggleRecoveryEnd = backgroundSource.indexOf('\nasync function _toggleOnNewTab', toggleRecoveryStart);
@@ -2677,6 +2688,82 @@ async function runTests() {
         'remove-listener'
       ].join(','),
     '9J-8: 精确等待拒绝旧业务页 complete，并在监听后复读捕获已完成的 home 导航');
+
+  const loadGetReadyACTab = new Function(
+    'chrome', 'waitForTabReady', 'isACHomePageTab',
+    `${getReadyTabBody}; return getReadyACTab;`
+  );
+  const runGetReadyTransitionCase = async (eventuallyHome) => {
+    let currentTab = {
+      id: 47,
+      url: 'https://w5.ab.ust.hk/njggt/app/home',
+      status: 'loading'
+    };
+    let capturedPredicate = null;
+    const calls = [];
+    const chromeForReady = {
+      tabs: {
+        async get(tabId) {
+          calls.push(`get:${currentTab.url}:${currentTab.status}`);
+          return { ...currentTab, id: tabId };
+        },
+        async query() {
+          calls.push('query');
+          return [];
+        }
+      }
+    };
+    const getReadyACTab = loadGetReadyACTab(
+      chromeForReady,
+      async (_tabId, _timeoutMs, isReadyTab) => {
+        capturedPredicate = isReadyTab;
+        currentTab = {
+          id: 47,
+          url: 'https://w5.ab.ust.hk/njggt/app/billing-cycle',
+          status: 'complete'
+        };
+        if (typeof isReadyTab !== 'function' || isReadyTab(currentTab)) return true;
+        if (!eventuallyHome) return false;
+        currentTab = {
+          id: 47,
+          url: 'https://w5.ab.ust.hk/njggt/app/home',
+          status: 'complete'
+        };
+        return isReadyTab(currentTab);
+      },
+      tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home'
+    );
+    const result = await getReadyACTab(47, 30000);
+    return { result, capturedPredicate, calls };
+  };
+  const transientReadyCase = await runGetReadyTransitionCase(true);
+  const permanentNonHomeCase = await runGetReadyTransitionCase(false);
+  const loadingHomeChrome = {
+    tabs: {
+      async get(tabId) {
+        return {
+          id: tabId,
+          url: 'https://w5.ab.ust.hk/njggt/app/home',
+          status: 'loading'
+        };
+      },
+      async query() { return []; }
+    }
+  };
+  const loadingHomeGetReady = loadGetReadyACTab(
+    loadingHomeChrome,
+    async () => false,
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home'
+  );
+  const permanentLoadingHomeCase = await loadingHomeGetReady(48, 30000);
+  assertPass(transientReadyCase.result?.url === 'https://w5.ab.ust.hk/njggt/app/home'
+      && typeof transientReadyCase.capturedPredicate === 'function'
+      && transientReadyCase.capturedPredicate({
+        url: 'https://w5.ab.ust.hk/njggt/app/billing-cycle'
+      }) === false
+      && permanentNonHomeCase.result === null
+      && permanentLoadingHomeCase === null,
+    '9J-9: 隐藏开机页等待 complete 的精确 home；永久非 home 或永久 loading 均保持拒绝');
 
   // 9T: 初始 tab URL 偏离精确 home 时，必须立即拒绝，不能导航、注入或发送消息。
   const proactiveCalls = { send: 0, update: 0, get: 0, ready: 0, ensure: 0 };
@@ -3251,8 +3338,9 @@ async function runTests() {
       && !verifyBody.includes('chrome.tabs.update(')
       && !verifyBody.includes('sourceWasAutoCreated')
       && verifyBody.includes('for (let attempt = 0; attempt < PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length; attempt++)')
-      && verifyBody.includes("chrome.tabs.create({ url: AC_PAGE, active: false })"),
-    '11A: 写入来源页绝不刷新/导航；每次验证均使用独立临时隐藏页');
+      && verifyBody.includes("chrome.tabs.create({ url: AC_PAGE, active: false })")
+      && /waitForTabReady\(\s*verifierTabId,\s*30000,\s*isACHomePageTab\s*\)/.test(verifyBody),
+    '11A: 写入来源页绝不刷新/导航；每次独立验证页均等待 complete 的精确 home');
   assertPass(verifyBody.includes("{ action: 'getPageTimer' }")
       && verifyBody.includes('actualValue === expectedValue')
       && verifyBody.includes('lastFailure = `第 ${attempt + 1} 次新鲜页读回不匹配')
@@ -4331,8 +4419,12 @@ return { reapplySmartSensitivityNow };`
   assertPass(popupSource.includes("diagnoseActiveBoundary")
       && popupSource.includes("diagnoseOffscreenPresent")
       && popupSource.includes("diagnosePageTimerRetryNone")
+      && popupSource.includes("diagnosePageTimerPwmRetry")
+      && popupSource.includes("code: 'SAFETY-PWM-RETRYING'")
+      && popupSource.includes("s.pwmState === 'on'")
+      && popupSource.includes('pwmAlarm?.scheduledTime')
       && popupSource.includes("diagnoseHeartbeatStale"),
-    '14G: 诊断面板新增 5 闹钟中的 ac-active-boundary/ac-page-timer-retry 与 L2 offscreen 与 heartbeat 真状态读取');
+    '14G: 诊断区分独立 page-timer retry 与当前 ON 相位的 live ac-pwm 重试，并保留 L2 真状态读取');
   assertPass(popupSource.includes("diagnoseSmartWeatherAlarm")
       && popupSource.includes("diagnoseSmartWeatherAlarmMissing")
       && popupSource.includes("diagnoseSmartWeatherFresh")
@@ -4639,6 +4731,7 @@ return { reapplySmartSensitivityNow };`
     'diagnoseAlarmMissing',
     'diagnoseAlarmExpired',
     'diagnoseSWInitPending',
+    'diagnosePageTimerPwmRetry',
     'diagnosePageTimerRetryAlarmMissing',
     'diagnosePageTimerMissing',
     'diagnoseRuntimeAlarmsCleared',

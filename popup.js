@@ -1886,10 +1886,14 @@ btnDiagnose.addEventListener('click', async () => {
       });
     }
 
-    // 4.6 ac-page-timer-retry 闹钟(指北固定 5 闹钟之一,此前诊断漏检)。
-    // PWM 验证 runPwmStep 失败或新鲜页 page timer 读不回时,持久化 pageTimerRetryMinutes 与
-    // ac-page-timer-retry 闹钟,1 分钟内自动重试 OFF 关机。诊断应显示这两者是否激活。
+    // 4.6 页面定时器重试有两条互斥路径：正常 PWM 失败保持当前相位并由 live ac-pwm
+    // 在 1 分钟后重跑；停用／运行时段退出等非 PWM 安全关机才使用独立
+    // ac-page-timer-retry。两者不能因 pageTimerRetryMinutes=0 被混报为“无重试”。
     const retryMin = Number(s.pageTimerRetryMinutes) || 0;
+    const pwmRetryAt = Number(pwmAlarm?.scheduledTime) || 0;
+    const pwmRetryActive = s.pwmState === 'on'
+      && !!s.pageTimerError
+      && pwmRetryAt > Date.now();
     if (retryMin > 0) {
       const retryAlarm = alarms.find(a => a.name === 'ac-page-timer-retry') || await chrome.alarms.get('ac-page-timer-retry');
       const retryAt = retryAlarm?.scheduledTime || 0;
@@ -1907,6 +1911,12 @@ btnDiagnose.addEventListener('click', async () => {
         domain: t('diagnoseDomainSafety'),
         action: t('diagnoseActionCheckTimer'),
         priority: 5
+      });
+    } else if (pwmRetryActive) {
+      add(true, t('diagnosePageTimerPwmRetry', new Date(pwmRetryAt).toLocaleTimeString()), {
+        level: 'info',
+        code: 'SAFETY-PWM-RETRYING',
+        domain: t('diagnoseDomainSafety')
       });
     } else {
       add(true, t('diagnosePageTimerRetryNone'), {

@@ -2048,7 +2048,11 @@ async function verifyPageTimerPersistence(
       // 1 分钟后该闹钟兜底关闭隐藏标签，避免泄漏。与 setPageTimer / _toggleOnNewTab 同模式。
       chrome.alarms.create(`ac-close-tab-${verifierTabId}`, { delayInMinutes: 1 });
 
-      const pageReady = await waitForTabReady(verifierTabId, 30000);
+      const pageReady = await waitForTabReady(
+        verifierTabId,
+        30000,
+        isACHomePageTab
+      );
       if (!pageReady) throw new Error('页面定时器验证页等待就绪超时');
       const verifierTarget = await getExactACHomeTab(verifierTabId);
       if (!verifierTarget) throw new Error('页面定时器验证页未停留在精确 home URL');
@@ -2891,9 +2895,11 @@ async function getReadyACTab(preferredTabId = null, timeoutMs = 30000) {
     try {
       let tab = await chrome.tabs.get(preferredTabId);
       if (isACHomePageTab(tab)) {
-        await waitForTabReady(tab.id, timeoutMs);
-        tab = await chrome.tabs.get(tab.id);
-        if (isACHomePageTab(tab)) return tab;
+        const pageReady = await waitForTabReady(tab.id, timeoutMs, isACHomePageTab);
+        if (pageReady) {
+          tab = await chrome.tabs.get(tab.id);
+          if (isACHomePageTab(tab)) return tab;
+        }
       }
     } catch (_) {
       // preferred tab 已关闭，回退到查询现有页面
@@ -2903,7 +2909,8 @@ async function getReadyACTab(preferredTabId = null, timeoutMs = 30000) {
   const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
   let tab = tabs.find(isACHomePageTab);
   if (!tab?.id) return null;
-  await waitForTabReady(tab.id, timeoutMs);
+  const pageReady = await waitForTabReady(tab.id, timeoutMs, isACHomePageTab);
+  if (!pageReady) return null;
   tab = await chrome.tabs.get(tab.id);
   return isACHomePageTab(tab) ? tab : null;
 }

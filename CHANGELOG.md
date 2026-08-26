@@ -2,6 +2,7 @@
 
 ## 0.8.2
 
+- 修复智能控制在 `:00`/`:30` 偶发零点击：自动创建的隐藏控制页与页面定时器新鲜验证页都会等待 `complete` 的精确 home，不再被 `billing-cycle`／warning 等过渡业务子页抢跑；首分钟、`Execution succeeded`、精确 URL 与 OFF 零点击边界不变。诊断同时区分当前 `ac-pwm` ON 相位重试与独立 `ac-page-timer-retry`，不再把 `pageTimerRetryMinutes=0` 误写成完全无重试。
 - 自动开机完成条件收紧为“本次点击后新出现的 `Execution succeeded` + ON 状态”；历史／伪成功提示不采信，等待与确认框轮询并行以免漏掉短暂 toast。提示缺失时不通过刷新或同轮 ON 复核绕过，已是 ON 的幂等预检保持不变。
 - 新增先于 Popup 主脚本加载的只读兜底诊断：捕获 `error`/`unhandledrejection`，主诊断未注册时仍可导出脱敏 schedule、`ac-*` alarms、heartbeat、SW 与文档现场并一键复制；各分区独立失败、全程不自愈，也不读取 URL、DOM、账号或余额。完整诊断同时显示本次 Popup 生命周期捕获的运行期异常。
 - 补齐 Popup 页面自诊断：报告文档加载/可见状态、视口与内容尺寸、横向溢出、控件与权威 `schedule` 是否同步，以及 Popup→Service Worker 保活连接；设置提交中的瞬态会跳过同步判定，正常纵向滚动不报错，也不采集 URL、DOM 文本或账号信息。
