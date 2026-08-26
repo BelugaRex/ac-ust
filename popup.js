@@ -19,6 +19,17 @@ const staticPreviewSchedule = {
   nextTriggerAt: Date.now() + 30 * 60 * 1000
 };
 
+function isPwmPageTimerRetryActive(pageTimerError, scheduledTime, now = Date.now()) {
+  const retryAt = Number(scheduledTime);
+  const nowMs = Number(now);
+  const remainingMs = retryAt - nowMs;
+  return !!pageTimerError
+    && Number.isFinite(retryAt)
+    && Number.isFinite(nowMs)
+    && remainingMs > 0
+    && remainingMs <= 90 * 1000;
+}
+
 if (IS_STATIC_PREVIEW) {
   document.documentElement.classList.add('static-preview');
 }
@@ -1891,9 +1902,7 @@ btnDiagnose.addEventListener('click', async () => {
     // ac-page-timer-retry。两者不能因 pageTimerRetryMinutes=0 被混报为“无重试”。
     const retryMin = Number(s.pageTimerRetryMinutes) || 0;
     const pwmRetryAt = Number(pwmAlarm?.scheduledTime) || 0;
-    const pwmRetryActive = s.pwmState === 'on'
-      && !!s.pageTimerError
-      && pwmRetryAt > Date.now();
+    const pwmRetryActive = isPwmPageTimerRetryActive(s.pageTimerError, pwmRetryAt);
     if (retryMin > 0) {
       const retryAlarm = alarms.find(a => a.name === 'ac-page-timer-retry') || await chrome.alarms.get('ac-page-timer-retry');
       const retryAt = retryAlarm?.scheduledTime || 0;

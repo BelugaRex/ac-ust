@@ -2044,6 +2044,50 @@ async function runTests() {
   assertPass(!contentSource.includes("error: t('contentCrossDayLimit')")
       && contentSource.includes('crossesMidnight,'),
     '9M: Power-off after 跨午夜时间直接输入，不再被代码拒绝');
+  const readableStatusWaitStart9M = contentSource.indexOf(
+    'async function waitForReadableACStatus('
+  );
+  const readableStatusWaitEnd9M = contentSource.indexOf(
+    '\n\nasync function getAuthoritativeACStatus(',
+    readableStatusWaitStart9M
+  );
+  const readableStatusWaitSource9M = readableStatusWaitStart9M >= 0
+      && readableStatusWaitEnd9M > readableStatusWaitStart9M
+    ? contentSource.slice(readableStatusWaitStart9M, readableStatusWaitEnd9M)
+    : '';
+  let transientStatusRecovered9M = false;
+  let persistentStatusAmbiguityRefused9M = false;
+  if (readableStatusWaitSource9M) {
+    const transientStatuses9M = [
+      { isOn: null, error: 'React 双树' },
+      { isOn: true, source: 'isolated-retry' }
+    ];
+    let transientStatusIndex9M = 0;
+    const waitForTransientStatus9M = new Function(
+      'getACStatus', 'sleep',
+      `${readableStatusWaitSource9M}; return waitForReadableACStatus;`
+    )(
+      () => transientStatuses9M[Math.min(
+        transientStatusIndex9M++,
+        transientStatuses9M.length - 1
+      )],
+      ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 1)))
+    );
+    transientStatusRecovered9M = (await waitForTransientStatus9M(25, 1))?.isOn === true;
+
+    const waitForAmbiguousStatus9M = new Function(
+      'getACStatus', 'sleep',
+      `${readableStatusWaitSource9M}; return waitForReadableACStatus;`
+    )(
+      () => ({ isOn: null, error: '持续歧义' }),
+      ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 1)))
+    );
+    persistentStatusAmbiguityRefused9M = typeof (
+      await waitForAmbiguousStatus9M(4, 1)
+    )?.isOn !== 'boolean';
+  }
+  assertPass(transientStatusRecovered9M && persistentStatusAmbiguityRefused9M,
+    '9M-0: AC 状态瞬时不可读时等待唯一可读值；持续歧义仍返回未知且零点击');
   const pageTimerTargetStart = contentSource.indexOf('function computePageTimerTarget(');
   const pageTimerTargetEnd = contentSource.indexOf('\n// 找到 "Power-off after"', pageTimerTargetStart);
   const pageTimerTargetSource = pageTimerTargetStart >= 0 && pageTimerTargetEnd > pageTimerTargetStart
@@ -2248,6 +2292,51 @@ async function runTests() {
       && ambiguousOkResult9M.clicked === false
       && ambiguousPickerOkClicks9M === 0,
     '9M-6: picker portal 仅点击显式关联或唯一新 dropdown；既有无关层与多个新层均零点击');
+  const confirmedTimerWaitStart9M = contentSource.indexOf(
+    'async function waitForConfirmedPowerOffTimerInput('
+  );
+  const confirmedTimerWaitEnd9M = contentSource.indexOf(
+    '\n\nfunction setNativeInputValue(',
+    confirmedTimerWaitStart9M
+  );
+  const confirmedTimerWaitSource9M = confirmedTimerWaitStart9M >= 0
+      && confirmedTimerWaitEnd9M > confirmedTimerWaitStart9M
+    ? contentSource.slice(confirmedTimerWaitStart9M, confirmedTimerWaitEnd9M)
+    : '';
+  let transientTimerRecovered9M = false;
+  let persistentAmbiguityRefused9M = false;
+  if (confirmedTimerWaitSource9M) {
+    const confirmedInput9M = {
+      value: '00:21',
+      getAttribute: () => null
+    };
+    const transientSequence9M = [null, confirmedInput9M, confirmedInput9M];
+    let transientIndex9M = 0;
+    const waitForTransientTimer9M = new Function(
+      'findPowerOffTimerInput', 'sleep',
+      `${confirmedTimerWaitSource9M}; return waitForConfirmedPowerOffTimerInput;`
+    )(
+      () => transientSequence9M[Math.min(
+        transientIndex9M++,
+        transientSequence9M.length - 1
+      )],
+      ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 1)))
+    );
+    transientTimerRecovered9M = await waitForTransientTimer9M('00:21', 25, 1)
+      === confirmedInput9M;
+
+    const waitForAmbiguousTimer9M = new Function(
+      'findPowerOffTimerInput', 'sleep',
+      `${confirmedTimerWaitSource9M}; return waitForConfirmedPowerOffTimerInput;`
+    )(
+      () => null,
+      ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 1)))
+    );
+    persistentAmbiguityRefused9M = await waitForAmbiguousTimer9M('00:21', 4, 1)
+      === null;
+  }
+  assertPass(transientTimerRecovered9M && persistentAmbiguityRefused9M,
+    '9M-7: 写入后等待唯一语义 picker 与目标值连续稳定；React 短暂双树可恢复，持续歧义仍失败关闭');
   const verificationStartForReload = backgroundSource.indexOf('async function verifyPageTimerPersistence(');
   const verificationEndForReload = backgroundSource.indexOf('\n// 关机定时器设置失败时', verificationStartForReload);
   const verifySectionForReload = verificationStartForReload >= 0 && verificationEndForReload > verificationStartForReload
@@ -4421,10 +4510,31 @@ return { reapplySmartSensitivityNow };`
       && popupSource.includes("diagnosePageTimerRetryNone")
       && popupSource.includes("diagnosePageTimerPwmRetry")
       && popupSource.includes("code: 'SAFETY-PWM-RETRYING'")
-      && popupSource.includes("s.pwmState === 'on'")
+      && popupSource.includes('isPwmPageTimerRetryActive(s.pageTimerError, pwmRetryAt)')
       && popupSource.includes('pwmAlarm?.scheduledTime')
       && popupSource.includes("diagnoseHeartbeatStale"),
-    '14G: 诊断区分独立 page-timer retry 与当前 ON 相位的 live ac-pwm 重试，并保留 L2 真状态读取');
+    '14G: 诊断区分独立 page-timer retry 与任意当前相位的 live ac-pwm 重试，并保留 L2 真状态读取');
+  const pwmRetryHelperStart14G = popupSource.indexOf(
+    'function isPwmPageTimerRetryActive('
+  );
+  const pwmRetryHelperEnd14G = popupSource.indexOf(
+    '\n\nif (IS_STATIC_PREVIEW)',
+    pwmRetryHelperStart14G
+  );
+  const pwmRetryHelperSource14G = pwmRetryHelperStart14G >= 0
+      && pwmRetryHelperEnd14G > pwmRetryHelperStart14G
+    ? popupSource.slice(pwmRetryHelperStart14G, pwmRetryHelperEnd14G)
+    : '';
+  const isPwmPageTimerRetryActive14G = pwmRetryHelperSource14G
+    ? new Function(`${pwmRetryHelperSource14G}; return isPwmPageTimerRetryActive;`)()
+    : null;
+  const pwmRetryNow14G = 1_700_000_000_000;
+  assertPass(typeof isPwmPageTimerRetryActive14G === 'function'
+      && isPwmPageTimerRetryActive14G('写入失败；1 分钟后重试', pwmRetryNow14G + 57_000, pwmRetryNow14G)
+      && !isPwmPageTimerRetryActive14G('', pwmRetryNow14G + 57_000, pwmRetryNow14G)
+      && !isPwmPageTimerRetryActive14G('旧错误', pwmRetryNow14G - 1, pwmRetryNow14G)
+      && !isPwmPageTimerRetryActive14G('旧错误', pwmRetryNow14G + 5 * 60_000, pwmRetryNow14G),
+    '14G-1: 一分钟 PWM retry 不依赖 pwmState，且无错误、已过期或普通远期闹钟不误报');
   assertPass(popupSource.includes("diagnoseSmartWeatherAlarm")
       && popupSource.includes("diagnoseSmartWeatherAlarmMissing")
       && popupSource.includes("diagnoseSmartWeatherFresh")

@@ -217,7 +217,7 @@
   "diagnoseActiveBoundary": { "message": "ac-active-boundary 闹钟存在", "description": "诊断：ac-active-boundary 闹钟存在" },
   "diagnoseActiveBoundaryMissing": { "message": "ac-active-boundary 闹钟缺失 (运行时段边界不会自动触发)", "description": "诊断：ac-active-boundary 闹钟缺失" },
   "diagnosePageTimerRetry": { "message": "页面定时器重试中 (下次 $1，$2 分钟后)", "description": "诊断：page timer 重试。$1=重试时刻,$2=重试分钟数" },
-  "diagnosePageTimerPwmRetry": { "message": "页面定时器由 PWM 当前 ON 相位重试 (下次 $1；独立重试关闭)", "description": "诊断：正常 PWM 失败由 ac-pwm 重跑当前 ON 相位。$1=重试时刻" },
+  "diagnosePageTimerPwmRetry": { "message": "页面定时器由 PWM 当前相位重试 (下次 $1；独立重试关闭)", "description": "诊断：PWM 页面定时器失败由一分钟后的 ac-pwm 重跑当前相位。$1=重试时刻" },
   "diagnosePageTimerRetryAlarmMissing": { "message": "页面定时器标记为重试中，但 ac-page-timer-retry 闹钟缺失（$1 分钟）", "description": "诊断：page timer 有重试状态但重试闹钟缺失。$1=重试分钟数" },
   "diagnosePageTimerRetryNone": { "message": "独立页面定时器重试未启用 (pageTimerRetryMinutes=0)", "description": "诊断：非 PWM 的独立 page timer 重试未启用" },
   "diagnoseRecentErrors": { "message": "ℹ️ 历史记录（不计入当前结论）：本次构建以来共 $1 条，显示最新 $2 条", "description": "诊断：与当前结论分离的本地持久化异常历史。$1=总条数,$2=显示条数" },

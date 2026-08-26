@@ -175,6 +175,18 @@ function getLegacyACStatus(legacySwitch) {
   return { isOn: null, error: '未找到 AC 开关元素' };
 }
 
+async function waitForReadableACStatus(timeoutMs = 750, pollIntervalMs = 50) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  const interval = Math.max(1, Number(pollIntervalMs) || 1);
+  let status = getACStatus();
+
+  while (typeof status?.isOn !== 'boolean' && Date.now() < deadline) {
+    await sleep(interval);
+    status = getACStatus();
+  }
+  return status;
+}
+
 async function getAuthoritativeACStatus() {
   const withBalance = (status) => {
     const balance = getACBalanceSnapshot();
@@ -195,9 +207,18 @@ async function getAuthoritativeACStatus() {
       : isolatedStatus);
   }
 
+  // React 切换受控组件时可能短暂同时保留旧／新开关；只读等待唯一状态恢复，
+  // 不刷新页面、不触发点击，持续歧义仍返回 unknown。
+  const recoveredStatus = await waitForReadableACStatus();
+  if (typeof recoveredStatus?.isOn === 'boolean') {
+    return withBalance(mainWorldStatus?.error
+      ? { ...recoveredStatus, fallbackError: mainWorldStatus.error, via: 'isolated-retry' }
+      : { ...recoveredStatus, via: 'isolated-retry' });
+  }
+
   return withBalance(mainWorldStatus?.error
-    ? { ...isolatedStatus, fallbackError: mainWorldStatus.error }
-    : isolatedStatus);
+    ? { ...recoveredStatus, fallbackError: mainWorldStatus.error }
+    : recoveredStatus);
 }
 
 // 页面余额环会同时显示当前剩余分钟数（如 "242 min"）和周期总额。
@@ -379,6 +400,35 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+// AntD 确认后 React 可能短暂同时保留旧树与新树。只在同一个唯一语义控件
+// 连续两次承载目标值时返回；持续歧义、空值或节点继续替换都会超时失败关闭。
+async function waitForConfirmedPowerOffTimerInput(
+  value,
+  timeoutMs = 2000,
+  pollIntervalMs = 50
+) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  const interval = Math.max(1, Number(pollIntervalMs) || 1);
+  let previousInput = null;
+
+  while (Date.now() <= deadline) {
+    const input = findPowerOffTimerInput();
+    const confirmedValue = input
+      ? (input.value || input.getAttribute('title') || '').trim()
+      : '';
+    if (input && confirmedValue === value) {
+      if (input === previousInput) return input;
+      previousInput = input;
+    } else {
+      previousInput = null;
+    }
+
+    if (Date.now() >= deadline) break;
+    await sleep(interval);
+  }
+  return null;
+}
+
 function setNativeInputValue(input, value) {
   const prototype = Object.getPrototypeOf(input);
   const descriptor = Object.getOwnPropertyDescriptor(prototype, 'value');
@@ -514,15 +564,15 @@ async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
       return { success: false, error: t('contentInputRejected', String(value)) };
     }
 
-    // 写入完成后再用同一语义定位器复核，DOM 漂移或歧义时不产生成功证明。
-    if (findPowerOffTimerInput() !== pickerInput) {
-      return { success: false, error: 'Power-off after 控件在写入期间发生歧义' };
+    // 受控组件可在确认后用等价新节点承载最终值；等待 DOM 恢复唯一，而非
+    // 在 React 双树过渡期间猜选第一个候选或把正常节点替换误判为失败。
+    const confirmedInput = await waitForConfirmedPowerOffTimerInput(value);
+    if (!confirmedInput) {
+      return findPowerOffTimerInput()
+        ? { success: false, error: t('contentInputRejected', String(value)) }
+        : { success: false, error: 'Power-off after 控件在写入期间发生歧义' };
     }
-
-    const confirmedValue = (pickerInput.value || pickerInput.getAttribute('title') || '').trim();
-    if (confirmedValue !== value) {
-      return { success: false, error: t('contentInputRejected', String(value)) };
-    }
+    const confirmedValue = (confirmedInput.value || confirmedInput.getAttribute('title') || '').trim();
     return {
       success: true,
       hours,
@@ -532,7 +582,7 @@ async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
       targetAt,
       crossesMidnight,
       value: confirmedValue,
-      title: (pickerInput.getAttribute('title') || '').trim()
+      title: (confirmedInput.getAttribute('title') || '').trim()
     };
   } catch (e) {
     return { success: false, error: String(e) };
