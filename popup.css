@@ -974,3 +974,42 @@ a:focus-visible,
 .mode-detail[hidden] {
   display: none;
 }
+
+/* CJK glyphs read smaller than Latin at the same nominal size. */
+html:lang(zh) :is(
+  #activeHoursSectionHeader h3,
+  .section-title
+) {
+  font-size: 14px;
+}
+
+html:lang(zh) :is(
+  .ac-indicator,
+  .balance-estimate-prefix,
+  .hero-caption,
+  .hero-idle,
+  .safetynet-warning,
+  .mode-choice,
+  .btn-diagnose,
+  .diag-copy
+) {
+  font-size: 13px;
+}
+
+html:lang(zh) :is(
+  .balance-estimate,
+  .automation-heading p,
+  .field-label,
+  .settings-hint,
+  .status,
+  .diagnose-result,
+  .diag-bar-title,
+  .smart-end,
+  .smart-readout-label
+) {
+  font-size: 12px;
+}
+
+html:lang(zh) .field-unit {
+  font-size: 11px;
+}

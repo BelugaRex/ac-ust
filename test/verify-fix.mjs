@@ -637,6 +637,12 @@ async function runTests() {
       && /\.hero-number\s*\{[^}]*?font-size:\s*26px/.test(popupCssNoComments)
       && /\.header-version\s*\{[^}]*?font-size:\s*11px/.test(popupCssNoComments),
     '排版层级固定为 11/12/13/14/15px，26px 仅用于倒计时主数字');
+  assertPass(/html:lang\(zh\)\s+:is\([^)]*#activeHoursSectionHeader h3[^)]*\.section-title[^)]*\)\s*\{[^}]*font-size:\s*14px/.test(popupCssNoComments)
+      && /html:lang\(zh\)\s+:is\([^)]*\.ac-indicator[^)]*\.mode-choice[^)]*\.btn-diagnose[^)]*\)\s*\{[^}]*font-size:\s*13px/.test(popupCssNoComments)
+      && /html:lang\(zh\)\s+:is\([^)]*\.automation-heading p[^)]*\.field-label[^)]*\.settings-hint[^)]*\.smart-readout-label[^)]*\)\s*\{[^}]*font-size:\s*12px/.test(popupCssNoComments)
+      && /html:lang\(zh\)\s+\.field-unit\s*\{[^}]*font-size:\s*11px/.test(popupCssNoComments)
+      && !popupCssNoComments.includes('html:lang(en)'),
+    '中文 locale 独立补偿小号文字各 1px，英文默认字级与 280px 几何不受影响');
   const popupJs = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
   assertPass(popupJs.includes('const smartSelected = currentSmartMode.enabled;')
       && popupJs.includes('const timerSelected = !smartSelected;')
