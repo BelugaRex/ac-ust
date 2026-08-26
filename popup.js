@@ -940,6 +940,103 @@ function appendRecentDiagnosticLogLines(lines, entries, nowMs = Date.now()) {
   });
 }
 
+function evaluatePopupPageState(snapshot, schedule) {
+  const page = snapshot && typeof snapshot === 'object' ? snapshot : {};
+  const config = schedule && typeof schedule === 'object' ? schedule : {};
+  const controls = page.controls && typeof page.controls === 'object'
+    ? page.controls
+    : {};
+  const expected = {
+    activeHours: config.activeHours?.enabled === true,
+    timer: config.enabled === true && config.smartMode?.enabled !== true,
+    smart: config.smartMode?.enabled === true,
+    activeHoursStart: typeof config.activeHours?.start === 'string'
+      ? config.activeHours.start
+      : '08:00',
+    activeHoursEnd: typeof config.activeHours?.end === 'string'
+      ? config.activeHours.end
+      : '23:00'
+  };
+  const dimensionsValid = Number(page.viewportWidth) > 0
+    && Number(page.viewportHeight) > 0
+    && Number(page.contentWidth) > 0
+    && Number(page.contentHeight) > 0;
+  const controlMismatches = [
+    ['activeHoursChecked', expected.activeHours],
+    ['activeHoursStart', expected.activeHoursStart],
+    ['activeHoursEnd', expected.activeHoursEnd],
+    ['activeHoursBodyHidden', !expected.activeHours],
+    ['activeHoursStartDisabled', !expected.activeHours],
+    ['activeHoursEndDisabled', !expected.activeHours],
+    ['timerPressed', expected.timer],
+    ['timerBodyHidden', !expected.timer],
+    ['smartPressed', expected.smart],
+    ['smartBodyHidden', !expected.smart]
+  ]
+    .filter(([field, expectedValue]) => controls[field] !== expectedValue)
+    .map(([field, expectedValue]) => (
+      `${field}(expected=${expectedValue}, actual=${String(controls[field])})`
+    ));
+  const controlSync = page.updatePending === true
+    ? null
+    : controlMismatches.length === 0;
+
+  return {
+    documentReady: page.readyState === 'interactive' || page.readyState === 'complete',
+    documentVisible: page.visibilityState === 'visible',
+    dimensionsValid,
+    horizontalOverflow: dimensionsValid
+      && Number(page.contentWidth) > Number(page.viewportWidth) + 1,
+    controlSync,
+    controlMismatches,
+    expected
+  };
+}
+
+function readPopupPageSnapshot() {
+  const root = document.documentElement;
+  const body = document.body;
+  const shellRect = appShell?.getBoundingClientRect();
+  const viewportWidth = Math.round(root?.clientWidth || window.innerWidth || 0);
+  const viewportHeight = Math.round(root?.clientHeight || window.innerHeight || 0);
+  const contentWidth = Math.round(Math.max(
+    root?.scrollWidth || 0,
+    body?.scrollWidth || 0,
+    appShell?.scrollWidth || 0,
+    shellRect?.width || 0
+  ));
+  const contentHeight = Math.round(Math.max(
+    root?.scrollHeight || 0,
+    body?.scrollHeight || 0,
+    appShell?.scrollHeight || 0,
+    shellRect?.height || 0
+  ));
+
+  return {
+    readyState: document.readyState,
+    visibilityState: document.visibilityState,
+    language: root?.lang || '?',
+    viewportWidth,
+    viewportHeight,
+    contentWidth,
+    contentHeight,
+    keepaliveConnected: keepalivePort !== null,
+    updatePending: hasPendingScheduleUpdate() || modeSwitchInFlight,
+    controls: {
+      timerPressed: timerToggle?.getAttribute('aria-pressed') === 'true',
+      smartPressed: smartModeToggle?.getAttribute('aria-pressed') === 'true',
+      activeHoursChecked: activeHoursToggle?.checked === true,
+      activeHoursStart: activeHoursStart?.value,
+      activeHoursEnd: activeHoursEnd?.value,
+      activeHoursBodyHidden: activeHoursBody?.hidden === true,
+      activeHoursStartDisabled: activeHoursStart?.disabled === true,
+      activeHoursEndDisabled: activeHoursEnd?.disabled === true,
+      timerBodyHidden: timerBody?.hidden === true,
+      smartBodyHidden: smartBody?.hidden === true
+    }
+  };
+}
+
 const DIAGNOSTIC_LEVEL_SYMBOLS = Object.freeze({
   ok: '✅',
   info: 'ℹ️',
@@ -1185,6 +1282,84 @@ btnDiagnose.addEventListener('click', async () => {
         });
       }
     }
+
+    // Popup 自身也属于诊断链路：报告当前文档、布局、控件投影和保活连接。
+    // 只记录结构化状态与尺寸，不读取 URL、DOM 文本、账号或冷气页面内容。
+    const popupPage = readPopupPageSnapshot();
+    const popupState = evaluatePopupPageState(popupPage, s);
+    const popupDocumentMessage = popupState.documentReady && popupState.documentVisible
+      ? t('diagnosePopupDocumentReady', popupPage.readyState, popupPage.visibilityState, popupPage.language)
+      : t('diagnosePopupDocumentState', popupPage.readyState, popupPage.visibilityState, popupPage.language);
+    add(popupState.documentReady && popupState.documentVisible, popupDocumentMessage,
+      popupState.documentReady && popupState.documentVisible ? {} : {
+        level: 'warning',
+        code: popupState.documentReady ? 'POPUP-DOCUMENT-HIDDEN' : 'POPUP-DOCUMENT-NOT-READY',
+        domain: t('diagnoseDomainPopup'),
+        action: t('diagnoseActionReopenPopup'),
+        priority: 60
+      });
+
+    const popupSizeArgs = [
+      popupPage.viewportWidth,
+      popupPage.viewportHeight,
+      popupPage.contentWidth,
+      popupPage.contentHeight
+    ];
+    if (!popupState.dimensionsValid) {
+      add(false, t('diagnosePopupLayoutUnmeasurable', ...popupSizeArgs), {
+        level: 'warning',
+        code: 'POPUP-LAYOUT-UNMEASURABLE',
+        domain: t('diagnoseDomainPopup'),
+        action: t('diagnoseActionReopenPopup'),
+        priority: 65
+      });
+    } else if (popupState.horizontalOverflow) {
+      add(false, t('diagnosePopupLayoutOverflow', ...popupSizeArgs), {
+        level: 'warning',
+        code: 'POPUP-HORIZONTAL-OVERFLOW',
+        domain: t('diagnoseDomainPopup'),
+        action: t('diagnoseActionReopenPopup'),
+        priority: 65
+      });
+    } else {
+      add(true, t('diagnosePopupLayoutOK', ...popupSizeArgs));
+    }
+
+    if (popupState.controlSync === null) {
+      add(true, t('diagnosePopupControlsPending'), {
+        level: 'info',
+        code: 'POPUP-UPDATE-IN-FLIGHT',
+        domain: t('diagnoseDomainPopup')
+      });
+    } else if (popupState.controlSync) {
+      add(true, t(
+        'diagnosePopupControlsSync',
+        popupState.expected.activeHours,
+        popupState.expected.timer,
+        popupState.expected.smart
+      ));
+    } else {
+      add(false, t(
+        'diagnosePopupControlsDesync',
+        popupState.controlMismatches.join(' | ')
+      ), {
+        level: 'warning',
+        code: 'POPUP-CONTROLS-DESYNC',
+        domain: t('diagnoseDomainPopup'),
+        action: t('diagnoseActionReopenPopup'),
+        priority: 55
+      });
+    }
+
+    add(popupPage.keepaliveConnected, popupPage.keepaliveConnected
+      ? t('diagnosePopupKeepaliveOK')
+      : t('diagnosePopupKeepaliveDisconnected'), popupPage.keepaliveConnected ? {} : {
+      level: 'warning',
+      code: 'POPUP-KEEPALIVE-DISCONNECTED',
+      domain: t('diagnoseDomainPopup'),
+      action: t('diagnoseActionReopenPopup'),
+      priority: 50
+    });
 
     add(true, t('diagnoseEnabledPrefix') + s.enabled + ' (' + (s.enabled ? t('diagnoseOn') : t('diagnoseOff')) + ')',
       automationEnabled ? {} : {

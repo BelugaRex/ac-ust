@@ -4112,6 +4112,71 @@ return { reapplySmartSensitivityNow };`
       '14P-2: 天气与 heartbeat 判定比较原始毫秒，不比较已取整显示值');
   }
 
+  const popupPageStateStart = popupSource.indexOf('function evaluatePopupPageState(');
+  const popupPageStateEnd = popupSource.indexOf('\nfunction readPopupPageSnapshot', popupPageStateStart);
+  const popupPageStateSource = popupPageStateStart >= 0 && popupPageStateEnd > popupPageStateStart
+    ? popupSource.slice(popupPageStateStart, popupPageStateEnd)
+    : '';
+  const evaluatePopupPageState = popupPageStateSource
+    ? new Function(`${popupPageStateSource}; return evaluatePopupPageState;`)()
+    : null;
+  assertPass(typeof evaluatePopupPageState === 'function',
+    '14Q-P0: popup 页面诊断使用纯判定 helper，可独立验证加载、布局与控件同步');
+  if (typeof evaluatePopupPageState === 'function') {
+    const healthyPopupSnapshot = {
+      readyState: 'complete',
+      visibilityState: 'visible',
+      viewportWidth: 250,
+      viewportHeight: 600,
+      contentWidth: 250,
+      contentHeight: 720,
+      updatePending: false,
+      controls: {
+        timerPressed: true,
+        smartPressed: false,
+        activeHoursChecked: true,
+        activeHoursStart: '08:00',
+        activeHoursEnd: '23:00',
+        activeHoursBodyHidden: false,
+        activeHoursStartDisabled: false,
+        activeHoursEndDisabled: false,
+        timerBodyHidden: false,
+        smartBodyHidden: true
+      }
+    };
+    const healthyPopupSchedule = {
+      enabled: true,
+      activeHours: { enabled: true, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false }
+    };
+    const healthyPopupState = evaluatePopupPageState(healthyPopupSnapshot, healthyPopupSchedule);
+    assertPass(healthyPopupState.documentReady
+        && healthyPopupState.documentVisible
+        && healthyPopupState.dimensionsValid
+        && !healthyPopupState.horizontalOverflow
+        && healthyPopupState.controlSync === true,
+      '14Q-P1: Popup 就绪、可见、尺寸有效、仅纵向滚动且控件匹配时全部通过');
+
+    const overflowPopupState = evaluatePopupPageState({
+      ...healthyPopupSnapshot,
+      contentWidth: 252
+    }, healthyPopupSchedule);
+    const desyncedPopupState = evaluatePopupPageState({
+      ...healthyPopupSnapshot,
+      controls: { ...healthyPopupSnapshot.controls, timerPressed: false }
+    }, healthyPopupSchedule);
+    const pendingPopupState = evaluatePopupPageState({
+      ...healthyPopupSnapshot,
+      updatePending: true,
+      controls: { ...healthyPopupSnapshot.controls, timerPressed: false }
+    }, healthyPopupSchedule);
+    assertPass(overflowPopupState.horizontalOverflow
+        && desyncedPopupState.controlSync === false
+        && desyncedPopupState.controlMismatches.includes('timerPressed(expected=true, actual=false)')
+        && pendingPopupState.controlSync === null,
+      '14Q-P2: 横向溢出与控件失步分别定位到 expected/actual 字段；设置提交中跳过同步判定，避免瞬态误报');
+  }
+
   const diagnosticReportStart = popupSource.indexOf('const DIAGNOSTIC_LEVEL_SYMBOLS =');
   const diagnosticReportEnd = popupSource.indexOf('\nfunction projectPersistentSchedule', diagnosticReportStart);
   const diagnosticReportSource = diagnosticReportStart >= 0 && diagnosticReportEnd > diagnosticReportStart
@@ -4199,6 +4264,7 @@ return { reapplySmartSensitivityNow };`
     'diagnoseDomainBackground',
     'diagnoseDomainWeather',
     'diagnoseDomainPage',
+    'diagnoseDomainPopup',
     'diagnoseDomainSafety',
     'diagnoseActionCopyReport',
     'diagnoseActionReloadExtension',
@@ -4206,6 +4272,17 @@ return { reapplySmartSensitivityNow };`
     'diagnoseActionReloadACPage',
     'diagnoseActionCheckTimer',
     'diagnoseActionWaitWeather',
+    'diagnoseActionReopenPopup',
+    'diagnosePopupDocumentReady',
+    'diagnosePopupDocumentState',
+    'diagnosePopupLayoutOK',
+    'diagnosePopupLayoutOverflow',
+    'diagnosePopupLayoutUnmeasurable',
+    'diagnosePopupControlsSync',
+    'diagnosePopupControlsPending',
+    'diagnosePopupControlsDesync',
+    'diagnosePopupKeepaliveOK',
+    'diagnosePopupKeepaliveDisconnected',
     'diagnoseEnsureFailed',
     'diagnoseScheduleReadFailed',
     'diagnoseStorageReadFailed',
@@ -4234,6 +4311,10 @@ return { reapplySmartSensitivityNow };`
       && diagnoseHandlerSource.includes("code: 'SAFETY-TIMER-FAILED'")
       && diagnoseHandlerSource.includes("code: 'SAFETY-TIMER-MISSING'")
       && diagnoseHandlerSource.includes("code: 'SCHED-RUNTIME-ALARMS-LEAKED'")
+      && diagnoseHandlerSource.includes("code: 'POPUP-CONTROLS-DESYNC'")
+      && diagnoseHandlerSource.includes("code: 'POPUP-HORIZONTAL-OVERFLOW'")
+      && diagnoseHandlerSource.includes("code: 'POPUP-KEEPALIVE-DISCONNECTED'")
+      && diagnoseHandlerSource.includes('readPopupPageSnapshot()')
       && diagnoseHandlerSource.includes("s.pwmState === 'off' || bgSchedule.actualStatus?.isOn === true")
       && diagnoseHandlerSource.includes("code: 'WEATHER-SLOT-MISMATCH'")
       && diagnoseHandlerSource.includes('ensured?.success === false && ensured.error')

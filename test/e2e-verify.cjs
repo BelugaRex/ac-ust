@@ -303,6 +303,14 @@ async function run() {
     });
     assert(hasLocalizedPrefix(diagnoseText, 'diagnoseSummary'),
       '诊断顶部显示 error/warning/repaired 汇总');
+    assert(['diagnosePopupDocumentReady', 'diagnosePopupLayoutOK',
+      'diagnosePopupControlsSync', 'diagnosePopupKeepaliveOK']
+      .every(key => hasDiagnosticLinePrefix(diagnoseText, '✅', key)),
+    '真实 Popup 诊断显示文档、布局、控件同步与保活连接现场信息');
+    assert(!diagnoseText.includes('[POPUP-CONTROLS-DESYNC]')
+        && !diagnoseText.includes('[POPUP-HORIZONTAL-OVERFLOW]')
+        && !diagnoseText.includes('[POPUP-KEEPALIVE-DISCONNECTED]'),
+      '健康 Popup 不产生控件失步、横向溢出或保活断开警告');
     assert(diagnoseText.includes('[PAGE-HOME-MISSING]'),
       '未打开冷气主页时显示稳定故障码 PAGE-HOME-MISSING');
     assert(hasLocalizedPrefix(diagnoseText, 'diagnoseNextStep'),
