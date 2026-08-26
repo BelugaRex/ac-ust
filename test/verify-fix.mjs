@@ -572,12 +572,12 @@ async function runTests() {
     'popup.html 的 CSS 不使用 vw/vh 视口单位（防窗口塌陷回归）');
   assertPass(!/\d+\.\d+px\b/.test(popupCssNoComments),
     'popup.css 的显式像素尺寸均使用整数，避免主动引入子像素几何');
-  assertPass(/--popup-width:\s*250px/.test(popupCssNoComments)
+  assertPass(/--popup-width:\s*300px/.test(popupCssNoComments)
       && /body\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
       && /\.app-shell\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
       && /\.static-preview body\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
       && /\.static-preview \.app-shell\s*\{[^}]*?transform-origin:\s*top left/.test(popupCssNoComments),
-    'popup、shell 与静态预览共用 250px 宽度令牌；窄预览仍从左上角整体缩放');
+    'popup、shell 与静态预览共用 300px 宽度令牌；窄预览仍从左上角整体缩放');
   assertPass(/--font:\s*"Inter Variable",\s*"Inter",\s*-apple-system/.test(popupCssNoComments)
       && popupCssNoComments.includes('"PingFang SC"')
       && popupCssNoComments.includes('"Microsoft YaHei UI"')
@@ -592,10 +592,11 @@ async function runTests() {
   assertPass(popupHtml.includes('class="visually-hidden" id="timerToggleState"')
       && popupHtml.includes('class="visually-hidden" id="smartModeToggleState"'),
     '两种自动模式的状态变化保留给辅助技术，但不与可见选中态重复显示');
-  assertPass(/id="activeHoursRow"[\s\S]*?for="activeHoursToggle"[\s\S]*?class="toggle-switch"/.test(popupHtml)
+  assertPass(/id="automationSettingsLabel"[\s\S]*?for="automationToggle"[\s\S]*?id="automationToggle"/.test(popupHtml)
+      && /id="activeHoursRow"[\s\S]*?for="activeHoursToggle"[\s\S]*?class="toggle-switch"/.test(popupHtml)
       && /for="activeHoursStart"[\s\S]*?id="activeHoursStart"[\s\S]*?for="activeHoursEnd"[\s\S]*?id="activeHoursEnd"/.test(popupHtml)
       && !popupHtml.includes('id="activeHoursStatus"'),
-    '运行时段主行含标签与拨杆，开始/结束字段保留完整无障碍名称');
+    '自动控制与运行时段各有独立二元拨杆；开始/结束字段保留完整无障碍名称');
   assertPass(popupHtml.includes('data-i18n="automationSettingsLabel"')
       && popupHtml.includes('id="automationScopeHint" data-i18n="automationScopeHint"')
       && /class="active-hours-section"[^>]*aria-describedby="automationScopeHint"/.test(popupHtml),
@@ -604,12 +605,20 @@ async function runTests() {
       && (popupHtml.match(/class="field"/g) || []).length === 4
       && /\.field-grid\s*\{[^}]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*?gap:\s*10px/.test(popupCssNoComments),
     '运行时段与循环时长各使用一组等宽双列字段');
-  assertPass(/\.field input\[type="time"\]\s*,\s*\.field input\[type="number"\]\s*\{[^}]*?width:\s*100%[^}]*?height:\s*32px[^}]*?font-size:\s*13px/.test(popupCssNoComments),
-    '四个字段统一填满列宽，使用 32px 控件高度和 13px 数字');
+  assertPass(/\.field input\[type="text"\]\s*,\s*\.field input\[type="number"\]\s*\{[^}]*?width:\s*100%[^}]*?height:\s*32px[^}]*?font-size:\s*13px/.test(popupCssNoComments)
+      && (popupHtml.match(/type="text"[^>]*inputmode="numeric"[^>]*placeholder="HH:mm"/g) || []).length === 2
+      && !/<input[^>]*type="time"/.test(popupHtml),
+    '运行时段固定为单字段 24 小时 HH:mm；四个字段统一使用 32px 控件高度和 13px 数字');
+  assertPass(en.acRunning?.message === 'AC is on'
+      && en.pwmSettings?.message === 'Cycle timer'
+      && en.smartModeLabel?.message === 'Smart control'
+      && en.automationScopeHint?.message === 'Active hours limit both automatic modes'
+      && en.scheduleHintPinTab?.message === 'Keep the UST AC tab pinned and open for timer control.',
+    '英文 300px Popup 使用完整清晰标签，核心状态与模式名不换行');
   assertPass(/\.toggle-switch\s*\{[^}]*?width:\s*36px[^}]*?height:\s*20px/.test(popupCssNoComments)
       && /\.toggle-switch::after\s*\{[^}]*?inset:\s*-11px\s+-4px/.test(popupCssNoComments)
-      && (popupHtml.match(/class="toggle-switch"/g) || []).length === 1,
-    '仅运行时段保留 36×20px 二元拨杆，并通过绝对命中区达到桌面指针目标要求');
+      && (popupHtml.match(/class="toggle-switch"/g) || []).length === 2,
+    '自动控制与运行时段使用 36×20px 二元拨杆，并通过绝对命中区达到桌面指针目标要求');
   assertPass((popupHtml.match(/class="mode-choice"/g) || []).length === 2
       && /<fieldset class="mode-section">\s*<legend class="visually-hidden"[^>]*>[\s\S]*?class="mode-segment"[\s\S]*?<button[^>]*id="timerToggle"[^>]*aria-pressed="false"[\s\S]*?<button[^>]*id="smartModeToggle"[^>]*aria-pressed="false"/.test(popupHtml)
       && !/<input[^>]*id="(?:timerToggle|smartModeToggle)"/.test(popupHtml)
@@ -628,7 +637,9 @@ async function runTests() {
       && /\.header-version\s*\{[^}]*?font-size:\s*11px/.test(popupCssNoComments),
     '排版层级固定为 11/12/13/14/15px，26px 仅用于倒计时主数字');
   const popupJs = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
-  assertPass(popupJs.includes('const timerOn = currentScheduleEnabled && !smartOn;')
+  assertPass(popupJs.includes('const smartSelected = currentSmartMode.enabled;')
+      && popupJs.includes('const timerSelected = !smartSelected;')
+      && popupJs.includes('automationToggle.checked = currentScheduleEnabled;')
       && popupJs.includes("'statusSmartOnOK'")
       && popupJs.includes("'statusOnOK'")
       && popupJs.includes("add(true, t('diagnoseSmartModeOn'))")
@@ -641,8 +652,9 @@ async function runTests() {
   assertPass(popupJs.includes('const IS_STATIC_PREVIEW = !globalThis.chrome?.runtime?.id;')
       && /const staticPreviewSchedule = \{[\s\S]{0,400}enabled:\s*true,[\s\S]{0,400}actualStatus:\s*\{\s*isOn:\s*true\s*\}/.test(popupJs)
       && /async function refreshStatus\(\) \{[\s\S]{0,160}if \(IS_STATIC_PREVIEW\)/.test(popupJs)
-      && /async function updateSchedule\(enabled, restart = false\) \{[\s\S]{0,900}if \(IS_STATIC_PREVIEW\)/.test(popupJs),
-    '静态网页预览使用可交互的 PWM 开启演示状态，不依赖扩展 API');
+      && /async function updateSchedule\(enabled, restart = false\) \{[\s\S]{0,1200}if \(IS_STATIC_PREVIEW\)/.test(popupJs)
+      && /if \(IS_STATIC_PREVIEW\)[\s\S]{0,1000}data\.smartMode\.enabled \? 'statusSmartOnOK' : 'statusOnOK'/.test(popupJs),
+    '静态网页预览可交互且按当前模式反馈开启状态，不依赖扩展 API');
   assertPass(popupHtml.includes('class="app-shell" id="appShell"')
       && popupJs.includes('function fitStaticPreviewToViewport()')
       && popupJs.includes('const currentScale = Number(document.documentElement.dataset.previewScale) || 1;')
@@ -4211,6 +4223,7 @@ return { reapplySmartSensitivityNow };`
       contentHeight: 720,
       updatePending: false,
       controls: {
+        automationChecked: true,
         timerPressed: true,
         smartPressed: false,
         activeHoursChecked: true,
@@ -4235,6 +4248,36 @@ return { reapplySmartSensitivityNow };`
         && !healthyPopupState.horizontalOverflow
         && healthyPopupState.controlSync === true,
       '14Q-P1: Popup 就绪、可见、尺寸有效、仅纵向滚动且控件匹配时全部通过');
+
+    const disabledTimerPopupState = evaluatePopupPageState({
+      ...healthyPopupSnapshot,
+      controls: { ...healthyPopupSnapshot.controls, automationChecked: false }
+    }, {
+      ...healthyPopupSchedule,
+      enabled: false
+    });
+    const dormantSmartPopupState = evaluatePopupPageState({
+      ...healthyPopupSnapshot,
+      controls: {
+        ...healthyPopupSnapshot.controls,
+        automationChecked: false,
+        timerPressed: false,
+        smartPressed: true,
+        timerBodyHidden: true,
+        smartBodyHidden: false
+      }
+    }, {
+      ...healthyPopupSchedule,
+      enabled: false,
+      smartMode: { enabled: true }
+    });
+    assertPass(disabledTimerPopupState.controlSync === true
+        && disabledTimerPopupState.expected.automation === false
+        && disabledTimerPopupState.expected.timer === true
+        && dormantSmartPopupState.controlSync === true
+        && dormantSmartPopupState.expected.automation === false
+        && dormantSmartPopupState.expected.smart === true,
+      '14Q-P1a: 总开关关闭时仍以持久模式选择校验 Popup，不把“已选择”误判为“已运行”');
 
     const overflowPopupState = evaluatePopupPageState({
       ...healthyPopupSnapshot,
@@ -4677,6 +4720,7 @@ return { reapplySmartSensitivityNow };`
     '16C-1: 跨午夜或 start>=end 的非法运行时段必须 fail-closed，不能意外放开自动控制');
 
   const automationHeadingIndex = popupHtml.indexOf('class="automation-heading"');
+  const automationToggleIndex = popupHtml.indexOf('id="automationToggle"');
   const activeHoursSectionIndex = popupHtml.indexOf('class="active-hours-section"');
   const activeHoursHeaderIndex = popupHtml.indexOf('id="activeHoursSectionHeader"');
   const activeHoursBodyIndex = popupHtml.indexOf('id="activeHoursBody"');
@@ -4696,7 +4740,9 @@ return { reapplySmartSensitivityNow };`
     'syncModeUI'
   );
   assertPass(automationHeadingIndex >= 0
+      && automationToggleIndex > automationHeadingIndex
       && activeHoursSectionIndex > automationHeadingIndex
+      && activeHoursSectionIndex > automationToggleIndex
       && activeHoursHeaderIndex > activeHoursSectionIndex
       && activeHoursBodyIndex > activeHoursHeaderIndex
       && modeSectionIndex > activeHoursBodyIndex
@@ -4707,15 +4753,34 @@ return { reapplySmartSensitivityNow };`
       && !popupHtml.includes('role="group" aria-labelledby="automationModeLabel"')
       && !popupHtml.includes('automationModeExclusive')
       && !popupHtml.includes('automationModeHint'),
-    '16D: 自动控制先声明共同作用域；分段控件保留无障碍分组名，不重复显示二选一说明');
-  assertPass(syncModeUiSource.includes("timerToggle.setAttribute('aria-pressed', String(timerOn));")
-      && syncModeUiSource.includes("smartModeToggle.setAttribute('aria-pressed', String(smartOn));")
-      && syncModeUiSource.includes('timerBody.hidden = !timerOn;')
-      && syncModeUiSource.includes('smartBody.hidden = !smartOn;')
+    '16D: 自动控制先提供独立总开关并声明共同作用域；分段控件保留无障碍分组名');
+  const timerModeHandlerSource16 = extractSourceSection(
+    popupSource,
+    "timerToggle.addEventListener('click', async () => {",
+    '\n});\n\n// ----- 修改分钟数自动保存；运行中则重启当前周期 -----',
+    'timer mode selection'
+  );
+  const smartModeHandlerSource16 = extractSourceSection(
+    popupSource,
+    "smartModeToggle.addEventListener('click', async () => {",
+    "\nsmartSensitivity.addEventListener('input'",
+    'smart mode selection'
+  );
+  assertPass(syncModeUiSource.includes('automationToggle.checked = currentScheduleEnabled;')
+      && syncModeUiSource.includes('const smartSelected = currentSmartMode.enabled;')
+      && syncModeUiSource.includes('const timerSelected = !smartSelected;')
+      && syncModeUiSource.includes("timerToggle.setAttribute('aria-pressed', String(timerSelected));")
+      && syncModeUiSource.includes("smartModeToggle.setAttribute('aria-pressed', String(smartSelected));")
+      && syncModeUiSource.includes('timerBody.hidden = !timerSelected;')
+      && syncModeUiSource.includes('smartBody.hidden = !smartSelected;')
       && popupSource.includes("timerToggle.addEventListener('click', async () => {")
       && popupSource.includes("smartModeToggle.addEventListener('click', async () => {")
-      && popupSource.includes('currentSmartMode.enabled = false;  // 模式互斥：选循环定时 → 关智能控制'),
-    '16D-1: 两个分段按钮同步持久选中态并保持原有互斥、折叠与再次点击关闭语义');
+      && popupSource.includes("automationToggle.addEventListener('change', async () => {")
+      && timerModeHandlerSource16.includes('if (!currentSmartMode.enabled) return;')
+      && smartModeHandlerSource16.includes('if (currentSmartMode.enabled) return;')
+      && !timerModeHandlerSource16.includes('currentScheduleEnabled = enabled;')
+      && !smartModeHandlerSource16.includes('currentScheduleEnabled = enabled;'),
+    '16D-1: 总开关只管启停；分段控件始终单选且再次点击当前模式不会关闭自动控制');
   assertPass(syncActiveHoursUiSource.includes('activeHoursBody.hidden = !currentActiveHours.enabled;')
       && !syncModeUiSource.includes('activeHoursBody')
       && !syncModeUiSource.includes('activeHoursToggle'),
@@ -4729,7 +4794,9 @@ return { reapplySmartSensitivityNow };`
   const activeHoursStartControl16 = {
     value: '23:00',
     validationMessage: '',
-    setCustomValidity(message) { this.validationMessage = message; }
+    reportCount: 0,
+    setCustomValidity(message) { this.validationMessage = message; },
+    reportValidity() { this.reportCount += 1; return !this.validationMessage; }
   };
   const activeHoursEndControl16 = {
     value: '07:00',
@@ -4739,7 +4806,7 @@ return { reapplySmartSensitivityNow };`
     reportValidity() { this.reportCount += 1; return !this.validationMessage; }
   };
   const activeHoursCommitHarness16 = new Function(
-    'activeHoursToggle', 'activeHoursStart', 'activeHoursEnd', 't',
+    'activeHoursToggle', 'activeHoursStart', 'activeHoursEnd', 'normalize24HourTime', 't',
     `let currentScheduleEnabled = true;
     let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
     let updateCount = 0;
@@ -4754,17 +4821,34 @@ return { reapplySmartSensitivityNow };`
     { checked: true },
     activeHoursStartControl16,
     activeHoursEndControl16,
-    key => key === 'activeHoursInvalid' ? 'invalid active hours' : key
+    value => {
+      const match = String(value || '').trim().match(/^(\d{1,2})(?::?(\d{2}))$/);
+      if (!match) return '';
+      const hours = Number(match[1]);
+      const minutes = Number(match[2]);
+      if (!Number.isInteger(hours) || !Number.isInteger(minutes)
+          || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return '';
+      return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+    },
+    key => key === 'activeHoursInvalid'
+      ? 'invalid active hours'
+      : key === 'time24Invalid' ? 'invalid 24-hour time' : key
   );
   activeHoursCommitHarness16.commitActiveHours();
   const invalidCommitState16 = activeHoursCommitHarness16.getState();
-  activeHoursStartControl16.value = '08:00';
+  activeHoursStartControl16.value = '25:00';
   activeHoursEndControl16.value = '23:00';
+  activeHoursCommitHarness16.commitActiveHours();
+  const invalidFormatState16 = activeHoursCommitHarness16.getState();
+  activeHoursStartControl16.value = '800';
+  activeHoursEndControl16.value = '2300';
   activeHoursCommitHarness16.commitActiveHours();
   const validCommitState16 = activeHoursCommitHarness16.getState();
   assertPass(invalidCommitState16.updateCount === 0
       && invalidCommitState16.currentActiveHours.enabled === false
       && activeHoursEndControl16.reportCount === 1
+      && invalidFormatState16.updateCount === 0
+      && activeHoursStartControl16.reportCount === 1
       && validCommitState16.updateCount === 1
       && validCommitState16.currentActiveHours.enabled === true
       && validCommitState16.currentActiveHours.start === '08:00'
@@ -4772,8 +4856,80 @@ return { reapplySmartSensitivityNow };`
       && activeHoursStartControl16.validationMessage === ''
       && activeHoursEndControl16.validationMessage === ''
       && zhCN.activeHoursInvalid?.message
-      && en.activeHoursInvalid?.message,
-    '16E-1: popup 拒绝提交 start>=end，并在修正后清除校验错误再保留原模式启用状态');
+      && en.activeHoursInvalid?.message
+      && zhCN.time24Invalid?.message
+      && en.time24Invalid?.message,
+    '16E-1: popup 拒绝非法范围和非法时间，接受简写并归一为 24 小时 HH:mm');
+
+  const normalize24HourTimeStart16 = popupSource.indexOf('function normalize24HourTime(value) {');
+  assertPass(normalize24HourTimeStart16 >= 0,
+    '16E-2: popup 提供可独立验证的 24 小时时间归一函数');
+  if (normalize24HourTimeStart16 >= 0) {
+    const normalize24HourTimeSource16 = extractSourceSection(
+      popupSource,
+      'function normalize24HourTime(value) {',
+      '\nfunction commitActiveHours() {',
+      'normalize24HourTime'
+    );
+    const normalize24HourTime16 = new Function(
+      `${normalize24HourTimeSource16}; return normalize24HourTime;`
+    )();
+    assertPass(normalize24HourTime16('0800') === '08:00'
+        && normalize24HourTime16('8:00') === '08:00'
+        && normalize24HourTime16('23:59') === '23:59'
+        && normalize24HourTime16('24:00') === ''
+        && normalize24HourTime16('12:60') === ''
+        && normalize24HourTime16('8 PM') === '',
+      '16E-3: 24 小时归一接受 HHmm/H:mm，拒绝 AM/PM 与越界值');
+  }
+
+  const minuteValidationStart16 = popupSource.indexOf('function validateManualMinutes(');
+  assertPass(minuteValidationStart16 >= 0
+      && !popupSource.includes('readPositiveMinutes(input, fallback)')
+      && !popupSource.includes('onMinutesInput.value = data.onMinutes;')
+      && popupSource.includes('validateManualMinutes({ report: enabled && !currentSmartMode.enabled })')
+      && popupSource.includes('if (!manualMinutes && enabled && !currentSmartMode.enabled)')
+      && popupSource.indexOf('const updateRevision = ++scheduleUpdateRevision;', popupSource.indexOf('async function updateSchedule('))
+        > popupSource.indexOf('if (!manualMinutes && enabled && !currentSmartMode.enabled)', popupSource.indexOf('async function updateSchedule('))
+      && zhCN.minutesInvalid?.message
+      && en.minutesInvalid?.message,
+    '16E-4: 非法分钟保留原文且只阻止启用循环定时；关闭路径不被表单错误阻断');
+  if (minuteValidationStart16 >= 0) {
+    const manualMinutesValidationSource16 = extractSourceSection(
+      popupSource,
+      'function parsePositiveMinutes(value) {',
+      '\n// ----- 更新定时设置 -----',
+      'manual minutes validation'
+    );
+    const makeMinuteControl16 = value => ({
+      value,
+      validationMessage: '',
+      reportCount: 0,
+      setCustomValidity(message) { this.validationMessage = message; },
+      reportValidity() { this.reportCount += 1; return !this.validationMessage; }
+    });
+    const onMinuteControl16 = makeMinuteControl16('15');
+    const offMinuteControl16 = makeMinuteControl16('45');
+    const manualMinutesHarness16 = new Function(
+      'onMinutesInput', 'offMinutesInput', 't',
+      `let currentManualMinutes = { onMinutes: 15, offMinutes: 45 };
+      ${manualMinutesValidationSource16}
+      return { parsePositiveMinutes, validateManualMinutes };`
+    )(onMinuteControl16, offMinuteControl16, () => 'invalid minutes');
+    const validMinutes16 = manualMinutesHarness16.validateManualMinutes({ report: true });
+    onMinuteControl16.value = '1.5';
+    const decimalMinutes16 = manualMinutesHarness16.validateManualMinutes({ report: true });
+    onMinuteControl16.value = '0';
+    const zeroMinutes16 = manualMinutesHarness16.validateManualMinutes({ report: false });
+    assertPass(validMinutes16.onMinutes === 15 && validMinutes16.offMinutes === 45
+        && decimalMinutes16 === null && zeroMinutes16 === null
+        && onMinuteControl16.value === '0'
+        && onMinuteControl16.validationMessage === 'invalid minutes'
+        && onMinuteControl16.reportCount === 1
+        && manualMinutesHarness16.parsePositiveMinutes('01') === 1
+        && manualMinutesHarness16.parsePositiveMinutes('abc') === null,
+      '16E-5: 分钟校验接受正整数，拒绝小数／零／非数字，报告错误且不改写输入原文');
+  }
 
   const setupAlarmsBody16 = extractSourceSection(
     backgroundSource,
@@ -5717,7 +5873,7 @@ return { reapplySmartSensitivityNow };`
   const popupRenderedSchedulesF90 = [];
   const popupStatusesF90 = [];
   const popupUpdateHarnessF90 = new Function(
-    'readPositiveMinutes', 'onMinutesInput', 'offMinutesInput',
+    'validateManualMinutes', 'currentManualMinutes',
     'currentActiveHours', 'currentSmartMode', 'IS_STATIC_PREVIEW',
     'staticPreviewSchedule', 'updateCountdownDisplay', 'showStatus', 't',
     'chrome', 'attachCachedActualStatus',
@@ -5731,12 +5887,8 @@ return { reapplySmartSensitivityNow };`
       state: () => ({ pendingScheduleUpdates, currentScheduleEnabled })
     };`
   )(
-    (input, fallback) => {
-      const value = Number.parseInt(input.value, 10);
-      return Number.isFinite(value) && value >= 1 ? value : fallback;
-    },
-    { value: '15' },
-    { value: '45' },
+    () => ({ onMinutes: 15, offMinutes: 45 }),
+    { onMinutes: 15, offMinutes: 45 },
     { enabled: true, start: '08:00', end: '23:00' },
     { enabled: false, sensitivity: 5 },
     false,
@@ -5924,10 +6076,11 @@ return { reapplySmartSensitivityNow };`
   };
   const timerBusyControlF90 = makeBusyControlF90();
   const smartBusyControlF90 = makeBusyControlF90();
+  const automationBusyControlF90 = makeBusyControlF90();
   const statusBusyControlF90 = makeBusyControlF90();
   const modeBusyMessagesF90 = [];
   const modeBusyHarnessF90 = new Function(
-    'timerToggle', 'smartModeToggle', 'statusDiv', 'showStatus',
+    'automationToggle', 'timerToggle', 'smartModeToggle', 'statusDiv', 'showStatus',
     `let modeSwitchInFlight = false;
     ${modeSwitchBusySourceF90}
     return {
@@ -5935,6 +6088,7 @@ return { reapplySmartSensitivityNow };`
       state: () => modeSwitchInFlight
     };`
   )(
+    automationBusyControlF90,
     timerBusyControlF90,
     smartBusyControlF90,
     statusBusyControlF90,
@@ -5942,19 +6096,21 @@ return { reapplySmartSensitivityNow };`
   );
   modeBusyHarnessF90.setModeSwitchBusy(true, 'Enabling');
   const busyAppliedF90 = modeBusyHarnessF90.state() === true
-    && timerBusyControlF90.disabled && smartBusyControlF90.disabled
+    && automationBusyControlF90.disabled && timerBusyControlF90.disabled && smartBusyControlF90.disabled
+    && automationBusyControlF90.hasAttribute('aria-busy')
     && timerBusyControlF90.hasAttribute('aria-busy')
     && smartBusyControlF90.hasAttribute('aria-busy')
     && statusBusyControlF90.hasAttribute('aria-busy');
   modeBusyHarnessF90.setModeSwitchBusy(false);
   assertPass(busyAppliedF90
       && modeBusyHarnessF90.state() === false
-      && !timerBusyControlF90.disabled && !smartBusyControlF90.disabled
+      && !automationBusyControlF90.disabled && !timerBusyControlF90.disabled && !smartBusyControlF90.disabled
+      && !automationBusyControlF90.hasAttribute('aria-busy')
       && !timerBusyControlF90.hasAttribute('aria-busy')
       && !smartBusyControlF90.hasAttribute('aria-busy')
       && !statusBusyControlF90.hasAttribute('aria-busy')
       && modeBusyMessagesF90[0]?.message === 'Enabling',
-    '16O-4: 模式提交期间循环定时与智能控制同时锁定并暴露短暂 busy 状态，完成后一起恢复');
+    '16O-4: 自动控制或模式提交期间总开关与两个模式同时锁定并暴露 busy，完成后一起恢复');
 
   const smartReapplyRequestSourceF90 = extractSourceSection(
     popupJs,

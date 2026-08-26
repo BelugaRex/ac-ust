@@ -1239,10 +1239,16 @@
     <!-- Settings card: global active-hours scope + mutually exclusive automation modes -->
     <div class="settings-card">
       <div class="automation-heading">
-        <div>
-          <h2 data-i18n="automationSettingsLabel"></h2>
-          <p id="automationScopeHint" data-i18n="automationScopeHint"></p>
+        <div class="automation-title-row">
+          <h2 id="automationSettingsLabel">
+            <label for="automationToggle" data-i18n="automationSettingsLabel"></label>
+          </h2>
+          <label class="toggle-switch">
+            <input type="checkbox" id="automationToggle" aria-labelledby="automationSettingsLabel" aria-describedby="automationScopeHint">
+            <span class="toggle-slider"></span>
+          </label>
         </div>
+        <p id="automationScopeHint" data-i18n="automationScopeHint"></p>
       </div>
       <section class="active-hours-section" aria-labelledby="activeHoursRow" aria-describedby="automationScopeHint">
       <div class="settings-header" id="activeHoursSectionHeader">
@@ -1257,14 +1263,15 @@
         </div>
       </div>
       <div class="setting-group" id="activeHoursBody" role="group" aria-labelledby="activeHoursRow">
+        <span class="visually-hidden" id="time24Hint" data-i18n="time24Hint"></span>
         <div class="field-grid" id="activeHoursSection">
           <div class="field">
             <label class="field-label" for="activeHoursStart" data-i18n="activeHoursStartShort"></label>
-            <input type="time" id="activeHoursStart" value="08:00" data-i18n-aria-label="activeHoursStartLabel">
+            <input type="text" inputmode="numeric" placeholder="HH:mm" pattern="(?:[01]\d|2[0-3]):[0-5]\d" maxlength="5" autocomplete="off" spellcheck="false" id="activeHoursStart" value="08:00" data-i18n-aria-label="activeHoursStartLabel" aria-describedby="time24Hint">
           </div>
           <div class="field">
             <label class="field-label" for="activeHoursEnd" data-i18n="activeHoursEndShort"></label>
-            <input type="time" id="activeHoursEnd" value="23:00" data-i18n-aria-label="activeHoursEndLabel">
+            <input type="text" inputmode="numeric" placeholder="HH:mm" pattern="(?:[01]\d|2[0-3]):[0-5]\d" maxlength="5" autocomplete="off" spellcheck="false" id="activeHoursEnd" value="23:00" data-i18n-aria-label="activeHoursEndLabel" aria-describedby="time24Hint">
           </div>
         </div>
       </div>

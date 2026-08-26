@@ -1,7 +1,7 @@
 /* AC-UST popup: restrained pre-Liquid-Glass macOS settings language. */
 :root {
   color-scheme: light;
-  --popup-width: 250px;
+  --popup-width: 300px;
   /* ============================================================
    * v0.6.3 设计转向：以 UST 页面色板为主、Apple HIG 为辅
    * （2026-08-04 从 .vscode/开机+已设置好定时.md 与关机.md 两份
@@ -367,6 +367,13 @@ input {
   border-bottom: 1px solid var(--separator);
 }
 
+.automation-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .automation-heading h2 {
   color: var(--text);
   font-size: 15px;
@@ -621,7 +628,7 @@ input {
   color: var(--text-tertiary);
 }
 
-.field input[type="time"],
+.field input[type="text"],
 .field input[type="number"] {
   width: 100%;
   min-width: 0;
@@ -643,14 +650,6 @@ input {
   padding-right: 42px;
   appearance: textfield;
   -moz-appearance: textfield;
-}
-
-.field input[type="time"]::-webkit-calendar-picker-indicator {
-  width: 15px;
-  height: 15px;
-  padding: 0;
-  margin: 0;
-  opacity: 0.72;
 }
 
 .field input[type="number"]::-webkit-inner-spin-button,
@@ -708,8 +707,8 @@ input {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 7px;
-  padding-top: 6px;
+  gap: 5px;
+  padding-top: 4px;
 }
 
 .status {

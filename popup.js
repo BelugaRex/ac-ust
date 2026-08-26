@@ -53,6 +53,7 @@ const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const onMinutesInput = document.getElementById('onMinutes');
 const offMinutesInput = document.getElementById('offMinutes');
+const automationToggle = document.getElementById('automationToggle');
 const activeHoursToggle = document.getElementById('activeHoursToggle');
 const activeHoursStart = document.getElementById('activeHoursStart');
 const activeHoursEnd = document.getElementById('activeHoursEnd');
@@ -99,6 +100,7 @@ try {
 
 // ----- 加载已保存的设置 -----
 let currentScheduleEnabled = false;
+let currentManualMinutes = { onMinutes: 60, offMinutes: 60 };
 let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
 let currentSmartMode = { enabled: false, sensitivity: 5 };
 let lastAnnouncedState = '';
@@ -129,8 +131,12 @@ async function loadSettings() {
     ? staticPreviewSchedule
     : (await chrome.storage.local.get('ac_schedule')).ac_schedule || {};
   currentScheduleEnabled = !!schedule.enabled;
-  onMinutesInput.value = schedule.onMinutes ?? 60;
-  offMinutesInput.value = schedule.offMinutes ?? 60;
+  currentManualMinutes = {
+    onMinutes: parsePositiveMinutes(schedule.onMinutes) ?? 60,
+    offMinutes: parsePositiveMinutes(schedule.offMinutes) ?? 60
+  };
+  onMinutesInput.value = String(currentManualMinutes.onMinutes);
+  offMinutesInput.value = String(currentManualMinutes.offMinutes);
   // activeHours
   const ah = schedule.activeHours || {};
   currentActiveHours = {
@@ -158,39 +164,55 @@ function syncActiveHoursUI() {
 }
 
 function syncModeUI() {
-  const smartOn = currentSmartMode.enabled;
-  const timerOn = currentScheduleEnabled && !smartOn;
+  const smartSelected = currentSmartMode.enabled;
+  const timerSelected = !smartSelected;
+  automationToggle.checked = currentScheduleEnabled;
 
-  timerToggle.setAttribute('aria-pressed', String(timerOn));
-  timerToggleState.textContent = timerOn ? t('timerEnabled') : t('timerDisabled');
+  timerToggle.setAttribute('aria-pressed', String(timerSelected));
+  timerToggleState.textContent = timerSelected ? t('modeSelected') : t('modeNotSelected');
 
-  smartModeToggle.setAttribute('aria-pressed', String(smartOn));
-  smartModeToggleState.textContent = smartOn ? t('timerEnabled') : t('timerDisabled');
+  smartModeToggle.setAttribute('aria-pressed', String(smartSelected));
+  smartModeToggleState.textContent = smartSelected ? t('modeSelected') : t('modeNotSelected');
 
   // 灵敏度滑块始终可调，便于在开启智能控制前预设偏好
   smartSensitivity.value = String(currentSmartMode.sensitivity);
   requestAnimationFrame(updateSmartSensitivityBubble);
 
-  // 折叠：未选中的模式隐藏对应 body。智能控制与循环定时互斥；
-  // 两者都未选中时，两个 body 都折叠。
-  timerBody.hidden = !timerOn;
-  smartBody.hidden = !smartOn;
+  // 总开关只控制运行；分段控件始终保留一个模式，关闭时仍可预设参数。
+  timerBody.hidden = !timerSelected;
+  smartBody.hidden = !smartSelected;
+}
+
+function normalize24HourTime(value) {
+  const match = String(value || '').trim().match(/^(\d{1,2})(?::?(\d{2}))$/);
+  if (!match) return '';
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isInteger(hours) || !Number.isInteger(minutes)
+      || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return '';
+  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 }
 
 function commitActiveHours() {
   // 读取 UI 值并提交到 background
-  const startVal = activeHoursStart.value || '08:00';
-  const endVal = activeHoursEnd.value || '23:00';
-  const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
+  const startVal = normalize24HourTime(activeHoursStart.value);
+  const endVal = normalize24HourTime(activeHoursEnd.value);
+  const startInvalid = activeHoursToggle.checked && !startVal;
+  const endInvalid = activeHoursToggle.checked && !endVal;
   const invalidRange = activeHoursToggle.checked
-    && (!timePattern.test(startVal) || !timePattern.test(endVal) || startVal >= endVal);
-  const validationMessage = invalidRange ? t('activeHoursInvalid') : '';
-  activeHoursStart.setCustomValidity(validationMessage);
-  activeHoursEnd.setCustomValidity(validationMessage);
-  if (invalidRange) {
-    activeHoursEnd.reportValidity();
+    && !startInvalid && !endInvalid && startVal >= endVal;
+  activeHoursStart.setCustomValidity(startInvalid
+    ? t('time24Invalid')
+    : invalidRange ? t('activeHoursInvalid') : '');
+  activeHoursEnd.setCustomValidity(endInvalid
+    ? t('time24Invalid')
+    : invalidRange ? t('activeHoursInvalid') : '');
+  if (startInvalid || endInvalid || invalidRange) {
+    (startInvalid ? activeHoursStart : activeHoursEnd).reportValidity();
     return;
   }
+  activeHoursStart.value = startVal;
+  activeHoursEnd.value = endVal;
   currentActiveHours = {
     enabled: activeHoursToggle.checked,
     start: startVal,
@@ -203,6 +225,23 @@ function commitActiveHours() {
 activeHoursToggle.addEventListener('change', commitActiveHours);
 activeHoursStart.addEventListener('change', commitActiveHours);
 activeHoursEnd.addEventListener('change', commitActiveHours);
+
+automationToggle.addEventListener('change', async () => {
+  if (modeSwitchInFlight) return;
+  const previousEnabled = currentScheduleEnabled;
+  const enabled = automationToggle.checked;
+  currentScheduleEnabled = enabled;
+  syncModeUI();
+  const pendingMessage = t(enabled ? 'timerEnabling' : 'timerDisabling');
+  setModeSwitchBusy(true, pendingMessage);
+  try {
+    const result = await updateSchedule(enabled, true);
+    if (!result?.success) currentScheduleEnabled = previousEnabled;
+  } finally {
+    syncModeUI();
+    setModeSwitchBusy(false);
+  }
+});
 
 // ----- 智能模式：开关 + 灵敏度滑块 + 实时读数 -----
 function renderSmartReadout(suggested, weather) {
@@ -280,16 +319,20 @@ async function updateSmartReadout() {
 
 smartModeToggle.addEventListener('click', async () => {
   if (modeSwitchInFlight) return;
-  const enabled = smartModeToggle.getAttribute('aria-pressed') !== 'true';
-  currentSmartMode.enabled = enabled;
-  currentScheduleEnabled = enabled;  // 智能控制开 = 自动控制开；关 = 自动控制全关（与循环定时互斥）
+  if (currentSmartMode.enabled) return;
+  currentSmartMode.enabled = true;
   syncModeUI();
-  const pendingMessage = t(enabled ? 'timerEnabling' : 'timerDisabling');
+  const pendingMessage = t('modeChanging');
   smartModeToggleState.textContent = pendingMessage;
   setModeSwitchBusy(true, pendingMessage);
   try {
-    await updateSchedule(enabled, true);
-    await updateSmartReadout();
+    const result = await updateSchedule(currentScheduleEnabled, currentScheduleEnabled);
+    if (result?.success) {
+      showStatus(t('statusModeSaved'), 'success');
+      await updateSmartReadout();
+    } else {
+      currentSmartMode.enabled = false;
+    }
   } finally {
     syncModeUI();
     setModeSwitchBusy(false);
@@ -624,27 +667,45 @@ function renderCountdown(schedule, alarm, nextAction) {
   }
 }
 
-function readPositiveMinutes(input, fallback) {
-  const value = Number.parseInt(input.value, 10);
-  return Number.isFinite(value) && value >= 1 ? value : fallback;
+function parsePositiveMinutes(value) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
+}
+
+function validateManualMinutes({ report = false } = {}) {
+  const onMinutes = parsePositiveMinutes(onMinutesInput.value);
+  const offMinutes = parsePositiveMinutes(offMinutesInput.value);
+  const message = t('minutesInvalid');
+  onMinutesInput.setCustomValidity(onMinutes === null ? message : '');
+  offMinutesInput.setCustomValidity(offMinutes === null ? message : '');
+  const invalidInput = onMinutes === null ? onMinutesInput : offMinutes === null ? offMinutesInput : null;
+  if (invalidInput) {
+    if (report) invalidInput.reportValidity();
+    return null;
+  }
+  currentManualMinutes = { onMinutes, offMinutes };
+  return currentManualMinutes;
 }
 
 // ----- 更新定时设置 -----
 async function updateSchedule(enabled, restart = false) {
+  const manualMinutes = validateManualMinutes({ report: enabled && !currentSmartMode.enabled });
+  if (!manualMinutes && enabled && !currentSmartMode.enabled) {
+    showStatus(t('minutesInvalid'), 'error');
+    return { success: false, validationError: true, superseded: false };
+  }
   const updateRevision = ++scheduleUpdateRevision;
   const data = {
     enabled,
     mode: 'pwm',
     clockMode: false,  // v0.5.x 起固定间隔模式
-    onMinutes: readPositiveMinutes(onMinutesInput, 30),
-    offMinutes: readPositiveMinutes(offMinutesInput, 30),
+    onMinutes: manualMinutes?.onMinutes ?? currentManualMinutes.onMinutes,
+    offMinutes: manualMinutes?.offMinutes ?? currentManualMinutes.offMinutes,
     activeHours: { ...currentActiveHours },  // 两种自动控制共用的运行时段
     smartMode: { ...currentSmartMode },      // v0.8.0: 智能模式（灵敏度 + 开关）
     restart
   };
 
-  onMinutesInput.value = data.onMinutes;
-  offMinutesInput.value = data.offMinutes;
   pendingScheduleUpdates += 1;
 
   const operation = scheduleUpdateChain
@@ -663,7 +724,12 @@ async function updateSchedule(enabled, restart = false) {
             updateCountdownDisplay(staticPreviewSchedule, {
               scheduledTime: staticPreviewSchedule.nextTriggerAt
             });
-            showStatus(data.enabled ? t('statusOnOK') : t('statusClosedOK'), 'success');
+            showStatus(
+              t(data.enabled
+                ? (data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK')
+                : 'statusClosedOK'),
+              'success'
+            );
           }
           return { success: true, superseded };
         }
@@ -726,7 +792,7 @@ async function waitForLatestScheduleUpdateResult() {
 
 function setModeSwitchBusy(busy, message = '') {
   modeSwitchInFlight = busy;
-  for (const toggle of [timerToggle, smartModeToggle]) {
+  for (const toggle of [automationToggle, timerToggle, smartModeToggle]) {
     toggle.disabled = busy;
     if (busy) toggle.setAttribute('aria-busy', 'true');
     else toggle.removeAttribute('aria-busy');
@@ -742,27 +808,30 @@ function setModeSwitchBusy(busy, message = '') {
 // ----- 自动模式分段选择（循环定时与智能控制互斥） -----
 timerToggle.addEventListener('click', async () => {
   if (modeSwitchInFlight) return;
-  const enabled = timerToggle.getAttribute('aria-pressed') !== 'true';
-  currentScheduleEnabled = enabled;
-  if (enabled) {
-    currentSmartMode.enabled = false;  // 模式互斥：选循环定时 → 关智能控制
-  }
+  if (!currentSmartMode.enabled) return;
+  currentSmartMode.enabled = false;
   syncModeUI();
-  const pendingMessage = t(enabled ? 'timerEnabling' : 'timerDisabling');
+  const pendingMessage = t('modeChanging');
   timerToggleState.textContent = pendingMessage;
   setModeSwitchBusy(true, pendingMessage);
   try {
-    await updateSchedule(enabled, true);
+    const result = await updateSchedule(currentScheduleEnabled, currentScheduleEnabled);
+    if (result?.success) showStatus(t('statusModeSaved'), 'success');
+    else currentSmartMode.enabled = true;
   } finally {
     syncModeUI();
     setModeSwitchBusy(false);
   }
 });
 
-// ----- 已启用时修改分钟数自动重启 -----
+// ----- 修改分钟数自动保存；运行中则重启当前周期 -----
 for (const input of [onMinutesInput, offMinutesInput]) {
-  input.addEventListener('change', () => {
-    if (currentScheduleEnabled) updateSchedule(true, true);
+  input.addEventListener('change', async () => {
+    if (!validateManualMinutes({ report: true })) return;
+    const result = await updateSchedule(currentScheduleEnabled, currentScheduleEnabled);
+    if (result?.success && !currentScheduleEnabled) {
+      showStatus(t('statusSettingsSaved'), 'success');
+    }
   });
 }
 
@@ -947,8 +1016,9 @@ function evaluatePopupPageState(snapshot, schedule) {
     ? page.controls
     : {};
   const expected = {
+    automation: config.enabled === true,
     activeHours: config.activeHours?.enabled === true,
-    timer: config.enabled === true && config.smartMode?.enabled !== true,
+    timer: config.smartMode?.enabled !== true,
     smart: config.smartMode?.enabled === true,
     activeHoursStart: typeof config.activeHours?.start === 'string'
       ? config.activeHours.start
@@ -962,6 +1032,7 @@ function evaluatePopupPageState(snapshot, schedule) {
     && Number(page.contentWidth) > 0
     && Number(page.contentHeight) > 0;
   const controlMismatches = [
+    ['automationChecked', expected.automation],
     ['activeHoursChecked', expected.activeHours],
     ['activeHoursStart', expected.activeHoursStart],
     ['activeHoursEnd', expected.activeHoursEnd],
@@ -1023,6 +1094,7 @@ function readPopupPageSnapshot() {
     keepaliveConnected: keepalivePort !== null,
     updatePending: hasPendingScheduleUpdate() || modeSwitchInFlight,
     controls: {
+      automationChecked: automationToggle?.checked === true,
       timerPressed: timerToggle?.getAttribute('aria-pressed') === 'true',
       smartPressed: smartModeToggle?.getAttribute('aria-pressed') === 'true',
       activeHoursChecked: activeHoursToggle?.checked === true,
@@ -1334,6 +1406,7 @@ btnDiagnose.addEventListener('click', async () => {
     } else if (popupState.controlSync) {
       add(true, t(
         'diagnosePopupControlsSync',
+        popupState.expected.automation,
         popupState.expected.activeHours,
         popupState.expected.timer,
         popupState.expected.smart
