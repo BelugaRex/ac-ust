@@ -8,12 +8,10 @@ AC-UST 是无依赖的纯 JS Chrome/Edge 扩展，测试分三层，各自职责
 |------|--------|------|------|
 | 架构契约 | 开发者(自动化) | Node | 验证依赖方向、运行入口、动态注入和打包清单 |
 | 代码层(单元/逻辑) | 开发者(自动化) | Node + mock chrome API | 验证 popup.js / background.js 的逻辑分支正确性 |
-| 浏览器层(端到端) | **用户手动** | Edge + 真实 AC 页面 | 验证扩展在真实环境的行为(灯转色、闹钟、PWM 循环) |
+| 浏览器层(确定性 E2E) | 开发者(自动化) | Playwright + 真实 dist 扩展 + 可控页面/网络 fixture | 验证用户交互、跨上下文消息、页面控制、重启与数据链 |
+| 外部验收 | **用户手动** | Chrome/Edge + 真实登录 AC 页面 | 验证 HKUST 服务端持久化、真实设备、浏览器休眠与商店渠道 |
 
-**浏览器层验证由用户在 Edge 中手动进行**,因为:
-- 需要真实 HKUST 账号登录 AC 页面(`https://w5.ab.ust.hk/njggt/app/*`)
-- MV3 service worker 在自动化 headed 浏览器中行为不稳定
-- 实际 PWM 切换涉及主世界点击 + AntD 弹窗,自动化模拟脆弱
+自动 E2E 覆盖可安全自动化的全部用户可见功能、关键生命周期与安全失败路径；私有纯函数排列组合继续由代码层承担。真实 HKUST 登录、设备副作用和 UST 服务端写入不能由 fixture 冒充，保留为外部人工验收。逐项所有权见 [`E2E-COVERAGE.md`](E2E-COVERAGE.md)。
 
 ## 测试脚本
 
@@ -51,7 +49,7 @@ node test/verify-fix.mjs --verbose
 **验证内容**:
 - 用例 1–4：popup 诊断的 `nextTriggerAt` 自愈与 Service Worker 降级行为
 - 用例 14：诊断将当前检查统一为 `ok/info/warning/repaired/error`，以稳定错误码、问题域、证据和唯一下一步生成摘要；自动控制关闭或运行时段暂停属于预期状态，不计入当前问题；后台自愈同时返回修复前快照和逐项修复记录；Popup 自检覆盖文档就绪/可见状态、视口与内容尺寸、横向溢出、运行期异常、控件与权威 `schedule` 同步以及 Popup→Service Worker 保活连接；独立兜底先于主脚本加载，故障注入后仍可只读导出 schedule/alarms/heartbeat/SW 部分现场并复制，正常纵向滚动不报错且不采集 URL、DOM 文本、账号或余额
-- 用例 5–8：i18n 包体、冷气余额解析与 PWM 可用时间估算、跨设备相位同步、页面定时器解析与采纳、popup 布局防回归（CSS 禁 vw/vh，popup 固定为 250px 并保留固定 gutter，静态网页预览在窄窗口整体等比缩放）
+- 用例 5–8：i18n 包体、冷气余额解析与 PWM 可用时间估算、跨设备相位同步、页面定时器解析与采纳、popup 布局防回归（CSS 禁 vw/vh，popup 固定为 280px 并保留固定 gutter，静态网页预览在窄窗口整体等比缩放）
 - popup 的界面字号限制在 8–16px：主界面为 16px，固定标签页提醒为 12px，版本元信息为 10px；元素间距统一收敛为可见边界之间的 8px 或 16px；1px 边框组件使用 7px/15px CSS padding 补偿，输入框外边距为 0，运行时段时钟指示器为 16px 且自身内边距为 0，运行时段和间隔时长输入框为 32px 标准高度，同一行文字与输入框垂直居中
 - 状态文字与倒计时、状态卡片与设置卡片、设置卡片与页脚边界均使用 8px 间距；页脚 8px 外间距叠加 8px 顶部内边距，使卡片边界到页脚内容保持 16px
 - 拨杆与诊断按钮的扩大命中区采用绝对定位伪元素，不参与布局；设置头、拨杆区域和运行时段标签不使用透明 `min-height` 撑开可见线框距离
@@ -89,14 +87,13 @@ python3 test/verify-icon.py
 
 修改或重画任何 `icons/` 文件后,先重跑 `python3 tools/scale-pixil-logo.py` 再跑本测试。
 
-### `e2e-verify.cjs`(浏览器层,**手动触发**)
+### `e2e-verify.cjs`（浏览器层，必过但本地触发）
 
-**用途**:用 Playwright 启动系统 Chrome/Edge + 加载 dist/ 扩展,模拟用户点击诊断按钮,读取真实诊断输出；完整重启后还会启用智能控制，验证目标 plan 缺失时真实 Service Worker 由新鲜本地天气把旧 `12/18` 更新为 `21/9`，且真实 Popup 同步显示 `21/30`。这是 evaluator 友好的"实际扩展中验证"路径,但**需要桌面图形环境**,CI 中无法跑。
+**用途**：用 Playwright 加载真实 `dist/` 扩展，覆盖 Popup 设置与校验、中文／英文布局和键盘、诊断及兜底复制、精确 AC home 状态／余额、ON 成功与失败关闭、OFF 零点击、页面 timer 新鲜页证明、旧 receiver 恢复、完整浏览器重启、智能缓存消费，以及 HKO 四源请求→解析→缓存→边界计划→Popup 和单源失败回退。
 
 **前置条件**:
 - `npm install playwright`(临时安装,不入 package.json)
-- 桌面环境(headed Chrome/Edge 可启动,headless 模式 MV3 行为异常)
-- 系统已装 Chrome 或 Edge
+- 优先使用可启动的系统 Chrome/Edge；不可用时脚本会尝试 Playwright Chromium 与 headed/headless 候选
 - **WSL2 额外依赖**(2026-08-16 实证):系统缺 `libnspr4/libnss3/libasound` 时,
 把 noble 版 deb 提取出的库放 `.test-profile/libs/extracted/`(已忽略),运行时先
 `export LD_LIBRARY_PATH="$PWD/.test-profile/libs/extracted/usr/lib/x86_64-linux-
@@ -110,15 +107,26 @@ node test/e2e-verify.cjs
 ```
 
 **注意**:
-- 会启动真实浏览器窗口
+- 可能启动真实浏览器窗口
 - 测试 profile 在 `.test-profile/`(自动清理)
-- 测试结束自动关闭 Edge
+- UST 页面与 HKO 响应均为本地确定性 fixture，不使用账号、不控制真实设备、不依赖公网
+- 测试结束自动关闭浏览器
+
+### `weather-live-smoke.cjs`（可选在线数据 smoke）
+
+**用途**：从 `background.js` 读取当前四个生产 HKO URL，真实联网获取数据，并复用 `smart-mode.js` 的生产解析器确认 Tseung Kwan O 同站天气协议仍可用。外网波动不应阻断确定性发布门禁，因此只在需要核对上游时运行：
+
+```bash
+node test/weather-live-smoke.cjs
+```
 
 ## 用户手动验证清单
 
-每次代码改动后,用户在 Edge 中:
+自动门禁通过后，用户在 Chrome/Edge 中只需验收自动化无法安全替代的外部边界：
 
 1. `edge://extensions/` → 找到 AC-UST → 点"重新加载"按钮
 2. 打开 popup → 看标题行中的版本号与构建时间,确认当前加载的是最新构建
-3. 点诊断按钮 → 检查所有 ✅/❌
-4. 如果有红灯,先看头栏构建时间是否最新;最新则报 bug,不是最新则重新 reload 扩展
+3. 登录真实 AC home，确认 ON 只在出现 `Execution succeeded` 后继续，`Power-off after` 刷新新页面后仍保留
+4. 在 `:20/:50` 观察天气预取，在 `:00/:30` 观察智能 ON 与页面绝对截止；等待至少一次浏览器休眠／唤醒
+5. 点诊断按钮检查所有 ✅/❌；红灯先核对头栏构建时间，最新则报 bug，否则重新加载扩展
+6. Chrome Web Store 测试账号安装／升级仍按商店清单验收

@@ -1,4 +1,4 @@
-// 端到端测试:加载真实 dist/ 扩展,模拟用户场景,验证诊断恢复与智能控制
+// 端到端测试:加载真实 dist/ 扩展,覆盖用户旅程、页面控制、诊断恢复与天气数据链
 // 这是 evaluator 要求的"在实际运行的扩展中看到问题被解决"
 //
 // 流程:
@@ -11,9 +11,11 @@
 // 5. 读取 #diagnoseResult 的实际文本输出
 // 6. 断言摘要能定位首要问题并给出下一步，同时两个旧红灯都已消除；
 //    修复可由后台诊断或 popup 兜底完成
-// 7. 完整重启后写入智能模式旧 12/18、目标 plan 缺失与新鲜天气夹具
-// 8. 在 loaded Service Worker 中执行生产天气消费链，断言持久化为 21/9
-// 9. 重新打开真实 Popup，断言智能控制选中并显示 21/30
+// 7. 真实写入页面关机定时器，并由独立新鲜页确认持久化；验证失败关闭与 OFF 零点击
+// 8. 完整重启后验证智能缓存消费，再以四个生产 URL 获取确定性 HKO 响应
+// 9. 验证 fetch→解析→缓存→边界计划→Popup，以及失败时保留上次成功数据
+// 10. 从真实 Popup 操作总开关、运行时段、两种模式、分钟数与灵敏度
+// 11. 以确定性中／英文 locale 验证布局、24h 字段、键盘顺序、帮助及完整诊断复制
 
 const { chromium } = require('playwright');
 const crypto = require('crypto');
@@ -32,6 +34,9 @@ const LAUNCH_ARGS = [
   `--load-extension=${EXT_PATH}`,
   '--no-first-run',
   '--no-default-browser-check',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-background-timer-throttling',
+  '--disable-renderer-backgrounding',
   '--disable-features=Translate'
 ];
 const LAUNCH_OPTIONS = [
@@ -204,6 +209,14 @@ async function run() {
     console.log('--- 步骤 2: 打开 popup.html,点击诊断按钮 ---\n');
     const popupPage = await context.newPage();
     await popupPage.addInitScript(() => {
+      try {
+        Object.defineProperty(chrome.i18n, 'getUILanguage', {
+          configurable: true,
+          value: () => 'zh-CN'
+        });
+      } catch (_) {
+        try { chrome.i18n.getUILanguage = () => 'zh-CN'; } catch (_) { /* ignored */ }
+      }
       const nativeSetInterval = globalThis.setInterval.bind(globalThis);
       globalThis.__AC_E2E_INTERVAL_IDS__ = [];
       globalThis.setInterval = (...args) => {
@@ -234,6 +247,14 @@ async function run() {
       versionText: document.getElementById('versionInfo')?.textContent || '',
       hasBtn: !!document.getElementById('btnDiagnose'),
       hasResult: !!document.getElementById('diagnoseResult'),
+      lang: document.documentElement.lang,
+      shellWidth: document.getElementById('appShell')?.getBoundingClientRect().width || 0,
+      shellClientWidth: document.getElementById('appShell')?.clientWidth || 0,
+      shellScrollWidth: document.getElementById('appShell')?.scrollWidth || 0,
+      timerLabel: document.getElementById('pwmSettingsTitle')?.textContent?.trim() || '',
+      smartLabel: document.getElementById('smartModeTitle')?.textContent?.trim() || '',
+      activeHoursStartType: document.getElementById('activeHoursStart')?.type || '',
+      activeHoursStartValue: document.getElementById('activeHoursStart')?.value || '',
       balanceEstimateVisible: document.getElementById('balanceEstimate')?.hidden === false,
       balanceEstimateText: document.getElementById('balanceEstimate')?.textContent || '',
       fullSnapshot: await chrome.runtime.sendMessage({ type: 'getSchedule' }),
@@ -310,6 +331,14 @@ async function run() {
       'diagnosePopupControlsSync', 'diagnosePopupKeepaliveOK']
       .every(key => hasDiagnosticLinePrefix(diagnoseText, '✅', key)),
     '真实 Popup 诊断显示文档、布局、控件同步与保活连接现场信息');
+    assert(popupState.lang === 'zh-CN'
+        && popupState.shellWidth === 280
+        && popupState.shellScrollWidth <= popupState.shellClientWidth + 1
+        && popupState.timerLabel === zhCN.pwmSettings.message
+        && popupState.smartLabel === zhCN.smartModeLabel.message
+        && popupState.activeHoursStartType === 'text'
+        && /^\d{2}:\d{2}$/.test(popupState.activeHoursStartValue),
+      '中文 Popup 使用 280px 无横向溢出，并保持单焦点 24h HH:mm 字段');
     assert(!diagnoseText.includes('[POPUP-CONTROLS-DESYNC]')
         && !diagnoseText.includes('[POPUP-HORIZONTAL-OVERFLOW]')
         && !diagnoseText.includes('[POPUP-KEEPALIVE-DISCONNECTED]'),
@@ -429,19 +458,34 @@ async function run() {
         </section>
         <div class="status-row">
           <small>Air Conditioning Status</small>
-          <button class="ant-switch" role="switch" aria-checked="true">ON</button>
+          <button class="ant-switch" role="switch" aria-checked="false">OFF</button>
         </div>
         <div class="timer-row">
           <small>Power-off after</small>
           <div class="ant-picker"><input readonly value="" title=""></div>
         </div>
-        <script>globalThis.__acMockLoadToken = Math.random().toString(36).slice(2);</script>
+        <script>
+          globalThis.__acMockLoadToken = Math.random().toString(36).slice(2);
+          const timerInput = document.querySelector('.timer-row .ant-picker input');
+          const persistedTimer = localStorage.getItem('ac-e2e-page-timer') || '';
+          timerInput.value = persistedTimer;
+          timerInput.setAttribute('title', persistedTimer);
+          timerInput.addEventListener('change', () => {
+            const value = String(timerInput.value || '').trim();
+            timerInput.setAttribute('title', value);
+            localStorage.setItem('ac-e2e-page-timer', value);
+          });
+        </script>
       </body></html>`;
-    await context.route('https://w5.ab.ust.hk/njggt/app/home', route => route.fulfill({
-      status: 200,
-      contentType: 'text/html',
-      body: mockHomeHtml
-    }));
+    let mockHomeRequestCount = 0;
+    await context.route('https://w5.ab.ust.hk/njggt/app/home', (route) => {
+      mockHomeRequestCount += 1;
+      return route.fulfill({
+        status: 200,
+        contentType: 'text/html',
+        body: mockHomeHtml
+      });
+    });
     const acPage = await context.newPage();
     await acPage.goto('https://w5.ab.ust.hk/njggt/app/home', {
       timeout: 10000,
@@ -626,6 +670,159 @@ async function run() {
         && recoveryElapsedMs < 20000,
       '旧 listener 吞包恢复后诊断在 20 秒内完成并重新启用按钮');
 
+    // === 页面控制失败关闭：缺成功提示不得推进，OFF 永远零点击 ===
+    console.log('\n--- 步骤 2.6: 验证开机失败关闭与 OFF 零点击 ---\n');
+    const negativeOnFixture = await acPage.evaluate(() => {
+      const switchElement = document.querySelector('button.ant-switch[role="switch"]');
+      switchElement.setAttribute('aria-checked', 'false');
+      switchElement.textContent = 'OFF';
+      return { clicksBefore: globalThis.__acMockSwitchClickCount };
+    });
+    const missingToastStartedAt = Date.now();
+    const missingToastResult = await serviceWorker.evaluate(async (notAfterAt) => {
+      const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/home' });
+      const tab = tabs.find(candidate => !candidate.discarded);
+      if (!tab?.id) return { success: false, error: 'mock home tab missing' };
+      return chrome.tabs.sendMessage(tab.id, { action: 'on', notAfterAt });
+    }, Date.now() + 1200);
+    const missingToastElapsedMs = Date.now() - missingToastStartedAt;
+    const afterMissingToastClicks = await acPage.evaluate(
+      () => globalThis.__acMockSwitchClickCount
+    );
+    const offRejectedResult = await serviceWorker.evaluate(async () => {
+      const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/home' });
+      const tab = tabs.find(candidate => !candidate.discarded);
+      if (!tab?.id) return { success: false, error: 'mock home tab missing' };
+      return chrome.tabs.sendMessage(tab.id, { action: 'off' });
+    });
+    const afterOffRequestClicks = await acPage.evaluate(
+      () => globalThis.__acMockSwitchClickCount
+    );
+
+    assert(negativeOnFixture.clicksBefore === 1
+        && missingToastResult?.success === false
+        && missingToastResult?.mainWorldResult?.success === false
+        && missingToastResult?.mainWorldResult?.clicks === 1
+        && afterMissingToastClicks === 2
+        && missingToastElapsedMs < 3000,
+      '本次 ON 没有新 Execution succeeded 时只点击一次并在截止前失败关闭');
+    assert(offRejectedResult?.success === false
+        && /OFF/.test(offRejectedResult?.error || '')
+        && afterOffRequestClicks === afterMissingToastClicks,
+      '真实 content OFF 请求被拒绝且页面开关保持零额外点击');
+
+    // === 页面关机保险：真实输入，并由独立新鲜页读回同一 HH:MM ===
+    console.log('\n--- 步骤 2.7: 验证页面关机定时器新鲜页证明 ---\n');
+    const pageTimerTargetAt = Math.ceil((Date.now() + 2 * 60 * 1000) / 60000) * 60000;
+    const homeRequestsBeforeTimerProof = mockHomeRequestCount;
+    const pageTimerHarness = await serviceWorker.evaluate(async (targetAt) => {
+      const freshTabs = [];
+      const redirectTasks = [];
+      const homeUrl = 'https://w5.ab.ust.hk/njggt/app/home';
+      const seedUrl = chrome.runtime.getURL('manifest.json');
+      const activateFreshTab = (tab) => {
+        const targetUrl = tab?.pendingUrl || tab?.url || '';
+        if (targetUrl !== homeUrl) return;
+        const entry = { id: tab.id, wasActive: tab.active, targetUrl };
+        freshTabs.push(entry);
+        // Playwright 不拦截 chrome.tabs.create 新 target 的首次导航。先让 target
+        // 附着到本地扩展页，再导航到 home fixture；生产代码仍请求 active:false。
+        redirectTasks.push((async () => {
+          try {
+            await chrome.tabs.update(tab.id, { url: seedUrl, active: true });
+            for (let index = 0; index < 40; index += 1) {
+              const current = await chrome.tabs.get(tab.id);
+              if (current.status === 'complete' && current.url === seedUrl) {
+                entry.seedReady = true;
+                break;
+              }
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            await chrome.tabs.update(tab.id, { url: homeUrl, active: true });
+            entry.rerouted = true;
+          } catch (error) {
+            entry.error = error?.message || String(error);
+          }
+        })());
+      };
+      chrome.tabs.onCreated.addListener(activateFreshTab);
+      try {
+        if (typeof setPageTimer !== 'function') {
+          return {
+            result: { success: false, productionFunctionMissing: true },
+            freshTabs
+          };
+        }
+        const result = await setPageTimer(2, { targetAt });
+        await Promise.allSettled(redirectTasks);
+        return { result, freshTabs };
+      } finally {
+        chrome.tabs.onCreated.removeListener(activateFreshTab);
+      }
+    }, pageTimerTargetAt);
+    const pageTimerResult = pageTimerHarness.result;
+    const homeRequestsDuringTimerProof = mockHomeRequestCount - homeRequestsBeforeTimerProof;
+    console.log('  新鲜页验证状态:', JSON.stringify(pageTimerHarness));
+    const pageTimerState = await serviceWorker.evaluate(async () => {
+      const stored = (await chrome.storage.local.get('ac_schedule')).ac_schedule || {};
+      return {
+        pageTimerMinutes: stored.pageTimerMinutes,
+        pageTimerTargetAt: stored.pageTimerTargetAt,
+        pageTimerError: stored.pageTimerError,
+        retryAt: stored.pageTimerRetryAt,
+        retryMinutes: stored.pageTimerRetryMinutes
+      };
+    });
+    const sourceTimerValue = await acPage.evaluate(() => ({
+      value: document.querySelector('.timer-row .ant-picker input')?.value || '',
+      title: document.querySelector('.timer-row .ant-picker input')?.getAttribute('title') || '',
+      persisted: localStorage.getItem('ac-e2e-page-timer') || '',
+      switchClicks: globalThis.__acMockSwitchClickCount
+    }));
+
+    await acPage.evaluate(() => {
+      const duplicate = document.querySelector('.timer-row').cloneNode(true);
+      duplicate.id = 'ambiguous-power-off-after';
+      document.body.appendChild(duplicate);
+    });
+    const ambiguousTimerTargetAt = Math.ceil((Date.now() + 3 * 60 * 1000) / 60000) * 60000;
+    const ambiguousTimerResult = await serviceWorker.evaluate(async (targetAt) => {
+      const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/home' });
+      const tab = tabs.find(candidate => !candidate.discarded);
+      if (!tab?.id) return { success: false, error: 'mock home tab missing' };
+      return chrome.tabs.sendMessage(tab.id, { action: 'setTimer', minutes: 3, targetAt });
+    }, ambiguousTimerTargetAt);
+    const ambiguousTimerFixture = await acPage.evaluate(() => {
+      document.getElementById('ambiguous-power-off-after')?.remove();
+      return {
+        persisted: localStorage.getItem('ac-e2e-page-timer') || '',
+        switchClicks: globalThis.__acMockSwitchClickCount
+      };
+    });
+
+    assert(pageTimerResult?.success === true
+        && pageTimerResult?.verified === true
+        && pageTimerResult?.verification?.attempts === 1
+        && pageTimerHarness.freshTabs?.length === 1
+        && pageTimerHarness.freshTabs[0]?.wasActive === false
+        && pageTimerHarness.freshTabs[0]?.seedReady === true
+        && pageTimerHarness.freshTabs[0]?.rerouted === true
+        && homeRequestsDuringTimerProof === 1
+        && pageTimerResult?.targetAt === pageTimerTargetAt
+        && pageTimerResult?.value === sourceTimerValue.persisted
+        && sourceTimerValue.value === sourceTimerValue.title,
+      '真实页面输入 Power-off after，并由第一张独立新鲜页精确读回');
+    assert(pageTimerState.pageTimerTargetAt === pageTimerTargetAt
+        && Number(pageTimerState.pageTimerMinutes) > 0
+        && pageTimerState.pageTimerError === ''
+        && pageTimerState.retryAt === 0
+        && pageTimerState.retryMinutes === 0,
+      '新鲜页确认后 storage 写入绝对关机证明并清空失败重试');
+    assert(ambiguousTimerResult?.success === false
+        && ambiguousTimerFixture.persisted === sourceTimerValue.persisted
+        && ambiguousTimerFixture.switchClicks === sourceTimerValue.switchClicks,
+      'Power-off after 控件歧义时拒绝写入，不改变已确认值且不点击 AC 开关');
+
     await acPage.close();
 
     // === 完整关闭并重启浏览器：storage.session 会清空，local 必须承担常驻边界 ===
@@ -806,6 +1003,525 @@ async function run() {
         && smartPopupState.snapshot?.offMinutes === 9,
       '真实 Popup 与 Service Worker 对智能模式及 21/9 派生时长一致');
 
+    // === HKO 四源数据：生产 URL → fetch → 解析 → 缓存 → 边界计划 → Popup ===
+    console.log('\n--- 步骤 5: 验证 HKO 四源数据获取全链路 ---\n');
+    const weatherBoundary = new Date();
+    weatherBoundary.setSeconds(0, 0);
+    if (weatherBoundary.getMinutes() < 30) {
+      weatherBoundary.setMinutes(30);
+    } else {
+      weatherBoundary.setHours(weatherBoundary.getHours() + 1, 0, 0, 0);
+    }
+    const weatherBoundaryAt = weatherBoundary.getTime();
+    const hkoFixtures = {
+      temperature: '\uFEFFDate time,Automatic Weather Station,Air Temperature(degree Celsius)\r\n'
+        + '202608241510,Sai Kung,33.3\r\n202608241510,Tseung Kwan O,32.6\r\n',
+      humidity: 'Date time,Automatic Weather Station,Relative Humidity(percent)\n'
+        + '202608241510,HK Observatory,73\n202608241510,Tseung Kwan O,67\n',
+      wind: 'Date time,Automatic Weather Station,Direction,Speed,Gust\n'
+        + '202608241510,Sai Kung,South,10,21\n'
+        + '202608241510,Tseung Kwan O,Southwest,16,26\n',
+      rainfall: {
+        hourlyRainfall: [
+          { automaticWeatherStation: 'Sai Kung', value: '40', unit: 'mm' },
+          { automaticWeatherStation: 'Tseung Kwan O', value: '6', unit: 'mm' }
+        ]
+      }
+    };
+    const weatherFetchState = await restartedWorker.evaluate(async ({ boundaryAt, fixtures }) => {
+      const originalFetch = globalThis.fetch;
+      const requests = [];
+      const expectedUrls = { ...SMART_WEATHER_URLS };
+      const bodies = new Map([
+        [expectedUrls.temperature, { type: 'text', body: fixtures.temperature }],
+        [expectedUrls.humidity, { type: 'text', body: fixtures.humidity }],
+        [expectedUrls.wind, { type: 'text', body: fixtures.wind }],
+        [expectedUrls.rainfall, { type: 'json', body: fixtures.rainfall }]
+      ]);
+      globalThis.fetch = async (input, init = {}) => {
+        const url = String(input);
+        requests.push({ url, cache: init.cache || '' });
+        const fixture = bodies.get(url);
+        if (!fixture) {
+          return { ok: false, status: 404, text: async () => '', json: async () => ({}) };
+        }
+        return {
+          ok: true,
+          status: 200,
+          text: async () => String(fixture.body),
+          json: async () => fixture.body
+        };
+      };
+      try {
+        await chrome.storage.local.remove(['ac_smart_weather', 'ac_smart_weather_plan']);
+        await loadScheduleFromStorage();
+        const prepared = await prepareSmartWeatherForBoundary(boundaryAt);
+        const stored = await chrome.storage.local.get([
+          'ac_smart_weather',
+          'ac_smart_weather_plan'
+        ]);
+        return {
+          requests,
+          expectedUrls,
+          prepared,
+          weather: stored.ac_smart_weather,
+          plan: stored.ac_smart_weather_plan
+        };
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    }, { boundaryAt: weatherBoundaryAt, fixtures: hkoFixtures });
+    console.log('  HKO 成功链:', JSON.stringify(weatherFetchState));
+
+    assert(Object.values(weatherFetchState.expectedUrls || {}).length === 4
+        && weatherFetchState.requests?.length === 4
+        && new Set(weatherFetchState.requests.map(request => request.url)).size === 4
+        && Object.values(weatherFetchState.expectedUrls).every(url => (
+          weatherFetchState.requests.some(request => request.url === url)
+        ))
+        && weatherFetchState.requests.every(request => request.cache === 'no-store'),
+      '真实 Worker 向四个生产 HKO URL 各请求一次，并全部禁用 HTTP 缓存');
+    assert(weatherFetchState.weather?.temperature === 32.6
+        && weatherFetchState.weather?.relativeHumidity === 67
+        && Math.abs(weatherFetchState.weather?.windSpeedMs - 16 / 3.6) < 1e-9
+        && weatherFetchState.weather?.rainMm === 6
+        && Number.isFinite(weatherFetchState.weather?.dewPoint),
+      '四源响应按 Tseung Kwan O 同站合并，推导露点并把风速换算为 m/s');
+    assert(weatherFetchState.prepared?.boundaryAt === weatherBoundaryAt
+        && weatherFetchState.plan?.boundaryAt === weatherBoundaryAt
+        && weatherFetchState.plan?.onMinutes === 23
+        && weatherFetchState.plan?.offMinutes === 7
+        && weatherFetchState.plan?.weather?.temperature === 32.6,
+      '获取结果缓存后为目标半点预计算并持久化 23/7 边界计划');
+
+    await restartedPopup.reload({ timeout: 10000, waitUntil: 'load' });
+    const fetchedWeatherPopupReady = await restartedPopup.waitForFunction(() => (
+      document.getElementById('smartSuggested')?.textContent?.trim() === '23/30'
+      && !document.getElementById('smartUpdated')?.textContent?.includes('--')
+    ), null, { timeout: 10000 }).then(() => true).catch(() => false);
+    const fetchedWeatherPopup = await restartedPopup.evaluate(() => ({
+      suggested: document.getElementById('smartSuggested')?.textContent?.trim() || '',
+      teq: document.getElementById('smartTeq')?.textContent?.trim() || '',
+      updated: document.getElementById('smartUpdated')?.textContent?.trim() || ''
+    }));
+    assert(fetchedWeatherPopupReady
+        && fetchedWeatherPopup.suggested === '23/30'
+        && /°C/.test(fetchedWeatherPopup.teq)
+        && fetchedWeatherPopup.updated !== '--',
+      '真实 Popup 消费刚获取的缓存并显示同一 23/30、Teq 与更新时间');
+
+    const weatherFailureState = await restartedWorker.evaluate(async ({ boundaryAt, fixtures }) => {
+      const before = await chrome.storage.local.get([
+        'ac_smart_weather',
+        'ac_smart_weather_plan'
+      ]);
+      const beforeWeather = JSON.stringify(before.ac_smart_weather);
+      const beforePlan = JSON.stringify(before.ac_smart_weather_plan);
+      const originalFetch = globalThis.fetch;
+      const requests = [];
+      const responseFor = (url) => {
+        if (url === SMART_WEATHER_URLS.temperature) {
+          return { ok: false, status: 503, text: async () => '' };
+        }
+        if (url === SMART_WEATHER_URLS.humidity) {
+          return { ok: true, status: 200, text: async () => fixtures.humidity };
+        }
+        if (url === SMART_WEATHER_URLS.wind) {
+          return { ok: true, status: 200, text: async () => fixtures.wind };
+        }
+        if (url === SMART_WEATHER_URLS.rainfall) {
+          return { ok: true, status: 200, json: async () => fixtures.rainfall };
+        }
+        return { ok: false, status: 404, text: async () => '' };
+      };
+      globalThis.fetch = async (input, init = {}) => {
+        const url = String(input);
+        requests.push({ url, cache: init.cache || '' });
+        return responseFor(url);
+      };
+      try {
+        const prepared = await prepareSmartWeatherForBoundary(boundaryAt);
+        const after = await chrome.storage.local.get([
+          'ac_smart_weather',
+          'ac_smart_weather_plan'
+        ]);
+        return {
+          prepared,
+          requests,
+          weatherPreserved: JSON.stringify(after.ac_smart_weather) === beforeWeather,
+          planPreserved: JSON.stringify(after.ac_smart_weather_plan) === beforePlan
+        };
+      } finally {
+        globalThis.fetch = originalFetch;
+      }
+    }, { boundaryAt: weatherBoundaryAt, fixtures: hkoFixtures });
+    console.log('  HKO 失败回退:', JSON.stringify(weatherFailureState));
+    assert(weatherFailureState.prepared === null
+        && weatherFailureState.requests?.length === 4
+        && weatherFailureState.requests.every(request => request.cache === 'no-store')
+        && weatherFailureState.weatherPreserved
+        && weatherFailureState.planPreserved,
+      '任一 HKO 源失败时不生成伪计划，并保留最近成功缓存与边界计划');
+
+    // === Popup 用户旅程：设置、校验、暂停运行与安全停用 ===
+    console.log('\n--- 步骤 6: 验证 Popup 全部设置交互 ---\n');
+    await restartedContext.route('https://w5.ab.ust.hk/njggt/app/home', route => route.fulfill({
+      status: 200,
+      contentType: 'text/html',
+      body: mockHomeHtml
+    }));
+    const settingsHome = await restartedContext.newPage();
+    await settingsHome.goto('https://w5.ab.ust.hk/njggt/app/home', {
+      timeout: 10000,
+      waitUntil: 'load'
+    });
+    await settingsHome.evaluate(() => {
+      globalThis.__acSettingsSwitchClicks = 0;
+      document.querySelector('button.ant-switch[role="switch"]')?.addEventListener('click', () => {
+        globalThis.__acSettingsSwitchClicks += 1;
+      });
+    });
+    let settingsHomeStatus = null;
+    const settingsHomeDeadline = Date.now() + 8000;
+    while (Date.now() < settingsHomeDeadline) {
+      settingsHomeStatus = await restartedWorker.evaluate(async () => {
+        const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/home' });
+        const tab = tabs.find(candidate => !candidate.discarded);
+        if (!tab?.id) return null;
+        try { return await chrome.tabs.sendMessage(tab.id, { action: 'status' }); }
+        catch (_) { return null; }
+      });
+      if (settingsHomeStatus?.isOn === false) break;
+      await new Promise(resolve => setTimeout(resolve, 250));
+    }
+
+    const settingsFixture = await restartedWorker.evaluate(async () => {
+      const current = (await chrome.storage.local.get('ac_schedule')).ac_schedule || {};
+      const disabled = {
+        ...current,
+        enabled: false,
+        mode: 'pwm',
+        clockMode: false,
+        onMinutes: 17,
+        offMinutes: 13,
+        pwmState: 'on',
+        nextTriggerAt: 0,
+        alarmCreatedAt: 0,
+        alarmDelayMinutes: 0,
+        pageTimerMinutes: null,
+        pageTimerTargetAt: 0,
+        pageTimerError: '',
+        pageTimerRetryAt: 0,
+        pageTimerRetryMinutes: 0,
+        activeHours: { enabled: false, start: '08:00', end: '23:00' },
+        smartMode: { enabled: false, sensitivity: 5 }
+      };
+      await chrome.storage.sync.remove('ac_schedule_sync');
+      await Promise.all([
+        'ac-pwm',
+        'ac-badge-tick',
+        'ac-watchdog',
+        'ac-active-boundary',
+        'ac-page-timer-retry'
+      ].map(name => chrome.alarms.clear(name)));
+      await chrome.storage.local.set({ ac_schedule: disabled });
+      await loadScheduleFromStorage();
+      return (await chrome.storage.local.get('ac_schedule')).ac_schedule;
+    });
+    await restartedPopup.reload({ timeout: 10000, waitUntil: 'load' });
+    await restartedPopup.waitForFunction(() => (
+      document.getElementById('automationToggle')?.checked === false
+      && document.getElementById('timerToggle')?.getAttribute('aria-pressed') === 'true'
+      && document.getElementById('onMinutes')?.value === '17'
+      && document.getElementById('offMinutes')?.value === '13'
+    ), null, { timeout: 10000 });
+
+    await restartedPopup.click('#smartModeToggle');
+    await restartedPopup.waitForFunction(async () => {
+      const schedule = (await chrome.storage.local.get('ac_schedule')).ac_schedule;
+      return schedule?.smartMode?.enabled === true
+        && document.getElementById('smartModeToggle')?.disabled === false;
+    }, null, { timeout: 10000 });
+    await restartedPopup.evaluate(() => {
+      const input = document.getElementById('smartSensitivity');
+      input.value = '8';
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await restartedPopup.waitForFunction(async () => (
+      (await chrome.storage.local.get('ac_schedule')).ac_schedule?.smartMode?.sensitivity === 8
+    ), null, { timeout: 10000 });
+    const smartInteractionState = await restartedPopup.evaluate(async () => ({
+      smartPressed: document.getElementById('smartModeToggle')?.getAttribute('aria-pressed'),
+      timerPressed: document.getElementById('timerToggle')?.getAttribute('aria-pressed'),
+      sensitivity: document.getElementById('smartSensitivity')?.value,
+      bubble: document.getElementById('smartSensitivityValue')?.textContent,
+      schedule: (await chrome.storage.local.get('ac_schedule')).ac_schedule,
+      smartWeatherAlarm: await chrome.alarms.get('ac-smart-weather'),
+      observedAt: Date.now()
+    }));
+
+    await restartedPopup.locator('label:has(#activeHoursToggle)').click();
+    await restartedPopup.waitForFunction(() => (
+      document.getElementById('activeHoursToggle')?.checked === true
+      && document.getElementById('activeHoursBody')?.hidden === false
+    ), null, { timeout: 10000 });
+    const activeHoursBeforeInvalid = await restartedPopup.evaluate(async () => (
+      (await chrome.storage.local.get('ac_schedule')).ac_schedule?.activeHours
+    ));
+    await restartedPopup.evaluate(() => {
+      document.getElementById('activeHoursStart').value = '23:00';
+      const end = document.getElementById('activeHoursEnd');
+      end.value = '08:00';
+      end.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const invalidHoursState = await restartedPopup.evaluate(async () => ({
+      validationMessage: document.getElementById('activeHoursEnd')?.validationMessage || '',
+      activeHours: (await chrome.storage.local.get('ac_schedule')).ac_schedule?.activeHours
+    }));
+
+    const nowForExcludedHours = new Date();
+    const excludedHours = nowForExcludedHours.getHours() === 0
+        && nowForExcludedHours.getMinutes() === 0
+      ? { start: '23:58', end: '23:59' }
+      : { start: '00:00', end: '00:01' };
+    await restartedPopup.evaluate(({ start, end }) => {
+      document.getElementById('activeHoursStart').value = start.replace(':', '');
+      const endInput = document.getElementById('activeHoursEnd');
+      endInput.value = end.replace(':', '');
+      endInput.dispatchEvent(new Event('change', { bubbles: true }));
+    }, excludedHours);
+    await restartedPopup.waitForFunction(async ({ start, end }) => {
+      const activeHours = (await chrome.storage.local.get('ac_schedule')).ac_schedule?.activeHours;
+      return activeHours?.enabled === true
+        && activeHours?.start === start
+        && activeHours?.end === end;
+    }, excludedHours, { timeout: 10000 });
+
+    await restartedPopup.locator('label:has(#automationToggle)').click();
+    await restartedPopup.waitForFunction(async () => (
+      (await chrome.storage.local.get('ac_schedule')).ac_schedule?.enabled === true
+      && document.getElementById('automationToggle')?.disabled === false
+    ), null, { timeout: 10000 });
+    const pausedAutomationState = await restartedPopup.evaluate(async () => ({
+      schedule: (await chrome.storage.local.get('ac_schedule')).ac_schedule,
+      snapshot: await chrome.runtime.sendMessage({ type: 'getScheduleLite' }),
+      activeBoundaryAlarm: await chrome.alarms.get('ac-active-boundary'),
+      observedAt: Date.now()
+    }));
+
+    await restartedPopup.click('#timerToggle');
+    await restartedPopup.waitForFunction(async () => (
+      (await chrome.storage.local.get('ac_schedule')).ac_schedule?.smartMode?.enabled === false
+      && document.getElementById('timerToggle')?.disabled === false
+    ), null, { timeout: 10000 });
+    await restartedPopup.evaluate(() => {
+      document.getElementById('onMinutes').value = '21';
+      const off = document.getElementById('offMinutes');
+      off.value = '9';
+      off.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const minutesSavedState = await restartedPopup.evaluate(async () => {
+      const result = await waitForLatestScheduleUpdateResult();
+      const schedule = (await chrome.storage.local.get('ac_schedule')).ac_schedule;
+      return { result, onMinutes: schedule?.onMinutes, offMinutes: schedule?.offMinutes };
+    });
+    await restartedPopup.evaluate(() => {
+      const on = document.getElementById('onMinutes');
+      on.value = '0';
+      on.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    const invalidMinutesState = await restartedPopup.evaluate(async () => ({
+      validationMessage: document.getElementById('onMinutes')?.validationMessage || '',
+      rawValue: document.getElementById('onMinutes')?.value || '',
+      schedule: (await chrome.storage.local.get('ac_schedule')).ac_schedule
+    }));
+    console.log('  非法分钟状态:', JSON.stringify({
+      saved: minutesSavedState,
+      after: invalidMinutesState
+    }));
+
+    // 非法分钟数不能阻止安全停用；后台应识别页面已 OFF，绝不点击开关。
+    await restartedPopup.locator('label:has(#automationToggle)').click();
+    await restartedPopup.waitForFunction(async () => (
+      (await chrome.storage.local.get('ac_schedule')).ac_schedule?.enabled === false
+      && document.getElementById('automationToggle')?.disabled === false
+    ), null, { timeout: 10000 });
+    await restartedPopup.evaluate(() => {
+      const on = document.getElementById('onMinutes');
+      on.value = '21';
+      on.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    await restartedPopup.locator('label:has(#activeHoursToggle)').click();
+    await restartedPopup.waitForFunction(async () => (
+      (await chrome.storage.local.get('ac_schedule')).ac_schedule?.activeHours?.enabled === false
+    ), null, { timeout: 10000 });
+    const finalSettingsState = await restartedPopup.evaluate(async () => ({
+      schedule: (await chrome.storage.local.get('ac_schedule')).ac_schedule,
+      automationChecked: document.getElementById('automationToggle')?.checked,
+      activeHoursChecked: document.getElementById('activeHoursToggle')?.checked,
+      timerPressed: document.getElementById('timerToggle')?.getAttribute('aria-pressed'),
+      onValue: document.getElementById('onMinutes')?.value,
+      offValue: document.getElementById('offMinutes')?.value,
+      status: document.getElementById('status')?.textContent || ''
+    }));
+    const settingsSwitchClicks = await settingsHome.evaluate(
+      () => globalThis.__acSettingsSwitchClicks
+    );
+
+    assert(settingsHomeStatus?.isOn === false
+        && settingsFixture.enabled === false
+        && settingsFixture.onMinutes === 17
+        && settingsFixture.offMinutes === 13,
+      '设置旅程从真实 OFF 页面与停用的 17/13 循环配置开始');
+    assert(smartInteractionState.smartPressed === 'true'
+        && smartInteractionState.timerPressed === 'false'
+        && smartInteractionState.sensitivity === '8'
+        && smartInteractionState.bubble === '8'
+        && smartInteractionState.schedule?.smartMode?.enabled === true
+        && smartInteractionState.schedule?.smartMode?.sensitivity === 8,
+      'Popup 点击智能控制并释放灵敏度滑块后，DOM 与 storage 同步为 sensitivity=8');
+    const smartWeatherAlarmMinute = new Date(
+      smartInteractionState.smartWeatherAlarm?.scheduledTime || 0
+    ).getMinutes();
+    assert(smartInteractionState.smartWeatherAlarm?.scheduledTime > smartInteractionState.observedAt
+        && smartInteractionState.smartWeatherAlarm.scheduledTime
+          <= smartInteractionState.observedAt + 30 * 60 * 1000 + 1000
+        && [20, 50].includes(smartWeatherAlarmMinute),
+      '智能控制启用后安排下一个 :20/:50 天气预取闹钟');
+    assert(invalidHoursState.validationMessage.length > 0
+        && JSON.stringify(invalidHoursState.activeHours) === JSON.stringify(activeHoursBeforeInvalid),
+      '运行时段 23:00–08:00 原位报错，非法范围不写入 storage');
+    assert(pausedAutomationState.schedule?.enabled === true
+        && pausedAutomationState.schedule?.activeHours?.start === excludedHours.start
+        && pausedAutomationState.schedule?.activeHours?.end === excludedHours.end
+        && pausedAutomationState.snapshot?._insideActiveHours === false
+        && pausedAutomationState.snapshot?._automationPausedByActiveHours === true,
+      'Popup 以规范化 24h 时段启用自动控制，时段外保持已启用但暂停运行');
+    assert(pausedAutomationState.activeBoundaryAlarm?.scheduledTime
+          > pausedAutomationState.observedAt
+        && pausedAutomationState.activeBoundaryAlarm.scheduledTime
+          <= pausedAutomationState.observedAt + 24 * 60 * 60 * 1000 + 1000,
+      '运行时段启用后安排未来 24 小时内的下一边界闹钟');
+    assert(invalidMinutesState.validationMessage.length > 0
+        && invalidMinutesState.rawValue === '0'
+        && minutesSavedState.result?.success === true
+        && minutesSavedState.onMinutes === 21
+        && minutesSavedState.offMinutes === 9
+        && invalidMinutesState.schedule?.onMinutes === minutesSavedState.onMinutes
+        && invalidMinutesState.schedule?.offMinutes === minutesSavedState.offMinutes,
+      '循环分钟数 0 原位报错并保留原文，已保存 21/9 不被静默改写');
+    assert(finalSettingsState.schedule?.enabled === false
+        && finalSettingsState.schedule?.activeHours?.enabled === false
+        && finalSettingsState.schedule?.smartMode?.enabled === false
+        && finalSettingsState.schedule?.onMinutes === 21
+        && finalSettingsState.schedule?.offMinutes === 9
+        && finalSettingsState.automationChecked === false
+        && finalSettingsState.activeHoursChecked === false
+        && finalSettingsState.timerPressed === 'true'
+        && finalSettingsState.onValue === '21'
+        && finalSettingsState.offValue === '9'
+        && finalSettingsState.status.trim().length > 0,
+      '非法分钟数不阻止总开关安全停用，最终 Popup 与 storage 回到停用循环 21/9');
+    assert(settingsSwitchClicks === 0,
+      '总开关、模式、时段和分钟设置全旅程不直接点击真实 AC OFF 开关');
+
+    // === 英文 locale：真实渲染、键盘顺序、帮助与完整诊断复制 ===
+    console.log('\n--- 步骤 7: 验证英文 Popup 与键盘/复制旅程 ---\n');
+    const englishPopup = await restartedContext.newPage();
+    await englishPopup.addInitScript(() => {
+      try {
+        Object.defineProperty(chrome.i18n, 'getUILanguage', {
+          configurable: true,
+          value: () => 'en-US'
+        });
+      } catch (_) {
+        try { chrome.i18n.getUILanguage = () => 'en-US'; } catch (_) { /* ignored */ }
+      }
+      globalThis.__AC_E2E_FULL_DIAGNOSTIC_COPY__ = '';
+      try {
+        Object.defineProperty(navigator, 'clipboard', {
+          configurable: true,
+          value: {
+            writeText: async (text) => {
+              globalThis.__AC_E2E_FULL_DIAGNOSTIC_COPY__ = text;
+            }
+          }
+        });
+      } catch (_) { /* clipboard assertion will expose an unsupported override */ }
+    });
+    await englishPopup.goto(`chrome-extension://${extensionId}/popup.html`, {
+      timeout: 10000,
+      waitUntil: 'load'
+    });
+    const englishReady = await englishPopup.waitForFunction(({ expectedTimer, expectedSmart }) => (
+      document.documentElement.lang === 'en'
+      && document.getElementById('pwmSettingsTitle')?.textContent?.trim() === expectedTimer
+      && document.getElementById('smartModeTitle')?.textContent?.trim() === expectedSmart
+    ), {
+      expectedTimer: en.pwmSettings.message,
+      expectedSmart: en.smartModeLabel.message
+    }, { timeout: 10000 })
+      .then(() => true).catch(() => false);
+    const englishLayout = await englishPopup.evaluate(() => ({
+      lang: document.documentElement.lang,
+      viewportWidth: window.innerWidth,
+      viewportHeight: window.innerHeight,
+      shellWidth: document.getElementById('appShell')?.getBoundingClientRect().width || 0,
+      shellClientWidth: document.getElementById('appShell')?.clientWidth || 0,
+      shellScrollWidth: document.getElementById('appShell')?.scrollWidth || 0,
+      timerLabel: document.getElementById('pwmSettingsTitle')?.textContent?.trim() || '',
+      smartLabel: document.getElementById('smartModeTitle')?.textContent?.trim() || '',
+      startType: document.getElementById('activeHoursStart')?.type || '',
+      startValue: document.getElementById('activeHoursStart')?.value || '',
+      helpHref: document.getElementById('helpLink')?.href || ''
+    }));
+    await englishPopup.evaluate(() => document.activeElement?.blur?.());
+    const englishTabOrder = [];
+    for (let index = 0; index < 12; index++) {
+      await englishPopup.keyboard.press('Tab');
+      englishTabOrder.push(await englishPopup.evaluate(() => document.activeElement?.id || ''));
+    }
+    await englishPopup.click('#btnDiagnose', { timeout: 5000 });
+    await englishPopup.waitForFunction(() => (
+      document.getElementById('btnDiagnose')?.disabled === false
+      && (document.getElementById('diagnoseResult')?.innerText || '').length > 100
+    ), null, { timeout: 20000 });
+    await englishPopup.click('#btnCopyDiag', { timeout: 5000 });
+    await englishPopup.waitForFunction(() => (
+      globalThis.__AC_E2E_FULL_DIAGNOSTIC_COPY__?.startsWith('```')
+    ), null, { timeout: 5000 }).catch(() => {});
+    const englishDiagnostic = await englishPopup.evaluate(() => ({
+      text: document.getElementById('diagnoseResult')?.innerText || '',
+      copied: globalThis.__AC_E2E_FULL_DIAGNOSTIC_COPY__ || '',
+      copyVisible: document.getElementById('btnCopyDiag')?.hidden === false
+    }));
+
+    assert(englishReady
+        && englishLayout.lang === 'en'
+        && englishLayout.shellWidth === 280
+        && englishLayout.shellScrollWidth <= englishLayout.shellClientWidth + 1
+        && englishLayout.timerLabel === en.pwmSettings.message
+        && englishLayout.smartLabel === en.smartModeLabel.message
+        && englishLayout.startType === 'text'
+        && /^\d{2}:\d{2}$/.test(englishLayout.startValue),
+      '英文 Popup 使用 280px 无横向溢出，并保持单焦点 24h HH:mm 字段');
+    assert(['helpLink', 'automationToggle', 'activeHoursToggle', 'timerToggle',
+      'smartModeToggle', 'onMinutes', 'offMinutes', 'btnDiagnose']
+      .every(id => englishTabOrder.includes(id))
+        && englishTabOrder.indexOf('timerToggle') < englishTabOrder.indexOf('smartModeToggle'),
+      '英文 Popup 键盘顺序可到达帮助、总开关、时段、两种模式、分钟数与诊断');
+    const englishSummaryPrefix = en.diagnoseSummary.message.split(/\$\d+/)[0];
+    assert(englishLayout.helpHref === 'https://github.com/BelugaRex/ac-ust/issues/new/choose'
+        && englishDiagnostic.copyVisible
+        && englishDiagnostic.text.includes(englishSummaryPrefix)
+        && englishDiagnostic.copied.startsWith('```')
+        && englishDiagnostic.copied.includes(englishSummaryPrefix),
+      '英文帮助链接准确，完整诊断可一键复制为 Markdown');
+
+    await englishPopup.close();
+    await settingsHome.close();
+
     // 汇总
     const passCount = results.filter(r => r.pass).length;
     console.log(`\n=== 测试汇总: ${passCount}/${results.length} 通过 ===`);
@@ -814,7 +1530,7 @@ async function run() {
       results.filter(r => !r.pass).forEach(r => console.log('  - ' + r.name));
       process.exitCode = 1;
     } else {
-      console.log(`\n✅ 所有断言通过 — v${manifest.version} 在真实扩展中完成诊断恢复，并验证智能控制 21/30。`);
+      console.log(`\n✅ 所有断言通过 — v${manifest.version} 已覆盖设置、页面控制、诊断恢复、智能控制与天气数据链。`);
     }
   } finally {
     if (context) await context.close();
