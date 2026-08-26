@@ -349,6 +349,61 @@ async function run() {
     assert(versionLine.includes(manifest.version),
       `Popup 版本行显示 v${manifest.version}`);
 
+    // === 主脚本诊断未就绪时，独立兜底仍可输出部分现场 ===
+    console.log('\n--- 步骤 2.1: 模拟 Popup 主诊断未就绪 ---\n');
+    const fallbackPage = await context.newPage();
+    await fallbackPage.addInitScript(() => {
+      globalThis.__AC_FALLBACK_COPIED__ = '';
+      Object.defineProperty(navigator, 'clipboard', {
+        configurable: true,
+        value: {
+          writeText: async (text) => { globalThis.__AC_FALLBACK_COPIED__ = text; }
+        }
+      });
+    });
+    await fallbackPage.route('**/popup.js*', route => route.fulfill({
+      status: 200,
+      contentType: 'application/javascript',
+      body: 'throw new Error("synthetic popup bootstrap failure");'
+    }));
+    await fallbackPage.goto(`chrome-extension://${extensionId}/popup.html`, {
+      timeout: 10000,
+      waitUntil: 'load'
+    });
+    await new Promise(r => setTimeout(r, 500));
+    const fallbackMainReady = await fallbackPage.evaluate(() => (
+      globalThis.__AC_POPUP_DIAGNOSTICS_READY__ === true
+    ));
+    await fallbackPage.click('#btnDiagnose', { timeout: 5000 });
+    await fallbackPage.waitForFunction(() => (
+      document.getElementById('diagContent')?.textContent.includes('[POPUP-MAIN-FAILED]')
+    ), { timeout: 10000 });
+    const fallbackState = await fallbackPage.evaluate(() => ({
+      text: document.getElementById('diagnoseResult')?.innerText || '',
+      copyVisible: document.getElementById('btnCopyDiag')?.hidden === false,
+      buttonEnabled: document.getElementById('btnDiagnose')?.disabled === false
+    }));
+    console.log(fallbackState.text);
+    assert(!fallbackMainReady
+        && fallbackState.text.includes('[POPUP-MAIN-FAILED]')
+        && fallbackState.text.includes('synthetic popup bootstrap failure'),
+      'popup.js 未执行时独立兜底捕获并显示 Popup 启动异常');
+    assert(hasLocalizedPrefix(fallbackState.text, 'diagnoseFallbackSchedule')
+        && hasLocalizedPrefix(fallbackState.text, 'diagnoseFallbackAlarms')
+        && hasLocalizedPrefix(fallbackState.text, 'diagnoseFallbackSw'),
+      '兜底报告仍包含 schedule、alarms 与 Service Worker 独立现场');
+    await fallbackPage.click('#btnCopyDiag', { timeout: 5000 });
+    await fallbackPage.waitForFunction(() => (
+      globalThis.__AC_FALLBACK_COPIED__?.includes('[POPUP-MAIN-FAILED]')
+    ), { timeout: 5000 });
+    const fallbackCopied = await fallbackPage.evaluate(() => globalThis.__AC_FALLBACK_COPIED__);
+    assert(fallbackState.copyVisible
+        && fallbackState.buttonEnabled
+        && fallbackCopied.startsWith('```')
+        && fallbackCopied.includes('[POPUP-RUNTIME-ERROR]'),
+      '兜底诊断完成后恢复按钮并可一键复制完整 Markdown 报告');
+    await fallbackPage.close();
+
     // === 真实旧接收端吞包：listener 仍注册且返回 true，但永不 sendResponse ===
     // 这确定性复现浏览器重启后旧 listener 冒充异步响应、诊断永久等待的现场。
     // 先停掉 popup 的常规 1 秒轮询，确保旧 listener 安装后的第一次恢复动作

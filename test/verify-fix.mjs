@@ -453,6 +453,10 @@ async function runTests() {
   // 5e: popup.html 中 data-i18n 属性与 messages.json key 完全对齐
   const popupHtml = fs.readFileSync(path.join(ROOT, 'popup.html'), 'utf8');
   const distPopupHtml = fs.readFileSync(path.join(ROOT, 'dist', 'popup.html'), 'utf8');
+  const popupFallbackPath = path.join(ROOT, 'popup-diagnostic-fallback.js');
+  const popupFallbackSource = fs.existsSync(popupFallbackPath)
+    ? fs.readFileSync(popupFallbackPath, 'utf8')
+    : '';
   const dataI18nKeys = [...popupHtml.matchAll(/data-i18n="([^"]+)"/g)].map(m => m[1]);
   verboseLog('  popup.html data-i18n keys:', dataI18nKeys.join(', '));
   for (const key of dataI18nKeys) {
@@ -482,9 +486,81 @@ async function runTests() {
     `dist/manifest.json 版本与源码一致 (${manifest.version})`);
   assertPass(distPopupHtml.includes(`<script src="popup.js?v=${manifest.version}"></script>`),
     'dist popup 脚本资源版本参数由构建注入并与 manifest 同步');
+  assertPass(popupHtml.indexOf('<script src="popup-diagnostic-fallback.js"></script>') > 0
+      && popupHtml.indexOf('<script src="popup-diagnostic-fallback.js"></script>')
+        < popupHtml.search(/<script src="popup\.js\?v=[^"]+"><\/script>/),
+    'Popup 独立兜底诊断先于主脚本加载，主脚本失效时仍可接管诊断按钮');
   assertPass(popupHtml.indexOf('<script src="billing-helpers.js"></script>')
       < popupHtml.search(/<script src="popup\.js\?v=[^"]+"><\/script>/),
     'popup 在主脚本前加载余额纯函数，避免初始化时缺少估算器');
+
+  const fallbackLocaleKeys = [
+    'diagnoseFallbackSummary',
+    'diagnoseFallbackCapturedError',
+    'diagnoseFallbackNoCapturedError',
+    'diagnoseFallbackDocument',
+    'diagnoseFallbackSchedule',
+    'diagnoseFallbackAlarms',
+    'diagnoseFallbackHeartbeat',
+    'diagnoseFallbackSw',
+    'diagnoseFallbackSectionFailed',
+    'diagnoseFallbackPartial'
+  ];
+  assertPass(fallbackLocaleKeys.every(key => zhCN[key]?.message && en[key]?.message),
+    'Popup 兜底诊断的现场、分区失败与部分报告文案保持中英双语');
+  assertPass(popupFallbackSource.includes("addEventListener('error'")
+      && popupFallbackSource.includes("addEventListener('unhandledrejection'")
+      && popupFallbackSource.includes("chrome.storage.local.get(['ac_schedule', '__heartbeat'])")
+      && popupFallbackSource.includes('chrome.alarms.getAll()')
+      && popupFallbackSource.includes("type: 'getSwStatus'")
+      && popupFallbackSource.includes('event.stopImmediatePropagation()')
+      && !popupFallbackSource.includes('location.href')
+      && !popupFallbackSource.includes('innerText'),
+    'Popup 兜底诊断独立采集 error/storage/alarms/SW，接管失败路径且不读取 URL/DOM 原文');
+
+  const fallbackPureStart = popupFallbackSource.indexOf('  function sanitizeFallbackError(');
+  const fallbackPureEnd = popupFallbackSource.indexOf('\n\n  async function loadFallbackTranslations', fallbackPureStart);
+  const fallbackPureSource = fallbackPureStart >= 0 && fallbackPureEnd > fallbackPureStart
+    ? popupFallbackSource.slice(fallbackPureStart, fallbackPureEnd)
+    : '';
+  const fallbackPureHelpers = fallbackPureSource
+    ? new Function(`${fallbackPureSource}; return { sanitizeFallbackError, formatFallbackBrowser, formatFallbackSchedule };`)()
+    : null;
+  assertPass(!!fallbackPureHelpers,
+    'Popup 兜底诊断提供可独立验证的脱敏错误与安全 schedule 投影 helper');
+  if (fallbackPureHelpers) {
+    const sanitizedFallbackError = fallbackPureHelpers.sanitizeFallbackError(
+      'failed https://w5.ab.ust.hk/njggt/app/home and chrome-extension://secret/popup.js for student@connect.ust.hk'
+    );
+    const fallbackScheduleText = fallbackPureHelpers.formatFallbackSchedule({
+      enabled: true,
+      mode: 'pwm',
+      clockMode: false,
+      pwmState: 'off',
+      nextTriggerAt: 1_787_714_629_522,
+      activeHours: { enabled: true, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 },
+      pageTimerError: 'private DOM failure',
+      actualStatus: { balanceMinutes: 156, account: 'student@connect.ust.hk' }
+    });
+    assertPass(sanitizedFallbackError.includes('[url]')
+        && sanitizedFallbackError.includes('[email]')
+        && !sanitizedFallbackError.includes('w5.ab.ust.hk')
+        && !sanitizedFallbackError.includes('chrome-extension://')
+        && !sanitizedFallbackError.includes('student@connect.ust.hk')
+        && fallbackScheduleText.includes('enabled=true')
+        && fallbackScheduleText.includes('pageTimerError=true')
+        && !fallbackScheduleText.includes('private DOM failure')
+        && !fallbackScheduleText.includes('balanceMinutes')
+        && !fallbackScheduleText.includes('student@connect.ust.hk'),
+      'Popup 兜底报告脱敏 URL/邮箱，只投影调度字段且不泄露错误原文、余额或账号');
+    assertPass(fallbackPureHelpers.formatFallbackSchedule({ mode: 'pwm.v2' }).includes('mode=pwm.v2'),
+      'Popup 兜底安全 token 保留版本与模式中的点号，报告不损坏可定位信息');
+    assertPass(fallbackPureHelpers.formatFallbackBrowser(
+      'Mozilla/5.0 Chrome/151.0.0.0 Safari/537.36 Edg/151.0.1.0'
+    ) === 'Edge 151.0.1.0',
+    'Popup 兜底浏览器识别优先 Edge，不把同时存在的 Chrome token 误报为 Chrome');
+  }
 
   // 5h: popup 布局防回归 —— 固定桌面面板宽度，避免 intrinsic/vw 初始布局竞态。
   const popupCss = fs.readFileSync(path.join(ROOT, 'popup.css'), 'utf8');
@@ -672,7 +748,7 @@ async function runTests() {
 
   const distRequiredFiles = [
     'manifest.json', 'background.js', 'content.js', 'page-confirm.js',
-    'popup.html', 'popup.js', 'i18n.js', 'sync-helpers.js', 'pwm-phase.js', 'billing-helpers.js',
+    'popup.html', 'popup.js', 'popup-diagnostic-fallback.js', 'i18n.js', 'sync-helpers.js', 'pwm-phase.js', 'billing-helpers.js',
     'offscreen.html', 'offscreen.js',
     'popup.css',
     '_locales/zh_CN/messages.json', '_locales/en/messages.json',
@@ -687,8 +763,11 @@ async function runTests() {
 
   const verbatimDistFiles = distRequiredFiles.filter(file => !['popup.html', 'popup.js'].includes(file));
   const mismatchedDistFiles = verbatimDistFiles.filter(file => {
-    const source = fs.readFileSync(path.join(ROOT, file));
-    const built = fs.readFileSync(path.join(ROOT, 'dist', file));
+    const sourcePath = path.join(ROOT, file);
+    const builtPath = path.join(ROOT, 'dist', file);
+    if (!fs.existsSync(sourcePath) || !fs.existsSync(builtPath)) return false;
+    const source = fs.readFileSync(sourcePath);
+    const built = fs.readFileSync(builtPath);
     return !source.equals(built);
   });
   assertPass(mismatchedDistFiles.length === 0,
@@ -4283,6 +4362,8 @@ return { reapplySmartSensitivityNow };`
     'diagnosePopupControlsDesync',
     'diagnosePopupKeepaliveOK',
     'diagnosePopupKeepaliveDisconnected',
+    'diagnosePopupRuntimeErrors',
+    'diagnosePopupRuntimeErrorsEmpty',
     'diagnoseEnsureFailed',
     'diagnoseScheduleReadFailed',
     'diagnoseStorageReadFailed',
@@ -4315,6 +4396,8 @@ return { reapplySmartSensitivityNow };`
       && diagnoseHandlerSource.includes("code: 'POPUP-HORIZONTAL-OVERFLOW'")
       && diagnoseHandlerSource.includes("code: 'POPUP-KEEPALIVE-DISCONNECTED'")
       && diagnoseHandlerSource.includes('readPopupPageSnapshot()')
+      && diagnoseHandlerSource.includes('ACPopupDiagnosticFallback?.getCapturedErrors?.()')
+      && popupSource.includes('globalThis.__AC_POPUP_DIAGNOSTICS_READY__ = true;')
       && diagnoseHandlerSource.includes("s.pwmState === 'off' || bgSchedule.actualStatus?.isOn === true")
       && diagnoseHandlerSource.includes("code: 'WEATHER-SLOT-MISMATCH'")
       && diagnoseHandlerSource.includes('ensured?.success === false && ensured.error')

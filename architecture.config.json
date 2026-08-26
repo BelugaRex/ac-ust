@@ -23,7 +23,7 @@
     "documents": [
       {
         "file": "popup.html",
-        "scripts": ["i18n.js", "billing-helpers.js", "smart-mode.js", "popup.js"]
+        "scripts": ["i18n.js", "popup-diagnostic-fallback.js", "billing-helpers.js", "smart-mode.js", "popup.js"]
       },
       {
         "file": "offscreen.html",
@@ -55,6 +55,10 @@
         },
         {
           "file": "popup.js",
+          "symbols": ["I18n"]
+        },
+        {
+          "file": "popup-diagnostic-fallback.js",
           "symbols": ["I18n"]
         }
       ]
@@ -183,6 +187,7 @@
       "popup.html",
       "popup.css",
       "popup.js",
+      "popup-diagnostic-fallback.js",
       "i18n.js",
       "billing-helpers.js",
       "sync-helpers.js",
@@ -257,6 +262,25 @@
         "requireAutomationAllowed\\s*:\\s*true",
         "function\\s+isAutomationOperationCurrent\\s*\\(",
         "async\\s+function\\s+clearAutomationRuntimeAlarmsWhileBlocked\\s*\\("
+      ]
+    },
+    {
+      "name": "popup fallback diagnostics remain read only and privacy safe",
+      "files": ["popup-diagnostic-fallback.js"],
+      "requirePatterns": [
+        "function\\s+recordPopupError\\s*\\(",
+        "function\\s+runFallbackDiagnostic\\s*\\(",
+        "chrome\\s*\\.\\s*storage\\s*\\.\\s*local\\s*\\.\\s*get",
+        "chrome\\s*\\.\\s*alarms\\s*\\.\\s*getAll",
+        "sendFallbackRuntimeMessage\\s*\\("
+      ],
+      "forbidPatterns": [
+        "chrome\\s*\\.\\s*storage\\s*\\.\\s*(?:local|sync)\\s*\\.\\s*set",
+        "chrome\\s*\\.\\s*alarms\\s*\\.\\s*(?:create|clear)",
+        "location\\s*\\.\\s*href",
+        "\\.\\s*innerText",
+        "balanceMinutes",
+        "actualStatus"
       ]
     },
     {

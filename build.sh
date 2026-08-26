@@ -18,6 +18,7 @@ RUNTIME_FILES=(
   popup.html
   popup.css
   popup.js
+  popup-diagnostic-fallback.js
   i18n.js
   billing-helpers.js
   sync-helpers.js

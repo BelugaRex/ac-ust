@@ -1361,6 +1361,20 @@ btnDiagnose.addEventListener('click', async () => {
       priority: 50
     });
 
+    const capturedPopupErrors = globalThis.ACPopupDiagnosticFallback?.getCapturedErrors?.() || [];
+    if (capturedPopupErrors.length) {
+      const latestPopupError = capturedPopupErrors[capturedPopupErrors.length - 1];
+      add(false, t('diagnosePopupRuntimeErrors', capturedPopupErrors.length, latestPopupError.message), {
+        level: 'warning',
+        code: 'POPUP-RUNTIME-ERROR',
+        domain: t('diagnoseDomainPopup'),
+        action: t('diagnoseActionReopenPopup'),
+        priority: 45
+      });
+    } else {
+      add(true, t('diagnosePopupRuntimeErrorsEmpty'));
+    }
+
     add(true, t('diagnoseEnabledPrefix') + s.enabled + ' (' + (s.enabled ? t('diagnoseOn') : t('diagnoseOff')) + ')',
       automationEnabled ? {} : {
         level: 'info',
@@ -1980,3 +1994,6 @@ btnDiagnose.addEventListener('click', async () => {
     );
   }
 });
+
+// 独立兜底脚本只在该标记缺失时接管诊断按钮。必须放在完整处理器注册之后。
+globalThis.__AC_POPUP_DIAGNOSTICS_READY__ = true;
