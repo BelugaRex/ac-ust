@@ -1690,7 +1690,7 @@ async function setupAlarms(startImmediately = false) {
 
     if (existingEnd && existingEnd <= now) {
       console.warn('[AC扩展] PWM 计划时间已过，立即补执行到期动作');
-      await runPwmStep();
+      await runPwmStep({ scheduledTime: existingEnd });
       return;
     }
 
@@ -1750,7 +1750,7 @@ async function clearBadge() {
   await chrome.action.setTitle({ title: t('badgeDefault') });
 }
 
-async function runPwmStep() {
+async function runPwmStep({ scheduledTime = 0 } = {}) {
   if (!isAutomationAllowed()) return;
   if (isCurrentPwmStepRunning()) {
     console.warn('[AC扩展] PWM 步骤已在执行，跳过重复触发');
@@ -1763,13 +1763,19 @@ async function runPwmStep() {
   }
   const automationRevision = claimPwmStepOwnership();
   invalidateTimerBasedShutdown();
+  const requestedScheduledTime = Number(scheduledTime);
+  const pwmTriggerScheduledTime = Number.isSafeInteger(requestedScheduledTime)
+    && requestedScheduledTime > 0
+    ? requestedScheduledTime
+    : 0;
 
   function planSmartAutomaticOn(targetAction, acIsOn) {
     if (!(schedule.smartMode?.enabled && targetAction === 'on')) return null;
     return planSmartModeOnWindow(schedule, {
       maxOnMinutes: SMART_MODE.ON_MAX,
       acIsOn,
-      boundaryAt: schedule.smartOnBoundaryAt
+      boundaryAt: schedule.smartOnBoundaryAt,
+      triggeredBoundaryAt: pwmTriggerScheduledTime
     });
   }
 
@@ -1783,7 +1789,12 @@ async function runPwmStep() {
         automationRevision
       });
       observations.toggleSucceeded = !!toggleResult?.success;
+      observations.toggleAlreadyDone = toggleResult?.alreadyDone === true;
       observations.toggleError = toggleResult?.error || '';
+      if (observations.toggleAlreadyDone) {
+        observations.acIsOn = true;
+        console.log('[AC扩展] 页面已 ON，零点击，直接设置 Power-off after');
+      }
       if (!observations.toggleSucceeded) {
         schedule.pageTimerError = `自动开启未确认：${toggleResult?.error || '未知错误'}`;
       }
@@ -2412,7 +2423,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     // （init()→setupAlarms()→syncStoredTriggerFromAlarm() 会覆写 alarmCreatedAt 为 Date.now()，
     //   导致 alarm.scheduledTime ≈ Date.now() ≤ alarmCreatedAt+1000 成立，闹钟被丢弃）。
     try {
-      await runPwmStep();
+      await runPwmStep({ scheduledTime: alarm.scheduledTime });
     } catch (e) {
       console.error('[AC扩展] PWM 步骤执行失败:', e);
       void appendDiagnosticLog('error', 'alarm-ac-pwm', e);
@@ -2883,7 +2894,12 @@ async function sendACToggleMessage(tabId, action, options = {}) {
       error: result?.error || `${action} 命令未确认`
     };
   }
-  return { success: true, tabId, result };
+  return {
+    success: true,
+    alreadyDone: result?.alreadyDone === true,
+    tabId,
+    result
+  };
 }
 
 async function _toggleOnNewTab(tabId, action, options = {}) {

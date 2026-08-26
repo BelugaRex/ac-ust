@@ -409,9 +409,9 @@ function nextSafePageTimerTargetAt(now = Date.now()) {
     * PWM_PHASE_MINUTE_MS;
 }
 
-// 智能控制自动 ON 门禁：只允许在 HH:00/HH:30 这一分钟内启动，并把关机
-// 截止时间固定为“半点边界 + onMinutes”，避免浏览器迟唤醒与 UST 分钟上取整
-// 把 5 分钟关闭窗口压短。循环定时不调用此函数，保持任意分钟切换。
+// 智能控制自动 ON 门禁：普通调用只允许在 HH:00/HH:30 这一分钟内启动；
+// 真正的半点 ac-pwm alarm 可在迟唤醒后补执行当前剩余 ON 相位。两者都把关机
+// 截止固定为“半点边界 + onMinutes”，不把延迟补到周期末尾。循环定时不调用。
 function planSmartModeOnWindow(schedule, opts = {}) {
   const now = pwmPhaseNow(opts);
   const onMinutes = Number(schedule?.onMinutes);
@@ -430,15 +430,28 @@ function planSmartModeOnWindow(schedule, opts = {}) {
 
   const acIsOn = opts?.acIsOn === true;
   const storedBoundaryAt = Number(opts?.boundaryAt);
+  const triggeredBoundaryAt = Number(opts?.triggeredBoundaryAt);
+  const triggeredPageTimerTargetAt = smartModePageTimerTargetAt(
+    onMinutes,
+    now,
+    triggeredBoundaryAt
+  );
+  const hasTriggeredBoundary = isHalfHourBoundary(triggeredBoundaryAt)
+    && triggeredBoundaryAt <= now
+    && triggeredPageTimerTargetAt >= nextSafePageTimerTargetAt(now);
   const hasActiveBoundary = acIsOn
     && isHalfHourBoundary(storedBoundaryAt)
     && storedBoundaryAt <= now;
-  const boundaryAt = hasActiveBoundary
-    ? storedBoundaryAt
-    : halfHourBoundaryAtOrBefore(now);
+  const useTriggeredBoundary = hasTriggeredBoundary
+    && (!hasActiveBoundary || triggeredBoundaryAt > storedBoundaryAt);
+  const boundaryAt = useTriggeredBoundary
+    ? triggeredBoundaryAt
+    : hasActiveBoundary
+      ? storedBoundaryAt
+      : halfHourBoundaryAtOrBefore(now);
   const pageTimerTargetAt = smartModePageTimerTargetAt(onMinutes, now, boundaryAt);
   if (acIsOn) {
-    if (!hasActiveBoundary) {
+    if (!hasActiveBoundary && !hasTriggeredBoundary) {
       return {
         kind: 'allow',
         reason: 'smart-on-overrun-shutdown',
@@ -459,6 +472,18 @@ function planSmartModeOnWindow(schedule, opts = {}) {
       reason: 'smart-on-overrun-shutdown',
       boundaryAt,
       pageTimerTargetAt: nextSafePageTimerTargetAt(now)
+    };
+  }
+
+  // 只有真正的 ac-pwm 半点 alarm（或启动期从其绝对 storage 时刻补执行）可以
+  // 越过首分钟继续当前 ON 相位；截止仍锁在原半点 + onMinutes，不把延迟补到末尾。
+  if (hasTriggeredBoundary) {
+    return {
+      kind: 'allow',
+      reason: 'smart-on-scheduled-boundary',
+      boundaryAt,
+      windowEndsAt: pageTimerTargetAt,
+      pageTimerTargetAt
     };
   }
 

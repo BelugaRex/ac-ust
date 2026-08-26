@@ -1353,7 +1353,7 @@ async function runTests() {
 
   const pwmBody = extractSourceSection(
     backgroundSource,
-    'async function runPwmStep()',
+    'async function runPwmStep({ scheduledTime = 0 } = {})',
     '\n// ----- 设置页面自带定时器',
     'runPwmStep'
   );
@@ -5589,6 +5589,71 @@ return { reapplySmartSensitivityNow };`
       && smartEntryPlan16.kind === 'defer'
       && new Date(smartEntryPlan16.nextTriggerAt).getMinutes() === 30,
     '16F: 进入时段时循环模式可立即执行，智能模式仍等待下一个 :00/:30 窗口');
+  const delayedSmartBoundary16 = new Date(2026, 7, 18, 10, 30, 0, 0).getTime();
+  const delayedSmartNow16 = delayedSmartBoundary16 + 65_000;
+  const delayedSmartTarget16 = delayedSmartBoundary16 + 21 * 60_000;
+  const delayedAlarmPlan16 = pwmPhase.planSmartModeOnWindow(
+    { onMinutes: 21 },
+    {
+      now: delayedSmartNow16,
+      maxOnMinutes: 25,
+      acIsOn: false,
+      triggeredBoundaryAt: delayedSmartBoundary16
+    }
+  );
+  const delayedWithoutAlarmPlan16 = pwmPhase.planSmartModeOnWindow(
+    { onMinutes: 21 },
+    { now: delayedSmartNow16, maxOnMinutes: 25, acIsOn: false }
+  );
+  const tooLateForSafeTimerPlan16 = pwmPhase.planSmartModeOnWindow(
+    { onMinutes: 21 },
+    {
+      now: delayedSmartTarget16 - 30_000,
+      maxOnMinutes: 25,
+      acIsOn: false,
+      triggeredBoundaryAt: delayedSmartBoundary16
+    }
+  );
+  const alreadyOnAtDelayedAlarm16 = pwmPhase.planPwmStep({
+    enabled: true,
+    onMinutes: 21,
+    offMinutes: 9,
+    pwmState: 'on'
+  }, { acIsOn: true }, { now: delayedSmartNow16 });
+  assertPass(delayedAlarmPlan16.kind === 'allow'
+      && delayedAlarmPlan16.reason === 'smart-on-scheduled-boundary'
+      && delayedAlarmPlan16.boundaryAt === delayedSmartBoundary16
+      && delayedAlarmPlan16.pageTimerTargetAt === delayedSmartTarget16
+      && delayedAlarmPlan16.windowEndsAt === delayedSmartTarget16
+      && delayedWithoutAlarmPlan16.kind === 'defer'
+      && tooLateForSafeTimerPlan16.kind === 'defer'
+      && alreadyOnAtDelayedAlarm16.kind === 'hold'
+      && alreadyOnAtDelayedAlarm16.prerequisite === 'set-page-timer',
+    '16F-0A: 可信半点 alarm 可补执行剩余 ON 相位且保持原绝对关机点；普通迟到调用仍等待，已 ON 直接进入页面 timer');
+  const alarmPwmBranch16 = extractSourceSection(
+    backgroundSource,
+    "if (alarm.name === 'ac-pwm') {",
+    "\n  if (alarm.name === 'ac-watchdog') {",
+    'ac-pwm alarm scheduled boundary forwarding'
+  );
+  assertPass(alarmPwmBranch16.includes(
+      'await runPwmStep({ scheduledTime: alarm.scheduledTime });'
+    )
+      && setupAlarmsBody16.includes(
+        'await runPwmStep({ scheduledTime: existingEnd });'
+      )
+      && backgroundSource.includes('triggeredBoundaryAt: pwmTriggerScheduledTime'),
+    '16F-0B: alarm 与启动期 storage 补执行都传递原计划时刻，异步状态读取后不再丢失 :00/:30 身份');
+  assertPass(backgroundSource.includes(
+      'alreadyDone: result?.alreadyDone === true'
+    )
+      && backgroundSource.includes(
+        'observations.toggleAlreadyDone = toggleResult?.alreadyDone === true;'
+      )
+      && backgroundSource.includes(
+        '页面已 ON，零点击，直接设置 Power-off after'
+      ),
+    '16F-0C: 主世界已 ON 的幂等结果显式回传，PWM 零点击后直接进入页面关机定时器');
   const rescheduleActiveBoundaryBody16 = extractSourceSection(
     backgroundSource,
     'async function rescheduleActiveBoundary() {',

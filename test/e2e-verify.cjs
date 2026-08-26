@@ -546,6 +546,15 @@ async function run() {
     const executionSuccessSwitchClicks = await acPage.evaluate(
       () => globalThis.__acMockSwitchClickCount
     );
+    const alreadyOnToggle = await serviceWorker.evaluate(async () => {
+      if (typeof toggleAC !== 'function') {
+        return { success: false, productionFunctionMissing: true };
+      }
+      return toggleAC('on');
+    });
+    const alreadyOnSwitchClicks = await acPage.evaluate(
+      () => globalThis.__acMockSwitchClickCount
+    );
 
     const staleReceiverInstall = await serviceWorker.evaluate(async () => {
       const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/home' });
@@ -636,6 +645,10 @@ async function run() {
         && executionSuccessSwitchClicks === 1
         && executionSuccessElapsedMs < 3000,
       '真实主世界先见短暂 Execution succeeded、再等迟到 ON；仅点击一次且不盲等 10 秒');
+    assert(alreadyOnToggle?.success === true
+        && alreadyOnToggle.alreadyDone === true
+        && alreadyOnSwitchClicks === executionSuccessSwitchClicks,
+      '真实后台发现 AC 已 ON 时零额外点击，显式返回 alreadyDone 供 PWM 直接设置 Power-off after');
     assert(staleReceiverInstall.loadedSentinel === true
         && staleReceiverInstall.hadListener === true
         && staleReceiverInstall.staleListenerInstalled === true
@@ -953,6 +966,23 @@ async function run() {
         allowActiveOnPhase: true,
         boundaryAt
       });
+      const delayedAlarmPlan = typeof planSmartModeOnWindow === 'function'
+        ? planSmartModeOnWindow(
+          { onMinutes: 21 },
+          {
+            now: boundaryAt + 65_000,
+            maxOnMinutes: 25,
+            acIsOn: false,
+            triggeredBoundaryAt: boundaryAt
+          }
+        )
+        : null;
+      const delayedWithoutAlarmPlan = typeof planSmartModeOnWindow === 'function'
+        ? planSmartModeOnWindow(
+          { onMinutes: 21 },
+          { now: boundaryAt + 65_000, maxOnMinutes: 25, acIsOn: false }
+        )
+        : null;
       await persistSchedule('e2e-smart-duration', { syncFromLiveAlarm: false });
       const persisted = (await chrome.storage.local.get('ac_schedule')).ac_schedule;
       return {
@@ -960,6 +990,8 @@ async function run() {
         planMissing,
         before,
         applied,
+        delayedAlarmPlan,
+        delayedWithoutAlarmPlan,
         persisted
       };
     }, { boundaryAt: smartBoundaryAt, weather: smartWeather });
@@ -991,6 +1023,12 @@ async function run() {
         && smartWorkerState.persisted?.onMinutes === 21
         && smartWorkerState.persisted?.offMinutes === 9,
       '真实 Worker 只读新鲜本地天气，把旧 12/18 刷新并持久化为 21/9');
+    assert(smartWorkerState.delayedAlarmPlan?.kind === 'allow'
+        && smartWorkerState.delayedAlarmPlan?.reason === 'smart-on-scheduled-boundary'
+        && smartWorkerState.delayedAlarmPlan?.pageTimerTargetAt
+          === smartBoundaryAt + 21 * 60 * 1000
+        && smartWorkerState.delayedWithoutAlarmPlan?.kind === 'defer',
+      '真实 Worker 只让可信半点 alarm 补执行迟到 ON，并保持原半点绝对关机点');
     assert(smartPopupReady
         && smartPopupState.smartPressed
         && smartPopupState.smartBodyVisible
