@@ -349,6 +349,37 @@
     };
   }
 
+  // 目标绑定的预计算快照可能因 SW 重启或 storage 写入竞态而缺失。边界执行仍可
+  // 使用边界前、未过期的同一份本地天气纯计算；绝不在 :00/:30 临界路径联网。
+  function consumeStoredSmartWeatherDecision(weather, { boundaryAt, sensitivity } = {}) {
+    const boundary = Number(boundaryAt);
+    const fetchedAt = Number(weather?.fetchedAt);
+    if (!isExactHalfHourBoundary(boundary)
+        || !Number.isSafeInteger(fetchedAt)
+        || fetchedAt <= 0
+        || fetchedAt > boundary
+        || boundary - fetchedAt > SMART_MODE.WEATHER_PLAN_MAX_AGE_MS
+        || weather?.stale === true
+        || !!weather?.error) {
+      return null;
+    }
+
+    const decision = computeSmartOnMinutes({
+      sensitivity: normalizeSmartSensitivity(sensitivity),
+      temperature: weather.temperature,
+      dewPoint: weather.dewPoint,
+      windSpeedMs: weather.windSpeedMs,
+      rainMm: weather.rainMm
+    });
+    if (!decision.valid) return null;
+    return {
+      ...decision,
+      boundaryAt: boundary,
+      fetchedAt,
+      source: 'stored-weather'
+    };
+  }
+
   return {
     SMART_MODE,
     normalizeSmartSensitivity,
@@ -364,6 +395,7 @@
     computeSmartOnMinutes,
     prepareSmartWeatherDecision,
     consumeSmartWeatherDecision,
+    consumeStoredSmartWeatherDecision,
     parseTseungKwanOWeather
   };
 });

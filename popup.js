@@ -30,6 +30,12 @@ function isPwmPageTimerRetryActive(pageTimerError, scheduledTime, now = Date.now
     && remainingMs <= 90 * 1000;
 }
 
+function isDiagnosticPageTimerRequired(schedule, actualIsOn, pausedByActiveHours) {
+  if (schedule?.enabled !== true || pausedByActiveHours === true) return false;
+  if (typeof actualIsOn === 'boolean') return actualIsOn;
+  return schedule?.pwmState === 'off';
+}
+
 if (IS_STATIC_PREVIEW) {
   document.documentElement.classList.add('static-preview');
 }
@@ -1313,6 +1319,8 @@ btnDiagnose.addEventListener('click', async () => {
     const automationPausedByActiveHours = s._automationPausedByActiveHours === true
       || isAutomationPausedByActiveHours(s);
     const automationEnabled = s.enabled === true;
+    const pwmStepInFlight = ensured?.pwmStepRunning === true
+      || s._pwmStepRunning === true;
     const repairedItems = new Set(Array.isArray(ensured?.repairs) ? ensured.repairs : []);
     const clearedAlarmCount = [...repairedItems]
       .filter(item => item.endsWith('-alarm-cleared')).length;
@@ -1480,7 +1488,9 @@ btnDiagnose.addEventListener('click', async () => {
       priority: 15
     });
     if (s.clockMode === false && s.enabled
-      && !automationPausedByActiveHours && !effectiveNextTriggerAt) {
+      && !automationPausedByActiveHours
+      && !pwmStepInFlight
+      && !effectiveNextTriggerAt) {
       add(false, t('diagnoseMissingTrigger'), {
         code: 'SCHED-TRIGGER-MISSING',
         domain: t('diagnoseDomainScheduler'),
@@ -1540,20 +1550,28 @@ btnDiagnose.addEventListener('click', async () => {
       }
     } else {
       const pwmWasRepaired = repairedItems.has('pwm-alarm');
-      add(!!pwmAlarm, pwmAlarm
-        ? t('diagnosePwmExists') + t('diagnosePwmTrigger') + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')'
-        : t('diagnosePwmMissing'),
-        pwmAlarm ? (pwmWasRepaired ? {
+      if (pwmAlarm) {
+        add(true, t('diagnosePwmExists') + t('diagnosePwmTrigger')
+          + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')', pwmWasRepaired ? {
           level: 'repaired',
           code: 'SCHED-PWM-REPAIRED',
           domain: t('diagnoseDomainScheduler'),
           priority: 10
-        } : {}) : {
+        } : {});
+      } else if (pwmStepInFlight) {
+        add(true, t('diagnosePwmInFlight'), {
+          level: 'info',
+          code: 'SCHED-PWM-IN-FLIGHT',
+          domain: t('diagnoseDomainScheduler')
+        });
+      } else {
+        add(false, t('diagnosePwmMissing'), {
           code: 'SCHED-PWM-MISSING',
           domain: t('diagnoseDomainScheduler'),
           action: t('diagnoseActionReloadExtension'),
           priority: 5
         });
+      }
       if (pwmAlarm && s.clockMode === false && !effectiveNextTriggerAt) {
         add(false, t('diagnosePwmDesync'), {
           code: 'SCHED-PWM-DESYNC',
@@ -1866,9 +1884,11 @@ btnDiagnose.addEventListener('click', async () => {
             priority: 10
           });
         } else {
-          const pageTimerRequired = automationEnabled
-            && !automationPausedByActiveHours
-            && (s.pwmState === 'off' || bgSchedule.actualStatus?.isOn === true);
+          const pageTimerRequired = isDiagnosticPageTimerRequired(
+            s,
+            bgSchedule.actualStatus?.isOn,
+            automationPausedByActiveHours
+          );
           add(!pageTimerRequired, t(pageTimerRequired ? 'diagnosePageTimerMissing' : 'diagnosePageTimerEmpty'),
             pageTimerRequired ? {
               code: 'SAFETY-TIMER-MISSING',
@@ -1982,6 +2002,8 @@ btnDiagnose.addEventListener('click', async () => {
       const memLive = sw.liveAlarmScheduledTime || 0;
       if (!automationEnabled || automationPausedByActiveHours) {
         // 停用／暂停态预期没有 PWM 时钟，不把三方全空误报为失步。
+      } else if (pwmStepInFlight && !memLive) {
+        // 前面的 alarm 检查已经显示一次“边界处理中”；此处只跳过瞬态三方校验。
       } else if (areDiagnosticTriggersAligned(memLive, memNext, storedNext)) {
         add(true, t('diagnoseTriMatch', fmt(memLive)));
       } else {

@@ -399,6 +399,16 @@ function smartModePageTimerTargetAt(
   return Number(boundaryAt) + duration * PWM_PHASE_MINUTE_MS;
 }
 
+// UST 的 HH:MM 控件会把不足一分钟的目标上取整。直接请求“下一分钟”时，若当前
+// 已过整分，02:11:01 → 02:12 只剩 59 秒，页面会持久化为 02:13。这里先生成
+// 至少完整一分钟后的整分目标，使写入值与新鲜页读回值一致。
+function nextSafePageTimerTargetAt(now = Date.now()) {
+  const nowMs = Number(now);
+  if (!Number.isFinite(nowMs)) return 0;
+  return Math.ceil((nowMs + PWM_PHASE_MINUTE_MS) / PWM_PHASE_MINUTE_MS)
+    * PWM_PHASE_MINUTE_MS;
+}
+
 // 智能控制自动 ON 门禁：只允许在 HH:00/HH:30 这一分钟内启动，并把关机
 // 截止时间固定为“半点边界 + onMinutes”，避免浏览器迟唤醒与 UST 分钟上取整
 // 把 5 分钟关闭窗口压短。循环定时不调用此函数，保持任意分钟切换。
@@ -433,8 +443,7 @@ function planSmartModeOnWindow(schedule, opts = {}) {
         kind: 'allow',
         reason: 'smart-on-overrun-shutdown',
         boundaryAt: 0,
-        pageTimerTargetAt: Math.floor(now / PWM_PHASE_MINUTE_MS + 1)
-          * PWM_PHASE_MINUTE_MS
+        pageTimerTargetAt: nextSafePageTimerTargetAt(now)
       };
     }
     if (pageTimerTargetAt > now) {
@@ -449,8 +458,7 @@ function planSmartModeOnWindow(schedule, opts = {}) {
       kind: 'allow',
       reason: 'smart-on-overrun-shutdown',
       boundaryAt,
-      pageTimerTargetAt: Math.floor(now / PWM_PHASE_MINUTE_MS + 1)
-        * PWM_PHASE_MINUTE_MS
+      pageTimerTargetAt: nextSafePageTimerTargetAt(now)
     };
   }
 
@@ -507,6 +515,7 @@ if (typeof module !== 'undefined' && module.exports) {
     smartWeatherTargetBoundaryAt,
     nextHalfHourBoundary,
     smartModePageTimerTargetAt,
+    nextSafePageTimerTargetAt,
     planSmartModeOnWindow,
     alignSmartModeNextTrigger
   };

@@ -153,6 +153,7 @@
   "diagnoseBgWriteback": { "message": " (后台已回写)", "description": "诊断：后台回写标签" },
   "diagnosePwmExists": { "message": "ac-pwm 闹钟存在", "description": "诊断：ac-pwm 闹钟存在" },
   "diagnosePwmMissing": { "message": "ac-pwm 闹钟缺失", "description": "诊断：ac-pwm 闹钟缺失" },
+  "diagnosePwmInFlight": { "message": "ac-pwm 边界处理中（本次完成后会建立下一闹钟）", "description": "诊断：已触发的 PWM 步骤仍在执行" },
   "diagnosePwmTrigger": { "message": " (触发: ", "description": "诊断：闹钟触发时间前缀" },
   "diagnosePwmSync": { "message": "ac-pwm 与 storage 触发时间同步", "description": "诊断：PWM 与 storage 同步检查" },
   "diagnosePwmDesync": { "message": "ac-pwm 与 storage 触发时间不一致", "description": "诊断：PWM 与 storage 失步" },

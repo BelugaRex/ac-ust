@@ -3548,9 +3548,10 @@ async function runTests() {
   assertPass(repairTimerIdx > 0
       && repairOffIdx > repairTimerIdx
       && repairBody.includes('planSmartModeOnWindow(schedule')
+      && repairBody.includes('await applyPreparedSmartModeDurations({')
       && repairBody.includes('targetAt: smartTargetAt')
       && repairBody.includes("'repair-pageTimer-failed'"),
-    '11E: 时钟修复沿用智能绝对截止，并仅在新鲜确认后恢复 OFF 相位');
+    '11E: 时钟修复先刷新当前智能周期时长、沿用绝对截止，并仅在新鲜确认后恢复 OFF 相位');
   const toggleTimerIdx = toggleBody.indexOf('await setPageTimer(schedule.onMinutes');
   const toggleOffIdx = toggleBody.indexOf("schedule.pwmState = currentOn ? 'off' : 'on';");
   assertPass(toggleTimerIdx > 0
@@ -3576,7 +3577,7 @@ async function runTests() {
   );
   const preparedDurationBody = extractSourceSection(
     backgroundSource,
-    'async function applyPreparedSmartModeDurations() {',
+    'async function applyPreparedSmartModeDurations(options = {}) {',
     '\n// 智能模式：滑块松开后立即按新灵敏度重设当前 ON 相位',
     'applyPreparedSmartModeDurations'
   );
@@ -3620,13 +3621,15 @@ async function runTests() {
       && smartWeatherPreparationBody.includes('[SMART_WEATHER_PLAN_KEY]: plan')
       && preparedDurationBody.includes('chrome.storage.local.get(SMART_WEATHER_PLAN_KEY)')
       && preparedDurationBody.includes('consumeSmartWeatherDecision(')
+      && preparedDurationBody.includes('await readStoredSmartWeather()')
+      && preparedDurationBody.includes('consumeStoredSmartWeatherDecision(')
       && !preparedDurationBody.includes('getSmartWeather(')
       && !preparedDurationBody.includes('fetchSmartWeather')
       && pwmBody.includes('await applyPreparedSmartModeDurations();')
       && !pwmBody.includes('getSmartWeather(')
       && !pwmBody.includes('fetchSmartWeather')
       && !pwmBody.includes('prepareSmartWeatherForBoundary('),
-    '11F-0A: 只有预取路径强制联网；:00/:30 runPwmStep 仅消费目标绑定 storage 快照');
+    '11F-0A: 只有预取路径强制联网；边界执行与重启修复只消费目标 plan／新鲜本地天气，不联网');
   assertPass(reapplyBody.includes('const weather = await readStoredSmartWeather();')
       && !reapplyBody.includes('getSmartWeather(')
       && !reapplyBody.includes('fetchSmartWeather')
@@ -3753,19 +3756,22 @@ return { reapplySmartSensitivityNow };`
     'createPwmAlarmFromPlan',
     'SMART_MODE',
     'planSmartModeOnWindow',
+    'nextSafePageTimerTargetAt',
+    'applyPreparedSmartModeDurations',
     'Date',
     `let pwmRuntimeRevision = 0;
     function isAutomationAllowed() { return schedule.enabled; }
     async function abortStaleAutomation() { return false; }
     ${repairFunctionSource}; return repairScheduleClock;`
   );
-  const runRepairCase = async (initialSchedule, nowMs) => {
+  const runRepairCase = async (initialSchedule, nowMs, refreshedSmartDuration = null) => {
     const repairSchedule = {
       ...initialSchedule,
       smartMode: { ...initialSchedule.smartMode }
     };
     const timerCalls = [];
     const alarmPlans = [];
+    const smartDurationCalls = [];
     const repairScheduleClock = loadRepairScheduleClock(
       repairSchedule,
       async () => false,
@@ -3783,10 +3789,20 @@ return { reapplySmartSensitivityNow };`
       async plan => { alarmPlans.push({ ...plan }); },
       smartMode.SMART_MODE,
       pwmPhase.planSmartModeOnWindow,
+      pwmPhase.nextSafePageTimerTargetAt,
+      async options => {
+        smartDurationCalls.push({ ...options });
+        if (refreshedSmartDuration) {
+          repairSchedule.onMinutes = refreshedSmartDuration.onMinutes;
+          repairSchedule.offMinutes = refreshedSmartDuration.offMinutes;
+          return true;
+        }
+        return false;
+      },
       { now: () => nowMs }
     );
     const result = await repairScheduleClock();
-    return { result, schedule: repairSchedule, timerCalls, alarmPlans };
+    return { result, schedule: repairSchedule, timerCalls, alarmPlans, smartDurationCalls };
   };
   const smartRepairBoundary = new Date(2026, 7, 17, 13, 30, 0, 0).getTime();
   const activeSmartRepair = await runRepairCase({
@@ -3807,6 +3823,28 @@ return { reapplySmartSensitivityNow };`
     smartOnBoundaryAt: smartRepairBoundary,
     smartMode: { enabled: true, sensitivity: 5 }
   }, new Date(2026, 7, 17, 13, 56, 0, 0).getTime());
+  const midMinuteOverrunSmartRepair = await runRepairCase({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 25,
+    offMinutes: 5,
+    nextTriggerAt: 0,
+    smartOnBoundaryAt: smartRepairBoundary,
+    smartMode: { enabled: true, sensitivity: 5 }
+  }, new Date(2026, 7, 17, 13, 56, 1, 0).getTime());
+  const restartedSmartRepairBoundary = new Date(2026, 7, 17, 2, 0, 0, 0).getTime();
+  const restartedSmartRepair = await runRepairCase({
+    enabled: true,
+    pwmState: 'off',
+    onMinutes: 12,
+    offMinutes: 18,
+    nextTriggerAt: 0,
+    smartOnBoundaryAt: restartedSmartRepairBoundary,
+    smartMode: { enabled: true, sensitivity: 10 }
+  }, new Date(2026, 7, 17, 2, 11, 1, 0).getTime(), {
+    onMinutes: 21,
+    offMinutes: 9
+  });
   const ordinaryRepairNow = new Date(2026, 7, 17, 13, 17, 0, 0).getTime();
   const ordinaryRepair = await runRepairCase({
     enabled: true,
@@ -3826,11 +3864,30 @@ return { reapplySmartSensitivityNow };`
       && overrunSmartRepair.timerCalls[0]?.minutes === 1
       && overrunSmartRepair.timerCalls[0]?.options.targetAt
         === new Date(2026, 7, 17, 13, 57, 0, 0).getTime()
+      && midMinuteOverrunSmartRepair.timerCalls[0]?.minutes === 2
+      && midMinuteOverrunSmartRepair.timerCalls[0]?.options.targetAt
+        === new Date(2026, 7, 17, 13, 58, 0, 0).getTime()
+      && restartedSmartRepair.smartDurationCalls[0]?.allowActiveOnPhase === true
+      && restartedSmartRepair.smartDurationCalls[0]?.boundaryAt
+        === restartedSmartRepairBoundary
+      && restartedSmartRepair.schedule.onMinutes === 21
+      && restartedSmartRepair.timerCalls[0]?.minutes === 10
+      && restartedSmartRepair.timerCalls[0]?.options.targetAt
+        === new Date(2026, 7, 17, 2, 21, 0, 0).getTime()
+      && restartedSmartRepair.alarmPlans[0]?.nextTriggerAt
+        === new Date(2026, 7, 17, 2, 21, 0, 0).getTime()
       && ordinaryRepair.timerCalls[0]?.minutes === 12
       && !Object.hasOwn(ordinaryRepair.timerCalls[0]?.options || {}, 'targetAt')
       && ordinaryRepair.alarmPlans[0]?.nextTriggerAt
         === ordinaryRepairNow + 12 * 60000,
-    '11F-3: 重启时钟修复沿用智能原半点截止，超时只给下一分钟，普通 PWM 仍按相对时长');
+    '11F-3: 02:11 重启先把旧 12 刷新为建议 21 并沿用 02:00 锚点；超时保证完整一分钟，普通 PWM 不变');
+  const midMinuteTarget11F = typeof pwmPhase.nextSafePageTimerTargetAt === 'function'
+    ? pwmPhase.nextSafePageTimerTargetAt(new Date(2026, 7, 17, 2, 11, 1, 0).getTime())
+    : 0;
+  assertPass(typeof pwmPhase.nextSafePageTimerTargetAt === 'function'
+      && midMinuteTarget11F === new Date(2026, 7, 17, 2, 13, 0, 0).getTime()
+      && midMinuteTarget11F - new Date(2026, 7, 17, 2, 11, 1, 0).getTime() >= 60_000,
+    '11F-3A: 紧急页面关机目标从 02:11:01 取 02:13，不再请求不足一分钟的 02:12');
   const recoveryNow11G = 1_700_000_000_000;
   const recoveryPlan11G = pwmPhase.planPwmRecovery({
     enabled: true,
@@ -4082,6 +4139,7 @@ return { reapplySmartSensitivityNow };`
         : 0;
     }
     function isWithinActiveHours() { return insideActiveHours !== false; }
+    function isCurrentPwmStepRunning() { return false; }
     let currentActualStatus = actualStatus;
     async function getCurrentACStatus() { return currentActualStatus; }
     async function persistSchedule() { scheduleWriteCount += 1; }
@@ -4659,6 +4717,11 @@ return { reapplySmartSensitivityNow };`
   const isPwmPageTimerRetryActive14G = pwmRetryHelperSource14G
     ? new Function(`${pwmRetryHelperSource14G}; return isPwmPageTimerRetryActive;`)()
     : null;
+  const isDiagnosticPageTimerRequired14G = pwmRetryHelperSource14G.includes(
+    'function isDiagnosticPageTimerRequired('
+  )
+    ? new Function(`${pwmRetryHelperSource14G}; return isDiagnosticPageTimerRequired;`)()
+    : null;
   const pwmRetryNow14G = 1_700_000_000_000;
   assertPass(typeof isPwmPageTimerRetryActive14G === 'function'
       && isPwmPageTimerRetryActive14G('写入失败；1 分钟后重试', pwmRetryNow14G + 57_000, pwmRetryNow14G)
@@ -4666,6 +4729,28 @@ return { reapplySmartSensitivityNow };`
       && !isPwmPageTimerRetryActive14G('旧错误', pwmRetryNow14G - 1, pwmRetryNow14G)
       && !isPwmPageTimerRetryActive14G('旧错误', pwmRetryNow14G + 5 * 60_000, pwmRetryNow14G),
     '14G-1: 一分钟 PWM retry 不依赖 pwmState，且无错误、已过期或普通远期闹钟不误报');
+  assertPass(typeof isDiagnosticPageTimerRequired14G === 'function'
+      && !isDiagnosticPageTimerRequired14G({
+        enabled: true,
+        pwmState: 'off'
+      }, false, false)
+      && isDiagnosticPageTimerRequired14G({
+        enabled: true,
+        pwmState: 'on'
+      }, true, false)
+      && isDiagnosticPageTimerRequired14G({
+        enabled: true,
+        pwmState: 'off'
+      }, null, false),
+    '14G-1A: 权威 AC=OFF 否决陈旧 ON 相位的缺 timer 报警；状态未知才回退 PWM 相位');
+  assertPass(backgroundSource.includes('_pwmStepRunning: isCurrentPwmStepRunning()')
+      && backgroundSource.includes('pwmStepRunning: isCurrentPwmStepRunning()')
+      && popupSource.includes('const pwmStepInFlight =')
+      && popupSource.includes("code: 'SCHED-PWM-IN-FLIGHT'")
+      && popupSource.includes('if (pwmStepInFlight && !memLive)')
+      && /if \(s\.clockMode === false && s\.enabled[\s\S]{0,160}!pwmStepInFlight[\s\S]{0,80}!effectiveNextTriggerAt/.test(popupSource)
+      && countOccurrences(popupSource, "t('diagnosePwmInFlight')") === 1,
+    '14G-1B: ac-pwm 已触发且步骤仍在执行时，只标记一次处理中，不误报触发时间／闹钟缺失或三方失步');
   assertPass(popupSource.includes("diagnoseSmartWeatherAlarm")
       && popupSource.includes("diagnoseSmartWeatherAlarmMissing")
       && popupSource.includes("diagnoseSmartWeatherFresh")
@@ -4992,7 +5077,7 @@ return { reapplySmartSensitivityNow };`
       && diagnoseHandlerSource.includes('readPopupPageSnapshot()')
       && diagnoseHandlerSource.includes('ACPopupDiagnosticFallback?.getCapturedErrors?.()')
       && popupSource.includes('globalThis.__AC_POPUP_DIAGNOSTICS_READY__ = true;')
-      && diagnoseHandlerSource.includes("s.pwmState === 'off' || bgSchedule.actualStatus?.isOn === true")
+      && diagnoseHandlerSource.includes('isDiagnosticPageTimerRequired(')
       && diagnoseHandlerSource.includes("code: 'WEATHER-SLOT-MISMATCH'")
       && diagnoseHandlerSource.includes('ensured?.success === false && ensured.error')
       && diagnoseHandlerSource.includes('if (!bgProbeFailed)')

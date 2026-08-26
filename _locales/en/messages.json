@@ -153,6 +153,7 @@
   "diagnoseBgWriteback": { "message": " (BG writeback)" },
   "diagnosePwmExists": { "message": "ac-pwm alarm exists" },
   "diagnosePwmMissing": { "message": "ac-pwm alarm missing" },
+  "diagnosePwmInFlight": { "message": "ac-pwm boundary in progress (the next alarm will be created when this step finishes)" },
   "diagnosePwmTrigger": { "message": " (fires: " },
   "diagnosePwmSync": { "message": "ac-pwm synced with storage trigger time" },
   "diagnosePwmDesync": { "message": "ac-pwm and storage trigger times do not match" },

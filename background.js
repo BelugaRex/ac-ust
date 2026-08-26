@@ -489,21 +489,32 @@ function applySmartDurationFallback() {
   );
 }
 
-async function applyPreparedSmartModeDurations() {
-  if (!schedule.enabled || !schedule.smartMode?.enabled) return;
-  if (schedule.pwmState !== 'on') return;
+async function applyPreparedSmartModeDurations(options = {}) {
+  if (!schedule.enabled || !schedule.smartMode?.enabled) return false;
+  if (options.allowActiveOnPhase !== true && schedule.pwmState !== 'on') return false;
 
-  const boundaryAt = currentSmartControlBoundary();
+  const requestedBoundaryAt = Number(options.boundaryAt);
+  const boundaryAt = Number.isSafeInteger(requestedBoundaryAt) && requestedBoundaryAt > 0
+    ? requestedBoundaryAt
+    : currentSmartControlBoundary();
   const stored = await chrome.storage.local.get(SMART_WEATHER_PLAN_KEY);
-  const suggested = consumeSmartWeatherDecision(stored[SMART_WEATHER_PLAN_KEY], {
+  let suggested = consumeSmartWeatherDecision(stored[SMART_WEATHER_PLAN_KEY], {
     boundaryAt,
     sensitivity: schedule.smartMode.sensitivity
   });
 
   if (!suggested?.valid) {
+    const cachedWeather = await readStoredSmartWeather();
+    suggested = consumeStoredSmartWeatherDecision(cachedWeather, {
+      boundaryAt,
+      sensitivity: schedule.smartMode.sensitivity
+    });
+  }
+
+  if (!suggested?.valid) {
     applySmartDurationFallback();
     console.warn('[AC扩展] 智能模式：目标边界预计算缺失，本周期沿用安全时长');
-    return;
+    return false;
   }
 
   applySmartDurationDecision(suggested);
@@ -514,6 +525,7 @@ async function applyPreparedSmartModeDurations() {
     + ` rain×${suggested.rainFactor.toFixed(3)} t_raw=${suggested.tRaw.toFixed(1)}`
     + ` → on=${suggested.onMinutes}min / off=${schedule.offMinutes}min`
   );
+  return true;
 }
 
 // 智能模式：滑块松开后立即按新灵敏度重设当前 ON 相位的 Power-off after。
@@ -597,7 +609,7 @@ async function reapplySmartSensitivityNow() {
       activeSmartBoundaryAt
     )
     : 0;
-  const nextMinuteTargetAt = Math.floor(nowMs / 60000 + 1) * 60000;
+  const nextMinuteTargetAt = nextSafePageTimerTargetAt(nowMs);
   const smartDeadlineAt = computedSmartDeadlineAt > nowMs
     ? computedSmartDeadlineAt
     : nextMinuteTargetAt;
@@ -3023,7 +3035,7 @@ async function repairScheduleClock() {
     // 才允许恢复为下一步 OFF。
     schedule.pwmState = 'on';
     const nowMs = Date.now();
-    const nextMinuteTargetAt = Math.floor(nowMs / 60000 + 1) * 60000;
+    const nextMinuteTargetAt = nextSafePageTimerTargetAt(nowMs);
     let smartTargetAt = 0;
     if (schedule.smartMode?.enabled) {
       const smartRepairPlan = planSmartModeOnWindow(schedule, {
@@ -3111,6 +3123,18 @@ async function repairScheduleClock() {
   const currentOn = typeof status?.isOn === 'boolean'
     ? status.isOn
     : schedule.pwmState !== 'on';
+  if (currentOn && schedule.smartMode?.enabled) {
+    await applyPreparedSmartModeDurations({
+      allowActiveOnPhase: true,
+      boundaryAt: schedule.smartOnBoundaryAt
+    });
+    if (await abortStaleAutomation(
+      automationRevision,
+      'repair-smart-duration-active-hours-paused'
+    )) {
+      return { success: false, reason: '运行时段外暂停', schedule };
+    }
+  }
   const delay = Math.max(1, currentOn ? schedule.onMinutes : schedule.offMinutes);
 
   if (currentOn) {
@@ -3338,7 +3362,10 @@ async function getScheduleSnapshot(lite = false) {
 
   const alarm = await chrome.alarms.get('ac-pwm');
   const liveAlarmEnd = getLiveAlarmEndMs(alarm);
-  const snapshot = { ...schedule };
+  const snapshot = {
+    ...schedule,
+    _pwmStepRunning: isCurrentPwmStepRunning()
+  };
   const insideActiveHours = typeof isWithinActiveHours === 'function'
     ? isWithinActiveHours()
     : true;
@@ -3525,6 +3552,7 @@ async function ensureDiagnosticAlarms() {
       before: beforeAlarms,
       repairs,
       schedule: { ...schedule },
+      pwmStepRunning: false,
       alarms: afterAlarms
     };
   }
@@ -3557,6 +3585,7 @@ async function ensureDiagnosticAlarms() {
         _insideActiveHours: false,
         _automationPausedByActiveHours: true
       },
+      pwmStepRunning: false,
       alarms: afterAlarms
     };
   }
@@ -3614,16 +3643,19 @@ async function ensureDiagnosticAlarms() {
     repairs.push('pwm-trigger');
   }
 
+  const pwmStepInFlight = isCurrentPwmStepRunning();
+
   return {
     success: !!badgeAlarm
       && !!watchdogAlarm
-      && !!pwmAlarm
+      && (!!pwmAlarm || pwmStepInFlight)
       && (!schedule.smartMode?.enabled || !!smartWeatherAlarm),
     enabled: true,
     repaired: repairs.length > 0,
     before: beforeAlarms,
     repairs,
     schedule: { ...schedule },
+    pwmStepRunning: isCurrentPwmStepRunning(),
     alarms: {
       badge: badgeAlarm ? { scheduledTime: badgeAlarm.scheduledTime } : null,
       watchdog: watchdogAlarm ? { scheduledTime: watchdogAlarm.scheduledTime, periodInMinutes: watchdogAlarm.periodInMinutes } : null,

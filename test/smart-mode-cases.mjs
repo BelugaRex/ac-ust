@@ -236,6 +236,42 @@ export function runSmartModeCases(assertPass) {
       && sensitivityChangedDecision.onMinutes !== preparedDecision.onMinutes,
     'smart-plan: 快照保存原始天气，边界消费可按当前灵敏度纯本地重算');
 
+  const consumeStoredWeather = typeof smartMode.consumeStoredSmartWeatherDecision === 'function'
+    ? smartMode.consumeStoredSmartWeatherDecision
+    : null;
+  const cachedWeatherDecision = consumeStoredWeather
+    ? consumeStoredWeather({
+      fetchedAt: preparedBoundary - 10 * 60_000,
+      temperature: 32.3,
+      dewPoint: 10,
+      windSpeedMs: 0,
+      rainMm: 0,
+      stale: false,
+      error: ''
+    }, { boundaryAt: preparedBoundary, sensitivity: 10 })
+    : null;
+  assertPass(consumeStoredWeather !== null
+      && cachedWeatherDecision?.valid === true
+      && cachedWeatherDecision.onMinutes === 21
+      && cachedWeatherDecision.offMinutes === 9
+      && cachedWeatherDecision.boundaryAt === preparedBoundary,
+    'smart-plan: 目标 plan 丢失时可用边界前的新鲜本地天气重算 21/30，不沿用旧 12 分钟');
+
+  assertPass(consumeStoredWeather !== null
+      && consumeStoredWeather({
+        ...preparedWeather,
+        fetchedAt: preparedBoundary + 1
+      }, { boundaryAt: preparedBoundary, sensitivity: 5 }) === null
+      && consumeStoredWeather({
+        ...preparedWeather,
+        fetchedAt: preparedBoundary - smartMode.SMART_MODE.WEATHER_PLAN_MAX_AGE_MS - 1
+      }, { boundaryAt: preparedBoundary, sensitivity: 5 }) === null
+      && consumeStoredWeather({
+        ...preparedWeather,
+        stale: true
+      }, { boundaryAt: preparedBoundary, sensitivity: 5 }) === null,
+    'smart-plan: 本地天气回退拒绝边界后、过期或 stale 观测');
+
   const stalePreparedWeather = {
     ...preparedWeather,
     fetchedAt: preparedBoundary - smartMode.SMART_MODE.WEATHER_PLAN_MAX_AGE_MS - 1
