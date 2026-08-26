@@ -1,5 +1,5 @@
-// 端到端测试:加载真实 dist/ 扩展,模拟用户场景,验证红灯转绿灯
-// 这是 evaluator 要求的"在实际运行的扩展中看到红灯被解决"
+// 端到端测试:加载真实 dist/ 扩展,模拟用户场景,验证诊断恢复与智能控制
+// 这是 evaluator 要求的"在实际运行的扩展中看到问题被解决"
 //
 // 流程:
 // 1. 用 Playwright 启动 Chromium,加载 dist/ 扩展
@@ -11,6 +11,9 @@
 // 5. 读取 #diagnoseResult 的实际文本输出
 // 6. 断言摘要能定位首要问题并给出下一步，同时两个旧红灯都已消除；
 //    修复可由后台诊断或 popup 兜底完成
+// 7. 完整重启后写入智能模式旧 12/18、目标 plan 缺失与新鲜天气夹具
+// 8. 在 loaded Service Worker 中执行生产天气消费链，断言持久化为 21/9
+// 9. 重新打开真实 Popup，断言智能控制选中并显示 21/30
 
 const { chromium } = require('playwright');
 const crypto = require('crypto');
@@ -100,7 +103,7 @@ async function readWorkerIdentity(serviceWorker) {
 }
 
 async function run() {
-  console.log('=== 端到端测试: 真实扩展中验证红灯转绿灯 ===\n');
+  console.log('=== 端到端测试: 真实扩展中验证诊断恢复与智能控制 ===\n');
   console.log('扩展路径:', EXT_PATH, '\n');
 
   let context;
@@ -699,6 +702,110 @@ async function run() {
         && !hasDiagnosticLinePrefix(restartedDiagnosticState.text, '❌', 'diagnoseTriMismatch'),
       '浏览器重建 alarm 引入毫秒小数时，三方时钟仍按 1500ms 容差显示绿灯');
 
+    // === 智能控制：真实 Worker 消费本地天气，真实 Popup 展示同一 21/30 ===
+    console.log('\n--- 步骤 4: 验证真实扩展智能控制 21/30 ---\n');
+    const smartBoundary = new Date();
+    smartBoundary.setMinutes(smartBoundary.getMinutes() < 30 ? 0 : 30, 0, 0);
+    const smartBoundaryAt = smartBoundary.getTime();
+    const smartWeather = {
+      fetchedAt: smartBoundaryAt - 10 * 60 * 1000,
+      temperature: 32.3,
+      dewPoint: 10,
+      windSpeedMs: 0,
+      rainMm: 0,
+      relativeHumidity: 45
+    };
+    const smartWorkerState = await restartedWorker.evaluate(async ({ boundaryAt, weather }) => {
+      const stored = (await chrome.storage.local.get('ac_schedule')).ac_schedule || {};
+      const smartSchedule = {
+        ...stored,
+        enabled: true,
+        mode: 'pwm',
+        clockMode: false,
+        onMinutes: 12,
+        offMinutes: 18,
+        pwmState: 'off',
+        smartOnBoundaryAt: boundaryAt,
+        activeHours: { enabled: false, start: '08:00', end: '23:00' },
+        smartMode: { enabled: true, sensitivity: 10 }
+      };
+      await chrome.storage.local.set({
+        ac_schedule: smartSchedule,
+        ac_smart_weather: weather
+      });
+      await chrome.storage.local.remove('ac_smart_weather_plan');
+
+      const productionFunctionsAvailable = typeof loadScheduleFromStorage === 'function'
+        && typeof applyPreparedSmartModeDurations === 'function'
+        && typeof persistSchedule === 'function';
+      const planMissing = (await chrome.storage.local.get('ac_smart_weather_plan'))
+        .ac_smart_weather_plan === undefined;
+      if (!productionFunctionsAvailable) {
+        return {
+          productionFunctionsAvailable,
+          planMissing,
+          before: smartSchedule,
+          applied: false,
+          persisted: (await chrome.storage.local.get('ac_schedule')).ac_schedule
+        };
+      }
+
+      await loadScheduleFromStorage();
+      const before = (await chrome.storage.local.get('ac_schedule')).ac_schedule;
+      const applied = await applyPreparedSmartModeDurations({
+        allowActiveOnPhase: true,
+        boundaryAt
+      });
+      await persistSchedule('e2e-smart-duration', { syncFromLiveAlarm: false });
+      const persisted = (await chrome.storage.local.get('ac_schedule')).ac_schedule;
+      return {
+        productionFunctionsAvailable,
+        planMissing,
+        before,
+        applied,
+        persisted
+      };
+    }, { boundaryAt: smartBoundaryAt, weather: smartWeather });
+    console.log('  智能 Worker 状态:', JSON.stringify(smartWorkerState));
+
+    await restartedPopup.reload({ timeout: 10000, waitUntil: 'load' });
+    const smartPopupReady = await restartedPopup.waitForFunction(() => (
+      document.getElementById('smartModeToggle')?.getAttribute('aria-pressed') === 'true'
+      && document.getElementById('smartBody')?.hidden === false
+      && document.getElementById('smartSuggested')?.textContent?.trim() === '21/30'
+    ), null, { timeout: 10000 }).then(() => true).catch(() => false);
+    const smartPopupState = await restartedPopup.evaluate(async () => ({
+      smartPressed: document.getElementById('smartModeToggle')?.getAttribute('aria-pressed') === 'true',
+      smartBodyVisible: document.getElementById('smartBody')?.hidden === false,
+      sensitivity: document.getElementById('smartSensitivity')?.value || '',
+      suggested: document.getElementById('smartSuggested')?.textContent?.trim() || '',
+      updated: document.getElementById('smartUpdated')?.textContent?.trim() || '',
+      snapshot: await chrome.runtime.sendMessage({ type: 'getScheduleLite' })
+    }));
+    console.log('  智能 Popup 状态:', JSON.stringify(smartPopupState));
+
+    assert(smartWorkerState.productionFunctionsAvailable
+        && smartWorkerState.planMissing
+        && smartWorkerState.before?.onMinutes === 12
+        && smartWorkerState.before?.offMinutes === 18,
+      '真实 Worker 以智能模式旧 12/18、目标 plan 缺失作为恢复夹具');
+    assert(smartWorkerState.applied === true
+        && smartWorkerState.persisted?.smartMode?.enabled === true
+        && smartWorkerState.persisted?.onMinutes === 21
+        && smartWorkerState.persisted?.offMinutes === 9,
+      '真实 Worker 只读新鲜本地天气，把旧 12/18 刷新并持久化为 21/9');
+    assert(smartPopupReady
+        && smartPopupState.smartPressed
+        && smartPopupState.smartBodyVisible
+        && smartPopupState.sensitivity === '10'
+        && smartPopupState.suggested === '21/30'
+        && smartPopupState.updated !== '--',
+      '真实 Popup 选中智能控制并显示 sensitivity=10 的建议 21/30');
+    assert(smartPopupState.snapshot?.smartMode?.enabled === true
+        && smartPopupState.snapshot?.onMinutes === 21
+        && smartPopupState.snapshot?.offMinutes === 9,
+      '真实 Popup 与 Service Worker 对智能模式及 21/9 派生时长一致');
+
     // 汇总
     const passCount = results.filter(r => r.pass).length;
     console.log(`\n=== 测试汇总: ${passCount}/${results.length} 通过 ===`);
@@ -707,7 +814,7 @@ async function run() {
       results.filter(r => !r.pass).forEach(r => console.log('  - ' + r.name));
       process.exitCode = 1;
     } else {
-      console.log(`\n✅ 所有断言通过 — v${manifest.version} 在真实扩展中把两个红灯转成绿灯,storage 已修复。`);
+      console.log(`\n✅ 所有断言通过 — v${manifest.version} 在真实扩展中完成诊断恢复，并验证智能控制 21/30。`);
     }
   } finally {
     if (context) await context.close();

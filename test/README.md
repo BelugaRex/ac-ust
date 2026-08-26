@@ -91,7 +91,7 @@ python3 test/verify-icon.py
 
 ### `e2e-verify.cjs`(浏览器层,**手动触发**)
 
-**用途**:用 Playwright 启动系统 Chrome/Edge + 加载 dist/ 扩展,模拟用户点击诊断按钮,读取真实诊断输出。这是 evaluator 友好的"实际扩展中验证"路径,但**需要桌面图形环境**,CI 中无法跑。
+**用途**:用 Playwright 启动系统 Chrome/Edge + 加载 dist/ 扩展,模拟用户点击诊断按钮,读取真实诊断输出；完整重启后还会启用智能控制，验证目标 plan 缺失时真实 Service Worker 由新鲜本地天气把旧 `12/18` 更新为 `21/9`，且真实 Popup 同步显示 `21/30`。这是 evaluator 友好的"实际扩展中验证"路径,但**需要桌面图形环境**,CI 中无法跑。
 
 **前置条件**:
 - `npm install playwright`(临时安装,不入 package.json)
