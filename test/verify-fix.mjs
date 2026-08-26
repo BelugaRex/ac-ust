@@ -578,11 +578,15 @@ async function runTests() {
       && /\.static-preview body\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
       && /\.static-preview \.app-shell\s*\{[^}]*?transform-origin:\s*top left/.test(popupCssNoComments),
     'popup、shell 与静态预览共用 280px 宽度令牌；窄预览仍从左上角整体缩放');
-  assertPass(/--font:\s*"Inter Variable",\s*"Inter",\s*-apple-system/.test(popupCssNoComments)
+  assertPass(/--font:\s*-apple-system,\s*BlinkMacSystemFont,\s*"SF Pro Text",\s*"Helvetica Neue",\s*"Segoe UI Variable Text",\s*"Segoe UI Variable",\s*"Segoe UI"/.test(popupCssNoComments)
       && popupCssNoComments.includes('"PingFang SC"')
       && popupCssNoComments.includes('"Microsoft YaHei UI"')
-      && popupCssNoComments.includes('"Noto Sans CJK SC"'),
-    'popup 优先使用 Inter，并保留 macOS、Windows 与 Linux 中文字体回退');
+      && popupCssNoComments.includes('"Noto Sans CJK SC"')
+      && !popupCssNoComments.includes('"Inter Variable"')
+      && !popupCssNoComments.includes('"Inter"'),
+    'popup 优先使用平台 UI 字体并保留 CJK 回退，不因用户偶然安装 Inter 而改变外观');
+  assertPass(/body\s*\{[^}]*?font-family:\s*var\(--font\)[^}]*?font-optical-sizing:\s*auto/.test(popupCssNoComments),
+    'popup 显式允许可变系统字体按实际字号使用 optical sizing');
   assertPass(/\.content\s*\{[^}]*?width:\s*auto[^}]*?min-width:\s*0[^}]*?padding:\s*8px 12px/.test(popupCssNoComments),
     '内容区使用水平12px、垂直8px的紧凑 gutter，不再由标签或版本元数据决定面板宽度');
   assertPass(/\.status-card,\s*\.settings-card\s*\{[^}]*?background:\s*var\(--surface\)[^}]*?border:\s*1px solid var\(--border\)/.test(popupCssNoComments)
