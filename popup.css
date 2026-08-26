@@ -1,7 +1,7 @@
 /* AC-UST popup: restrained pre-Liquid-Glass macOS settings language. */
 :root {
   color-scheme: light;
-  --popup-width: 300px;
+  --popup-width: 280px;
   /* ============================================================
    * v0.6.3 设计转向：以 UST 页面色板为主、Apple HIG 为辅
    * （2026-08-04 从 .vscode/开机+已设置好定时.md 与关机.md 两份
@@ -428,7 +428,6 @@ input {
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 5px;
   min-width: 0;
   height: 32px;
   padding: 0 7px;
@@ -440,6 +439,7 @@ input {
   font-size: 12px;
   font-weight: 600;
   line-height: 16px;
+  white-space: nowrap;
   transition: background var(--transition), box-shadow var(--transition), color var(--transition), transform var(--transition);
 }
 
@@ -452,24 +452,6 @@ input {
   background: var(--surface);
   color: var(--accent);
   box-shadow: 0 0 0 1px var(--border);
-}
-
-.mode-choice-mark {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  width: 14px;
-  height: 14px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: #fff;
-  font-size: 9px;
-  line-height: 1;
-  visibility: hidden;
-}
-
-.mode-choice[aria-pressed="true"] .mode-choice-mark {
-  visibility: visible;
 }
 
 .mode-choice:active:not(:disabled) {

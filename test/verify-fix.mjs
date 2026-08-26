@@ -572,12 +572,12 @@ async function runTests() {
     'popup.html 的 CSS 不使用 vw/vh 视口单位（防窗口塌陷回归）');
   assertPass(!/\d+\.\d+px\b/.test(popupCssNoComments),
     'popup.css 的显式像素尺寸均使用整数，避免主动引入子像素几何');
-  assertPass(/--popup-width:\s*300px/.test(popupCssNoComments)
+  assertPass(/--popup-width:\s*280px/.test(popupCssNoComments)
       && /body\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
       && /\.app-shell\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
       && /\.static-preview body\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
       && /\.static-preview \.app-shell\s*\{[^}]*?transform-origin:\s*top left/.test(popupCssNoComments),
-    'popup、shell 与静态预览共用 300px 宽度令牌；窄预览仍从左上角整体缩放');
+    'popup、shell 与静态预览共用 280px 宽度令牌；窄预览仍从左上角整体缩放');
   assertPass(/--font:\s*"Inter Variable",\s*"Inter",\s*-apple-system/.test(popupCssNoComments)
       && popupCssNoComments.includes('"PingFang SC"')
       && popupCssNoComments.includes('"Microsoft YaHei UI"')
@@ -614,7 +614,7 @@ async function runTests() {
       && en.smartModeLabel?.message === 'Smart control'
       && en.automationScopeHint?.message === 'Active hours limit both automatic modes'
       && en.scheduleHintPinTab?.message === 'Keep the UST AC tab pinned and open for timer control.',
-    '英文 300px Popup 使用完整清晰标签，核心状态与模式名不换行');
+    '英文 280px Popup 使用完整清晰标签，核心状态与模式名不换行');
   assertPass(/\.toggle-switch\s*\{[^}]*?width:\s*36px[^}]*?height:\s*20px/.test(popupCssNoComments)
       && /\.toggle-switch::after\s*\{[^}]*?inset:\s*-11px\s+-4px/.test(popupCssNoComments)
       && (popupHtml.match(/class="toggle-switch"/g) || []).length === 2,
@@ -623,9 +623,10 @@ async function runTests() {
       && /<fieldset class="mode-section">\s*<legend class="visually-hidden"[^>]*>[\s\S]*?class="mode-segment"[\s\S]*?<button[^>]*id="timerToggle"[^>]*aria-pressed="false"[\s\S]*?<button[^>]*id="smartModeToggle"[^>]*aria-pressed="false"/.test(popupHtml)
       && !/<input[^>]*id="(?:timerToggle|smartModeToggle)"/.test(popupHtml)
       && /\.mode-segment\s*\{[^}]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/.test(popupCssNoComments)
+      && /\.mode-choice\s*\{[^}]*?white-space:\s*nowrap/.test(popupCssNoComments)
       && /\.mode-choice\[aria-pressed="true"\]\s*\{[^}]*?background:\s*var\(--surface\)/.test(popupCssNoComments)
-      && popupHtml.includes('class="mode-choice-mark" aria-hidden="true">✓</span>'),
-    '循环定时与智能控制使用等宽二选一分段控件，持续选中态同时包含表面、边框与勾选标记');
+      && !popupHtml.includes('mode-choice-mark'),
+    '循环定时与智能控制使用紧凑等宽二选一分段控件，标签不换行且选中态由表面与描边表达');
   assertPass((popupHtml.match(/class="number-field"/g) || []).length === 2
       && (popupHtml.match(/class="field-unit" data-i18n="unitMinutes"/g) || []).length === 2
       && /\.field-unit\s*\{[^}]*?position:\s*absolute[^}]*?pointer-events:\s*none/.test(popupCssNoComments),
