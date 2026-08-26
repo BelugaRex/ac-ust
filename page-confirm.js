@@ -263,12 +263,16 @@
       Number(ensureACState.notAfterAt) || 0,
       ensureACState.cancellationRevision
     );
-    const dialogConfirmed = await clickConfirmDialogInPageWorld(
+    const dialogWait = { stopped: false };
+    const dialogPromise = clickConfirmDialogInPageWorld(
       5000,
       Number(ensureACState.notAfterAt) || 0,
-      ensureACState.cancellationRevision
+      ensureACState.cancellationRevision,
+      () => dialogWait.stopped
     );
     const executionSuccess = await executionSuccessPromise;
+    dialogWait.stopped = true;
+    const dialogConfirmed = await dialogPromise;
     const afterClick = getACStatusInPageWorld();
     const afterClickWindowError = getOnWindowError();
     if (afterClickWindowError) {
@@ -285,15 +289,24 @@
         }
       );
     }
-    const reachedTarget = typeof afterClick.isOn === 'boolean' && afterClick.isOn === targetState;
-    const afterClickMessage = `[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(afterClick)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}，页面提示=${AC_ON_SUCCESS_TEXT}`;
+    const settled = await waitForTargetACStateInPageWorld(
+      targetState,
+      AC_STATE_SETTLE_MS,
+      Number(ensureACState.notAfterAt) || 0,
+      ensureACState.cancellationRevision
+    );
+    const settledStatus = settled.status || afterClick;
+    if (settled.error) {
+      return failureResult(settledStatus, clickCount + 1, settled.error);
+    }
+    const reachedTarget = settled.reached === true;
+    const afterClickMessage = `[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(settledStatus)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}，页面提示=${AC_ON_SUCCESS_TEXT}`;
     if (reachedTarget) {
       console.log(afterClickMessage);
-      return successResult(afterClick, clickCount + 1);
+      return successResult(settledStatus, clickCount + 1);
     } else {
       console.warn(afterClickMessage);
     }
-    await sleepInPageWorld(AC_STATE_SETTLE_MS);
     return ensureACState(targetState, clickCount + 1);
   }
 
@@ -358,6 +371,32 @@
       executionConfirmationMissing: true,
       error: `页面未出现新的 ${AC_ON_SUCCESS_TEXT} 成功提示`
     };
+  }
+
+  async function waitForTargetACStateInPageWorld(
+    targetState,
+    timeoutMs,
+    notAfterAt = 0,
+    cancellationRevision = automaticOnCancellationRevision
+  ) {
+    const start = Date.now();
+    let status = getACStatusInPageWorld();
+    while (Date.now() - start <= timeoutMs) {
+      if (cancellationRevision !== automaticOnCancellationRevision) {
+        return { reached: false, status, error: '请求已被后台取消' };
+      }
+      if (notAfterAt !== 0
+          && (!Number.isSafeInteger(notAfterAt) || Date.now() >= notAfterAt)) {
+        return { reached: false, status, error: '自动开启窗口已结束' };
+      }
+      if (typeof status?.isOn === 'boolean' && status.isOn === targetState) {
+        return { reached: true, status };
+      }
+      if (Date.now() - start >= timeoutMs) break;
+      await sleepInPageWorld(100);
+      status = getACStatusInPageWorld();
+    }
+    return { reached: false, status };
   }
 
   function findACSwitchInPageWorld() {
@@ -438,7 +477,8 @@
   async function clickConfirmDialogInPageWorld(
     timeoutMs,
     notAfterAt = 0,
-    cancellationRevision = automaticOnCancellationRevision
+    cancellationRevision = automaticOnCancellationRevision,
+    shouldStop = () => false
   ) {
     const start = Date.now();
     const confirmTexts = [
@@ -483,6 +523,7 @@
       return innermostDialogs.length === 1 ? innermostDialogs[0] : null;
     };
     while (Date.now() - start <= timeoutMs) {
+      if (shouldStop()) return false;
       if (cancellationRevision !== automaticOnCancellationRevision) {
         console.warn('[AC扩展] ensureACState: 自动开启请求已被后台取消');
         return false;

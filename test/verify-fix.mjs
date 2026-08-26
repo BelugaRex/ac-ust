@@ -1343,7 +1343,10 @@ async function runTests() {
     '9Bridge-3: 两条主世界通道保留各自的超时返回值并清理监听器');
 
   const ensureStart = pageConfirmSource.indexOf('async function ensureACState(targetState, clickCount = 0)');
-  const ensureEnd = pageConfirmSource.indexOf('\n  function findACSwitchInPageWorld', ensureStart);
+  const ensureEnd = pageConfirmSource.indexOf(
+    '\n  function findACToggleExecutionSuccessMessagesInPageWorld',
+    ensureStart
+  );
   const ensureBody = ensureStart >= 0 && ensureEnd > ensureStart
     ? pageConfirmSource.slice(ensureStart, ensureEnd)
     : '';
@@ -1401,16 +1404,22 @@ async function runTests() {
     '9A: 主世界存在 ensureACState(targetState, clickCount) 递归收敛函数');
   assertPass(ensureBody.includes('return ensureACState(targetState, clickCount + 1);'),
     '9B: 每轮等待后只递归调用 ensureACState 自身');
-  assertPass(ensureBody.includes('await sleepInPageWorld(AC_STATE_SETTLE_MS);')
-      && pageConfirmSource.includes('const AC_STATE_SETTLE_MS = 10000;'),
-    '9C: 成功提示已出现但状态仍未收敛时，等待 10 秒再递归复查');
+  assertPass(ensureBody.includes('await waitForTargetACStateInPageWorld(')
+      && !ensureBody.includes('await sleepInPageWorld(AC_STATE_SETTLE_MS);')
+      && pageConfirmSource.includes('const AC_STATE_SETTLE_MS = 10000;')
+      && pageConfirmSource.includes('async function waitForTargetACStateInPageWorld('),
+    '9C: 成功提示出现后按目标 ON 状态推进，不再盲等 10 秒才复查');
   const executionBaselineIndex9C = ensureBody.indexOf('const executionSuccessBaseline = new Set(');
   const executionClickIndex9C = ensureBody.indexOf('clickElementOnceInPageWorld(sw)');
   const executionWaitStartIndex9C = ensureBody.indexOf(
     'const executionSuccessPromise = waitForNewACToggleExecutionSuccessInPageWorld('
   );
-  const executionDialogIndex9C = ensureBody.indexOf('await clickConfirmDialogInPageWorld(');
+  const executionDialogIndex9C = ensureBody.indexOf(
+    'const dialogPromise = clickConfirmDialogInPageWorld('
+  );
   const executionWaitEndIndex9C = ensureBody.indexOf('await executionSuccessPromise');
+  const executionDialogStopIndex9C = ensureBody.indexOf('dialogWait.stopped = true;');
+  const executionDialogEndIndex9C = ensureBody.indexOf('await dialogPromise');
   assertPass(pageConfirmSource.includes("const AC_ON_SUCCESS_TEXT = 'Execution succeeded';")
       && pageConfirmSource.includes('function findACToggleExecutionSuccessMessagesInPageWorld()')
       && pageConfirmSource.includes('async function waitForNewACToggleExecutionSuccessInPageWorld(')
@@ -1419,8 +1428,11 @@ async function runTests() {
       && executionWaitStartIndex9C > executionClickIndex9C
       && executionWaitStartIndex9C < executionDialogIndex9C
       && executionWaitEndIndex9C > executionDialogIndex9C
-      && ensureBody.includes('executionConfirmationMissing: true'),
-    '9C-1: 本次 click 前建立成功提示基线，并与确认框并行等待新 Execution succeeded；缺失时显式失败');
+      && executionDialogStopIndex9C > executionWaitEndIndex9C
+      && executionDialogEndIndex9C > executionDialogStopIndex9C
+      && ensureBody.includes('executionSuccess.executionConfirmationMissing === true')
+      && pageConfirmSource.includes('executionConfirmationMissing: true'),
+    '9C-1: 新 Execution succeeded 与确认框并行；toast 完成后停止无关确认框等待，缺失时显式失败');
   assertPass(countOccurrences(ensureBody, 'clickElementOnceInPageWorld(sw)') === 1,
     '9D: ensureACState 每轮只有一个 AC 开关点击调用点');
   assertPass(countOccurrences(pageConfirmSource, 'element.click()') === 1,
@@ -1568,14 +1580,18 @@ async function runTests() {
     '9G-4: isACSwitchDisabledInPageWorld 实测：disabled 属性 / ant-switch-disabled 类 / aria-disabled 均判禁用');
   // 9G-5: 行为级证明——禁用开关时 ensureACState 直接返回失败，绝不调用点击。
   const ensureFnStart = pageConfirmSource.indexOf('async function ensureACState(targetState, clickCount = 0)');
-  const ensureFnEnd = pageConfirmSource.indexOf('\n  function findACSwitchInPageWorld', ensureFnStart);
+  const ensureFnEnd = pageConfirmSource.indexOf(
+    '\n  async function waitForTargetACStateInPageWorld',
+    ensureFnStart
+  );
   const ensureFnSource = ensureFnStart >= 0 && ensureFnEnd > ensureFnStart
     ? pageConfirmSource.slice(ensureFnStart, ensureFnEnd)
     : '';
   let disabledEnsureClickCalls = 0;
   const loadEnsure = new Function(
     'getACStatusInPageWorld', 'waitForACSwitchInPageWorld', 'clickElementOnceInPageWorld',
-    'clickConfirmDialogInPageWorld', 'sleepInPageWorld', 'MAX_AC_SWITCH_CLICKS', 'AC_STATE_SETTLE_MS',
+    'clickConfirmDialogInPageWorld', 'waitForTargetACStateInPageWorld', 'sleepInPageWorld',
+    'MAX_AC_SWITCH_CLICKS', 'AC_STATE_SETTLE_MS',
     'automaticOnCancellationRevision', 'document', 'AC_ON_SUCCESS_TEXT',
     'AC_EXECUTION_SUCCESS_TIMEOUT_MS', 'console',
     `${ensureFnSource}; return { ensureACState };`
@@ -1585,6 +1601,7 @@ async function runTests() {
     async () => null,
     () => { disabledEnsureClickCalls += 1; return true; },
     async () => false,
+    async () => ({ reached: false, status: { isOn: false } }),
     async () => {},
     3,
     10000,
@@ -1602,6 +1619,7 @@ async function runTests() {
     async () => ({}),
     () => { expiredWindowClickCalls += 1; return true; },
     async () => false,
+    async () => ({ reached: false, status: { isOn: false } }),
     async () => {},
     3,
     10000,
@@ -1634,6 +1652,36 @@ async function runTests() {
     testConsole
   );
   const expiredConfirmResult = await clickConfirmDialogInPageWorld(5000, confirmDeadlineAt, 0);
+  let stoppedConfirmClickCalls = 0;
+  const stoppedConfirmButton = {
+    textContent: 'Confirm',
+    className: 'ant-btn-primary',
+    disabled: false,
+    hasAttribute: () => false,
+    getAttribute: () => null
+  };
+  const stoppedConfirmDialog = {
+    textContent: 'Turn on Air Conditioning?',
+    className: 'ant-modal-confirm',
+    hidden: false,
+    parentElement: null,
+    getAttribute: () => null,
+    contains: () => false,
+    querySelectorAll: selector => selector === 'button' ? [stoppedConfirmButton] : []
+  };
+  const { clickConfirmDialogInPageWorld: clickStoppedConfirm } = new Function(
+    'document', 'Date', 'clickElementOnceInPageWorld', 'sleepInPageWorld',
+    'automaticOnCancellationRevision', 'console',
+    `${confirmFnSource}; return { clickConfirmDialogInPageWorld };`
+  )(
+    { querySelectorAll: () => [stoppedConfirmDialog] },
+    Date,
+    () => { stoppedConfirmClickCalls += 1; return true; },
+    async () => {},
+    0,
+    testConsole
+  );
+  const stoppedConfirmResult = await clickStoppedConfirm(5000, 0, 0, () => true);
   assertPass(disabledEnsureResult.success === false
       && disabledEnsureResult.error.includes('被禁用')
       && disabledEnsureClickCalls === 0
@@ -1641,8 +1689,10 @@ async function runTests() {
       && expiredWindowResult.error.includes('窗口已结束')
       && expiredWindowClickCalls === 0
       && expiredConfirmResult === false
-      && expiredConfirmClickCalls === 0,
-    '9G-5: 禁用开关或智能 ON 窗口已结束时，开关与确认按钮均零点击');
+      && expiredConfirmClickCalls === 0
+      && stoppedConfirmResult === false
+      && stoppedConfirmClickCalls === 0,
+    '9G-5: 禁用／截止／toast 已完成时，开关或确认按钮均不会产生迟到点击');
   const makeConfirmButton9G = ({ text = 'Confirm', disabled = false } = {}) => ({
     textContent: text,
     className: 'ant-btn-primary',
@@ -1747,6 +1797,7 @@ async function runTests() {
     async () => ({}),
     () => { cancelledEnsureClickCalls += 1; return true; },
     async () => false,
+    async () => ({ reached: false, status: { isOn: false } }),
     async () => {},
     3,
     10000,
@@ -1778,6 +1829,7 @@ async function runTests() {
     async () => ({}),
     () => { enabledEnsureClickCalls += 1; return true; },
     async () => false,
+    async () => ({ reached: false, status: { isOn: false } }),
     async () => {},
     3,
     10000,
@@ -1812,11 +1864,18 @@ async function runTests() {
     const freshMessage9G = makeExecutionSuccessMessage9G();
     const wrongTextMessage9G = makeExecutionSuccessMessage9G('Operation queued');
     const wrongSemanticMessage9G = makeExecutionSuccessMessage9G('Execution succeeded', false);
-    const loadSuccessHelpers9G = document => new Function(
-      'document', 'sleepInPageWorld', 'automaticOnCancellationRevision',
+    const loadSuccessHelpers9G = (document, getACStatusInPageWorld = () => ({ isOn: null })) => new Function(
+      'document', 'getACStatusInPageWorld', 'sleepInPageWorld', 'automaticOnCancellationRevision',
       'AC_ON_SUCCESS_TEXT', 'console',
-      `${successHelperSource9G}; return { findACToggleExecutionSuccessMessagesInPageWorld, waitForNewACToggleExecutionSuccessInPageWorld };`
-    )(document, async () => {}, 0, 'Execution succeeded', testConsole);
+      `${successHelperSource9G}; return {
+        findACToggleExecutionSuccessMessagesInPageWorld,
+        waitForNewACToggleExecutionSuccessInPageWorld,
+        waitForTargetACStateInPageWorld:
+          typeof waitForTargetACStateInPageWorld === 'function'
+            ? waitForTargetACStateInPageWorld
+            : null
+      };`
+    )(document, getACStatusInPageWorld, async () => {}, 0, 'Execution succeeded', testConsole);
     const staleHelpers9G = loadSuccessHelpers9G({ querySelectorAll: () => [staleMessage9G] });
     const staleResult9G = await staleHelpers9G.waitForNewACToggleExecutionSuccessInPageWorld(
       new Set([staleMessage9G]), 0, 0, 0
@@ -1828,23 +1887,42 @@ async function runTests() {
     const rejectedHelpers9G = loadSuccessHelpers9G({
       querySelectorAll: () => [wrongTextMessage9G, wrongSemanticMessage9G]
     });
+    let delayedTargetStatusCalls9G = 0;
+    const delayedTargetHelpers9G = loadSuccessHelpers9G(
+      { querySelectorAll: () => [] },
+      () => ({
+        isOn: ++delayedTargetStatusCalls9G >= 3,
+        disabled: false,
+        source: 'main-world-ant-switch'
+      })
+    );
+    const delayedTargetResult9G = delayedTargetHelpers9G.waitForTargetACStateInPageWorld
+      ? await delayedTargetHelpers9G.waitForTargetACStateInPageWorld(true, 25, 0, 0)
+      : null;
     successHelperBehavior9G = {
       staleResult9G,
       freshResult9G,
-      rejectedCount: rejectedHelpers9G.findACToggleExecutionSuccessMessagesInPageWorld().length
+      rejectedCount: rejectedHelpers9G.findACToggleExecutionSuccessMessagesInPageWorld().length,
+      delayedTargetResult9G,
+      delayedTargetStatusCalls9G
     };
   }
   let clickedSuccessStatusCalls9G = 0;
   let clickedSuccessQueryCalls9G = 0;
+  let clickedSuccessClickCalls9G = 0;
   const { ensureACState: ensureClickedSuccess9G } = loadEnsure(
     () => ({
-      isOn: ++clickedSuccessStatusCalls9G >= 3,
+      isOn: (++clickedSuccessStatusCalls9G, false),
       disabled: false,
       source: 'main-world-ant-switch'
     }),
     async () => ({}),
-    () => true,
+    () => { clickedSuccessClickCalls9G += 1; return true; },
     async () => false,
+    async () => ({
+      reached: true,
+      status: { isOn: true, disabled: false, source: 'main-world-ant-switch' }
+    }),
     async () => {},
     3,
     10000,
@@ -1870,6 +1948,7 @@ async function runTests() {
     async () => ({}),
     () => true,
     async () => false,
+    async () => ({ reached: true, status: { isOn: true } }),
     async () => {},
     3,
     10000,
@@ -1887,6 +1966,7 @@ async function runTests() {
     async () => ({}),
     () => true,
     async () => false,
+    async () => ({ reached: true, status: { isOn: true } }),
     async () => {},
     3,
     10000,
@@ -1901,15 +1981,18 @@ async function runTests() {
   assertPass(successHelperBehavior9G?.staleResult9G?.success === false
       && successHelperBehavior9G?.freshResult9G?.success === true
       && successHelperBehavior9G?.rejectedCount === 0
+      && successHelperBehavior9G?.delayedTargetResult9G?.reached === true
+      && successHelperBehavior9G?.delayedTargetStatusCalls9G === 3
       && clickedSuccessResult9G.success === true
       && clickedSuccessResult9G.executionSucceeded === true
+      && clickedSuccessClickCalls9G === 1
       && missingSuccessResult9G.success === false
       && missingSuccessResult9G.executionConfirmationMissing === true
       && alreadyOnResult9G.success === true
       && alreadyOnResult9G.alreadyDone === true
       && alreadyOnResult9G.executionSucceeded === false
       && alreadyOnSuccessQueries9G === 0,
-    '9G-6A: 旧/伪成功提示不采信；本次新提示+ON 才成功；缺提示失败；原本已 ON 保持幂等');
+    '9G-6A: 旧/伪提示不采信；新提示后等待迟到 ON 且只点一次；缺提示失败；原本已 ON 幂等');
   assertPass(/executionConfirmationMissing:\s*mainWorldResult\?\.executionConfirmationMissing === true/
         .test(contentSource)
       && backgroundSource.includes(
@@ -2355,8 +2438,9 @@ async function runTests() {
   assertPass(setTimerBody.includes('tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded)')
       && !setTimerBody.includes('tabs[0]')
       && !setTimerBody.includes('chrome.tabs.update(')
+      && /waitForTabReady\(\s*tab\.id,\s*30000,\s*isACHomePageTab\s*\)/.test(setTimerBody)
       && setTimerBody.includes('if (!isACHomePageTab(tab)) throw new Error'),
-    '9O-1: 页面定时器只复用精确 home；不存在时新建隐藏 home，绝不降级改写其他 HKUST 标签');
+    '9O-1: 页面定时器只等待／复用精确 home；隐藏页过渡业务子页不得抢跑，也不改写其他标签');
   assertPass(contentSource.includes('function normalizeContentLocale(raw)')
       && contentSource.includes("if (/^en(?:_|$)/i.test(normalized)) return 'en';")
       && contentSource.includes('const ui = normalizeContentLocale(chrome.i18n?.getUILanguage?.());'),
@@ -3787,6 +3871,53 @@ return { reapplySmartSensitivityNow };`
       && contentSource.includes('async function typeOnceIntoPickerInput(picker, input, value)')
       && contentSource.includes('return inputValue === value || inputTitle === value;'),
     '11J-1: 页面定时器写入有限重试，并同时接受 value 或 title 命中目标 HH:MM');
+  const typeTimeStart11J = contentSource.indexOf(
+    'async function typeTimeIntoPickerInput(input, value)'
+  );
+  const typeTimeEnd11J = contentSource.indexOf(
+    '\n\n// 单次模拟手动输入',
+    typeTimeStart11J
+  );
+  const typeTimeSource11J = typeTimeStart11J >= 0 && typeTimeEnd11J > typeTimeStart11J
+    ? contentSource.slice(typeTimeStart11J, typeTimeEnd11J)
+    : '';
+  let pickerRetryRebound11J = false;
+  if (typeTimeSource11J) {
+    const makeRetryInput11J = id => ({
+      id,
+      readonlyRestored: false,
+      hasAttribute: attribute => attribute === 'readonly',
+      setAttribute(attribute) {
+        if (attribute === 'readonly') this.readonlyRestored = true;
+      }
+    });
+    const oldInput11J = makeRetryInput11J('old');
+    const newInput11J = makeRetryInput11J('new');
+    const oldControl11J = { input: oldInput11J, picker: { id: 'old-picker' } };
+    const newControl11J = { input: newInput11J, picker: { id: 'new-picker' } };
+    let stableControlCalls11J = 0;
+    let typeOnceCalls11J = 0;
+    const typeTimeIntoPickerInput11J = new Function(
+      'findPowerOffTimerControl', 'waitForStablePowerOffTimerControl',
+      'typeOnceIntoPickerInput', 'console',
+      `${typeTimeSource11J}; return typeTimeIntoPickerInput;`
+    )(
+      () => oldControl11J,
+      async () => (++stableControlCalls11J === 1 ? oldControl11J : newControl11J),
+      async (picker) => {
+        typeOnceCalls11J += 1;
+        return picker === newControl11J.picker;
+      },
+      testConsole
+    );
+    pickerRetryRebound11J = await typeTimeIntoPickerInput11J(oldInput11J, '00:21')
+      && stableControlCalls11J === 2
+      && typeOnceCalls11J === 2
+      && oldInput11J.readonlyRestored
+      && newInput11J.readonlyRestored;
+  }
+  assertPass(pickerRetryRebound11J,
+    '11J-2: picker 首次输入后 React 换节点时，下一次重试重新绑定唯一新控件而非继续操作旧节点');
 
   const clearPageTimerProofStart = backgroundSource.indexOf('function clearPageTimerProofState()');
   const clearPageTimerProofEnd = backgroundSource.indexOf('\nasync function syncStoredTriggerFromAlarm', clearPageTimerProofStart);

@@ -400,6 +400,28 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+async function waitForStablePowerOffTimerControl(
+  timeoutMs = 750,
+  pollIntervalMs = 50
+) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  const interval = Math.max(1, Number(pollIntervalMs) || 1);
+  let previousControl = null;
+
+  while (Date.now() <= deadline) {
+    const control = findPowerOffTimerControl();
+    if (control
+        && previousControl?.input === control.input
+        && previousControl?.picker === control.picker) {
+      return control;
+    }
+    previousControl = control;
+    if (Date.now() >= deadline) break;
+    await sleep(interval);
+  }
+  return null;
+}
+
 // AntD 确认后 React 可能短暂同时保留旧树与新树。只在同一个唯一语义控件
 // 连续两次承载目标值时返回；持续歧义、空值或节点继续替换都会超时失败关闭。
 async function waitForConfirmedPowerOffTimerInput(
@@ -440,26 +462,31 @@ function setNativeInputValue(input, value) {
 }
 
 async function typeTimeIntoPickerInput(input, value) {
-  const control = findPowerOffTimerControl();
-  if (!control || control.input !== input) return false;
-  const picker = control.picker;
-  const hadReadonly = input.hasAttribute('readonly');
+  const initialControl = findPowerOffTimerControl();
+  if (!initialControl || initialControl.input !== input) return false;
   // 受控 AntD picker 单次模拟输入可能被 React 中途回退；有限重试提高可靠性。
   const MAX_TYPING_ATTEMPTS = 3;
 
   for (let attempt = 1; attempt <= MAX_TYPING_ATTEMPTS; attempt++) {
+    const control = await waitForStablePowerOffTimerControl();
+    if (!control) {
+      console.warn(`[AC扩展] 页面定时器输入第 ${attempt} 次等待唯一控件超时`);
+      continue;
+    }
+    const attemptInput = control.input;
+    const hadReadonly = attemptInput.hasAttribute('readonly');
     try {
-      if (await typeOnceIntoPickerInput(picker, input, value)) {
-        if (hadReadonly) input.setAttribute('readonly', '');
+      if (await typeOnceIntoPickerInput(control.picker, attemptInput, value)) {
         return true;
       }
       console.warn(`[AC扩展] 页面定时器输入第 ${attempt} 次未接受 ${value}`);
     } catch (e) {
       console.warn(`[AC扩展] 页面定时器输入第 ${attempt} 次异常:`, e?.message || e);
+    } finally {
+      if (hadReadonly) attemptInput.setAttribute('readonly', '');
     }
   }
 
-  if (hadReadonly) input.setAttribute('readonly', '');
   return false;
 }
 

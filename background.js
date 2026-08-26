@@ -2231,7 +2231,7 @@ async function setPageTimer(
       console.log('[AC扩展] 页面定时器：无现有 AC 页面，已创建隐藏标签页');
     }
 
-    const pageReady = await waitForTabReady(tab.id, 30000);
+    const pageReady = await waitForTabReady(tab.id, 30000, isACHomePageTab);
     if (!pageReady) throw new Error('AC 页面等待就绪超时');
     tab = await chrome.tabs.get(tab.id);
     if (!isACHomePageTab(tab)) throw new Error('页面定时器目标标签已离开精确 home URL');

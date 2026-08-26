@@ -467,10 +467,11 @@ async function run() {
       const switchElement = document.querySelector('button.ant-switch[role="switch"]');
       switchElement.setAttribute('aria-checked', 'false');
       switchElement.textContent = 'OFF';
+      globalThis.__acMockSwitchClickCount = 0;
       switchElement.addEventListener('click', () => {
+        globalThis.__acMockSwitchClickCount += 1;
+        if (globalThis.__acMockSwitchClickCount > 1) return;
         setTimeout(() => {
-          switchElement.setAttribute('aria-checked', 'true');
-          switchElement.textContent = 'ON';
           const notice = document.createElement('div');
           notice.className = 'ant-message-notice-content';
           const success = document.createElement('div');
@@ -480,14 +481,24 @@ async function run() {
           document.body.appendChild(notice);
           setTimeout(() => notice.remove(), 250);
         }, 20);
-      }, { once: true });
+        // 模拟真实页：服务端成功 toast 先到，React 的 aria-checked 稍后才收敛。
+        setTimeout(() => {
+          switchElement.setAttribute('aria-checked', 'true');
+          switchElement.textContent = 'ON';
+        }, 450);
+      });
     });
+    const executionSuccessStartedAt = Date.now();
     const executionSuccessToggle = await serviceWorker.evaluate(async () => {
       const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/home' });
       const tab = tabs.find(candidate => !candidate.discarded);
       if (!tab?.id) return { success: false, error: 'mock home tab missing' };
       return chrome.tabs.sendMessage(tab.id, { action: 'on' });
     });
+    const executionSuccessElapsedMs = Date.now() - executionSuccessStartedAt;
+    const executionSuccessSwitchClicks = await acPage.evaluate(
+      () => globalThis.__acMockSwitchClickCount
+    );
 
     const staleReceiverInstall = await serviceWorker.evaluate(async () => {
       const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/home' });
@@ -574,8 +585,10 @@ async function run() {
       '真实精确 home 初始 content script 可读取 Charge Mode 余额');
     assert(executionSuccessToggle?.success === true
         && executionSuccessToggle.executionSucceeded === true
-        && executionSuccessToggle.clicks === 1,
-      '真实主世界点击等待本次短暂 Execution succeeded 后才确认 ON');
+        && executionSuccessToggle.clicks === 1
+        && executionSuccessSwitchClicks === 1
+        && executionSuccessElapsedMs < 3000,
+      '真实主世界先见短暂 Execution succeeded、再等迟到 ON；仅点击一次且不盲等 10 秒');
     assert(staleReceiverInstall.loadedSentinel === true
         && staleReceiverInstall.hadListener === true
         && staleReceiverInstall.staleListenerInstalled === true
