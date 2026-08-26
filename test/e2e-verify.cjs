@@ -463,6 +463,32 @@ async function run() {
       await new Promise(resolve => setTimeout(resolve, 250));
     }
 
+    await acPage.evaluate(() => {
+      const switchElement = document.querySelector('button.ant-switch[role="switch"]');
+      switchElement.setAttribute('aria-checked', 'false');
+      switchElement.textContent = 'OFF';
+      switchElement.addEventListener('click', () => {
+        setTimeout(() => {
+          switchElement.setAttribute('aria-checked', 'true');
+          switchElement.textContent = 'ON';
+          const notice = document.createElement('div');
+          notice.className = 'ant-message-notice-content';
+          const success = document.createElement('div');
+          success.className = 'ant-message-custom-content ant-message-success';
+          success.textContent = 'Execution succeeded';
+          notice.appendChild(success);
+          document.body.appendChild(notice);
+          setTimeout(() => notice.remove(), 250);
+        }, 20);
+      }, { once: true });
+    });
+    const executionSuccessToggle = await serviceWorker.evaluate(async () => {
+      const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/home' });
+      const tab = tabs.find(candidate => !candidate.discarded);
+      if (!tab?.id) return { success: false, error: 'mock home tab missing' };
+      return chrome.tabs.sendMessage(tab.id, { action: 'on' });
+    });
+
     const staleReceiverInstall = await serviceWorker.evaluate(async () => {
       const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/home' });
       const tab = tabs.find(candidate => !candidate.discarded);
@@ -546,6 +572,10 @@ async function run() {
 
     assert(initialContentStatus?.balanceMinutes === 156,
       '真实精确 home 初始 content script 可读取 Charge Mode 余额');
+    assert(executionSuccessToggle?.success === true
+        && executionSuccessToggle.executionSucceeded === true
+        && executionSuccessToggle.clicks === 1,
+      '真实主世界点击等待本次短暂 Execution succeeded 后才确认 ON');
     assert(staleReceiverInstall.loadedSentinel === true
         && staleReceiverInstall.hadListener === true
         && staleReceiverInstall.staleListenerInstalled === true

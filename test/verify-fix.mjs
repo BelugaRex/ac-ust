@@ -1386,7 +1386,24 @@ async function runTests() {
     '9B: 每轮等待后只递归调用 ensureACState 自身');
   assertPass(ensureBody.includes('await sleepInPageWorld(AC_STATE_SETTLE_MS);')
       && pageConfirmSource.includes('const AC_STATE_SETTLE_MS = 10000;'),
-    '9C: 每次 click 后等待 10 秒再递归复查');
+    '9C: 成功提示已出现但状态仍未收敛时，等待 10 秒再递归复查');
+  const executionBaselineIndex9C = ensureBody.indexOf('const executionSuccessBaseline = new Set(');
+  const executionClickIndex9C = ensureBody.indexOf('clickElementOnceInPageWorld(sw)');
+  const executionWaitStartIndex9C = ensureBody.indexOf(
+    'const executionSuccessPromise = waitForNewACToggleExecutionSuccessInPageWorld('
+  );
+  const executionDialogIndex9C = ensureBody.indexOf('await clickConfirmDialogInPageWorld(');
+  const executionWaitEndIndex9C = ensureBody.indexOf('await executionSuccessPromise');
+  assertPass(pageConfirmSource.includes("const AC_ON_SUCCESS_TEXT = 'Execution succeeded';")
+      && pageConfirmSource.includes('function findACToggleExecutionSuccessMessagesInPageWorld()')
+      && pageConfirmSource.includes('async function waitForNewACToggleExecutionSuccessInPageWorld(')
+      && executionBaselineIndex9C >= 0
+      && executionBaselineIndex9C < executionClickIndex9C
+      && executionWaitStartIndex9C > executionClickIndex9C
+      && executionWaitStartIndex9C < executionDialogIndex9C
+      && executionWaitEndIndex9C > executionDialogIndex9C
+      && ensureBody.includes('executionConfirmationMissing: true'),
+    '9C-1: 本次 click 前建立成功提示基线，并与确认框并行等待新 Execution succeeded；缺失时显式失败');
   assertPass(countOccurrences(ensureBody, 'clickElementOnceInPageWorld(sw)') === 1,
     '9D: ensureACState 每轮只有一个 AC 开关点击调用点');
   assertPass(countOccurrences(pageConfirmSource, 'element.click()') === 1,
@@ -1542,7 +1559,8 @@ async function runTests() {
   const loadEnsure = new Function(
     'getACStatusInPageWorld', 'waitForACSwitchInPageWorld', 'clickElementOnceInPageWorld',
     'clickConfirmDialogInPageWorld', 'sleepInPageWorld', 'MAX_AC_SWITCH_CLICKS', 'AC_STATE_SETTLE_MS',
-    'automaticOnCancellationRevision', 'console',
+    'automaticOnCancellationRevision', 'document', 'AC_ON_SUCCESS_TEXT',
+    'AC_EXECUTION_SUCCESS_TIMEOUT_MS', 'console',
     `${ensureFnSource}; return { ensureACState };`
   );
   const { ensureACState } = loadEnsure(
@@ -1553,6 +1571,9 @@ async function runTests() {
     async () => {},
     3,
     10000,
+    0,
+    { querySelectorAll: () => [] },
+    'Execution succeeded',
     0,
     testConsole
   );
@@ -1567,6 +1588,9 @@ async function runTests() {
     async () => {},
     3,
     10000,
+    0,
+    { querySelectorAll: () => [] },
+    'Execution succeeded',
     0,
     testConsole
   );
@@ -1710,6 +1734,9 @@ async function runTests() {
     3,
     10000,
     1,
+    { querySelectorAll: () => [] },
+    'Execution succeeded',
+    0,
     testConsole
   );
   ensureCancelled.cancellationRevision = 0;
@@ -1720,6 +1747,15 @@ async function runTests() {
     '9G-5B: 后台取消旧自动 ON 后，主世界递归在下一次点击前立即停止');
   // 9G-6: 反证——启用开关（free mode 下余额为 0 也不禁用）不被误判禁用，仍走完整点击链路。
   let enabledEnsureClickCalls = 0;
+  let enabledSuccessQueryCalls = 0;
+  const makeExecutionSuccessMessage9G = (text = 'Execution succeeded', success = true) => ({
+    textContent: text,
+    hidden: false,
+    className: success ? 'ant-message-custom-content ant-message-success' : 'ant-message-custom-content',
+    parentElement: null,
+    getAttribute: () => null,
+    querySelector: () => null
+  });
   const { ensureACState: ensureEnabled } = loadEnsure(
     () => ({ isOn: false, disabled: false, source: 'main-world-ant-switch' }),
     async () => ({}),
@@ -1729,6 +1765,13 @@ async function runTests() {
     3,
     10000,
     0,
+    {
+      querySelectorAll: () => (++enabledSuccessQueryCalls % 2 === 1
+        ? []
+        : [makeExecutionSuccessMessage9G()])
+    },
+    'Execution succeeded',
+    0,
     testConsole
   );
   ensureEnabled.cancellationRevision = 0;
@@ -1737,6 +1780,127 @@ async function runTests() {
       && enabledEnsureResult.clicks === 3
       && enabledEnsureClickCalls === 3,
     '9G-6: 启用开关（free mode）不判禁用，仍走 3 次点击链路后才失败');
+  const successHelperStart9G = pageConfirmSource.indexOf(
+    'function findACToggleExecutionSuccessMessagesInPageWorld()'
+  );
+  const successHelperEnd9G = pageConfirmSource.indexOf(
+    '\n  function findACSwitchInPageWorld()', successHelperStart9G
+  );
+  const successHelperSource9G = successHelperStart9G >= 0 && successHelperEnd9G > successHelperStart9G
+    ? pageConfirmSource.slice(successHelperStart9G, successHelperEnd9G)
+    : '';
+  let successHelperBehavior9G = null;
+  if (successHelperSource9G) {
+    const staleMessage9G = makeExecutionSuccessMessage9G();
+    const freshMessage9G = makeExecutionSuccessMessage9G();
+    const wrongTextMessage9G = makeExecutionSuccessMessage9G('Operation queued');
+    const wrongSemanticMessage9G = makeExecutionSuccessMessage9G('Execution succeeded', false);
+    const loadSuccessHelpers9G = document => new Function(
+      'document', 'sleepInPageWorld', 'automaticOnCancellationRevision',
+      'AC_ON_SUCCESS_TEXT', 'console',
+      `${successHelperSource9G}; return { findACToggleExecutionSuccessMessagesInPageWorld, waitForNewACToggleExecutionSuccessInPageWorld };`
+    )(document, async () => {}, 0, 'Execution succeeded', testConsole);
+    const staleHelpers9G = loadSuccessHelpers9G({ querySelectorAll: () => [staleMessage9G] });
+    const staleResult9G = await staleHelpers9G.waitForNewACToggleExecutionSuccessInPageWorld(
+      new Set([staleMessage9G]), 0, 0, 0
+    );
+    const freshHelpers9G = loadSuccessHelpers9G({ querySelectorAll: () => [staleMessage9G, freshMessage9G] });
+    const freshResult9G = await freshHelpers9G.waitForNewACToggleExecutionSuccessInPageWorld(
+      new Set([staleMessage9G]), 0, 0, 0
+    );
+    const rejectedHelpers9G = loadSuccessHelpers9G({
+      querySelectorAll: () => [wrongTextMessage9G, wrongSemanticMessage9G]
+    });
+    successHelperBehavior9G = {
+      staleResult9G,
+      freshResult9G,
+      rejectedCount: rejectedHelpers9G.findACToggleExecutionSuccessMessagesInPageWorld().length
+    };
+  }
+  let clickedSuccessStatusCalls9G = 0;
+  let clickedSuccessQueryCalls9G = 0;
+  const { ensureACState: ensureClickedSuccess9G } = loadEnsure(
+    () => ({
+      isOn: ++clickedSuccessStatusCalls9G >= 3,
+      disabled: false,
+      source: 'main-world-ant-switch'
+    }),
+    async () => ({}),
+    () => true,
+    async () => false,
+    async () => {},
+    3,
+    10000,
+    0,
+    {
+      querySelectorAll: () => (++clickedSuccessQueryCalls9G === 1
+        ? []
+        : [makeExecutionSuccessMessage9G()])
+    },
+    'Execution succeeded',
+    0,
+    testConsole
+  );
+  ensureClickedSuccess9G.cancellationRevision = 0;
+  const clickedSuccessResult9G = await ensureClickedSuccess9G(true);
+  let missingSuccessStatusCalls9G = 0;
+  const { ensureACState: ensureMissingSuccess9G } = loadEnsure(
+    () => ({
+      isOn: ++missingSuccessStatusCalls9G >= 3,
+      disabled: false,
+      source: 'main-world-ant-switch'
+    }),
+    async () => ({}),
+    () => true,
+    async () => false,
+    async () => {},
+    3,
+    10000,
+    0,
+    { querySelectorAll: () => [] },
+    'Execution succeeded',
+    0,
+    testConsole
+  );
+  ensureMissingSuccess9G.cancellationRevision = 0;
+  const missingSuccessResult9G = await ensureMissingSuccess9G(true);
+  let alreadyOnSuccessQueries9G = 0;
+  const { ensureACState: ensureAlreadyOn9G } = loadEnsure(
+    () => ({ isOn: true, disabled: false, source: 'main-world-ant-switch' }),
+    async () => ({}),
+    () => true,
+    async () => false,
+    async () => {},
+    3,
+    10000,
+    0,
+    { querySelectorAll: () => { alreadyOnSuccessQueries9G += 1; return []; } },
+    'Execution succeeded',
+    0,
+    testConsole
+  );
+  ensureAlreadyOn9G.cancellationRevision = 0;
+  const alreadyOnResult9G = await ensureAlreadyOn9G(true);
+  assertPass(successHelperBehavior9G?.staleResult9G?.success === false
+      && successHelperBehavior9G?.freshResult9G?.success === true
+      && successHelperBehavior9G?.rejectedCount === 0
+      && clickedSuccessResult9G.success === true
+      && clickedSuccessResult9G.executionSucceeded === true
+      && missingSuccessResult9G.success === false
+      && missingSuccessResult9G.executionConfirmationMissing === true
+      && alreadyOnResult9G.success === true
+      && alreadyOnResult9G.alreadyDone === true
+      && alreadyOnResult9G.executionSucceeded === false
+      && alreadyOnSuccessQueries9G === 0,
+    '9G-6A: 旧/伪成功提示不采信；本次新提示+ON 才成功；缺提示失败；原本已 ON 保持幂等');
+  assertPass(/executionConfirmationMissing:\s*mainWorldResult\?\.executionConfirmationMissing === true/
+        .test(contentSource)
+      && backgroundSource.includes(
+        'executionConfirmationMissing: result?.executionConfirmationMissing === true'
+      )
+      && backgroundSource.includes('result?.executionConfirmationMissing === true')
+      && !pwmBody.includes('observations.acIsOn = actual?.isOn;'),
+    '9G-6B: 缺少 Execution succeeded 标记贯穿主世界→content→后台，终止刷新且 PWM 同轮 ON 复核不绕过');
   assertPass(countOccurrences(pwmBody, "toggleAC('on', {") === 1
       && !pwmBody.includes('for (let retry'),
     '9H: 每个 PWM 开机步骤只调用一次 toggleAC(on)，无外围点击重试循环');
@@ -2256,6 +2420,48 @@ async function runTests() {
       && rejectedCalls.send === 2 && rejectedCalls.reload === 1,
     '9J-5: 主世界明确返回未开启时也刷新 home，等待页面就绪后仅重试一次');
 
+  const missingExecutionCalls = { send: 0, reload: 0, wait: 0, diagnostic: [] };
+  const missingExecutionChrome = {
+    tabs: {
+      async sendMessage() {
+        missingExecutionCalls.send += 1;
+        return {
+          success: false,
+          executionConfirmationMissing: true,
+          error: '页面未出现新的 Execution succeeded 成功提示'
+        };
+      },
+      async reload() { missingExecutionCalls.reload += 1; },
+      async get(tabId) {
+        return { id: tabId, url: 'https://w5.ab.ust.hk/njggt/app/home', status: 'complete' };
+      }
+    }
+  };
+  const missingExecutionHarness = loadToggleRecovery(
+    missingExecutionChrome,
+    async () => { missingExecutionCalls.wait += 1; return true; },
+    () => true,
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/home',
+    async () => true,
+    async tabId => missingExecutionChrome.tabs.get(tabId),
+    async () => null,
+    async (tabId, message) => missingExecutionChrome.tabs.sendMessage(tabId, message),
+    (...args) => { missingExecutionCalls.diagnostic.push(args); },
+    quietConsole,
+    'https://w5.ab.ust.hk/njggt/app/home'
+  );
+  const missingExecutionRecovery = await missingExecutionHarness._toggleOnExistingTab(
+    { id: 46, url: 'https://w5.ab.ust.hk/njggt/app/home' },
+    'on'
+  );
+  assertPass(missingExecutionRecovery.success === false
+      && missingExecutionRecovery.executionConfirmationMissing === true
+      && missingExecutionCalls.send === 1
+      && missingExecutionCalls.reload === 0
+      && missingExecutionCalls.wait === 0
+      && missingExecutionCalls.diagnostic.length === 0,
+    '9J-5A: 缺少本次 Execution succeeded 属于终止结果，后台不刷新绕过提示证据');
+
   const expiredRecoveryCalls = { send: 0, reload: 0, wait: 0, diagnostic: [] };
   const expiredRecoveryChrome = {
     tabs: {
@@ -2299,7 +2505,7 @@ async function runTests() {
       && expiredRecoveryCalls.reload === 0
       && expiredRecoveryCalls.wait === 0
       && expiredRecoveryCalls.diagnostic.length === 0,
-    '9J-5A: 智能 ON 截止已过属于终止结果，后台零刷新、零导航且不写恢复 ERROR');
+    '9J-5B: 智能 ON 截止已过属于终止结果，后台零刷新、零导航且不写恢复 ERROR');
 
   const pausedRecoveryCalls = { send: 0, reload: 0, diagnostic: [] };
   const pausedRecoveryChrome = {
@@ -2340,7 +2546,7 @@ async function runTests() {
       && pausedRecoveryCalls.send === 0
       && pausedRecoveryCalls.reload === 0
       && pausedRecoveryCalls.diagnostic.length === 0,
-    '9J-5B: 自动控制 revision 已失效属于终止结果，后台不发送、不刷新且不写恢复 ERROR');
+    '9J-5C: 自动控制 revision 已失效属于终止结果，后台不发送、不刷新且不写恢复 ERROR');
 
   const driftCalls = { send: 0, reload: 0, update: 0, wait: 0 };
   let driftUrl = 'https://w5.ab.ust.hk/njggt/app/home';

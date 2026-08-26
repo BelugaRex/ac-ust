@@ -263,7 +263,7 @@ function getACBalanceSnapshot() {
   }
 
   // 隔离世界只确认页面已渲染，然后把目标状态交给主世界 ensureACState()。
-  // 状态预检、单次 click、10 秒等待与递归复查全部由主世界统一负责。
+  // 状态预检、单次 click、页面成功提示与状态复查全部由主世界统一负责。
   const switchEl = await waitForSwitch(10000);
   if (!switchEl) {
     return { success: false, error: t('contentTimeout') };
@@ -284,6 +284,8 @@ function getACBalanceSnapshot() {
     verified: false,
     via: 'isolated-delegated-to-main',
     mainWorldResult,
+    executionConfirmationMissing:
+      mainWorldResult?.executionConfirmationMissing === true,
     error: mainWorldResult?.error || t('contentRetryExhausted', targetAction)
   };
 }

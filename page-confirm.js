@@ -39,6 +39,8 @@
 
   const MAX_AC_SWITCH_CLICKS = 3;
   const AC_STATE_SETTLE_MS = 10000;
+  const AC_ON_SUCCESS_TEXT = 'Execution succeeded';
+  const AC_EXECUTION_SUCCESS_TIMEOUT_MS = 15000;
   let acStateRequestInFlight = null;
   let acStateRequestTarget = null;
   let acStateRequestNotAfterAt = 0;
@@ -167,7 +169,8 @@
     }
   }
 
-  // 递归状态收敛：每轮只做「查状态 → 必要时 click 一次 → 等 10 秒 → 递归复查」。
+  // 递归状态收敛：每轮只做「查状态 → 必要时 click 一次 → 等本次成功提示 →
+  // 若状态仍未收敛则等 10 秒后递归复查」。
   // 所有物理开关尝试都集中在这里，content/background 不再叠加点击重试；
   // 当前生产调度仅传入 true（ON），OFF 完全由页面定时器执行。
   async function ensureACState(targetState, clickCount = 0) {
@@ -176,6 +179,7 @@
       return {
         success: true,
         alreadyDone: clickCount === 0,
+        executionSucceeded: clickCount > 0,
         verified: true,
         stable: true,
         status,
@@ -183,14 +187,15 @@
         via: 'main-world-ensureACState'
       };
     }
-    function failureResult(status, clickCount, error) {
+    function failureResult(status, clickCount, error, details = {}) {
       return {
         success: false,
         verified: false,
         status,
         clicks: clickCount,
         error,
-        via: 'main-world-ensureACState'
+        via: 'main-world-ensureACState',
+        ...details
       };
     }
     function getOnWindowError() {
@@ -244,29 +249,115 @@
     }
 
     console.log(`[AC扩展] ensureACState: 当前=${beforeClick.isOn}，目标=${targetState}，执行第 ${clickCount + 1} 次单击`);
+    const executionSuccessBaseline = new Set(
+      findACToggleExecutionSuccessMessagesInPageWorld()
+    );
     if (!clickElementOnceInPageWorld(sw)) {
       return failureResult(beforeClick, clickCount, '主世界 AC 开关 click() 调用失败');
     }
 
+    // 点击后立即开始等待，和确认框轮询并行；否则无确认框时短暂 toast 可能先消失。
+    const executionSuccessPromise = waitForNewACToggleExecutionSuccessInPageWorld(
+      executionSuccessBaseline,
+      AC_EXECUTION_SUCCESS_TIMEOUT_MS,
+      Number(ensureACState.notAfterAt) || 0,
+      ensureACState.cancellationRevision
+    );
     const dialogConfirmed = await clickConfirmDialogInPageWorld(
       5000,
       Number(ensureACState.notAfterAt) || 0,
       ensureACState.cancellationRevision
     );
+    const executionSuccess = await executionSuccessPromise;
     const afterClick = getACStatusInPageWorld();
     const afterClickWindowError = getOnWindowError();
     if (afterClickWindowError) {
       return failureResult(afterClick, clickCount + 1, afterClickWindowError);
     }
+    if (!executionSuccess.success) {
+      return failureResult(
+        afterClick,
+        clickCount + 1,
+        executionSuccess.error,
+        {
+          executionConfirmationMissing:
+            executionSuccess.executionConfirmationMissing === true
+        }
+      );
+    }
     const reachedTarget = typeof afterClick.isOn === 'boolean' && afterClick.isOn === targetState;
-    const afterClickMessage = `[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(afterClick)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}`;
+    const afterClickMessage = `[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(afterClick)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}，页面提示=${AC_ON_SUCCESS_TEXT}`;
     if (reachedTarget) {
       console.log(afterClickMessage);
+      return successResult(afterClick, clickCount + 1);
     } else {
       console.warn(afterClickMessage);
     }
     await sleepInPageWorld(AC_STATE_SETTLE_MS);
     return ensureACState(targetState, clickCount + 1);
+  }
+
+  function findACToggleExecutionSuccessMessagesInPageWorld() {
+    const candidates = Array.from(new Set(document.querySelectorAll(
+      '.ant-message-notice-content, '
+      + '.ant-message-custom-content.ant-message-success, '
+      + '[role="alert"].ant-message-success'
+    )));
+    return candidates.filter((node) => {
+      const className = String(node.className || '');
+      const hasSuccessSemantics = /(?:^|\s)ant-message-success(?:\s|$)/.test(className)
+        || !!node.querySelector?.('.ant-message-success');
+      const text = String(node.textContent || '').replace(/\s+/g, ' ').trim();
+      return hasSuccessSemantics
+        && text === AC_ON_SUCCESS_TEXT
+        && isACToggleExecutionMessageVisibleInPageWorld(node);
+    });
+  }
+
+  function isACToggleExecutionMessageVisibleInPageWorld(node) {
+    for (let current = node; current; current = current.parentElement) {
+      const className = String(current.className || '');
+      const style = String(current.getAttribute?.('style') || '');
+      if (current.hidden
+          || current.getAttribute?.('aria-hidden') === 'true'
+          || /(?:^|\s)(?:ant-message-notice-hidden|hidden)(?:\s|$)/.test(className)
+          || /display\s*:\s*none|visibility\s*:\s*hidden/i.test(style)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  async function waitForNewACToggleExecutionSuccessInPageWorld(
+    baselineMessages,
+    timeoutMs,
+    notAfterAt = 0,
+    cancellationRevision = automaticOnCancellationRevision
+  ) {
+    const baseline = baselineMessages instanceof Set
+      ? baselineMessages
+      : new Set(baselineMessages || []);
+    const start = Date.now();
+    while (Date.now() - start <= timeoutMs) {
+      if (cancellationRevision !== automaticOnCancellationRevision) {
+        return { success: false, error: '请求已被后台取消' };
+      }
+      if (notAfterAt !== 0
+          && (!Number.isSafeInteger(notAfterAt) || Date.now() >= notAfterAt)) {
+        return { success: false, error: '自动开启窗口已结束' };
+      }
+      const freshMessage = findACToggleExecutionSuccessMessagesInPageWorld()
+        .find(node => !baseline.has(node));
+      if (freshMessage) {
+        return { success: true, message: AC_ON_SUCCESS_TEXT };
+      }
+      await sleepInPageWorld(100);
+    }
+    return {
+      success: false,
+      executionConfirmationMissing: true,
+      error: `页面未出现新的 ${AC_ON_SUCCESS_TEXT} 成功提示`
+    };
   }
 
   function findACSwitchInPageWorld() {

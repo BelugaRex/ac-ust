@@ -1783,10 +1783,9 @@ async function runPwmStep() {
 
     if (!observations.toggleSucceeded) {
       const actual = await getCurrentACStatus();
-      observations.acIsOn = actual?.isOn;
       if (actual?.isOn === true) {
-        schedule.pageTimerError = '';
-        console.log('[AC扩展] PWM 开机只读复核通过：AC=ON');
+        schedule.pageTimerError = `自动开启未确认：${observations.toggleError || '页面未出现 Execution succeeded'}；AC 虽显示 ON，本轮仍不推进`;
+        console.warn('[AC扩展] PWM 开机只读复核仅见 AC=ON，缺少本次成功提示，不改判成功');
       } else {
         console.warn(`[AC扩展] PWM 本轮未开机：实际=${actual?.isOn}；外围不重复点击，1分钟后重试`);
       }
@@ -2741,6 +2740,7 @@ async function _toggleOnExistingTab(tab, action, options = {}) {
 function isTerminalACToggleRecoveryResult(action, result, options = {}, now = Date.now()) {
   if (action !== 'on') return false;
   if (result?.automationPausedByActiveHours === true) return true;
+  if (result?.executionConfirmationMissing === true) return true;
 
   const notAfterAt = Number(options?.notAfterAt);
   return Number.isSafeInteger(notAfterAt)
@@ -2863,6 +2863,7 @@ async function sendACToggleMessage(tabId, action, options = {}) {
       success: false,
       tabId,
       result,
+      executionConfirmationMissing: result?.executionConfirmationMissing === true,
       error: result?.error || `${action} 命令未确认`
     };
   }
