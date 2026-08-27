@@ -129,6 +129,23 @@ function computeConfigDiff(localSchedule, remote) {
   return { changed, fields: out };
 }
 
+// 有效 smart-on 重试已经把本周期绝对边界写入本机事务。跨设备 config 仍可
+// 更新总开关、时段和灵敏度，但不能在重试完成前篡改本周期 on/off 时长。
+function protectSmartOnRetryConfigDiff(configDiff, protectDurations = false) {
+  if (!configDiff || typeof configDiff !== 'object') {
+    return { changed: false, fields: {} };
+  }
+  const fields = { ...(configDiff.fields || {}) };
+  if (protectDurations) {
+    delete fields.onMinutes;
+    delete fields.offMinutes;
+  }
+  return {
+    changed: Object.keys(fields).length > 0,
+    fields
+  };
+}
+
 // ---- v0.5.10: 页面定时器作为跨设备主同步通道 ----
 //
 // UST 服务器已确认："Power-off after" 定时器值会同步到同一账号的所有会话。
@@ -322,6 +339,7 @@ if (typeof module !== 'undefined' && module.exports) {
     composeSyncPayload,
     computePhaseAdoption,
     computeConfigDiff,
+    protectSmartOnRetryConfigDiff,
     parsePageTimerValue,
     isPageTimerProofFresh,
     planComfortStart,

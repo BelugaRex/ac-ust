@@ -71,11 +71,11 @@ for file in "${RUNTIME_FILES[@]}"; do
   fi
 done
 
-python3 - "$DIST/popup.js" "$DIST/popup.html" "$VERSION" "$BUILD_TIME" "$BUILD_TIME_EPOCH_MS" <<'PY'
+python3 - "$DIST/popup.js" "$DIST/background.js" "$DIST/popup.html" "$VERSION" "$BUILD_TIME" "$BUILD_TIME_EPOCH_MS" <<'PY'
 import re
 import sys
 
-popup_path, popup_html_path, version, build_time, build_time_epoch_ms = sys.argv[1:]
+popup_path, background_path, popup_html_path, version, build_time, build_time_epoch_ms = sys.argv[1:]
 with open(popup_path, encoding='utf-8') as popup_file:
     content = popup_file.read()
 
@@ -103,6 +103,27 @@ if version_replacements != 1 or build_time_replacements != 1 or build_epoch_repl
 with open(popup_path, 'w', encoding='utf-8', newline='\n') as popup_file:
     popup_file.write(content)
 
+with open(background_path, encoding='utf-8') as background_file:
+  background_content = background_file.read()
+
+background_content, background_build_time_replacements = re.subn(
+  r"const BUILD_TIME = '[^']*'",
+  f"const BUILD_TIME = '{build_time}'",
+  background_content,
+  count=1,
+)
+background_content, background_build_epoch_replacements = re.subn(
+  r"const BUILD_TIME_EPOCH_MS = \d+;",
+  f"const BUILD_TIME_EPOCH_MS = {build_time_epoch_ms};",
+  background_content,
+  count=1,
+)
+if background_build_time_replacements != 1 or background_build_epoch_replacements != 1:
+  raise SystemExit('Could not inject build time and build epoch into dist/background.js.')
+
+with open(background_path, 'w', encoding='utf-8', newline='\n') as background_file:
+  background_file.write(background_content)
+
 with open(popup_html_path, encoding='utf-8') as popup_html_file:
   popup_html = popup_html_file.read()
 
@@ -117,7 +138,7 @@ if cache_version_replacements != 2:
 with open(popup_html_path, 'w', encoding='utf-8', newline='\n') as popup_html_file:
   popup_html_file.write(popup_html)
 PY
-echo "  OK  popup assets (version: $VERSION, build: $BUILD_TIME, epoch: $BUILD_TIME_EPOCH_MS)"
+echo "  OK  popup/SW identity (version: $VERSION, build: $BUILD_TIME, epoch: $BUILD_TIME_EPOCH_MS)"
 
 ZIP_PATH="$RELEASES/ac-ust-v$VERSION.zip"
 rm -f "$ZIP_PATH"

@@ -891,6 +891,15 @@ const APP_VERSION = '0.8.2';
 const BUILD_TIME = 'dev';
 const BUILD_TIME_EPOCH_MS = 0;
 
+function isMatchingServiceWorkerBuild(sw) {
+  const popupBuildEpoch = Number(BUILD_TIME_EPOCH_MS);
+  if (!Number.isSafeInteger(popupBuildEpoch) || popupBuildEpoch <= 0) return null;
+  const swBuildEpoch = Number(sw?.buildTimeEpochMs);
+  return Number.isSafeInteger(swBuildEpoch)
+    && swBuildEpoch === popupBuildEpoch
+    && String(sw?.buildTime || '') === BUILD_TIME;
+}
+
 function formatBuildTimeShort(buildTime) {
   const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):\d{2}$/.exec(buildTime);
   if (!match) return buildTime;
@@ -940,7 +949,7 @@ function areDiagnosticTriggersAligned(...triggerTimes) {
   if (times.length < 2 || times.some(time => !Number.isFinite(time) || time <= 0)) {
     return false;
   }
-  return Math.max(...times) - Math.min(...times) < DIAGNOSTIC_TRIGGER_TOLERANCE_MS;
+  return Math.max(...times) - Math.min(...times) <= DIAGNOSTIC_TRIGGER_TOLERANCE_MS;
 }
 
 async function sendDiagnosticRuntimeMessage(message) {
@@ -1336,6 +1345,15 @@ btnDiagnose.addEventListener('click', async () => {
     const pwmStepInFlight = ensured?.pwmStepRunning === true
       || s._pwmStepRunning === true;
     const repairedItems = new Set(Array.isArray(ensured?.repairs) ? ensured.repairs : []);
+    if (repairedItems.has('smart-current-cycle-started')) {
+      add(false, t('diagnoseSmartCurrentCycleRecoveryStarted'), {
+        level: 'warning',
+        code: 'SMART-CURRENT-CYCLE-RECOVERY-STARTED',
+        domain: t('diagnoseDomainScheduler'),
+        action: t('diagnoseActionRecheckRecovery'),
+        priority: 15
+      });
+    }
     const clearedAlarmCount = [...repairedItems]
       .filter(item => item.endsWith('-alarm-cleared')).length;
     const leakedRuntimeAlarmCount = [
@@ -1972,8 +1990,8 @@ btnDiagnose.addEventListener('click', async () => {
     // 5. SW 状态可观测性:启动时间 / init 完成时间 / 内存 schedule 与 storage 是否一致
     // 注意:getSwStatus 失败、未响应、或 SW 跑旧代码时 sw 可能为 undefined/success:false,
     // 必须在所有分支都显示信息,避免静默盲区。
-    // 评判原则:getSwStatus 只是辅助诊断,不是核心功能。如果 popup 已自愈 storage 接管,
-    // 即使 SW 没响应,功能上也是 OK 的,显示绿灯而非红灯。
+    // 正式构建必须能核对 Popup/SW 身份。storage 自愈不能证明正在执行的旧 SW
+    // 已加载同一套调度逻辑，因此正式构建缺少 getSwStatus 时必须报红并要求重载。
     let sw = null;
     try {
       sw = await sendDiagnosticRuntimeMessage({ type: 'getSwStatus' });
@@ -1985,6 +2003,23 @@ btnDiagnose.addEventListener('click', async () => {
       // SW 响应成功:显示三方一致校验
       const swAgeSec = Math.round((sw.swAgeMs || 0) / 1000);
       const initAgeSec = sw.initAgeMs >= 0 ? Math.round(sw.initAgeMs / 1000) : -1;
+      const swBuildMatches = isMatchingServiceWorkerBuild(sw);
+      if (swBuildMatches === true) {
+        add(true, t('diagnoseSWBuildMatch', BUILD_TIME));
+      } else if (swBuildMatches === false) {
+        add(false, t('diagnoseSWBuildMismatch', BUILD_TIME, sw.buildTime || '?'), {
+          code: 'SW-BUILD-MISMATCH',
+          domain: t('diagnoseDomainBackground'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 1
+        });
+      } else {
+        add(true, t('diagnoseSWBuildUnknown'), {
+          level: 'info',
+          code: 'SW-BUILD-DEV',
+          domain: t('diagnoseDomainBackground')
+        });
+      }
       add(sw.initCompleted, t(sw.initCompleted ? 'diagnoseSWInitDone' : 'diagnoseSWInitPending', swAgeSec, initAgeSec), {
         code: 'SW-INIT-INCOMPLETE',
         domain: t('diagnoseDomainBackground'),
@@ -2029,14 +2064,22 @@ btnDiagnose.addEventListener('click', async () => {
         });
       }
     } else if (selfHealed) {
-      // SW 没响应(可能跑旧代码),但 popup 已自愈 storage 接管 — 功能不受影响,显示绿灯
-      add(false, t('diagnosePopHealedSw'), {
-        level: 'warning',
-        code: 'SW-STATUS-DEGRADED',
-        domain: t('diagnoseDomainBackground'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 50
-      });
+      if (Number(BUILD_TIME_EPOCH_MS) > 0) {
+        add(false, t('diagnoseSwBuildUnverified'), {
+          code: 'SW-BUILD-UNVERIFIED',
+          domain: t('diagnoseDomainBackground'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 1
+        });
+      } else {
+        add(false, t('diagnosePopHealedSw'), {
+          level: 'warning',
+          code: 'SW-STATUS-DEGRADED',
+          domain: t('diagnoseDomainBackground'),
+          action: t('diagnoseActionReloadExtension'),
+          priority: 50
+        });
+      }
     } else if (sw && sw.success === false) {
       add(false, t('diagnoseGetSwFailed') + (sw.error||'?').slice(0,80), {
         code: 'SW-STATUS-FAILED',

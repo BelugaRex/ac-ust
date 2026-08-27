@@ -9,6 +9,7 @@ import syncHelpers from '../sync-helpers.js';
 import billingHelpers from '../billing-helpers.js';
 import pwmPhase from '../pwm-phase.js';
 import smartMode from '../smart-mode.js';
+import recoveryCoordinator from '../recovery-coordinator.js';
 import { runPwmPhaseCases } from './pwm-phase-cases.mjs';
 import { runSmartModeCases } from './smart-mode-cases.mjs';
 import { runRecoveryPolicyCases } from './recovery-policy-cases.mjs';
@@ -213,7 +214,7 @@ async function runDiagnosticSelfHeal(chrome, opts = {}) {
     add(Math.abs(pwmAlarm.scheduledTime - effectiveNextTriggerAt) < 1500, 'ac-pwm 与 storage 触发时间同步' + (selfHealed ? ' (popup 已自愈)' : ''));
   }
 
-  // SW 状态查询(与 popup.js 同步:SW 不响应 + selfHealed 时显示绿灯)
+  // 正式构建即使完成 popup storage 自愈，也不能把无法核验身份的旧 SW 判绿。
   let sw = null;
   try {
     sw = await chrome.runtime.sendMessage({ type: 'getSwStatus' });
@@ -221,7 +222,7 @@ async function runDiagnosticSelfHeal(chrome, opts = {}) {
   if (sw && sw.success === true) {
     add(true, 'SW init 已完成 (getSwStatus 响应正常)');
   } else if (selfHealed) {
-    add(true, 'popup 已接管 storage 自愈(SW 详细状态不可用,功能正常)');
+    add(false, '[SW-BUILD-UNVERIFIED] storage 已修复，但 Service Worker 构建身份无法验证');
   } else if (!sw) {
     add(false, 'getSwStatus 无响应且 popup 未自愈');
   } else {
@@ -379,7 +380,7 @@ async function runTests() {
   verboseLog('');
   assertPass(result3.selfHealed === false, '时钟模式不触发自愈');
 
-  // 用例 4:SW 不响应 getSwStatus(模拟跑旧代码)+ popup 自愈成功 → getSwStatus 那行应显示绿灯
+  // 用例 4:SW 不响应 getSwStatus(模拟跑旧代码)+ popup 自愈成功 → 正式构建仍须红灯
   beginSuite('用例 4：Service Worker 降级', '\n\n=== 用例 4:SW 不响应 getSwStatus + popup 自愈成功 ===\n');
   const initialSchedule4 = { ...initialSchedule, nextTriggerAt: staleTime };
   const mock4 = createMockChrome(initialSchedule4, pwmTime);
@@ -399,12 +400,14 @@ async function runTests() {
   const result4 = await runDiagnosticSelfHeal(mock4.chrome);
   for (const line of result4.lines) verboseLog(line);
   verboseLog('');
-  // 自愈应触发,getSwStatus 那行应该是绿灯(popup 已接管)
   assertPass(result4.selfHealed === true, '用例 4 自愈触发');
-  assertPass(!result4.lines.some(l => l.startsWith('❌')),
-    '用例 4 无任何红灯(SW 不响应但 popup 自愈,功能不受影响)');
-  assertPass(result4.lines.some(l => l.includes('popup 已接管 storage 自愈')),
-    '用例 4 显示 "popup 已接管 storage 自愈" 绿灯');
+  assertPass(result4.lines.some(l => l.startsWith('❌')
+      && l.includes('SW-BUILD-UNVERIFIED')
+      && l.includes('构建身份无法验证')),
+    '用例 4 正式构建无法核验旧 SW 时保持红灯，storage 自愈不再制造假绿');
+  assertPass(result4.lines.some(l => l.includes('storage 绝对触发时间')
+      && l.includes('popup 已自愈')),
+    '用例 4 仍明确报告 popup 已修复 storage 时钟，但不据此放行旧 SW');
 
   // ===== 用例 5: i18n fetch-based 加载器 — 验证用户报告的三个坏键 =====
   beginSuite('用例 5：i18n、页面逻辑与产物契约',
@@ -694,6 +697,37 @@ async function runTests() {
       && popupJs.includes("versionInfo.setAttribute('aria-label', buildInfo)")
       && popupJs.includes('versionInfo.title = buildInfo;'),
     '头栏显示版本号与 MM/DD 分钟级短构建时间，完整秒级时间保留在 tooltip 和无障碍名称');
+  const buildMatchStart = popupJs.indexOf('function isMatchingServiceWorkerBuild(sw)');
+  const buildMatchEnd = popupJs.indexOf('\nfunction formatBuildTimeShort', buildMatchStart);
+  const buildMatchSource = buildMatchStart >= 0 && buildMatchEnd > buildMatchStart
+    ? popupJs.slice(buildMatchStart, buildMatchEnd)
+    : '';
+  const loadBuildMatcher = (buildTime, buildEpoch) => new Function(
+    `const BUILD_TIME = ${JSON.stringify(buildTime)};
+    const BUILD_TIME_EPOCH_MS = ${buildEpoch};
+    ${buildMatchSource};
+    return isMatchingServiceWorkerBuild;`
+  )();
+  const packagedBuildMatcher = loadBuildMatcher('2026-08-27 22:40:00', 123456);
+  const devBuildMatcher = loadBuildMatcher('dev', 0);
+  assertPass(packagedBuildMatcher({
+    buildTime: '2026-08-27 22:40:00',
+    buildTimeEpochMs: 123456
+  }) === true
+      && packagedBuildMatcher({
+        buildTime: '2026-08-27 22:39:59',
+        buildTimeEpochMs: 123455
+      }) === false
+      && packagedBuildMatcher({}) === false
+      && devBuildMatcher({}) === null
+      && popupJs.includes("code: 'SW-BUILD-MISMATCH'")
+      && popupJs.includes("code: 'SW-BUILD-UNVERIFIED'")
+      && popupJs.includes('Number(BUILD_TIME_EPOCH_MS) > 0')
+      && popupJs.includes("action: t('diagnoseActionReloadExtension')")
+      && zhCN.diagnoseSWBuildMismatch?.message.includes('构建不一致')
+      && zhCN.diagnoseSwBuildUnverified?.message.includes('构建身份无法验证')
+      && en.diagnoseSWBuildMismatch?.message.includes('builds differ'),
+    '诊断：打包版 Popup/SW 构建一致才绿；旧 SW 缺字段、无响应或身份不同均提示重新加载扩展');
   const formatBuildTimeStart = popupJs.indexOf('function formatBuildTimeShort(buildTime)');
   const formatBuildTimeEnd = popupJs.indexOf('\nconst versionInfo =', formatBuildTimeStart);
   const formatBuildTimeShort = new Function(
@@ -791,7 +825,8 @@ async function runTests() {
   assertPass(missingDistFiles.length === 0,
     `dist 包含全部运行时文件${missingDistFiles.length ? `（缺少 ${missingDistFiles.join(', ')}）` : ''}`);
 
-  const verbatimDistFiles = distRequiredFiles.filter(file => !['popup.html', 'popup.js'].includes(file));
+  const verbatimDistFiles = distRequiredFiles.filter(file =>
+    !['background.js', 'popup.html', 'popup.js'].includes(file));
   const mismatchedDistFiles = verbatimDistFiles.filter(file => {
     const sourcePath = path.join(ROOT, file);
     const builtPath = path.join(ROOT, 'dist', file);
@@ -804,10 +839,20 @@ async function runTests() {
     `dist 非注入文件与源码逐字一致${mismatchedDistFiles.length ? `（不一致 ${mismatchedDistFiles.join(', ')}）` : ''}`);
 
   const distPopupSource = fs.readFileSync(path.join(ROOT, 'dist', 'popup.js'), 'utf8');
+  const distBackgroundSource = fs.readFileSync(path.join(ROOT, 'dist', 'background.js'), 'utf8');
+  const sourceBackgroundForBuild = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
   const distBuildTime = distPopupSource.match(/const BUILD_TIME = '([^']+)'/)?.[1];
   const distBuildEpoch = Number(
     distPopupSource.match(/const BUILD_TIME_EPOCH_MS = (\d+);/)?.[1]
   );
+  const distBackgroundBuildTime = distBackgroundSource
+    .match(/const BUILD_TIME = '([^']+)'/)?.[1];
+  const distBackgroundBuildEpoch = Number(
+    distBackgroundSource.match(/const BUILD_TIME_EPOCH_MS = (\d+);/)?.[1]
+  );
+  const normalizedDistBackgroundSource = distBackgroundSource
+    .replace(/const BUILD_TIME = '[^']*'/, "const BUILD_TIME = 'dev'")
+    .replace(/const BUILD_TIME_EPOCH_MS = \d+;/, 'const BUILD_TIME_EPOCH_MS = 0;');
   const buildEpochDate = new Date(distBuildEpoch);
   const expectedDistBuildTime = Number.isSafeInteger(distBuildEpoch)
     ? `${buildEpochDate.getFullYear()}-${String(buildEpochDate.getMonth() + 1).padStart(2, '0')}-${String(buildEpochDate.getDate()).padStart(2, '0')}`
@@ -819,8 +864,12 @@ async function runTests() {
   assertPass(Number.isSafeInteger(distBuildEpoch)
       && distBuildEpoch > 0
       && distBuildTime === expectedDistBuildTime
-      && popupJs.includes('const BUILD_TIME_EPOCH_MS = 0;'),
-    'build: 文本构建时间与数值 epoch 由同一秒注入，源码保留数值占位');
+      && distBackgroundBuildTime === distBuildTime
+      && distBackgroundBuildEpoch === distBuildEpoch
+      && normalizedDistBackgroundSource === sourceBackgroundForBuild
+      && popupJs.includes('const BUILD_TIME_EPOCH_MS = 0;')
+      && sourceBackgroundForBuild.includes('const BUILD_TIME_EPOCH_MS = 0;'),
+    'build: Popup/SW 注入同一构建身份；background 除两个占位外与源码逐字一致');
   assertPass(fs.existsSync(path.join(ROOT, 'releases', `ac-ust-v${manifest.version}.zip`)),
     `商店 ZIP 已生成: ac-ust-v${manifest.version}.zip`);
 
@@ -862,6 +911,7 @@ async function runTests() {
     composeSyncPayload,
     computePhaseAdoption,
     computeConfigDiff,
+    protectSmartOnRetryConfigDiff,
     parsePageTimerValue,
     isPageTimerProofFresh,
     computePageTimerAdoption
@@ -940,6 +990,47 @@ async function runTests() {
   const diffOn = computeConfigDiff(baseSchedule, { onMinutes: 45, offMinutes: 30, activeHours: baseSchedule.activeHours, enabled: true });
   assertPass(diffOn.changed === true && diffOn.fields.onMinutes === 45,
     '6J: computeConfigDiff onMinutes 30→45 被检测');
+  const protectedRetryDiff = protectSmartOnRetryConfigDiff(computeConfigDiff(
+    { ...baseSchedule, onMinutes: 21, offMinutes: 9 },
+    {
+      ...baseSchedule,
+      onMinutes: 30,
+      offMinutes: 30,
+      smartMode: { enabled: true, sensitivity: 8 }
+    }
+  ), true);
+  assertPass(protectedRetryDiff.changed === true
+      && protectedRetryDiff.fields.onMinutes === undefined
+      && protectedRetryDiff.fields.offMinutes === undefined
+      && protectedRetryDiff.fields.smartMode?.sensitivity === 8,
+    '6J-1: typed smart-on 重试冻结本地 21/9，但仍采纳远端灵敏度等非事务配置');
+  const cancelledRetryDiffs = [
+    protectSmartOnRetryConfigDiff(computeConfigDiff(
+      { ...baseSchedule, onMinutes: 21, offMinutes: 9 },
+      { ...baseSchedule, enabled: false, onMinutes: 30, offMinutes: 30 }
+    ), false),
+    protectSmartOnRetryConfigDiff(computeConfigDiff(
+      { ...baseSchedule, onMinutes: 21, offMinutes: 9 },
+      {
+        ...baseSchedule,
+        onMinutes: 30,
+        offMinutes: 30,
+        smartMode: { enabled: false, sensitivity: 8 }
+      }
+    ), false),
+    protectSmartOnRetryConfigDiff(computeConfigDiff(
+      { ...baseSchedule, onMinutes: 21, offMinutes: 9 },
+      {
+        ...baseSchedule,
+        onMinutes: 30,
+        offMinutes: 30,
+        activeHours: { enabled: true, start: '00:00', end: '00:01' }
+      }
+    ), false)
+  ];
+  assertPass(cancelledRetryDiffs.every(diff => (
+    diff.fields.onMinutes === 30 && diff.fields.offMinutes === 30
+  )), '6J-2: 同快照停用、退出智能或进入暂停时段会取消事务，远端 30/30 不被误丢弃');
 
   // 6K: computeConfigDiff 检测 activeHours 深度变更
   const remoteActive = { ...baseSchedule, activeHours: { enabled: true, start: '09:00', end: '21:00' } };
@@ -1422,7 +1513,7 @@ async function runTests() {
     : '';
 
   const getStatusStart = backgroundSource.indexOf('async function getCurrentACStatus()');
-  const getStatusEnd = backgroundSource.indexOf('\nasync function ensureScheduleClock()', getStatusStart);
+  const getStatusEnd = backgroundSource.indexOf('\nasync function ensureScheduleClock(options = {})', getStatusStart);
   const getStatusBody = getStatusStart >= 0 && getStatusEnd > getStatusStart
     ? backgroundSource.slice(getStatusStart, getStatusEnd)
     : '';
@@ -2055,7 +2146,8 @@ async function runTests() {
       && pwmBody.includes("schedule.smartMode?.enabled && targetAction === 'on'")
       && pwmBody.includes('maxOnMinutes: SMART_MODE.ON_MAX')
       && pwmBody.includes('acIsOn')
-      && pwmBody.includes('boundaryAt: schedule.smartOnBoundaryAt')
+      && pwmBody.includes('boundaryAt: retryingSmartOn')
+      && pwmBody.includes(': schedule.smartOnBoundaryAt')
       && pwmBody.includes('schedule.smartOnBoundaryAt = Number(smartOnWindow.boundaryAt) || 0;')
       && pwmBody.includes("persistSchedule('runPwmStep-smart-on-boundary', { syncFromLiveAlarm: false })")
       && pwmBody.includes('observations.smartOnWindowEndsAt = Number(smartOnWindow.windowEndsAt) || 0;')
@@ -2502,10 +2594,12 @@ async function runTests() {
       && newTabBody.includes('ac-close-tab-${tabId}')
       && !newTabBody.includes('if (result?.success)'),
     '9Q: 自动创建的开机标签无论成功失败都会安排回收');
-  assertPass(countOccurrences(
-    getReadyTabBody,
-    'await waitForTabReady(tab.id, timeoutMs, isACHomePageTab);'
-  ) === 2,
+  assertPass(getReadyTabBody.includes(
+      'preferredTabId,\n        timeoutMs,\n        isACHomePageTab'
+    )
+      && getReadyTabBody.includes(
+        'await waitForTabReady(tab.id, timeoutMs, isACHomePageTab);'
+      ),
     '9Q-1: 新建／候选开机页两条等待都只接受 complete 的精确 home，业务子页不得抢跑');
 
   const toggleRecoveryStart = backgroundSource.indexOf('async function _toggleOnExistingTab');
@@ -2896,8 +2990,8 @@ async function runTests() {
     'chrome', 'waitForTabReady', 'isACHomePageTab',
     `${getReadyTabBody}; return getReadyACTab;`
   );
-  const runGetReadyTransitionCase = async (eventuallyHome) => {
-    let currentTab = {
+  const runGetReadyTransitionCase = async (eventuallyHome, initialTab = null) => {
+    let currentTab = initialTab || {
       id: 47,
       url: 'https://w5.ab.ust.hk/njggt/app/home',
       status: 'loading'
@@ -2920,6 +3014,7 @@ async function runTests() {
       chromeForReady,
       async (_tabId, _timeoutMs, isReadyTab) => {
         capturedPredicate = isReadyTab;
+        await chromeForReady.tabs.get(_tabId);
         currentTab = {
           id: 47,
           url: 'https://w5.ab.ust.hk/njggt/app/billing-cycle',
@@ -2940,6 +3035,12 @@ async function runTests() {
     return { result, capturedPredicate, calls };
   };
   const transientReadyCase = await runGetReadyTransitionCase(true);
+  const blankNavigationReadyCase = await runGetReadyTransitionCase(true, {
+    id: 47,
+    url: 'about:blank',
+    pendingUrl: 'https://w5.ab.ust.hk/njggt/app/home',
+    status: 'loading'
+  });
   const permanentNonHomeCase = await runGetReadyTransitionCase(false);
   const loadingHomeChrome = {
     tabs: {
@@ -2960,13 +3061,16 @@ async function runTests() {
   );
   const permanentLoadingHomeCase = await loadingHomeGetReady(48, 30000);
   assertPass(transientReadyCase.result?.url === 'https://w5.ab.ust.hk/njggt/app/home'
+      && blankNavigationReadyCase.result?.url === 'https://w5.ab.ust.hk/njggt/app/home'
+      && blankNavigationReadyCase.calls[0] === 'get:about:blank:loading'
+      && blankNavigationReadyCase.calls.includes('get:https://w5.ab.ust.hk/njggt/app/home:complete')
       && typeof transientReadyCase.capturedPredicate === 'function'
       && transientReadyCase.capturedPredicate({
         url: 'https://w5.ab.ust.hk/njggt/app/billing-cycle'
       }) === false
       && permanentNonHomeCase.result === null
       && permanentLoadingHomeCase === null,
-    '9J-9: 隐藏开机页等待 complete 的精确 home；永久非 home 或永久 loading 均保持拒绝');
+    '9J-9: 隐藏开机页即使初态 about:blank 也等待 complete 的精确 home；永久非 home 或永久 loading 均保持拒绝');
 
   // 9T: 初始 tab URL 偏离精确 home 时，必须立即拒绝，不能导航、注入或发送消息。
   const proactiveCalls = { send: 0, update: 0, get: 0, ready: 0, ensure: 0 };
@@ -3138,7 +3242,7 @@ async function runTests() {
   const statusRecoverySource = extractSourceSection(
     backgroundSource,
     'async function getCurrentACStatus()',
-    '\nasync function ensureScheduleClock()',
+    '\nasync function ensureScheduleClock(options = {})',
     'getCurrentACStatus recovery'
   );
   const loadStatusRecovery = new Function(
@@ -3653,6 +3757,9 @@ async function runTests() {
       && preparedDurationBody.includes('consumeSmartWeatherDecision(')
       && preparedDurationBody.includes('await readStoredSmartWeather()')
       && preparedDurationBody.includes('consumeStoredSmartWeatherDecision(')
+      && preparedDurationBody.includes("appendDiagnosticLog('warn', 'smart-duration-prepare', error)")
+      && preparedDurationBody.includes('applySmartDurationFallback();')
+      && preparedDurationBody.includes('catch (error)')
       && !preparedDurationBody.includes('getSmartWeather(')
       && !preparedDurationBody.includes('fetchSmartWeather')
       && pwmBody.includes('boundaryAt: smartPreparedBoundaryAt')
@@ -3660,7 +3767,113 @@ async function runTests() {
       && !pwmBody.includes('getSmartWeather(')
       && !pwmBody.includes('fetchSmartWeather')
       && !pwmBody.includes('prepareSmartWeatherForBoundary('),
-    '11F-0A: 只有预取路径强制联网；边界执行与重启修复只消费目标 plan／新鲜本地天气，不联网');
+    '11F-0A: 只有预取路径强制联网；边界/重启只读本地数据，storage 瞬断降级安全时长而不退出 setup/watchdog');
+  let preparedFallbackCount11 = 0;
+  const preparedWarnings11 = [];
+  const applyPreparedWithStorageFailure11 = new Function(
+    'schedule', 'SMART_MODE', 'SMART_WEATHER_PLAN_KEY', 'chrome', 'consumeSmartWeatherDecision',
+    'readStoredSmartWeather', 'consumeStoredSmartWeatherDecision',
+    'applySmartDurationFallback', 'applySmartDurationDecision',
+    'appendDiagnosticLog', 'snapshotSmartPreparationOwner',
+    'isSmartPreparationOwnerCurrent',
+    `${preparedDurationBody}; return applyPreparedSmartModeDurations;`
+  )(
+    {
+      enabled: true,
+      pwmState: 'on',
+      onMinutes: 12,
+      offMinutes: 18,
+      smartMode: { enabled: true, sensitivity: 5 }
+    },
+    { CYCLE_MINUTES: 30 },
+    'ac_smart_weather_plan',
+    { storage: { local: { get: async () => { throw new Error('storage transient'); } } } },
+    () => null,
+    async () => null,
+    () => null,
+    () => { preparedFallbackCount11 += 1; },
+    () => {},
+    (level, source, error) => { preparedWarnings11.push({ level, source, error }); },
+    () => ({ owner: 'stable' }),
+    () => true
+  );
+  const preparedStorageFailureResult11 = await applyPreparedWithStorageFailure11({
+    allowActiveOnPhase: true,
+    boundaryAt: new Date(2026, 7, 18, 10, 30, 0, 0).getTime()
+  });
+  assertPass(preparedStorageFailureResult11 === false
+      && preparedFallbackCount11 === 1
+      && preparedWarnings11[0]?.level === 'warn'
+      && preparedWarnings11[0]?.source === 'smart-duration-prepare'
+      && preparedWarnings11[0]?.error?.message === 'storage transient',
+    '11F-0A-1: 启动/边界读取天气 plan 瞬断时动态降级安全时长并返回 planner，不让 init 在建 watchdog 前退出');
+  const preparedConfigRaceSchedule11 = {
+    enabled: true,
+    mode: 'pwm',
+    clockMode: false,
+    pwmState: 'on',
+    onMinutes: 12,
+    offMinutes: 18,
+    activeHours: { enabled: false, start: '08:00', end: '23:00' },
+    smartMode: { enabled: true, sensitivity: 5 }
+  };
+  const snapshotPreparedOwner11 = () => ({
+    enabled: preparedConfigRaceSchedule11.enabled === true,
+    mode: preparedConfigRaceSchedule11.mode,
+    clockMode: !!preparedConfigRaceSchedule11.clockMode,
+    smartEnabled: preparedConfigRaceSchedule11.smartMode?.enabled === true,
+    smartSensitivity: preparedConfigRaceSchedule11.smartMode?.sensitivity,
+    activeHoursEnabled: preparedConfigRaceSchedule11.activeHours?.enabled === true,
+    activeHoursStart: preparedConfigRaceSchedule11.activeHours?.start,
+    activeHoursEnd: preparedConfigRaceSchedule11.activeHours?.end
+  });
+  const isPreparedOwnerCurrent11 = owner => {
+    const current = snapshotPreparedOwner11();
+    return Object.keys(current).every(key => current[key] === owner[key]);
+  };
+  let releasePreparedRead11;
+  const delayedPreparedRead11 = new Promise(resolve => { releasePreparedRead11 = resolve; });
+  let preparedRaceConsumes11 = 0;
+  let preparedRaceFallbacks11 = 0;
+  let preparedRaceApplies11 = 0;
+  const applyPreparedConfigRace11 = new Function(
+    'schedule', 'SMART_MODE', 'SMART_WEATHER_PLAN_KEY', 'chrome', 'consumeSmartWeatherDecision',
+    'readStoredSmartWeather', 'consumeStoredSmartWeatherDecision',
+    'applySmartDurationFallback', 'applySmartDurationDecision',
+    'appendDiagnosticLog', 'snapshotSmartPreparationOwner',
+    'isSmartPreparationOwnerCurrent',
+    `${preparedDurationBody}; return applyPreparedSmartModeDurations;`
+  )(
+    preparedConfigRaceSchedule11,
+    { CYCLE_MINUTES: 30 },
+    'ac_smart_weather_plan',
+    { storage: { local: { get: () => delayedPreparedRead11 } } },
+    () => { preparedRaceConsumes11 += 1; return { valid: true, onMinutes: 22, offMinutes: 8 }; },
+    async () => null,
+    () => null,
+    () => { preparedRaceFallbacks11 += 1; },
+    () => { preparedRaceApplies11 += 1; },
+    () => {},
+    snapshotPreparedOwner11,
+    isPreparedOwnerCurrent11
+  );
+  const preparedConfigRacePromise11 = applyPreparedConfigRace11({
+    allowActiveOnPhase: true,
+    boundaryAt: new Date(2026, 7, 18, 10, 30, 0, 0).getTime()
+  });
+  preparedConfigRaceSchedule11.smartMode = { enabled: false, sensitivity: 5 };
+  preparedConfigRaceSchedule11.onMinutes = 60;
+  preparedConfigRaceSchedule11.offMinutes = 45;
+  releasePreparedRead11({ ac_smart_weather_plan: { schemaVersion: 1 } });
+  const preparedConfigRaceResult11 = await preparedConfigRacePromise11;
+  assertPass(preparedConfigRaceResult11 === false
+      && preparedRaceConsumes11 === 0
+      && preparedRaceFallbacks11 === 0
+      && preparedRaceApplies11 === 0
+      && preparedConfigRaceSchedule11.smartMode.enabled === false
+      && preparedConfigRaceSchedule11.onMinutes === 60
+      && preparedConfigRaceSchedule11.offMinutes === 45,
+    '11F-0A-2: 天气 storage await 中切回手动 60/45 会失效旧智能 owner，不消费、不 fallback、也不覆盖新配置');
   assertPass(reapplyBody.includes('const weather = await readStoredSmartWeather();')
       && !reapplyBody.includes('getSmartWeather(')
       && !reapplyBody.includes('fetchSmartWeather')
@@ -3675,7 +3888,8 @@ async function runTests() {
       && toggleBody.includes("createPwmAlarmFromPlan(")
       && reapplyBody.indexOf('await setPageTimer(minutes') >= 0
       && reapplyBody.indexOf('createPwmAlarmFromPlan(') > reapplyBody.indexOf('await setPageTimer(minutes')
-      && reapplyBody.includes('nextTriggerAt: schedule.pageTimerTargetAt')
+      && reapplyBody.includes('const reapplyTargetAt = Number(schedule.pageTimerTargetAt)')
+      && reapplyBody.includes('const reapplyPlan = { nextTriggerAt: reapplyTargetAt }')
       && !reapplyBody.includes('nowMs + minutes * 60000'),
     '11F-1: repair、手动 ON 与智能重设均以页面证明 targetAt 创建同一绝对 ac-pwm');
   assertPass(reapplyBody.includes('const previousSmartBoundaryAt = oldTriggerAt - oldOnMinutes * 60000;')
@@ -3687,6 +3901,8 @@ async function runTests() {
       && reapplyBody.includes('smartModePageTimerTargetAt(')
       && reapplyBody.includes('previousSmartBoundaryAt')
       && reapplyBody.includes('pwmStepRunning')
+      && reapplyBody.indexOf('getActiveSmartOnPwmRetryContext(schedule)')
+        < reapplyBody.indexOf('const weather = await readStoredSmartWeather();')
       && reapplyBody.includes('pwmRuntimeRevision !== oldPwmRuntimeRevision')
       && reapplyBody.includes('schedule.pwmState !== oldPwmState')
       && reapplyBody.includes('(Number(schedule.nextTriggerAt) || 0) !== oldTriggerAt')
@@ -3712,6 +3928,7 @@ async function runTests() {
   let reapplyComputeCalls = 0;
   const reapplyRaceHarness = new Function(
     'schedule', 'readStoredSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE', 'persistSchedule',
+    'getActiveSmartOnPwmRetryContext',
     `let pwmStepRunning = false;
 let pwmRuntimeRevision = 0;
 function isComfortStartActive() { return false; }
@@ -3732,7 +3949,8 @@ return {
     },
     () => { reapplyComputeCalls += 1; return { valid: true }; },
     smartMode.SMART_MODE,
-    async () => {}
+    async () => {},
+    () => ({ hasTypedSmartOnRetry: false })
   );
   const reapplyRacePromise = reapplyRaceHarness.reapplySmartSensitivityNow();
   reapplyRaceHarness.completePwmStep();
@@ -3754,6 +3972,7 @@ return {
   const stableReapplyPersistReasons = [];
   const stableReapplyHarness = new Function(
     'schedule', 'readStoredSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE', 'persistSchedule',
+    'getActiveSmartOnPwmRetryContext',
     `let pwmStepRunning = false;
 let pwmRuntimeRevision = 0;
 function isComfortStartActive() { return false; }
@@ -3764,13 +3983,164 @@ return { reapplySmartSensitivityNow };`
     async () => ({}),
     () => ({ valid: true, onMinutes: 10, offMinutes: 20 }),
     smartMode.SMART_MODE,
-    async reason => { stableReapplyPersistReasons.push(reason); }
+    async reason => { stableReapplyPersistReasons.push(reason); },
+    () => ({ hasTypedSmartOnRetry: false })
   );
   await stableReapplyHarness.reapplySmartSensitivityNow();
   assertPass(stableReapplySchedule.onMinutes === 10
       && stableReapplySchedule.offMinutes === 20
       && stableReapplyPersistReasons.join(',') === 'reapply-smart-sensitivity-off-phase',
     '11F-2B: 天气等待期间相位快照稳定时，灵敏度重设仍正常更新下一 ON 周期');
+  const protectedRetrySchedule = {
+    ...stableReapplySchedule,
+    onMinutes: 21,
+    offMinutes: 9,
+    pwmRetryKind: 'smart-on',
+    pwmRetryBoundaryAt: new Date(2026, 7, 27, 22, 30, 0, 0).getTime(),
+    pwmRetryScheduledAt: new Date(2026, 7, 27, 22, 31, 0, 0).getTime(),
+    nextTriggerAt: new Date(2026, 7, 27, 22, 31, 0, 0).getTime()
+  };
+  let protectedRetryWeatherReads = 0;
+  let protectedRetryComputes = 0;
+  let protectedRetryPersists = 0;
+  const protectedRetryHarness = new Function(
+    'schedule', 'readStoredSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE', 'persistSchedule',
+    'getActiveSmartOnPwmRetryContext',
+    `let pwmStepRunning = false;
+let pwmRuntimeRevision = 0;
+function isComfortStartActive() { return false; }
+${reapplyBody}
+return { reapplySmartSensitivityNow };`
+  )(
+    protectedRetrySchedule,
+    async () => { protectedRetryWeatherReads += 1; return {}; },
+    () => {
+      protectedRetryComputes += 1;
+      return { valid: true, onMinutes: 0, offMinutes: 30 };
+    },
+    smartMode.SMART_MODE,
+    async () => { protectedRetryPersists += 1; },
+    () => ({ hasTypedSmartOnRetry: true })
+  );
+  const protectedRetryOutcome = await protectedRetryHarness.reapplySmartSensitivityNow();
+  assertPass(protectedRetryOutcome?.retryProtected === true
+      && protectedRetryWeatherReads === 0
+      && protectedRetryComputes === 0
+      && protectedRetryPersists === 0
+      && protectedRetrySchedule.onMinutes === 21
+      && protectedRetrySchedule.offMinutes === 9,
+    '11F-2C: smart-on 重试期间灵敏度即时应用不消费 on=0 建议，原 21/9 与绝对事务保持不变');
+  let lateRetryGuardChecks = 0;
+  let releaseLateRetryWeather;
+  const lateRetryWeather = new Promise(resolve => { releaseLateRetryWeather = resolve; });
+  let lateRetryComputes = 0;
+  let lateRetryPersists = 0;
+  const lateRetryHarness = new Function(
+    'schedule', 'readStoredSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE', 'persistSchedule',
+    'getActiveSmartOnPwmRetryContext',
+    `let pwmStepRunning = false;
+let pwmRuntimeRevision = 0;
+function isComfortStartActive() { return false; }
+${reapplyBody}
+return { reapplySmartSensitivityNow };`
+  )(
+    { ...stableReapplySchedule, onMinutes: 21, offMinutes: 9 },
+    () => lateRetryWeather,
+    () => { lateRetryComputes += 1; return { valid: true, onMinutes: 0, offMinutes: 30 }; },
+    smartMode.SMART_MODE,
+    async () => { lateRetryPersists += 1; },
+    () => ({ hasTypedSmartOnRetry: ++lateRetryGuardChecks >= 2 })
+  );
+  const lateRetryPromise = lateRetryHarness.reapplySmartSensitivityNow();
+  releaseLateRetryWeather({});
+  const lateRetryOutcome = await lateRetryPromise;
+  assertPass(lateRetryOutcome?.retryProtected === true
+      && lateRetryGuardChecks === 2
+      && lateRetryComputes === 0
+      && lateRetryPersists === 0,
+    '11F-2D: 天气等待期间新出现 typed retry 时，第二道门禁阻止旧灵敏度覆盖事务');
+  const runReapplyAlarmFailure11 = async timerSucceeds => {
+    const nowMs = new Date(2026, 7, 17, 22, 10, 0, 0).getTime();
+    const boundaryAt = new Date(2026, 7, 17, 22, 0, 0, 0).getTime();
+    const timerTargetAt = new Date(2026, 7, 17, 22, 22, 0, 0).getTime();
+    const failureSchedule = {
+      enabled: true,
+      pwmState: 'off',
+      onMinutes: 20,
+      offMinutes: 10,
+      nextTriggerAt: boundaryAt + 20 * 60000,
+      alarmCreatedAt: boundaryAt,
+      alarmDelayMinutes: 20,
+      smartOnBoundaryAt: boundaryAt,
+      pageTimerTargetAt: boundaryAt + 20 * 60000,
+      pageTimerError: '',
+      smartMode: { enabled: true, sensitivity: 5 }
+    };
+    const persisted = [];
+    const alarms = [];
+    class ReapplyDate11 extends Date {
+      static now() { return nowMs; }
+    }
+    const reapply = new Function(
+      'schedule', 'readStoredSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE',
+      'persistSchedule', 'getActiveSmartOnPwmRetryContext',
+      'smartModePageTimerTargetAt', 'nextSafePageTimerTargetAt', 'clearPwmAlarm',
+      'setNextTriggerAt', 'setPageTimer', 'abortStaleAutomation',
+      'createPwmAlarmFromPlan', 'createAlarm', 'updateBadge', 'Date',
+      `let pwmStepRunning = false;
+      let pwmRuntimeRevision = 71;
+      function isComfortStartActive() { return false; }
+      function isAutomationAllowed() { return schedule.enabled; }
+      ${reapplyBody}
+      return reapplySmartSensitivityNow;`
+    )(
+      failureSchedule,
+      async () => ({ temperature: 30 }),
+      () => ({ valid: true, onMinutes: 22, offMinutes: 8 }),
+      smartMode.SMART_MODE,
+      async (reason, options = {}) => {
+        persisted.push({
+          reason,
+          options: { ...options },
+          snapshot: JSON.parse(JSON.stringify(failureSchedule))
+        });
+      },
+      () => ({ hasTypedSmartOnRetry: false }),
+      pwmPhase.smartModePageTimerTargetAt,
+      pwmPhase.nextSafePageTimerTargetAt,
+      async () => true,
+      value => { failureSchedule.nextTriggerAt = value > 0 ? value : 0; },
+      async () => {
+        if (!timerSucceeds) return { success: false, error: 'synthetic timer failure' };
+        failureSchedule.pageTimerTargetAt = timerTargetAt;
+        return { success: true, targetAt: timerTargetAt };
+      },
+      async () => false,
+      async () => false,
+      async name => { alarms.push(name); return true; },
+      async () => {},
+      ReapplyDate11
+    );
+    const result = await reapply();
+    return { result, schedule: failureSchedule, persisted, alarms, timerTargetAt, nowMs };
+  };
+  const reapplyTimerAlarmFailure11 = await runReapplyAlarmFailure11(false);
+  const reapplyCommitAlarmFailure11 = await runReapplyAlarmFailure11(true);
+  assertPass(reapplyTimerAlarmFailure11.result?.success === false
+      && reapplyTimerAlarmFailure11.persisted[0]?.reason
+        === 'reapply-smart-sensitivity-pageTimer-retry-intent'
+      && reapplyTimerAlarmFailure11.persisted[0]?.snapshot.nextTriggerAt
+        === reapplyTimerAlarmFailure11.nowMs + 60000
+      && reapplyTimerAlarmFailure11.persisted.at(-1)?.snapshot.pageTimerError.includes('闹钟创建失败')
+      && reapplyTimerAlarmFailure11.alarms.includes('ac-watchdog')
+      && reapplyCommitAlarmFailure11.result?.success === false
+      && reapplyCommitAlarmFailure11.persisted[0]?.reason
+        === 'reapply-smart-sensitivity-commit-intent'
+      && reapplyCommitAlarmFailure11.persisted[0]?.snapshot.nextTriggerAt
+        === reapplyCommitAlarmFailure11.timerTargetAt
+      && reapplyCommitAlarmFailure11.persisted.at(-1)?.snapshot.pageTimerError.includes('闹钟创建失败')
+      && reapplyCommitAlarmFailure11.alarms.includes('ac-watchdog'),
+    '11F-2E: 灵敏度重设 retry/commit 建钟 false 都先持久化新绝对 intent，再保留红灯与 watchdog，不会重载旧钟假绿');
   const repairFunctionSource = extractSourceSection(
     backgroundSource,
     'async function repairScheduleClock() {',
@@ -3790,7 +4160,9 @@ return { reapplySmartSensitivityNow };`
     'SMART_MODE',
     'planSmartModeOnWindow',
     'nextSafePageTimerTargetAt',
+    'nextHalfHourBoundary',
     'applyPreparedSmartModeDurations',
+    'setNextTriggerAt',
     'Date',
     `let pwmRuntimeRevision = 0;
     function isComfortStartActive() { return false; }
@@ -3798,7 +4170,12 @@ return { reapplySmartSensitivityNow };`
     async function abortStaleAutomation() { return false; }
     ${repairFunctionSource}; return repairScheduleClock;`
   );
-  const runRepairCase = async (initialSchedule, nowMs, refreshedSmartDuration = null) => {
+  const runRepairCase = async (
+    initialSchedule,
+    nowMs,
+    refreshedSmartDuration = null,
+    actualIsOn = true
+  ) => {
     const repairSchedule = {
       ...initialSchedule,
       smartMode: { ...initialSchedule.smartMode }
@@ -3810,7 +4187,7 @@ return { reapplySmartSensitivityNow };`
       repairSchedule,
       async () => false,
       async () => {},
-      async () => ({ isOn: true }),
+      async () => ({ isOn: actualIsOn }),
       async (minutes, options = {}) => {
         const targetAt = Number(options.targetAt) || nowMs + minutes * 60000;
         timerCalls.push({ minutes, options: { ...options }, targetAt });
@@ -3824,6 +4201,7 @@ return { reapplySmartSensitivityNow };`
       smartMode.SMART_MODE,
       pwmPhase.planSmartModeOnWindow,
       pwmPhase.nextSafePageTimerTargetAt,
+      pwmPhase.nextHalfHourBoundary,
       async options => {
         smartDurationCalls.push({ ...options });
         if (refreshedSmartDuration) {
@@ -3833,6 +4211,7 @@ return { reapplySmartSensitivityNow };`
         }
         return false;
       },
+      value => { repairSchedule.nextTriggerAt = value > 0 ? value : 0; },
       { now: () => nowMs }
     );
     const result = await repairScheduleClock();
@@ -3889,6 +4268,16 @@ return { reapplySmartSensitivityNow };`
     smartOnBoundaryAt: 0,
     smartMode: { enabled: false, sensitivity: 5 }
   }, ordinaryRepairNow);
+  const smartMissingClockRepairNow = new Date(2026, 7, 17, 22, 20, 0, 0).getTime();
+  const smartMissingClockRepair = await runRepairCase({
+    enabled: true,
+    pwmState: 'off',
+    onMinutes: 0,
+    offMinutes: 30,
+    nextTriggerAt: 0,
+    smartOnBoundaryAt: new Date(2026, 7, 17, 22, 0, 0, 0).getTime(),
+    smartMode: { enabled: true, sensitivity: 5 }
+  }, smartMissingClockRepairNow, null, false);
   assertPass(activeSmartRepair.timerCalls[0]?.minutes === 10
       && activeSmartRepair.timerCalls[0]?.options.targetAt
         === smartRepairBoundary + 25 * 60000
@@ -3913,8 +4302,74 @@ return { reapplySmartSensitivityNow };`
       && ordinaryRepair.timerCalls[0]?.minutes === 12
       && !Object.hasOwn(ordinaryRepair.timerCalls[0]?.options || {}, 'targetAt')
       && ordinaryRepair.alarmPlans[0]?.nextTriggerAt
-        === ordinaryRepairNow + 12 * 60000,
-    '11F-3: 02:11 重启先把旧 12 刷新为建议 21 并沿用 02:00 锚点；超时保证完整一分钟，普通 PWM 不变');
+        === ordinaryRepairNow + 12 * 60000
+      && smartMissingClockRepair.timerCalls.length === 0
+      && smartMissingClockRepair.schedule.pwmState === 'on'
+      && smartMissingClockRepair.alarmPlans[0]?.nextTriggerAt
+        === new Date(2026, 7, 17, 22, 30, 0, 0).getTime(),
+    '11F-3: 02:11 重启刷新智能时长；智能 OFF 缺钟对齐下一半点而不沿用旧 offMinutes，普通 PWM 不变');
+  const restoreIntervalSource11 = extractSourceSection(
+    backgroundSource,
+    'function isTrustedHalfHourAlarmBoundary(timestamp) {',
+    '\nasync function createAlarm(name, info)',
+    'trusted smart stored alarm restore'
+  );
+  const runStoredDriftRestore11 = async targetAt => {
+    const boundaryAt = new Date(2026, 7, 17, 22, 30, 0, 0).getTime();
+    const nowMs = boundaryAt + 200.25;
+    const restoreSchedule = {
+      enabled: true,
+      pwmState: 'on',
+      nextTriggerAt: targetAt,
+      smartMode: { enabled: true }
+    };
+    const createdPlans = [];
+    class RestoreDate11 extends Date {
+      static now() { return nowMs; }
+    }
+    const restore = new Function(
+      'schedule', 'chrome', 'isAutomationAllowed', 'isAutomationOperationCurrent',
+      'getLiveAlarmEndMs', 'getStoredAlarmEndMs', 'getActiveSmartOnPwmRetryContext',
+      'halfHourBoundaryAtOrBefore', 'nextHalfHourBoundary', 'clearPwmAlarm',
+      'createPwmAlarmFromPlan', 'createAlarm', 'persistSchedule', 'updateBadge',
+      'Date', 'console',
+      `let pwmRuntimeRevision = 81;
+      const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+      ${restoreIntervalSource11}
+      return restoreIntervalAlarmFromStorage;`
+    )(
+      restoreSchedule,
+      { alarms: { get: async () => null } },
+      () => true,
+      () => true,
+      () => 0,
+      () => restoreSchedule.nextTriggerAt,
+      () => ({ hasTypedSmartOnRetry: false }),
+      pwmPhase.halfHourBoundaryAtOrBefore,
+      pwmPhase.nextHalfHourBoundary,
+      async () => true,
+      async plan => { createdPlans.push({ ...plan }); return true; },
+      async () => true,
+      async () => {},
+      async () => {},
+      RestoreDate11,
+      testConsole
+    );
+    const result = await restore('dynamic drift restore');
+    return { result, createdPlans };
+  };
+  const fractionalStoredRestore11 = await runStoredDriftRestore11(
+    new Date(2026, 7, 17, 22, 30, 0, 0).getTime() + 500.5
+  );
+  const nonBoundaryStoredRestore11 = await runStoredDriftRestore11(
+    new Date(2026, 7, 17, 22, 50, 0, 0).getTime()
+  );
+  assertPass(fractionalStoredRestore11.result === true
+      && fractionalStoredRestore11.createdPlans[0]?.nextTriggerAt
+        === new Date(2026, 7, 17, 22, 30, 0, 0).getTime() + 500.5
+      && nonBoundaryStoredRestore11.result === false
+      && nonBoundaryStoredRestore11.createdPlans.length === 0,
+    '11F-3B: 缺 live 时 storage 半点+500.5ms 保留原 scheduledTime 建钟；22:50 非边界拒绝恢复');
   const midMinuteTarget11F = typeof pwmPhase.nextSafePageTimerTargetAt === 'function'
     ? pwmPhase.nextSafePageTimerTargetAt(new Date(2026, 7, 17, 2, 11, 1, 0).getTime())
     : 0;
@@ -4468,8 +4923,10 @@ return { reapplySmartSensitivityNow };`
       && alarmListenerBody13.includes('await updateBadge();')
       && alarmListenerBody13.includes('await ensureOffscreen();'),
     '13F: 每分钟 badge-tick 顺带 ensureOffscreen()，守住 L2 长连接保活层');
-  assertPass(backgroundSource.includes('offscreenAlive: !!offscreenAlive'),
-    '13G: getSwStatus 返回 offscreenAlive 真值(L2 长连接保活层状态经 chrome.offscreen.hasDocument 真检)');
+  assertPass(backgroundSource.includes('offscreenAlive: !!offscreenAlive')
+      && backgroundSource.includes('buildTime: BUILD_TIME')
+      && backgroundSource.includes('buildTimeEpochMs: BUILD_TIME_EPOCH_MS'),
+    '13G: getSwStatus 返回 offscreenAlive 真值与 SW 构建身份');
   assertPass(initBody13.includes('const retryMinutes = Number(schedule.pageTimerRetryMinutes) || 0;')
       && initBody13.includes("createAlarm('ac-page-timer-retry', { when: retryAt })")
       && initBody13.includes("await schedulePageTimerRetry(retryMinutes, '启动恢复错过的页面定时器重试');")
@@ -4521,7 +4978,10 @@ return { reapplySmartSensitivityNow };`
     pageTimerRetryMinutes: 1,
     comfortStartUntil: Date.now() + 5 * 60_000,
     comfortStartOnConfirmedAt: Date.now(),
-    smartOnBoundaryAt: Date.now() - 30 * 60_000
+    smartOnBoundaryAt: Date.now() - 30 * 60_000,
+    pwmRetryKind: 'smart-on',
+    pwmRetryBoundaryAt: Date.now() - 30 * 60_000,
+    pwmRetryScheduledAt: Date.now() + 60_000
   };
   const resetDisabledPwmRuntimeHarness = loadResetDisabledPwmRuntime(
     resetRuntimeSchedule,
@@ -4547,6 +5007,9 @@ return { reapplySmartSensitivityNow };`
       && resetRuntimeSchedule.comfortStartUntil === 0
       && resetRuntimeSchedule.comfortStartOnConfirmedAt === 0
       && resetRuntimeSchedule.smartOnBoundaryAt === 0
+      && resetRuntimeSchedule.pwmRetryKind === ''
+      && resetRuntimeSchedule.pwmRetryBoundaryAt === 0
+      && resetRuntimeSchedule.pwmRetryScheduledAt === 0
       && resetRuntimeSchedule.pageTimerMinutes === 30
       && resetRuntimeSchedule.pageTimerError === 'keep'
       && resetRuntimeSchedule.pageTimerRetryMinutes === 1
@@ -4706,8 +5169,108 @@ return { reapplySmartSensitivityNow };`
       && ensureDiagnosticAlarmsBody.includes('before: beforeAlarms')
       && ensureDiagnosticAlarmsBody.includes('repairs,'),
     '13M-3: 诊断自愈返回修复前闹钟快照与逐项 repairs，不再用总布尔值掩盖根因');
+  const ensureScheduleClockBody13 = extractSourceSection(
+    backgroundSource,
+    'async function ensureScheduleClock(options = {}) {',
+    '\n\nasync function repairScheduleClock()',
+    'diagnostic lifecycle clock delegation'
+  );
+  const diagnosticSmartGateStart13 = ensureDiagnosticAlarmsBody.indexOf(
+    'const comfortStartInFlight = isComfortStartActive() && !pwmAlarm;'
+  );
+  const diagnosticSmartGateEnd13 = ensureDiagnosticAlarmsBody.indexOf(
+    '// 活闹钟存在但 storage 可能缺失 nextTriggerAt',
+    diagnosticSmartGateStart13
+  );
+  const diagnosticSmartGateSource13 = diagnosticSmartGateStart13 >= 0
+      && diagnosticSmartGateEnd13 > diagnosticSmartGateStart13
+    ? ensureDiagnosticAlarmsBody.slice(diagnosticSmartGateStart13, diagnosticSmartGateEnd13)
+    : '';
+  const runDiagnosticSmartCycleCase13 = async ({ recoveryKind, mutateState, started = false }) => {
+    const now = new Date(2026, 7, 27, 22, 31, 0, 0).getTime();
+    const oldAlarmAt = new Date(2026, 7, 27, 23, 0, 0, 0).getTime();
+    const newAlarmAt = new Date(2026, 7, 27, 22, 52, 0, 0).getTime();
+    const testSchedule = {
+      enabled: true,
+      pwmState: 'on',
+      onMinutes: recoveryKind === 'recover-smart-current-cycle' ? 22 : 0,
+      offMinutes: recoveryKind === 'recover-smart-current-cycle' ? 8 : 30,
+      smartMode: { enabled: true }
+    };
+    let ensureCalls = 0;
+    let ensureOptions = null;
+    const run = new Function(
+      'schedule', 'chrome', 'isComfortStartActive', 'ensureScheduleClock', 'Date',
+      `return (async () => {
+      let pwmAlarm = { scheduledTime: ${oldAlarmAt} };
+      let smartWeatherAlarm = { scheduledTime: ${oldAlarmAt} };
+      let badgeAlarm = { scheduledTime: ${oldAlarmAt} };
+      let watchdogAlarm = { scheduledTime: ${oldAlarmAt} };
+      let pwmRuntimeRevision = 4;
+      const repairs = [];
+      ${diagnosticSmartGateSource13}
+      return { repairs, pwmAlarm, schedule };
+      })();`
+    );
+    const result = await run(
+      testSchedule,
+      {
+        alarms: {
+          async get(name) {
+            if (name === 'ac-pwm') return {
+              scheduledTime: recoveryKind === 'recover-smart-current-cycle' && !started
+                ? newAlarmAt
+                : oldAlarmAt
+            };
+            return { scheduledTime: oldAlarmAt };
+          }
+        }
+      },
+      () => false,
+      async options => {
+        ensureCalls += 1;
+        ensureOptions = options;
+        if (mutateState) testSchedule.pwmState = mutateState;
+        return { handled: true, started, plan: { kind: recoveryKind } };
+      },
+      { now: () => now }
+    );
+    return { ...result, ensureCalls, ensureOptions };
+  };
+  const recoveredDiagnosticSmartCycle13 = await runDiagnosticSmartCycleCase13({
+    recoveryKind: 'recover-smart-current-cycle',
+    mutateState: 'off'
+  });
+  const zeroOnDiagnosticSmartCycle13 = await runDiagnosticSmartCycleCase13({
+    recoveryKind: 'preserve-live-alarm',
+    mutateState: 'on'
+  });
+  const startedDiagnosticSmartCycle13 = await runDiagnosticSmartCycleCase13({
+    recoveryKind: 'recover-smart-current-cycle',
+    mutateState: null,
+    started: true
+  });
+  assertPass(ensureScheduleClockBody13.includes('return recoverPwmLifecycle({')
+      && ensureScheduleClockBody13.includes('deferSmartCurrentCycleExecution: options.deferSmartCurrentCycleExecution === true')
+      && recoveredDiagnosticSmartCycle13.ensureCalls === 1
+      && recoveredDiagnosticSmartCycle13.ensureOptions?.deferSmartCurrentCycleExecution === true
+      && recoveredDiagnosticSmartCycle13.repairs.includes('smart-current-cycle')
+      && recoveredDiagnosticSmartCycle13.repairs.includes('pwm-alarm')
+      && zeroOnDiagnosticSmartCycle13.ensureCalls === 1
+      && zeroOnDiagnosticSmartCycle13.repairs.length === 0
+      && startedDiagnosticSmartCycle13.repairs.includes('smart-current-cycle-started')
+      && !startedDiagnosticSmartCycle13.repairs.includes('smart-current-cycle')
+      && ensureDiagnosticAlarmsBody.includes('const triggerPlan = smartCurrentCycleStarted')
+      && ensureDiagnosticAlarmsBody.includes('? null')
+      && ensureDiagnosticAlarmsBody.indexOf('const triggerPlan = smartCurrentCycleStarted')
+        < ensureDiagnosticAlarmsBody.indexOf(': await persistReconciledPwmTrigger('),
+    '13M-4: 22:31 即使三方未来钟为 23:00，诊断也启动当前周期恢复；in-flight 明示 started 且不把旧 23:00 闹钟回写，on=0 保留未来钟');
   assertPass(persistScheduleBody.includes('reconcilePwmTrigger(schedule, liveAlarm, PWM_TRIGGER_NEXT_ONLY_OPTIONS)')
-      && persistScheduleBody.includes('if (!schedule.smartMode?.enabled) schedule.smartOnBoundaryAt = 0;')
+      && persistScheduleBody.includes('if (!schedule.smartMode?.enabled) {')
+      && persistScheduleBody.includes('schedule.smartOnBoundaryAt = 0;')
+      && persistScheduleBody.includes("schedule.pwmRetryKind = '';")
+      && persistScheduleBody.includes('schedule.pwmRetryBoundaryAt = 0;')
+      && persistScheduleBody.includes('schedule.pwmRetryScheduledAt = 0;')
       && !persistScheduleBody.includes('persistReconciledPwmTrigger(')
       && snapshotBody.includes('reconcilePwmTrigger(snapshot, alarm, PWM_TRIGGER_SNAPSHOT_OPTIONS)')
       && !snapshotBody.includes('persistReconciledPwmTrigger('),
@@ -4857,7 +5420,8 @@ return { reapplySmartSensitivityNow };`
     return areDiagnosticTriggersAligned;
   `)();
   assertPass(areDiagnosticTriggersAligned(10000, 10001.5, 9999)
-      && !areDiagnosticTriggersAligned(10000, 11500)
+      && areDiagnosticTriggersAligned(10000, 11500)
+      && !areDiagnosticTriggersAligned(10000, 11501)
       && !areDiagnosticTriggersAligned(10000, 0)
       && countOccurrences(diagnoseHandlerSource, 'areDiagnosticTriggersAligned(') >= 2
       && !diagnoseHandlerSource.includes('memNext === memLive'),
@@ -5080,6 +5644,7 @@ return { reapplySmartSensitivityNow };`
     'diagnoseActionOpenACPage',
     'diagnoseActionReloadACPage',
     'diagnoseActionCheckTimer',
+    'diagnoseActionRecheckRecovery',
     'diagnoseActionWaitWeather',
     'diagnoseActionReopenPopup',
     'diagnosePopupDocumentReady',
@@ -5104,6 +5669,7 @@ return { reapplySmartSensitivityNow };`
     'diagnoseSmartWeatherSlotMismatch',
     'diagnoseTabDiscarded',
     'diagnoseSmartModeDormant',
+    'diagnoseSmartCurrentCycleRecoveryStarted',
     'diagnosePwmMissing',
     'diagnosePwmDesync',
     'diagnoseAlarmMissing',
@@ -5122,6 +5688,9 @@ return { reapplySmartSensitivityNow };`
       && diagnoseHandlerSource.includes("code: 'SW-STATUS-FAILED'")
       && diagnoseHandlerSource.includes("code: 'SAFETY-TIMER-FAILED'")
       && diagnoseHandlerSource.includes("code: 'SAFETY-TIMER-MISSING'")
+      && diagnoseHandlerSource.includes("code: 'SMART-CURRENT-CYCLE-RECOVERY-STARTED'")
+      && diagnoseHandlerSource.includes("repairedItems.has('smart-current-cycle-started')")
+      && diagnoseHandlerSource.includes("action: t('diagnoseActionRecheckRecovery')")
       && diagnoseHandlerSource.includes("code: 'SCHED-RUNTIME-ALARMS-LEAKED'")
       && diagnoseHandlerSource.includes("code: 'POPUP-CONTROLS-DESYNC'")
       && diagnoseHandlerSource.includes("code: 'POPUP-HORIZONTAL-OVERFLOW'")
@@ -5233,7 +5802,8 @@ return { reapplySmartSensitivityNow };`
 
   assertPass(!diagnosticLogBody.includes('chrome.storage.sync')
       && backgroundSource.includes("appendDiagnosticLog('error', 'init', e)")
-      && backgroundSource.includes("appendDiagnosticLog('error', 'alarm-ac-pwm', e)")
+      && backgroundSource.includes("appendDiagnosticLog('error', source, error)")
+      && backgroundSource.includes("source: 'alarm-ac-pwm'")
       && backgroundSource.includes("appendDiagnosticLog('error', `message-${msg?.type || 'unknown'}`, e)")
       && backgroundSource.includes("appendDiagnosticLog('error', 'toggle-refresh-recovery'"),
     '15E: 日志只进 local，并覆盖 init、PWM、消息汇聚与刷新恢复关键错误链');
@@ -5378,7 +5948,13 @@ return { reapplySmartSensitivityNow };`
   );
   const createActiveHoursPolicy = new Function(
     'schedule',
-    `${activeHoursPolicySource}; return { isWithinActiveHours, isAutomationAllowed };`
+    `let automaticOnAdmissionBlocked = false;
+    ${activeHoursPolicySource}; return {
+      isWithinActiveHours,
+      isWithinActiveHoursForSchedule,
+      isAutomationAllowed,
+      isAutomationAllowedForSchedule
+    };`
   );
   const activeHoursSchedule = {
     enabled: true,
@@ -5394,6 +5970,19 @@ return { reapplySmartSensitivityNow };`
       && activeHoursPolicy.isAutomationAllowed(new Date(2026, 7, 18, 12, 0))
       && !activeHoursPolicy.isAutomationAllowed(new Date(2026, 7, 18, 23, 0)),
     '16A: 运行时段与自动门禁共同采用同日半开区间 [start,end)');
+  assertPass(activeHoursPolicy.isAutomationAllowedForSchedule({
+    enabled: true,
+    activeHours: { enabled: false }
+  }, new Date(2026, 7, 18, 12, 0))
+      && !activeHoursPolicy.isAutomationAllowedForSchedule({
+        enabled: false,
+        activeHours: { enabled: false }
+      }, new Date(2026, 7, 18, 12, 0))
+      && !activeHoursPolicy.isAutomationAllowedForSchedule({
+        enabled: true,
+        activeHours: { enabled: true, start: '00:00', end: '00:01' }
+      }, new Date(2026, 7, 18, 12, 0)),
+    '16A-1: 候选配置门禁可在写入全局 schedule 前判断 retry 是否被同快照取消');
   activeHoursSchedule.activeHours.enabled = false;
   assertPass(activeHoursPolicy.isWithinActiveHours(new Date(2026, 7, 18, 3, 0))
       && activeHoursPolicy.isAutomationAllowed(),
@@ -5637,7 +6226,10 @@ return { reapplySmartSensitivityNow };`
     { now: smartEntryNow16, maxOnMinutes: 25, acIsOn: false }
   );
   assertPass(activeBoundaryBody16.includes('await setupAlarms(true);')
-      && setupAlarmsBody16.includes('await runPwmStep();')
+      && setupAlarmsBody16.includes('await executePwmStepWithRecovery({')
+      && setupAlarmsBody16.includes("persistSchedule('setupAlarms-start-intent', { syncFromLiveAlarm: false })")
+      && setupAlarmsBody16.indexOf("persistSchedule('setupAlarms-start-intent'")
+        < setupAlarmsBody16.indexOf('await executePwmStepWithRecovery({')
       && smartEntryPlan16.kind === 'defer'
       && new Date(smartEntryPlan16.nextTriggerAt).getMinutes() === 30,
     '16F: 进入时段时循环模式可立即执行，智能模式仍等待下一个 :00/:30 窗口');
@@ -5716,16 +6308,1474 @@ return { reapplySmartSensitivityNow };`
     'ac-pwm alarm scheduled boundary forwarding'
   );
   assertPass(alarmPwmBranch16.includes(
-      'await runPwmStep({ scheduledTime: alarm.scheduledTime });'
+      'await executePwmStepWithRecovery({'
     )
+      && alarmPwmBranch16.includes('scheduledTime: alarm.scheduledTime')
+      && alarmPwmBranch16.includes("source: 'alarm-ac-pwm'")
       && setupAlarmsBody16.includes(
         'storedAlarmAt: storedDueAt'
       )
       && backgroundSource.includes(
-        'await runPwmStep({ scheduledTime: plan.scheduledTime });'
+        'scheduledTime: plan.scheduledTime,'
       )
-      && backgroundSource.includes('triggeredBoundaryAt: pwmTriggerScheduledTime'),
-    '16F-0B: alarm 与启动期 storage 补执行都传递原计划时刻，异步状态读取后不再丢失 :00/:30 身份');
+      && backgroundSource.includes(': pwmTriggerScheduledTime,'),
+    '16F-0B: alarm 与启动期 storage 补执行都经共享异常边界传递原计划时刻，不丢失 :00/:30 身份');
+  const retryStateHelpers16 = extractSourceSection(
+    backgroundSource,
+    'function clearPwmRetryState() {',
+    '\nfunction applyPwmPlanState(',
+    'smart-on retry state helpers'
+  );
+  const loadRetryStateHarness16 = initialSchedule => new Function(
+    'initialSchedule',
+    `let schedule = initialSchedule;
+    const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+    const setNextTriggerAt = value => { schedule.nextTriggerAt = value; };
+    ${retryStateHelpers16}
+    return {
+      set: setSmartOnPwmRetryState,
+      get: getSmartOnPwmRetryContext,
+      getActive: getActiveSmartOnPwmRetryContext,
+      clear: clearPwmRetryState,
+      prepareFreshStart: prepareFreshPwmStartState,
+      snapshot: () => schedule
+    };`
+  )(initialSchedule);
+  const retryBoundary16 = new Date(2026, 7, 18, 22, 30, 0, 0).getTime();
+  const retryScheduled16 = retryBoundary16 + 60_000;
+  const initialRetryHarness16 = loadRetryStateHarness16({
+    enabled: true,
+    smartMode: { enabled: true, sensitivity: 5 },
+    pwmState: 'on',
+    smartOnBoundaryAt: retryBoundary16,
+    nextTriggerAt: retryScheduled16,
+    pageTimerError: '新建的 AC 页面未就绪',
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0
+  });
+  initialRetryHarness16.set('on', retryScheduled16);
+  const serializedRetry16 = JSON.parse(JSON.stringify(initialRetryHarness16.snapshot()));
+  const reloadedRetrySchedule16 = JSON.parse(JSON.stringify(serializedRetry16));
+  const reloadedRetryHarness16 = loadRetryStateHarness16(reloadedRetrySchedule16);
+  const exactRetryContext16 = reloadedRetryHarness16.get(
+    serializedRetry16,
+    retryScheduled16
+  );
+  const maxDriftRetryContext16 = reloadedRetryHarness16.getActive(
+    serializedRetry16,
+    retryScheduled16 + 1500
+  );
+  const staleLiveRetryContext16 = reloadedRetryHarness16.getActive(
+    serializedRetry16,
+    retryScheduled16 + 1501
+  );
+  const storedFallbackRetryContext16 = reloadedRetryHarness16.getActive(
+    serializedRetry16,
+    0
+  );
+  const fractionalRetryAt16 = retryScheduled16 + 0.5;
+  const fractionalRetryHarness16 = loadRetryStateHarness16({
+    ...serializedRetry16,
+    nextTriggerAt: fractionalRetryAt16,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0,
+    smartOnBoundaryAt: retryBoundary16
+  });
+  fractionalRetryHarness16.set('on', fractionalRetryAt16);
+  const fractionalRetryContext16 = fractionalRetryHarness16.getActive(
+    fractionalRetryHarness16.snapshot(),
+    fractionalRetryAt16
+  );
+  const pwmTriggerNormalizationStart16 = pwmBody.indexOf(
+    'const requestedScheduledTime = Number(scheduledTime);'
+  );
+  const pwmTriggerNormalizationEnd16 = pwmBody.indexOf(
+    'const recoveringSmartCurrentCycle',
+    pwmTriggerNormalizationStart16
+  );
+  const pwmTriggerNormalizationSource16 = pwmTriggerNormalizationStart16 >= 0
+      && pwmTriggerNormalizationEnd16 > pwmTriggerNormalizationStart16
+    ? pwmBody.slice(pwmTriggerNormalizationStart16, pwmTriggerNormalizationEnd16)
+    : '';
+  const normalizeRunPwmTrigger16 = new Function(
+    'scheduledTime',
+    `${pwmTriggerNormalizationSource16}; return pwmTriggerScheduledTime;`
+  );
+  const normalizedFractionalRunPwmTrigger16 = normalizeRunPwmTrigger16(fractionalRetryAt16);
+  const runPwmFractionalRetryContext16 = fractionalRetryHarness16.getActive(
+    fractionalRetryHarness16.snapshot(),
+    normalizedFractionalRunPwmTrigger16
+  );
+  reloadedRetryHarness16.clear();
+  const clearedRetry16 = reloadedRetryHarness16.snapshot();
+  const ignoredRetryHarness16 = loadRetryStateHarness16({
+    smartMode: { enabled: false },
+    pwmState: 'on',
+    smartOnBoundaryAt: retryBoundary16
+  });
+  ignoredRetryHarness16.set('on', retryScheduled16);
+  const resurrectedStartHarness16 = loadRetryStateHarness16({
+    ...serializedRetry16,
+    nextTriggerAt: retryScheduled16,
+    alarmCreatedAt: retryBoundary16,
+    alarmDelayMinutes: 1
+  });
+  resurrectedStartHarness16.prepareFreshStart();
+  const durableFreshStart16 = JSON.parse(JSON.stringify(
+    resurrectedStartHarness16.snapshot()
+  ));
+  assertPass(serializedRetry16.pwmRetryKind === 'smart-on'
+      && serializedRetry16.pwmRetryBoundaryAt === retryBoundary16
+      && serializedRetry16.pwmRetryScheduledAt === retryScheduled16
+      && exactRetryContext16.hasTypedSmartOnRetry === true
+      && exactRetryContext16.boundaryAt === retryBoundary16
+      && exactRetryContext16.priorError === '新建的 AC 页面未就绪'
+      && maxDriftRetryContext16.hasTypedSmartOnRetry === true
+      && staleLiveRetryContext16.hasStoredSmartOnRetry === true
+      && staleLiveRetryContext16.hasTypedSmartOnRetry === false
+      && storedFallbackRetryContext16.hasTypedSmartOnRetry === true
+      && fractionalRetryHarness16.snapshot().pwmRetryScheduledAt === fractionalRetryAt16
+      && fractionalRetryContext16.hasTypedSmartOnRetry === true
+      && normalizedFractionalRunPwmTrigger16 === fractionalRetryAt16
+      && runPwmFractionalRetryContext16.hasTypedSmartOnRetry === true
+      && clearedRetry16.pwmRetryKind === ''
+      && clearedRetry16.pwmRetryBoundaryAt === 0
+      && clearedRetry16.pwmRetryScheduledAt === 0
+      && ignoredRetryHarness16.snapshot().pwmRetryKind === ''
+      && durableFreshStart16.pwmState === 'on'
+      && durableFreshStart16.nextTriggerAt === 0
+      && durableFreshStart16.alarmCreatedAt === 0
+      && durableFreshStart16.alarmDelayMinutes === 0
+      && durableFreshStart16.pwmRetryKind === ''
+      && durableFreshStart16.pwmRetryBoundaryAt === 0
+      && durableFreshStart16.pwmRetryScheduledAt === 0,
+    '16F-0B-1: smart-on retry 经 JSON/小数毫秒 alarm 穿过 runPwmStep 入场仍绑定原半点；live 优先，失配/停用拒绝，fresh-start 清空三字段');
+  const firstAttemptAt16 = retryBoundary16 + 202;
+  const failedTransactionSchedule16 = {
+    enabled: true,
+    smartMode: { enabled: true, sensitivity: 5 },
+    pwmState: 'on',
+    onMinutes: 22,
+    offMinutes: 8,
+    smartOnBoundaryAt: retryBoundary16,
+    nextTriggerAt: 0,
+    pageTimerError: '',
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0
+  };
+  const firstFailurePlan16 = pwmPhase.planPwmStep(
+    failedTransactionSchedule16,
+    {
+      acIsOn: false,
+      toggleSucceeded: false,
+      toggleError: '新建的 AC 页面未就绪'
+    },
+    { now: firstAttemptAt16 }
+  );
+  Object.assign(failedTransactionSchedule16, firstFailurePlan16.phasePatch);
+  failedTransactionSchedule16.pageTimerError = '新建的 AC 页面未就绪';
+  const failedTransactionHarness16 = loadRetryStateHarness16(
+    failedTransactionSchedule16
+  );
+  failedTransactionHarness16.set('on', firstFailurePlan16.nextTriggerAt);
+  const reloadedFailedTransaction16 = JSON.parse(JSON.stringify(
+    failedTransactionHarness16.snapshot()
+  ));
+  const retryTransactionHarness16 = loadRetryStateHarness16(
+    reloadedFailedTransaction16
+  );
+  const consumedRetryContext16 = retryTransactionHarness16.get(
+    reloadedFailedTransaction16,
+    firstFailurePlan16.nextTriggerAt
+  );
+  const retryWindow16 = pwmPhase.planSmartModeOnWindow(
+    reloadedFailedTransaction16,
+    {
+      now: firstFailurePlan16.nextTriggerAt,
+      maxOnMinutes: 25,
+      acIsOn: false,
+      boundaryAt: consumedRetryContext16.boundaryAt,
+      triggeredBoundaryAt: consumedRetryContext16.boundaryAt,
+      recoverCurrentCycle: true
+    }
+  );
+  const retryTogglePlan16 = pwmPhase.planPwmStep(
+    reloadedFailedTransaction16,
+    { acIsOn: false },
+    { now: firstFailurePlan16.nextTriggerAt }
+  );
+  const retryTimerPlan16 = pwmPhase.planPwmStep(
+    reloadedFailedTransaction16,
+    { acIsOn: false, toggleSucceeded: true },
+    { now: firstFailurePlan16.nextTriggerAt }
+  );
+  const retryCommitPlan16 = pwmPhase.planPwmStep(
+    reloadedFailedTransaction16,
+    {
+      acIsOn: true,
+      pageTimerSucceeded: true,
+      pageTimerTargetAt: retryWindow16.pageTimerTargetAt
+    },
+    { now: firstFailurePlan16.nextTriggerAt }
+  );
+  const overdueRetryNow16 = retryBoundary16 + 23 * 60_000;
+  const overdueRetryWindow16 = pwmPhase.planSmartModeOnWindow(
+    reloadedFailedTransaction16,
+    {
+      now: overdueRetryNow16,
+      maxOnMinutes: 25,
+      acIsOn: false,
+      boundaryAt: consumedRetryContext16.boundaryAt,
+      triggeredBoundaryAt: firstFailurePlan16.nextTriggerAt,
+      recoverCurrentCycle: false
+    }
+  );
+  Object.assign(reloadedFailedTransaction16, retryCommitPlan16.phasePatch);
+  retryTransactionHarness16.clear();
+  assertPass(firstFailurePlan16.kind === 'retry'
+      && firstFailurePlan16.reason === 'toggle-on-failed'
+      && firstFailurePlan16.nextTriggerAt === firstAttemptAt16 + 60_000
+      && consumedRetryContext16.hasTypedSmartOnRetry === true
+      && retryWindow16.kind === 'allow'
+      && retryWindow16.boundaryAt === retryBoundary16
+      && retryWindow16.pageTimerTargetAt === retryBoundary16 + 22 * 60_000
+      && retryTogglePlan16.kind === 'hold'
+      && retryTogglePlan16.prerequisite === 'toggle-on'
+      && retryTimerPlan16.kind === 'hold'
+      && retryTimerPlan16.prerequisite === 'set-page-timer'
+      && retryCommitPlan16.kind === 'commit'
+      && retryCommitPlan16.nextTriggerAt === retryBoundary16 + 22 * 60_000
+      && overdueRetryWindow16.kind === 'defer'
+      && overdueRetryWindow16.nextTriggerAt === retryBoundary16 + 30 * 60_000
+      && reloadedFailedTransaction16.pwmState === 'off'
+      && reloadedFailedTransaction16.pwmRetryKind === ''
+      && reloadedFailedTransaction16.pwmRetryBoundaryAt === 0
+      && reloadedFailedTransaction16.pwmRetryScheduledAt === 0,
+    '16F-0B-1C: 动态执行 首轮 toggle 失败→JSON 重载→22:31 typed retry→原 22:30 截止 commit，并在终态清 marker');
+  const retryPlanStart16 = pwmBody.indexOf('async function resolveRetryPlan(');
+  const retryPlanEnd16 = pwmBody.indexOf('\n\n  return waitUntil(', retryPlanStart16);
+  const retryPlanSource16 = retryPlanStart16 >= 0 && retryPlanEnd16 > retryPlanStart16
+    ? pwmBody.slice(retryPlanStart16, retryPlanEnd16)
+    : '';
+  assertPass(retryPlanSource16.indexOf('setSmartOnPwmRetryState(targetAction, plan.nextTriggerAt)') >= 0
+      && retryPlanSource16.indexOf("persistSchedule('runPwmStep-retry-intent'")
+        > retryPlanSource16.indexOf('setSmartOnPwmRetryState(targetAction, plan.nextTriggerAt)')
+      && retryPlanSource16.indexOf('createPwmAlarmFromPlan(')
+        > retryPlanSource16.indexOf("persistSchedule('runPwmStep-retry-intent'")
+      && retryPlanSource16.indexOf('setSmartOnPwmRetryState(targetAction, schedule.nextTriggerAt)')
+        > retryPlanSource16.indexOf('createPwmAlarmFromPlan(')
+      && pwmBody.includes('getSmartOnPwmRetryContext(')
+      && pwmBody.includes('recoverCurrentCycle: retryingSmartOn')
+      && pwmBody.includes('triggeredBoundaryAt: retryingSmartOn')
+      && pwmBody.includes('clearPwmRetryState()')
+      && pwmBody.includes('rejectedSmartOnRetryError')
+      && pwmBody.includes('智能开机重试身份不匹配')
+      && pwmBody.includes('本周期智能开机重试已超过安全关机余量'),
+    '16F-0B-1A: retry intent 先持久化再建 alarm、再写 canonical 时刻；失配和超窗都保留红灯而非静默延期');
+  let retryCreateRaceCurrent16 = true;
+  const retryCreateRaceSchedule16 = {
+    enabled: true,
+    pwmState: 'on',
+    nextTriggerAt: retryScheduled16,
+    pageTimerError: '',
+    smartOnBoundaryAt: retryBoundary16,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0
+  };
+  const retryCreateRaceOrder16 = [];
+  const resolveRetryPlanRace16 = new Function(
+    'schedule', 'applyPwmPlanState', 'setSmartOnPwmRetryState',
+    'persistSchedule', 'createPwmAlarmFromPlan', 'automationRevision',
+    'isAutomationOperationCurrent', 'createAlarm', 'abortStaleAutomation',
+    'updateBadge',
+    `${retryPlanSource16}; return resolveRetryPlan;`
+  )(
+    retryCreateRaceSchedule16,
+    plan => Object.assign(retryCreateRaceSchedule16, plan.phasePatch),
+    (_action, scheduledAt) => {
+      retryCreateRaceSchedule16.pwmRetryKind = 'smart-on';
+      retryCreateRaceSchedule16.pwmRetryBoundaryAt = retryBoundary16;
+      retryCreateRaceSchedule16.pwmRetryScheduledAt = scheduledAt;
+    },
+    async reason => { retryCreateRaceOrder16.push(`persist:${reason}`); },
+    async () => {
+      retryCreateRaceOrder16.push('create-alarm:false');
+      retryCreateRaceCurrent16 = false;
+      Object.assign(retryCreateRaceSchedule16, {
+        enabled: false,
+        pwmState: 'off',
+        nextTriggerAt: 0,
+        pageTimerError: 'NEW-RETRY-LIFECYCLE',
+        pwmRetryKind: '',
+        pwmRetryBoundaryAt: 0,
+        pwmRetryScheduledAt: 0
+      });
+      return false;
+    },
+    17,
+    () => retryCreateRaceCurrent16,
+    async () => { retryCreateRaceOrder16.push('badge'); },
+    async () => false,
+    async () => { retryCreateRaceOrder16.push('update-badge'); }
+  );
+  await resolveRetryPlanRace16({
+    kind: 'retry',
+    reason: 'toggle-on-failed',
+    nextTriggerAt: retryScheduled16 + 60_000,
+    phasePatch: { pwmState: 'on', nextTriggerAt: retryScheduled16 + 60_000 }
+  }, { toggleError: 'synthetic retry failure' }, 'on');
+  assertPass(retryCreateRaceOrder16.join(',')
+        === 'persist:runPwmStep-retry-intent,create-alarm:false'
+      && retryCreateRaceSchedule16.pageTimerError === 'NEW-RETRY-LIFECYCLE'
+      && retryCreateRaceSchedule16.enabled === false
+      && retryCreateRaceSchedule16.nextTriggerAt === 0,
+    '16F-0B-1A-1: retry 建钟期间 revision 失效后不追加旧错误或 persist，不覆盖新 lifecycle');
+  const pageTimerAdoptionBody16 = extractSourceSection(
+    backgroundSource,
+    'async function tryAdoptPageTimer(reason = \'\') {',
+    '\n// ----- 官方推荐：setInterval heartbeat',
+    'page timer adoption retry guard'
+  );
+  const syncedPhaseBody16 = extractSourceSection(
+    backgroundSource,
+    'async function applySyncedPhase(remote, reason = \'\') {',
+    '\n// 从 chrome.storage.sync 拉取并尝试合并。',
+    'sync phase retry guard'
+  );
+  assertPass(pageTimerAdoptionBody16.includes('getActiveSmartOnPwmRetryContext(')
+      && pageTimerAdoptionBody16.includes('retryContext.hasTypedSmartOnRetry')
+      && pageTimerAdoptionBody16.indexOf('retryContext.hasTypedSmartOnRetry')
+        < pageTimerAdoptionBody16.indexOf('computePageTimerAdoption(')
+      && syncedPhaseBody16.includes('protectLocalSmartOnRetry')
+      && syncedPhaseBody16.includes('getActiveSmartOnPwmRetryContext(')
+      && syncedPhaseBody16.includes('protectSmartOnRetryConfigDiff(')
+      && syncedPhaseBody16.indexOf('localRetryBeforeConfig')
+        < syncedPhaseBody16.indexOf('computeConfigDiff(schedule, remote)')
+      && syncedPhaseBody16.includes('const prospectiveSchedule =')
+      && syncedPhaseBody16.includes('isAutomationAllowedForSchedule(prospectiveSchedule)')
+      && syncedPhaseBody16.includes('? false')
+      && syncedPhaseBody16.includes(': await adoptPhaseAndRearm('),
+    '16F-0B-1B: 22:31 durable retry 优先于预置的 22:52 page timer 与远端相位；只有 live/storage 所有权失配后才允许采纳');
+  const recoverLifecycleBody16 = extractSourceSection(
+    backgroundSource,
+    'async function recoverPwmLifecycle(context = {}) {',
+    '\n// ===== 智能模式：将军澳 JKB 天气取数',
+    'typed retry lifecycle recovery'
+  );
+  assertPass(recoverLifecycleBody16.includes("kind: 'execute-smart-on-retry'")
+      && recoverLifecycleBody16.includes("reason: 'typed-smart-on-retry-due'")
+      && recoverLifecycleBody16.includes('getActiveSmartOnPwmRetryContext(')
+      && recoverLifecycleBody16.includes('scheduledTime: retryAlarmAt,')
+      && recoverLifecycleBody16.includes('await executePwmStepWithRecovery({')
+      && !recoverLifecycleBody16.includes('await runPwmStep(')
+      && recoverLifecycleBody16.indexOf("kind: 'execute-smart-on-retry'")
+        < recoverLifecycleBody16.indexOf('await applyPreparedSmartModeDurations({')
+      && recoverLifecycleBody16.indexOf("kind: 'execute-smart-on-retry'")
+        < recoverLifecycleBody16.indexOf('const plan = planPwmLifecycleRecovery(')
+      && recoverLifecycleBody16.includes('if (!lifecycleRetryContext.hasTypedSmartOnRetry)')
+      && pwmBody.includes('if (!hasTypedSmartOnRetry) {')
+      && pwmBody.indexOf('if (!hasTypedSmartOnRetry) {')
+        < pwmBody.indexOf('await applyPreparedSmartModeDurations({')
+      && pwmBody.includes("refreshedRecoveryPlan.kind === 'recover-smart-current-cycle'")
+      && recoverLifecycleBody16.includes('smartNextAction: preparedRuntimeSnapshot?.pwmState || schedule.pwmState')
+      && !pwmBody.includes("if (refreshedRecoveryPlan.kind !== 'recover-smart-current-cycle') return")
+      && pwmBody.indexOf('await clearPwmAlarm(automationRevision);')
+        > pwmBody.indexOf("refreshedRecoveryPlan.kind === 'recover-smart-current-cycle'"),
+    '16F-0B-1D: typed retry 所有权先于新半点天气与通用协调器；过期 R 回原事务，不从 22:31 漂成 23:01');
+  const deferredCurrentCycleStart16 = recoverLifecycleBody16.indexOf(
+    "if (plan.kind === 'recover-smart-current-cycle') {"
+  );
+  const deferredCurrentCycleEnd16 = recoverLifecycleBody16.indexOf(
+    "\n  if (plan.kind === 'preserve-live-alarm') {",
+    deferredCurrentCycleStart16
+  );
+  const deferredCurrentCycleBody16 = deferredCurrentCycleStart16 >= 0
+      && deferredCurrentCycleEnd16 > deferredCurrentCycleStart16
+    ? recoverLifecycleBody16.slice(deferredCurrentCycleStart16, deferredCurrentCycleEnd16)
+    : '';
+  let deferredExecutionCalls16 = 0;
+  let deferredWaitUntilCalls16 = 0;
+  const neverCompletes16 = new Promise(() => {});
+  const runDeferredCurrentCycle16 = new Function(
+    'plan', 'context', 'automationRevision', 'executePwmStepWithRecovery',
+    'waitUntil', 'appendDiagnosticLog', 'console',
+    `return (async () => { ${deferredCurrentCycleBody16} })();`
+  );
+  const deferredCurrentCycleResult16 = await Promise.race([
+    runDeferredCurrentCycle16(
+      {
+        kind: 'recover-smart-current-cycle',
+        scheduledTime: new Date(2026, 7, 27, 22, 30, 0, 0).getTime(),
+        pageTimerTargetAt: new Date(2026, 7, 27, 22, 52, 0, 0).getTime()
+      },
+      { source: 'diagnostic', deferSmartCurrentCycleExecution: true },
+      31,
+      () => {
+        deferredExecutionCalls16 += 1;
+        return neverCompletes16;
+      },
+      execution => {
+        deferredWaitUntilCalls16 += 1;
+        return execution;
+      },
+      () => {},
+      { warn() {}, error() {} }
+    ),
+    new Promise(resolve => setTimeout(() => resolve({ timedOut: true }), 50))
+  ]);
+  assertPass(deferredCurrentCycleResult16?.started === true
+      && deferredCurrentCycleResult16?.handled === true
+      && deferredCurrentCycleResult16?.plan?.kind === 'recover-smart-current-cycle'
+      && deferredCurrentCycleResult16?.timedOut !== true
+      && deferredExecutionCalls16 === 1
+      && deferredWaitUntilCalls16 === 1
+      && deferredCurrentCycleBody16.includes('void waitUntil(execution).catch('),
+    '16F-0B-1D-0: 诊断启动漏开恢复后立即返回 in-flight marker，不再等待页面 timer 验证撞上 10 秒 RPC 超时');
+  const preparedRuntimeHelpers16 = extractSourceSection(
+    backgroundSource,
+    'function snapshotSmartPreparationOwner() {',
+    '\nfunction applySmartDurationDecision(',
+    'prepared smart runtime rollback helpers'
+  );
+  const preparedRuntimeHarness16 = new Function(
+    'initialSchedule',
+    `let schedule = initialSchedule;
+    let pwmRuntimeRevision = 7;
+    ${preparedRuntimeHelpers16}
+    return {
+      snapshot: snapshotPreparedSmartRuntime,
+      restore: restorePreparedSmartRuntime,
+      get: () => schedule,
+      claim: () => { pwmRuntimeRevision += 1; return pwmRuntimeRevision; }
+    };`
+  )({
+    enabled: true,
+    smartMode: { enabled: true },
+    pwmState: 'on',
+    onMinutes: 12,
+    offMinutes: 18,
+    smartOnBoundaryAt: 0,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0
+  });
+  const beforeFutureClockPreparation16 = preparedRuntimeHarness16.snapshot();
+  Object.assign(preparedRuntimeHarness16.get(), {
+    pwmState: 'off',
+    onMinutes: 30,
+    offMinutes: 30
+  });
+  const futureClockNow16 = new Date(2026, 7, 27, 22, 20, 0, 0).getTime();
+  const futureHalfHour16 = new Date(2026, 7, 27, 22, 30, 0, 0).getTime();
+  const futureClockPlan16 = recoveryCoordinator.planPwmLifecycleRecovery(
+    preparedRuntimeHarness16.get(),
+    {
+      now: futureClockNow16,
+      plannedActionAt: futureHalfHour16,
+      liveAlarmAt: futureHalfHour16,
+      storedAlarmAt: futureHalfHour16,
+      maxOnMinutes: 25
+    }
+  );
+  if (futureClockPlan16.kind === 'preserve-live-alarm') {
+    preparedRuntimeHarness16.restore(beforeFutureClockPreparation16);
+  }
+  assertPass(futureClockPlan16.kind === 'preserve-live-alarm'
+      && futureClockPlan16.smartDecisionReason === 'next-action-not-on'
+      && preparedRuntimeHarness16.get().pwmState === 'on'
+      && preparedRuntimeHarness16.get().onMinutes === 12
+      && preparedRuntimeHarness16.get().offMinutes === 18
+      && recoverLifecycleBody16.indexOf('restorePreparedSmartRuntime(preparedRuntimeSnapshot)')
+        > recoverLifecycleBody16.indexOf('const plan = planPwmLifecycleRecovery('),
+    '16F-0B-1D-1: 22:20 恢复读取 22:00 on=0 只作规划；保留 22:30 future ON 时回滚旧边界相位/时长，触发时再消费 22:30 计划');
+  const beforeManualSwitch16 = preparedRuntimeHarness16.snapshot();
+  Object.assign(preparedRuntimeHarness16.get(), {
+    pwmState: 'off',
+    onMinutes: 60,
+    offMinutes: 45,
+    smartMode: { enabled: false, sensitivity: 5 }
+  });
+  const stalePreparedRestore16 = preparedRuntimeHarness16.restore(beforeManualSwitch16);
+  assertPass(stalePreparedRestore16 === false
+      && preparedRuntimeHarness16.get().smartMode.enabled === false
+      && preparedRuntimeHarness16.get().onMinutes === 60
+      && preparedRuntimeHarness16.get().offMinutes === 45
+      && preparedRuntimeHelpers16.includes('isSmartPreparationOwnerCurrent(snapshot.owner)'),
+    '16F-0B-1D-2: future-clock rollback 有配置 owner；天气等待中切回手动 60/45 后旧 12/18 快照拒绝恢复');
+
+  const revisionOwnerSchedule16 = {
+    enabled: true,
+    mode: 'pwm',
+    clockMode: false,
+    pwmState: 'on',
+    onMinutes: 12,
+    offMinutes: 18,
+    nextTriggerAt: futureHalfHour16,
+    alarmCreatedAt: futureClockNow16,
+    alarmDelayMinutes: 10,
+    activeHours: { enabled: false, start: '08:00', end: '23:00' },
+    smartMode: { enabled: true, sensitivity: 5 },
+    smartOnBoundaryAt: 0,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0
+  };
+  let releaseRevisionOwnerRead16;
+  const revisionOwnerRead16 = new Promise(resolve => { releaseRevisionOwnerRead16 = resolve; });
+  let revisionOwnerConsumeCalls16 = 0;
+  let revisionOwnerApplyCalls16 = 0;
+  const revisionOwnerHarness16 = new Function(
+    'schedule', 'SMART_MODE', 'SMART_WEATHER_PLAN_KEY', 'chrome',
+    'consumeSmartWeatherDecision', 'readStoredSmartWeather',
+    'consumeStoredSmartWeatherDecision', 'applySmartDurationFallback',
+    'applySmartDurationDecision', 'appendDiagnosticLog',
+    `let pwmRuntimeRevision = 10;
+    ${preparedRuntimeHelpers16}
+    ${preparedDurationBody}
+    return {
+      apply: applyPreparedSmartModeDurations,
+      claim: () => { pwmRuntimeRevision += 1; return pwmRuntimeRevision; }
+    };`
+  )(
+    revisionOwnerSchedule16,
+    { CYCLE_MINUTES: 30 },
+    'ac_smart_weather_plan',
+    { storage: { local: { get: () => revisionOwnerRead16 } } },
+    () => {
+      revisionOwnerConsumeCalls16 += 1;
+      return { valid: true, onMinutes: 0, offMinutes: 30 };
+    },
+    async () => null,
+    () => null,
+    () => {},
+    decision => {
+      revisionOwnerApplyCalls16 += 1;
+      revisionOwnerSchedule16.pwmState = decision.onMinutes === 0 ? 'off' : 'on';
+    },
+    () => {}
+  );
+  const staleRevisionWeather16 = revisionOwnerHarness16.apply({
+    allowActiveOnPhase: true,
+    boundaryAt: futureHalfHour16
+  });
+  revisionOwnerHarness16.claim();
+  Object.assign(revisionOwnerSchedule16, {
+    pwmState: 'on',
+    onMinutes: 23,
+    offMinutes: 7
+  });
+  releaseRevisionOwnerRead16({ ac_smart_weather_plan: { schemaVersion: 1 } });
+  const staleRevisionWeatherResult16 = await staleRevisionWeather16;
+  assertPass(staleRevisionWeatherResult16 === false
+      && revisionOwnerConsumeCalls16 === 0
+      && revisionOwnerApplyCalls16 === 0
+      && revisionOwnerSchedule16.pwmState === 'on'
+      && revisionOwnerSchedule16.onMinutes === 23
+      && revisionOwnerSchedule16.offMinutes === 7
+      && preparedRuntimeHelpers16.includes('pwmRuntimeRevision,'),
+    '16F-0B-1D-2A: 天气 await 中新 PWM revision 认领相位后，旧 on=0 计划零消费且不能覆盖新 23/7 lifecycle');
+  const phaseOwnerSchedule16 = {
+    enabled: true,
+    mode: 'pwm',
+    clockMode: false,
+    pwmState: 'on',
+    onMinutes: 12,
+    offMinutes: 18,
+    nextTriggerAt: futureHalfHour16,
+    alarmCreatedAt: futureClockNow16 - 1000,
+    alarmDelayMinutes: 10,
+    smartOnBoundaryAt: 0,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0,
+    activeHours: { enabled: false, start: '08:00', end: '23:00' },
+    smartMode: { enabled: true, sensitivity: 5 }
+  };
+  const phaseOwnerToken16 = () => ({
+    enabled: phaseOwnerSchedule16.enabled,
+    mode: phaseOwnerSchedule16.mode,
+    clockMode: phaseOwnerSchedule16.clockMode,
+    smartEnabled: phaseOwnerSchedule16.smartMode.enabled,
+    smartSensitivity: phaseOwnerSchedule16.smartMode.sensitivity,
+    activeHoursEnabled: phaseOwnerSchedule16.activeHours.enabled,
+    activeHoursStart: phaseOwnerSchedule16.activeHours.start,
+    activeHoursEnd: phaseOwnerSchedule16.activeHours.end,
+    nextTriggerAt: phaseOwnerSchedule16.nextTriggerAt,
+    alarmCreatedAt: phaseOwnerSchedule16.alarmCreatedAt,
+    alarmDelayMinutes: phaseOwnerSchedule16.alarmDelayMinutes
+  });
+  const phaseOwnerCurrent16 = owner => {
+    const current = phaseOwnerToken16();
+    return Object.keys(current).every(key => current[key] === owner[key]);
+  };
+  let releasePhasePreparation16;
+  const phasePreparationWait16 = new Promise(resolve => {
+    releasePhasePreparation16 = resolve;
+  });
+  let staleContextPlannerCalls16 = 0;
+  const recoverWithPhaseOwner16 = new Function(
+    'schedule', 'getActiveSmartOnPwmRetryContext', 'snapshotPreparedSmartRuntime',
+    'halfHourBoundaryAtOrBefore', 'applyPreparedSmartModeDurations',
+    'isAutomationOperationCurrent', 'isSmartPreparationOwnerCurrent',
+    'planPwmLifecycleRecovery',
+    `let pwmRuntimeRevision = 61;
+    ${recoverLifecycleBody16}
+    return recoverPwmLifecycle;`
+  )(
+    phaseOwnerSchedule16,
+    () => ({ hasTypedSmartOnRetry: false }),
+    () => ({
+      owner: phaseOwnerToken16(),
+      pwmState: phaseOwnerSchedule16.pwmState,
+      onMinutes: phaseOwnerSchedule16.onMinutes,
+      offMinutes: phaseOwnerSchedule16.offMinutes
+    }),
+    () => futureClockNow16,
+    async () => { await phasePreparationWait16; return false; },
+    () => true,
+    phaseOwnerCurrent16,
+    () => { staleContextPlannerCalls16 += 1; return { kind: 'preserve-live-alarm' }; }
+  );
+  const staleContextRecoveryPromise16 = recoverWithPhaseOwner16({
+    now: futureClockNow16,
+    existingAlarm: { scheduledTime: futureHalfHour16 },
+    liveAlarmAt: futureHalfHour16,
+    storedAlarmAt: futureHalfHour16,
+    plannedActionAt: futureHalfHour16,
+    missingClockAction: 'repair-clock'
+  });
+  phaseOwnerSchedule16.pwmState = 'off';
+  phaseOwnerSchedule16.nextTriggerAt = futureHalfHour16 + 30 * 60000;
+  phaseOwnerSchedule16.alarmCreatedAt += 5000;
+  releasePhasePreparation16();
+  const staleContextRecovery16 = await staleContextRecoveryPromise16;
+  assertPass(staleContextRecovery16.handled === false
+      && staleContextRecovery16.plan?.reason === 'schedule-owner-changed'
+      && staleContextPlannerCalls16 === 0
+      && phaseOwnerSchedule16.pwmState === 'off'
+      && phaseOwnerSchedule16.nextTriggerAt === futureHalfHour16 + 30 * 60000,
+    '16F-0B-1D-3: 天气 await 中 sync 认领新 phase/clock 后旧 lifecycle 立即退出，零 planner/rollback/旧钟回写');
+  const typedAlarmExceptionRecoveryBody16 = extractSourceSection(
+    backgroundSource,
+    'async function recoverTypedSmartOnAlarmException(',
+    '\nasync function recoverGenericPwmAlarmException(',
+    'typed smart-on alarm exception recovery'
+  );
+  const genericAlarmExceptionRecoveryBody16 = extractSourceSection(
+    backgroundSource,
+    'async function recoverGenericPwmAlarmException(',
+    '\n// 所有 PWM 入口共享同一异常边界',
+    'generic pwm alarm exception recovery'
+  );
+  const pwmStepWithRecoveryBody16 = extractSourceSection(
+    backgroundSource,
+    'async function executePwmStepWithRecovery({',
+    '\n// 通过新鲜页面确认 Power-off after',
+    'shared pwm exception executor'
+  );
+  const alarmPwmCatchStart16 = backgroundSource.indexOf(
+    "if (alarm.name === 'ac-pwm') {"
+  );
+  const alarmPwmCatchEnd16 = backgroundSource.indexOf(
+    "\n    return;\n  }\n\n  if (alarm.name === 'ac-watchdog')",
+    alarmPwmCatchStart16
+  );
+  const alarmPwmCatchBody16 = alarmPwmCatchStart16 >= 0
+      && alarmPwmCatchEnd16 > alarmPwmCatchStart16
+    ? backgroundSource.slice(alarmPwmCatchStart16, alarmPwmCatchEnd16)
+    : '';
+  assertPass(typedAlarmExceptionRecoveryBody16.includes("persistSchedule('onAlarm-smart-on-error-intent'")
+      && typedAlarmExceptionRecoveryBody16.indexOf("persistSchedule('onAlarm-smart-on-error-intent'")
+        < typedAlarmExceptionRecoveryBody16.indexOf('createPwmAlarmFromPlan(')
+      && typedAlarmExceptionRecoveryBody16.includes("setSmartOnPwmRetryState('on', schedule.nextTriggerAt)")
+      && typedAlarmExceptionRecoveryBody16.includes("recoveryPlan.kind === 'defer'")
+      && pwmStepWithRecoveryBody16.indexOf('const incomingSmartOnRetryContext =')
+        < pwmStepWithRecoveryBody16.indexOf('await runPwmStep({ scheduledTime: triggerAt, recoveryPlan });')
+      && pwmStepWithRecoveryBody16.indexOf('const incomingPwmSnapshot =')
+        < pwmStepWithRecoveryBody16.indexOf('await runPwmStep({ scheduledTime: triggerAt, recoveryPlan });')
+      && pwmStepWithRecoveryBody16.indexOf('const incomingSmartOnWindow =')
+        < pwmStepWithRecoveryBody16.indexOf('await runPwmStep({ scheduledTime: triggerAt, recoveryPlan });')
+      && pwmStepWithRecoveryBody16.includes('Number.isSafeInteger(error?.pwmAutomationRevision)')
+      && pwmStepWithRecoveryBody16.indexOf('if (!isAutomationOperationCurrent(failedRevision)) return false;')
+        < pwmStepWithRecoveryBody16.indexOf('recoverTypedSmartOnAlarmException(')
+      && pwmStepWithRecoveryBody16.indexOf('recoverTypedSmartOnAlarmException(')
+        < pwmStepWithRecoveryBody16.indexOf('recoverGenericPwmAlarmException(')
+      && alarmPwmCatchBody16.includes('await executePwmStepWithRecovery({')
+      && alarmPwmCatchBody16.includes("source: 'alarm-ac-pwm'")
+      && !alarmPwmCatchBody16.includes('recoverGenericPwmAlarmException(')
+      && !pwmStepWithRecoveryBody16.includes('createPwmAlarmWithVerify(')
+      && !pwmStepWithRecoveryBody16.includes('const delay = Math.max(')
+      && backgroundSource.includes('function tagPwmAutomationError(')
+      && backgroundSource.includes('Object.defineProperties(taggedError, {')
+      && backgroundSource.includes('wrappedError.pwmRecoveryContext = recoveryContext')
+      && pwmBody.includes('capturePwmExceptionRecoveryContext();')
+      && pwmBody.indexOf('await applyPreparedSmartModeDurations({')
+        < pwmBody.indexOf('capturePwmExceptionRecoveryContext();')
+      && pwmBody.includes('throw tagPwmAutomationError(')
+      && pwmStepWithRecoveryBody16.includes('const postPrepareContext = error?.pwmRecoveryContext;')
+      && pwmStepWithRecoveryBody16.includes('postPrepareContext?.snapshot')
+      && pwmStepWithRecoveryBody16.includes("Object.hasOwn(\n      postPrepareContext || {},\n      'smartOnWindow'"),
+    '16F-0B-1E: alarm/启动/看门狗共用异常执行器；入场冻结事务，throw 绑定失败 revision，typed 优先且禁止长周期跳钟');
+  const sharedExecutorBoundary16 = new Date(2026, 7, 27, 22, 30, 0, 0).getTime();
+  const sharedExecutorRetryAt16 = sharedExecutorBoundary16 + 60_000;
+  const sharedExecutorSchedule16 = {
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 22,
+    offMinutes: 8,
+    smartMode: { enabled: true },
+    smartOnBoundaryAt: sharedExecutorBoundary16,
+    pwmRetryKind: 'smart-on',
+    pwmRetryBoundaryAt: sharedExecutorBoundary16,
+    pwmRetryScheduledAt: sharedExecutorRetryAt16
+  };
+  const sharedExecutorCalls16 = [];
+  const executeSharedPwmStep16 = new Function(
+    'schedule', 'pwmRuntimeRevision', 'isAutomationOperationCurrent',
+    'getSmartOnPwmRetryContext', 'planSmartModeOnWindow', 'SMART_MODE',
+    'runPwmStep', 'appendDiagnosticLog',
+    'recoverTypedSmartOnAlarmException', 'recoverGenericPwmAlarmException',
+    `${pwmStepWithRecoveryBody16}; return executePwmStepWithRecovery;`
+  )(
+    sharedExecutorSchedule16,
+    19,
+    revision => revision === 19,
+    (snapshot, scheduledTime) => ({
+      hasTypedSmartOnRetry: snapshot.pwmRetryKind === 'smart-on'
+        && snapshot.pwmRetryScheduledAt === scheduledTime,
+      boundaryAt: snapshot.pwmRetryBoundaryAt,
+      priorError: snapshot.pageTimerError || ''
+    }),
+    () => ({
+      kind: 'allow',
+      reason: 'smart-on-scheduled-boundary',
+      boundaryAt: sharedExecutorBoundary16
+    }),
+    { ON_MAX: 25 },
+    async options => {
+      sharedExecutorCalls16.push({ type: 'run', options });
+      const error = new Error('startup storage reload failed');
+      error.pwmAutomationRevision = 19;
+      throw error;
+    },
+    (_level, source) => { sharedExecutorCalls16.push({ type: 'log', source }); },
+    async (_alarm, _error, revision, _now, retryContext) => {
+      sharedExecutorCalls16.push({ type: 'typed', revision, retryContext });
+      return true;
+    },
+    async () => {
+      sharedExecutorCalls16.push({ type: 'generic' });
+      return true;
+    }
+  );
+  const sharedExecutorHandled16 = await executeSharedPwmStep16({
+    scheduledTime: sharedExecutorRetryAt16,
+    automationRevision: 19,
+    source: 'setupAlarms-typed-retry'
+  });
+  assertPass(sharedExecutorHandled16 === true
+      && sharedExecutorCalls16.find(call => call.type === 'run')?.options?.scheduledTime
+        === sharedExecutorRetryAt16
+      && sharedExecutorCalls16.find(call => call.type === 'typed')?.revision === 19
+      && sharedExecutorCalls16.find(call => call.type === 'typed')?.retryContext?.boundaryAt
+        === sharedExecutorBoundary16
+      && !sharedExecutorCalls16.some(call => call.type === 'generic')
+      && (backgroundSource.match(/await runPwmStep\(/g) || []).length === 1,
+    '16F-0B-1E-1: storage-only 到期 R 在启动恢复抛错时由共享执行器接住并续原 typed 事务；所有入口无裸 runPwmStep');
+  const runPostWeatherRecoveryCase16 = async recoveryContext => {
+    const captured = { typed: null, generic: null };
+    const execute = new Function(
+      'schedule', 'pwmRuntimeRevision', 'isAutomationOperationCurrent',
+      'getSmartOnPwmRetryContext', 'planSmartModeOnWindow', 'SMART_MODE',
+      'runPwmStep', 'appendDiagnosticLog',
+      'recoverTypedSmartOnAlarmException', 'recoverGenericPwmAlarmException',
+      `${pwmStepWithRecoveryBody16}; return executePwmStepWithRecovery;`
+    )(
+      {
+        enabled: true,
+        pwmState: 'on',
+        onMinutes: 12,
+        offMinutes: 18,
+        smartMode: { enabled: true },
+        smartOnBoundaryAt: sharedExecutorBoundary16,
+        pwmRetryKind: '',
+        pwmRetryBoundaryAt: 0,
+        pwmRetryScheduledAt: 0
+      },
+      20,
+      revision => revision === 20,
+      () => ({ hasTypedSmartOnRetry: false, boundaryAt: 0, priorError: '' }),
+      () => ({
+        kind: 'allow',
+        reason: 'smart-on-scheduled-boundary',
+        boundaryAt: sharedExecutorBoundary16
+      }),
+      { ON_MAX: 25 },
+      async () => {
+        const error = new Error('post-weather throw');
+        error.pwmAutomationRevision = 20;
+        error.pwmRecoveryContext = recoveryContext;
+        throw error;
+      },
+      () => {},
+      async (...args) => {
+        captured.typed = args;
+        return false;
+      },
+      async (...args) => {
+        captured.generic = args;
+        return true;
+      }
+    );
+    const handled = await execute({
+      scheduledTime: sharedExecutorBoundary16,
+      automationRevision: 20,
+      source: 'post-weather-test'
+    });
+    return { handled, captured };
+  };
+  const updatedDurationRecovery16 = await runPostWeatherRecoveryCase16({
+    retryContext: { hasTypedSmartOnRetry: false, boundaryAt: 0, priorError: '' },
+    snapshot: {
+      pwmState: 'on',
+      onMinutes: 22,
+      offMinutes: 8,
+      smartOnBoundaryAt: sharedExecutorBoundary16
+    },
+    smartOnWindow: {
+      kind: 'allow',
+      reason: 'smart-on-scheduled-boundary',
+      boundaryAt: sharedExecutorBoundary16
+    }
+  });
+  const zeroDurationRecovery16 = await runPostWeatherRecoveryCase16({
+    retryContext: { hasTypedSmartOnRetry: false, boundaryAt: 0, priorError: '' },
+    snapshot: {
+      pwmState: 'off',
+      onMinutes: 30,
+      offMinutes: 30,
+      smartOnBoundaryAt: 0
+    },
+    smartOnWindow: null
+  });
+  assertPass(updatedDurationRecovery16.handled === true
+      && updatedDurationRecovery16.captured.generic?.[3]?.onMinutes === 22
+      && updatedDurationRecovery16.captured.generic?.[3]?.offMinutes === 8
+      && updatedDurationRecovery16.captured.generic?.[4]?.reason
+        === 'smart-on-scheduled-boundary'
+      && zeroDurationRecovery16.handled === true
+      && zeroDurationRecovery16.captured.generic?.[3]?.pwmState === 'off'
+      && zeroDurationRecovery16.captured.generic?.[4] === null,
+    '16F-0B-1E-2: 异常恢复优先消费 post-weather 快照；旧 12→新 22 保留 22，on=0 决策保持 OFF 且绝不重造 ON');
+  const loadTypedAlarmExceptionRecovery16 = (
+    initialSchedule,
+    { revisionCurrent = () => true, createResult = true, onCreate = null } = {}
+  ) => {
+    const testSchedule = { ...initialSchedule };
+    const order = [];
+    const persisted = [];
+    const alarmPlans = [];
+    const recover = new Function(
+      'schedule', 'getSmartOnPwmRetryContext', 'planSmartOnRetryExceptionRecovery',
+      'setNextTriggerAt', 'setSmartOnPwmRetryState', 'clearPwmRetryState',
+      'persistSchedule', 'createPwmAlarmFromPlan', 'isAutomationOperationCurrent',
+      'createAlarm',
+      `${typedAlarmExceptionRecoveryBody16}; return recoverTypedSmartOnAlarmException;`
+    )(
+      testSchedule,
+      (snapshot, scheduledTime) => ({
+        hasTypedSmartOnRetry: snapshot.pwmRetryKind === 'smart-on'
+          && scheduledTime === snapshot.pwmRetryScheduledAt,
+        boundaryAt: snapshot.pwmRetryBoundaryAt,
+        priorError: snapshot.pageTimerError
+      }),
+      pwmPhase.planSmartOnRetryExceptionRecovery,
+      value => { testSchedule.nextTriggerAt = value; },
+      (_action, scheduledAt) => {
+        testSchedule.pwmRetryKind = 'smart-on';
+        testSchedule.pwmRetryBoundaryAt = testSchedule.smartOnBoundaryAt;
+        testSchedule.pwmRetryScheduledAt = scheduledAt;
+      },
+      () => {
+        testSchedule.pwmRetryKind = '';
+        testSchedule.pwmRetryBoundaryAt = 0;
+        testSchedule.pwmRetryScheduledAt = 0;
+      },
+      async reason => {
+        order.push(`persist:${reason}`);
+        persisted.push(JSON.parse(JSON.stringify(testSchedule)));
+      },
+      async plan => {
+        order.push('create-alarm');
+        alarmPlans.push({ ...plan });
+        if (typeof onCreate === 'function') onCreate(testSchedule);
+        if (!createResult) return false;
+        testSchedule.nextTriggerAt = plan.nextTriggerAt + 200;
+        return true;
+      },
+      revisionCurrent,
+      async name => { order.push(`alarm:${name}`); }
+    );
+    return { recover, schedule: testSchedule, order, persisted, alarmPlans };
+  };
+  const exceptionBoundary16 = new Date(2026, 7, 27, 22, 30, 0, 0).getTime();
+  const exceptionRetryAt16 = new Date(2026, 7, 27, 22, 31, 0, 0).getTime();
+  const safeExceptionHarness16 = loadTypedAlarmExceptionRecovery16({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 21,
+    offMinutes: 9,
+    pageTimerError: '首轮 ON 未确认',
+    smartMode: { enabled: true },
+    smartOnBoundaryAt: exceptionBoundary16,
+    pwmRetryKind: 'smart-on',
+    pwmRetryBoundaryAt: exceptionBoundary16,
+    pwmRetryScheduledAt: exceptionRetryAt16,
+    nextTriggerAt: exceptionRetryAt16
+  });
+  const frozenExceptionContext16 = {
+    hasTypedSmartOnRetry: true,
+    boundaryAt: exceptionBoundary16,
+    priorError: '首轮 ON 未确认'
+  };
+  // 模拟 runPwmStep 已 clear marker/清错误，随后创建 commit alarm 才抛错。
+  safeExceptionHarness16.schedule.pwmRetryKind = '';
+  safeExceptionHarness16.schedule.pwmRetryBoundaryAt = 0;
+  safeExceptionHarness16.schedule.pwmRetryScheduledAt = 0;
+  safeExceptionHarness16.schedule.pageTimerError = '';
+  const safeExceptionHandled16 = await safeExceptionHarness16.recover(
+    { scheduledTime: exceptionRetryAt16 },
+    new Error('synthetic retry throw'),
+    7,
+    exceptionRetryAt16,
+    frozenExceptionContext16
+  );
+  assertPass(safeExceptionHandled16 === true
+      && safeExceptionHarness16.order[0] === 'persist:onAlarm-smart-on-error-intent'
+      && safeExceptionHarness16.order[1] === 'create-alarm'
+      && safeExceptionHarness16.alarmPlans[0]?.kind === 'retry-smart-on-exception'
+      && safeExceptionHarness16.schedule.pwmRetryScheduledAt
+        === safeExceptionHarness16.schedule.nextTriggerAt
+      && safeExceptionHarness16.schedule.pageTimerError.includes('synthetic retry throw'),
+    '16F-0B-1F: 动态 throw 在安全窗内只续一分钟，intent 先持久化并把 marker 改绑 canonical alarm');
+  const unsafeExceptionHarness16 = loadTypedAlarmExceptionRecovery16({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 21,
+    offMinutes: 9,
+    pageTimerError: '首轮 ON 未确认',
+    smartMode: { enabled: true },
+    smartOnBoundaryAt: exceptionBoundary16,
+    pwmRetryKind: 'smart-on',
+    pwmRetryBoundaryAt: exceptionBoundary16,
+    pwmRetryScheduledAt: exceptionRetryAt16,
+    nextTriggerAt: exceptionRetryAt16
+  });
+  await unsafeExceptionHarness16.recover(
+    { scheduledTime: exceptionRetryAt16 },
+    new Error('late retry throw'),
+    8,
+    new Date(2026, 7, 27, 22, 50, 0, 0).getTime()
+  );
+  assertPass(unsafeExceptionHarness16.alarmPlans[0]?.kind === 'defer'
+      && unsafeExceptionHarness16.alarmPlans[0]?.nextTriggerAt
+        === new Date(2026, 7, 27, 23, 0, 0, 0).getTime()
+      && unsafeExceptionHarness16.schedule.pwmRetryKind === ''
+      && unsafeExceptionHarness16.schedule.pageTimerError.includes('等待下一个半点'),
+    '16F-0B-1G: 动态 throw 已超安全余量时清 marker、保留红灯并建立下一半点时钟');
+  let typedCreateRaceCurrent16 = true;
+  const typedCreateRaceHarness16 = loadTypedAlarmExceptionRecovery16({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 21,
+    offMinutes: 9,
+    pageTimerError: '首轮 ON 未确认',
+    smartMode: { enabled: true },
+    smartOnBoundaryAt: exceptionBoundary16,
+    pwmRetryKind: 'smart-on',
+    pwmRetryBoundaryAt: exceptionBoundary16,
+    pwmRetryScheduledAt: exceptionRetryAt16,
+    nextTriggerAt: exceptionRetryAt16
+  }, {
+    revisionCurrent: () => typedCreateRaceCurrent16,
+    createResult: false,
+    onCreate: currentSchedule => {
+      typedCreateRaceCurrent16 = false;
+      Object.assign(currentSchedule, {
+        enabled: false,
+        pwmState: 'off',
+        nextTriggerAt: 0,
+        pageTimerError: 'NEW-LIFECYCLE',
+        pwmRetryKind: '',
+        pwmRetryBoundaryAt: 0,
+        pwmRetryScheduledAt: 0
+      });
+    }
+  });
+  await typedCreateRaceHarness16.recover(
+    { scheduledTime: exceptionRetryAt16 },
+    new Error('typed create race'),
+    18,
+    exceptionRetryAt16
+  );
+  assertPass(typedCreateRaceHarness16.order.join(',')
+        === 'persist:onAlarm-smart-on-error-intent,create-alarm'
+      && typedCreateRaceHarness16.schedule.pageTimerError === 'NEW-LIFECYCLE'
+      && typedCreateRaceHarness16.schedule.enabled === false
+      && typedCreateRaceHarness16.schedule.nextTriggerAt === 0,
+    '16F-0B-1G-0: typed 恢复建钟期间 revision 失效后不追加旧错误、不二次 persist、不污染新 lifecycle');
+  const loadGenericAlarmExceptionRecovery16 = ({
+    initialSchedule,
+    revisionCurrent = () => true,
+    createResult = true,
+    onCreate = null
+  }) => {
+    const testSchedule = { ...initialSchedule };
+    const order = [];
+    const persisted = [];
+    const alarmPlans = [];
+    const recover = new Function(
+      'schedule', 'isAutomationOperationCurrent',
+      'planSmartOnRetryExceptionRecovery', 'setNextTriggerAt',
+      'setSmartOnPwmRetryState', 'clearPwmRetryState',
+      'persistSchedule', 'createPwmAlarmFromPlan', 'createAlarm',
+      `${genericAlarmExceptionRecoveryBody16}; return recoverGenericPwmAlarmException;`
+    )(
+      testSchedule,
+      typeof revisionCurrent === 'function' ? revisionCurrent : () => revisionCurrent,
+      pwmPhase.planSmartOnRetryExceptionRecovery,
+      value => { testSchedule.nextTriggerAt = value; },
+      (_action, scheduledAt) => {
+        testSchedule.pwmRetryKind = 'smart-on';
+        testSchedule.pwmRetryBoundaryAt = testSchedule.smartOnBoundaryAt;
+        testSchedule.pwmRetryScheduledAt = scheduledAt;
+      },
+      () => {
+        testSchedule.pwmRetryKind = '';
+        testSchedule.pwmRetryBoundaryAt = 0;
+        testSchedule.pwmRetryScheduledAt = 0;
+      },
+      async reason => {
+        order.push(`persist:${reason}`);
+        persisted.push(JSON.parse(JSON.stringify(testSchedule)));
+      },
+      async plan => {
+        order.push('create-alarm');
+        alarmPlans.push({ ...plan });
+        if (typeof onCreate === 'function') onCreate(testSchedule);
+        if (!createResult) return false;
+        testSchedule.nextTriggerAt = plan.nextTriggerAt + 200;
+        return true;
+      },
+      async name => { order.push(`alarm:${name}`); }
+    );
+    return { recover, schedule: testSchedule, order, persisted, alarmPlans };
+  };
+  const genericSmartHarness16 = loadGenericAlarmExceptionRecovery16({
+    initialSchedule: {
+      enabled: true,
+      pwmState: 'off',
+      onMinutes: 5,
+      offMinutes: 25,
+      pageTimerError: '',
+      smartMode: { enabled: true },
+      smartOnBoundaryAt: 0,
+      pwmRetryKind: '',
+      pwmRetryBoundaryAt: 0,
+      pwmRetryScheduledAt: 0,
+      nextTriggerAt: 0
+    }
+  });
+  const genericSmartNow16 = exceptionBoundary16 + 202;
+  await genericSmartHarness16.recover(
+    { scheduledTime: genericSmartNow16 },
+    new Error('initial smart throw'),
+    10,
+    { pwmState: 'on', onMinutes: 22, offMinutes: 8 },
+    {
+      kind: 'allow',
+      reason: 'smart-on-scheduled-boundary',
+      boundaryAt: exceptionBoundary16
+    },
+    genericSmartNow16
+  );
+  assertPass(genericSmartHarness16.order[0] === 'persist:onAlarm-error-recovery-intent'
+      && genericSmartHarness16.order[1] === 'create-alarm'
+      && genericSmartHarness16.order[2] === 'alarm:ac-badge-tick'
+      && genericSmartHarness16.order[3] === 'persist:onAlarm-error-recovery-retry'
+      && genericSmartHarness16.persisted.length === 2
+      && genericSmartHarness16.alarmPlans[0]?.kind === 'retry-smart-on-exception'
+      && genericSmartHarness16.alarmPlans[0]?.nextTriggerAt === genericSmartNow16 + 60_000
+      && genericSmartHarness16.schedule.pwmState === 'on'
+      && genericSmartHarness16.schedule.onMinutes === 22
+      && genericSmartHarness16.schedule.offMinutes === 8
+      && genericSmartHarness16.schedule.pwmRetryBoundaryAt === exceptionBoundary16
+      && genericSmartHarness16.schedule.pwmRetryScheduledAt
+        === genericSmartHarness16.schedule.nextTriggerAt
+      && genericSmartHarness16.persisted[1]?.pwmRetryScheduledAt
+        === genericSmartHarness16.schedule.nextTriggerAt
+      && genericSmartHarness16.schedule.pageTimerError.includes('initial smart throw'),
+    '16F-0B-1G-1: 首次半点智能 ON 抛错也冻结入场时长/边界，intent-first 且只延后 1 分钟');
+  const genericIntervalHarness16 = loadGenericAlarmExceptionRecovery16({
+    initialSchedule: {
+      enabled: true,
+      pwmState: 'on',
+      onMinutes: 21,
+      offMinutes: 9,
+      pageTimerError: '',
+      smartMode: { enabled: false },
+      pwmRetryKind: '',
+      pwmRetryBoundaryAt: 0,
+      pwmRetryScheduledAt: 0,
+      nextTriggerAt: 0
+    }
+  });
+  const genericIntervalNow16 = exceptionBoundary16 + 5 * 60_000;
+  await genericIntervalHarness16.recover(
+    { scheduledTime: genericIntervalNow16 },
+    new Error('interval throw'),
+    11,
+    { pwmState: 'off', onMinutes: 21, offMinutes: 9 },
+    null,
+    genericIntervalNow16
+  );
+  assertPass(genericIntervalHarness16.alarmPlans[0]?.kind === 'retry-pwm-exception'
+      && genericIntervalHarness16.alarmPlans[0]?.nextTriggerAt
+        === genericIntervalNow16 + 60_000
+      && genericIntervalHarness16.schedule.pwmState === 'off'
+      && genericIntervalHarness16.schedule.pwmRetryKind === ''
+      && genericIntervalHarness16.persisted.length === 2
+      && genericIntervalHarness16.persisted[1]?.nextTriggerAt
+        === genericIntervalHarness16.schedule.nextTriggerAt
+      && genericIntervalHarness16.persisted[1]?.pwmRetryKind === ''
+      && genericIntervalHarness16.schedule.pageTimerError.includes('interval throw'),
+    '16F-0B-1G-2: 普通 PWM throw 恢复入场 action 且固定 1 分钟重试，不按 on/off 长周期跳钟');
+  const staleGenericHarness16 = loadGenericAlarmExceptionRecovery16({
+    initialSchedule: {
+      enabled: false,
+      pwmState: 'off',
+      onMinutes: 21,
+      offMinutes: 9,
+      pageTimerError: '',
+      smartMode: { enabled: false },
+      nextTriggerAt: 0
+    },
+    revisionCurrent: false
+  });
+  const staleGenericBefore16 = JSON.stringify(staleGenericHarness16.schedule);
+  const staleGenericHandled16 = await staleGenericHarness16.recover(
+    { scheduledTime: genericIntervalNow16 },
+    new Error('stale throw'),
+    12,
+    { pwmState: 'on', onMinutes: 22, offMinutes: 8 },
+    null,
+    genericIntervalNow16
+  );
+  assertPass(staleGenericHandled16 === true
+      && staleGenericHarness16.order.length === 0
+      && staleGenericHarness16.alarmPlans.length === 0
+      && JSON.stringify(staleGenericHarness16.schedule) === staleGenericBefore16,
+    '16F-0B-1G-3: 用户停用/新周期后旧异常为零写入，不能复活旧 phase 或 PWM alarm');
+  let genericCreateRaceCurrent16 = true;
+  const genericCreateRaceHarness16 = loadGenericAlarmExceptionRecovery16({
+    initialSchedule: {
+      enabled: true,
+      pwmState: 'on',
+      onMinutes: 21,
+      offMinutes: 9,
+      pageTimerError: '',
+      smartMode: { enabled: false },
+      nextTriggerAt: genericIntervalNow16
+    },
+    revisionCurrent: () => genericCreateRaceCurrent16,
+    createResult: false,
+    onCreate: currentSchedule => {
+      genericCreateRaceCurrent16 = false;
+      Object.assign(currentSchedule, {
+        enabled: false,
+        pwmState: 'off',
+        nextTriggerAt: 0,
+        pageTimerError: 'NEW-GENERIC-LIFECYCLE'
+      });
+    }
+  });
+  await genericCreateRaceHarness16.recover(
+    { scheduledTime: genericIntervalNow16 },
+    new Error('generic create race'),
+    13,
+    { pwmState: 'on', onMinutes: 21, offMinutes: 9 },
+    null,
+    genericIntervalNow16
+  );
+  assertPass(genericCreateRaceHarness16.order.join(',')
+        === 'persist:onAlarm-error-recovery-intent,create-alarm'
+      && genericCreateRaceHarness16.schedule.pageTimerError
+        === 'NEW-GENERIC-LIFECYCLE'
+      && genericCreateRaceHarness16.schedule.enabled === false
+      && genericCreateRaceHarness16.schedule.nextTriggerAt === 0,
+    '16F-0B-1G-4: generic 建钟期间 revision 失效后不追加失败错误或 persist，不覆盖新 lifecycle sentinel');
+  const deferIntentIndex16 = pwmBody.indexOf("persistSchedule('runPwmStep-smart-on-deferred-intent'");
+  const deferAlarmIndex16 = pwmBody.indexOf("'PWM-smart-on-deferred'", deferIntentIndex16);
+  const commitIntentIndex16 = pwmBody.indexOf("persistSchedule('runPwmStep-commit-intent'");
+  const commitAlarmIndex16 = pwmBody.indexOf("createPwmAlarmFromPlan(plan, 'PWM'", commitIntentIndex16);
+  assertPass(deferIntentIndex16 > 0
+      && deferAlarmIndex16 > deferIntentIndex16
+      && pwmBody.includes("persistSchedule('runPwmStep-smart-on-deferred-alarm-failed'")
+      && pwmBody.indexOf('if (!isAutomationOperationCurrent(automationRevision)) return;', deferAlarmIndex16)
+        < pwmBody.indexOf("persistSchedule('runPwmStep-smart-on-deferred-alarm-failed'", deferAlarmIndex16)
+      && commitIntentIndex16 > 0
+      && commitAlarmIndex16 > commitIntentIndex16
+      && pwmBody.includes("persistSchedule('runPwmStep-commit-alarm-failed'")
+      && pwmBody.indexOf('if (!isAutomationOperationCurrent(automationRevision)) return;', commitAlarmIndex16)
+        < pwmBody.indexOf("persistSchedule('runPwmStep-commit-alarm-failed'", commitAlarmIndex16),
+    '16F-0B-1H: defer/commit intent-first；建钟 false 只允许当前 revision 写红灯，旧 run 不得覆盖停用/新周期');
+  const deferDurableStart16 = pwmBody.indexOf("    if (plan.kind === 'defer') {");
+  const deferDurableEnd16 = pwmBody.indexOf(
+    "\n    if (plan.kind === 'refuse') {",
+    deferDurableStart16
+  );
+  const deferDurableSource16 = deferDurableStart16 >= 0
+      && deferDurableEnd16 > deferDurableStart16
+    ? pwmBody.slice(deferDurableStart16, deferDurableEnd16)
+    : '';
+  const loadDeferAlarmFailure16 = ({ staleDuringCreate = false } = {}) => {
+    const testSchedule = {
+      enabled: true,
+      pwmState: 'on',
+      nextTriggerAt: exceptionRetryAt16,
+      pageTimerError: '原半点 ON 未确认',
+      pwmRetryKind: 'smart-on',
+      pwmRetryBoundaryAt: exceptionBoundary16,
+      pwmRetryScheduledAt: exceptionRetryAt16
+    };
+    let current = true;
+    const order = [];
+    const persisted = [];
+    const run = new Function(
+      'schedule', 'hasTypedSmartOnRetry', 'priorPwmRetryError',
+      'rejectedSmartOnRetryError', 'applyPwmPlanState', 'clearPwmRetryState',
+      'persistSchedule', 'clearPwmAlarm', 'createPwmAlarmFromPlan',
+      'isAutomationOperationCurrent', 'createAlarm', 'abortStaleAutomation',
+      'updateBadge', 'syncScheduleToSync',
+      `return async function runDeferFailure(plan, automationRevision) {
+${deferDurableSource16}
+};`
+    )(
+      testSchedule,
+      true,
+      '原半点 ON 未确认',
+      '',
+      plan => Object.assign(testSchedule, plan.phasePatch),
+      () => {
+        testSchedule.pwmRetryKind = '';
+        testSchedule.pwmRetryBoundaryAt = 0;
+        testSchedule.pwmRetryScheduledAt = 0;
+      },
+      async reason => {
+        order.push(`persist:${reason}`);
+        persisted.push(JSON.parse(JSON.stringify(testSchedule)));
+      },
+      async () => { order.push('clear-pwm'); return true; },
+      async () => {
+        order.push('create-alarm:false');
+        if (staleDuringCreate) {
+          current = false;
+          Object.assign(testSchedule, {
+            enabled: false,
+            pwmState: 'off',
+            nextTriggerAt: 0,
+            pageTimerError: 'NEW-DEFER-LIFECYCLE'
+          });
+        }
+        return false;
+      },
+      () => current,
+      async name => { order.push(`alarm:${name}`); return true; },
+      async () => false,
+      async () => { order.push('update-badge'); },
+      async () => { order.push('sync'); }
+    );
+    return { run, schedule: testSchedule, order, persisted };
+  };
+  const deferredFailure16 = loadDeferAlarmFailure16();
+  const deferredTarget16 = new Date(2026, 7, 27, 23, 0, 0, 0).getTime();
+  await deferredFailure16.run({
+    kind: 'defer',
+    phasePatch: { pwmState: 'on', nextTriggerAt: deferredTarget16 },
+    nextTriggerAt: deferredTarget16
+  }, 22);
+  assertPass(deferredFailure16.order.join(',')
+        === 'persist:runPwmStep-smart-on-deferred-intent,clear-pwm,create-alarm:false,persist:runPwmStep-smart-on-deferred-alarm-failed'
+      && deferredFailure16.persisted[0]?.pwmState === 'on'
+      && deferredFailure16.persisted[0]?.nextTriggerAt === deferredTarget16
+      && deferredFailure16.persisted[0]?.pwmRetryKind === ''
+      && deferredFailure16.persisted[1]?.pageTimerError.includes('等待看门狗恢复')
+      && !deferredFailure16.order.some(item => item === 'update-badge' || item === 'sync'),
+    '16F-0B-1H-1: smart defer 建钟 false 保留下一半点 durable phase、清 marker 并写红灯，不执行 badge/sync 成功尾段');
+  const staleDeferredFailure16 = loadDeferAlarmFailure16({ staleDuringCreate: true });
+  await staleDeferredFailure16.run({
+    kind: 'defer',
+    phasePatch: { pwmState: 'on', nextTriggerAt: deferredTarget16 },
+    nextTriggerAt: deferredTarget16
+  }, 23);
+  assertPass(staleDeferredFailure16.order.join(',')
+        === 'persist:runPwmStep-smart-on-deferred-intent,clear-pwm,create-alarm:false'
+      && staleDeferredFailure16.schedule.pageTimerError === 'NEW-DEFER-LIFECYCLE'
+      && staleDeferredFailure16.schedule.enabled === false
+      && staleDeferredFailure16.schedule.nextTriggerAt === 0,
+    '16F-0B-1H-2: smart defer 建钟期间 revision 失效后零失败写回，不覆盖新 lifecycle sentinel');
+  const commitDurableStart16 = pwmBody.lastIndexOf('    applyPwmPlanState(plan);');
+  const commitDurableEnd16 = pwmBody.indexOf(
+    '    console.log(`[AC扩展] PWM 下一阶段:',
+    commitDurableStart16
+  );
+  const commitDurableSource16 = commitDurableStart16 >= 0
+      && commitDurableEnd16 > commitDurableStart16
+    ? pwmBody.slice(commitDurableStart16, commitDurableEnd16)
+    : '';
+  const commitFailureSchedule16 = {
+    pwmState: 'on',
+    nextTriggerAt: exceptionRetryAt16,
+    pageTimerError: '',
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0
+  };
+  const commitFailureOrder16 = [];
+  const commitFailureSnapshots16 = [];
+  const runCommitAlarmFailure16 = new Function(
+    'schedule', 'applyPwmPlanState', 'abortStaleAutomation',
+    'persistSchedule', 'createPwmAlarmFromPlan', 'isAutomationOperationCurrent',
+    `return async function runCommitFailure(plan, automationRevision) {
+${commitDurableSource16}
+};`
+  )(
+    commitFailureSchedule16,
+    plan => Object.assign(commitFailureSchedule16, plan.phasePatch),
+    async () => false,
+    async reason => {
+      commitFailureOrder16.push(`persist:${reason}`);
+      commitFailureSnapshots16.push(JSON.parse(JSON.stringify(commitFailureSchedule16)));
+    },
+    async () => { commitFailureOrder16.push('create-alarm:false'); return false; },
+    () => true
+  );
+  const commitFailureTarget16 = exceptionBoundary16 + 21 * 60_000;
+  await runCommitAlarmFailure16({
+    kind: 'commit',
+    phasePatch: { pwmState: 'off', nextTriggerAt: commitFailureTarget16 }
+  }, 9);
+  assertPass(commitFailureOrder16.join(',')
+        === 'persist:runPwmStep-commit-intent,create-alarm:false,persist:runPwmStep-commit-alarm-failed'
+      && commitFailureSnapshots16[0]?.pwmState === 'off'
+      && commitFailureSnapshots16[0]?.nextTriggerAt === commitFailureTarget16
+      && commitFailureSnapshots16[1]?.pageTimerError.includes('等待看门狗恢复'),
+    '16F-0B-1I: 动态 commit 建钟 false 时 durable phase/截止已落盘，并追加红灯而非留下无钟绿态');
+  let staleCommitCurrent16 = true;
+  const staleCommitSchedule16 = {
+    pwmState: 'on',
+    nextTriggerAt: exceptionRetryAt16,
+    pageTimerError: ''
+  };
+  const staleCommitOrder16 = [];
+  const runStaleCommitFailure16 = new Function(
+    'schedule', 'applyPwmPlanState', 'abortStaleAutomation',
+    'persistSchedule', 'createPwmAlarmFromPlan', 'isAutomationOperationCurrent',
+    `return async function runCommitFailure(plan, automationRevision) {
+${commitDurableSource16}
+};`
+  )(
+    staleCommitSchedule16,
+    plan => Object.assign(staleCommitSchedule16, plan.phasePatch),
+    async () => false,
+    async reason => { staleCommitOrder16.push(`persist:${reason}`); },
+    async () => {
+      staleCommitOrder16.push('create-alarm:false');
+      staleCommitCurrent16 = false;
+      Object.assign(staleCommitSchedule16, {
+        enabled: false,
+        pwmState: 'on',
+        nextTriggerAt: 0,
+        pageTimerError: 'NEW-COMMIT-LIFECYCLE'
+      });
+      return false;
+    },
+    () => staleCommitCurrent16
+  );
+  await runStaleCommitFailure16({
+    kind: 'commit',
+    phasePatch: { pwmState: 'off', nextTriggerAt: commitFailureTarget16 }
+  }, 21);
+  assertPass(staleCommitOrder16.join(',')
+        === 'persist:runPwmStep-commit-intent,create-alarm:false'
+      && staleCommitSchedule16.pageTimerError === 'NEW-COMMIT-LIFECYCLE'
+      && staleCommitSchedule16.enabled === false
+      && staleCommitSchedule16.nextTriggerAt === 0,
+    '16F-0B-1I-1: commit 建钟期间 revision 失效后仅保留已发生的 intent，不写旧失败状态覆盖新 lifecycle');
+  const smartAutomaticOnStart16 = pwmBody.indexOf(
+    'function planSmartAutomaticOn(targetAction, acIsOn) {'
+  );
+  const smartAutomaticOnEnd16 = pwmBody.indexOf(
+    '\n  // 提取（Fowler Extract Function）：PWM 开机 hold 分支',
+    smartAutomaticOnStart16
+  );
+  const smartAutomaticOnSource16 = smartAutomaticOnStart16 >= 0
+      && smartAutomaticOnEnd16 > smartAutomaticOnStart16
+    ? pwmBody.slice(smartAutomaticOnStart16, smartAutomaticOnEnd16)
+    : '';
+  const runSmartAutomaticOnContext16 = ({
+    retryingSmartOn,
+    smartOnRetryBoundaryAt,
+    pwmTriggerScheduledTime,
+    recoveringSmartCurrentCycle = false
+  }) => {
+    let captured = null;
+    const schedule = {
+      smartMode: { enabled: true },
+      smartOnBoundaryAt: delayedSmartBoundary16,
+      onMinutes: 21
+    };
+    const planSmartAutomaticOn = new Function(
+      'schedule', 'retryingSmartOn', 'smartOnRetryBoundaryAt',
+      'pwmTriggerScheduledTime', 'recoveringSmartCurrentCycle',
+      'SMART_MODE', 'planSmartModeOnWindow',
+      `${smartAutomaticOnSource16}; return planSmartAutomaticOn;`
+    )(
+      schedule,
+      retryingSmartOn,
+      smartOnRetryBoundaryAt,
+      pwmTriggerScheduledTime,
+      recoveringSmartCurrentCycle,
+      { ON_MAX: 25 },
+      (_schedule, options) => {
+        captured = options;
+        return { kind: 'allow' };
+      }
+    );
+    planSmartAutomaticOn('on', false);
+    return captured;
+  };
+  const typedRetryContext16 = runSmartAutomaticOnContext16({
+    retryingSmartOn: true,
+    smartOnRetryBoundaryAt: delayedSmartBoundary16,
+    pwmTriggerScheduledTime: delayedSmartBoundary16 + 60_000
+  });
+  const ordinaryLateContext16 = runSmartAutomaticOnContext16({
+    retryingSmartOn: false,
+    smartOnRetryBoundaryAt: 0,
+    pwmTriggerScheduledTime: delayedSmartBoundary16 + 60_000
+  });
+  assertPass(typedRetryContext16?.boundaryAt === delayedSmartBoundary16
+      && typedRetryContext16?.triggeredBoundaryAt === delayedSmartBoundary16
+      && typedRetryContext16?.recoverCurrentCycle === true
+      && ordinaryLateContext16?.triggeredBoundaryAt
+        === delayedSmartBoundary16 + 60_000
+      && ordinaryLateContext16?.recoverCurrentCycle === false,
+    '16F-0B-2: typed retry 消费原半点；无 provenance 的普通 22:31 仍保留原调用时间并受窗口门禁');
   assertPass(backgroundSource.includes(
       'alreadyDone: result?.alreadyDone === true'
     )
@@ -6156,7 +8206,7 @@ return { reapplySmartSensitivityNow };`
   const blockedCleanupResult16 = await clearBlockedRuntimeAlarms16(23);
   const disabledUpdateBranchStart16 = updateScheduleBody.indexOf('if (!schedule.enabled) {');
   const disabledUpdateBranchEnd16 = updateScheduleBody.indexOf(
-    '} else if (!automationAllowed',
+    '} else if (!comfortRequested && !automationAllowed',
     disabledUpdateBranchStart16
   );
   const disabledUpdateBranch16 = disabledUpdateBranchStart16 >= 0
@@ -6228,7 +8278,8 @@ return { reapplySmartSensitivityNow };`
   const actualUpdateStartedF90 = new Promise(resolve => { markActualUpdateStartedF90 = resolve; });
   const actualUpdatePersistReasonsF90 = [];
   const actualUpdateResponsesF90 = [];
-  const actualUpdateHarnessF90 = new Function(
+  const actualUpdateRuntimeAlarmsF90 = [];
+  const makeActualUpdateHarnessF90 = new Function(
     'runSerializedScheduleUpdate', 'persistSchedule', 'setupAlarms',
     'syncScheduleToSync', 'resetDisabledPwmRuntime', 'requestTimerBasedShutdown',
     'createAlarm', 'rescheduleActiveBoundary',
@@ -6244,17 +8295,34 @@ return { reapplySmartSensitivityNow };`
     };
     let smartReapplyInFlight = false;
     let smartReapplyPending = false;
-    function isAutomationAllowed() { return schedule.enabled; }
+    let automaticDisableAdmissionEpoch = 0;
+    let automaticOnAdmissionBlocked = false;
+    let comfortStartRuns = 0;
+    function isAutomationAllowed() {
+      return !automaticOnAdmissionBlocked && schedule.enabled;
+    }
     function isComfortStartActive() {
       return schedule.enabled && Number(schedule.comfortStartUntil) > Date.now();
     }
     async function runComfortStart() {
+      if (!isAutomationAllowed()) {
+        return { success: false, cancelled: true, error: 'admission blocked' };
+      }
+      comfortStartRuns += 1;
       schedule.comfortStartUntil = Date.now() + 5 * 60_000;
       schedule.pwmState = 'off';
       return { success: true, minimumMinutes: 5 };
     }
     async function preemptAutomaticOnForExplicitDisable() {
+      const admissionEpoch = ++automaticDisableAdmissionEpoch;
+      automaticOnAdmissionBlocked = true;
       schedule.comfortStartUntil = 0;
+      return admissionEpoch;
+    }
+    function releaseExplicitDisableAdmission(admissionEpoch) {
+      if (admissionEpoch === automaticDisableAdmissionEpoch) {
+        automaticOnAdmissionBlocked = false;
+      }
     }
     async function rescheduleSmartWeatherAlarm() {}
     function sanitizeMinutes(value, fallback) {
@@ -6270,9 +8338,14 @@ return { reapplySmartSensitivityNow };`
     }
     return {
       dispatch,
-      state: () => ({ ...schedule })
+      state: () => ({ ...schedule }),
+      admissionBlocked: () => automaticOnAdmissionBlocked,
+      admissionEpoch: () => automaticDisableAdmissionEpoch,
+      automationAllowed: () => isAutomationAllowed(),
+      comfortStartRuns: () => comfortStartRuns
     };`
-  )(
+  );
+  const actualUpdateHarnessF90 = makeActualUpdateHarnessF90(
     runSerializedScheduleUpdateF90,
     async reason => {
       actualUpdatePersistReasonsF90.push(reason);
@@ -6285,7 +8358,7 @@ return { reapplySmartSensitivityNow };`
     async () => {},
     async () => {},
     async () => ({ success: true }),
-    async () => {},
+    async name => { actualUpdateRuntimeAlarmsF90.push(name); },
     () => {}
   );
   let latestRemoteF90 = { syncedAt: 2, enabled: false };
@@ -6355,10 +8428,164 @@ return { reapplySmartSensitivityNow };`
       && queuedSyncResultF90 === false
       && actualUpdateResponsesF90.length === 2
       && actualUpdateHarnessF90.state().enabled === false
+      && actualUpdateHarnessF90.admissionBlocked() === false
+      && !actualUpdateRuntimeAlarmsF90.includes('ac-watchdog')
       && syncReadsF90 === 0
       && adoptedStatesF90.join(',') === 'false'
       && applySyncedPhaseBody.includes('remoteSyncedAt <= lastSyncedAt'),
     '16M-2: 真实 updateSchedule 分支与 sync 共用事务队列；等待期淘汰旧 enable，仅采纳 mailbox 最新 disable');
+
+  const explicitDisableAdmissionSourceF90 = extractSourceSection(
+    backgroundSource,
+    'async function preemptAutomaticOnForExplicitDisable() {',
+    '\n\n// ===== Active Hours',
+    'explicit disable admission claim'
+  );
+  const isAutomationAllowedSourceF90 = extractSourceSection(
+    backgroundSource,
+    'function isAutomationAllowed(now = new Date()) {',
+    '\n\nfunction isAutomationOperationCurrent',
+    'automation admission gate'
+  );
+  let releaseDisableClearF90;
+  const disableClearGateF90 = new Promise(resolve => { releaseDisableClearF90 = resolve; });
+  const explicitDisableAdmissionHarnessF90 = new Function(
+    'chrome', 'cancelAutomaticOnRequests', 'invalidateTimerBasedShutdown',
+    'appendDiagnosticLog', 'console',
+    `let automaticDisableAdmissionEpoch = 0;
+    let automaticOnAdmissionBlocked = false;
+    let pwmRuntimeRevision = 31;
+    let schedule = { enabled: true, comfortStartUntil: 1, comfortStartOnConfirmedAt: 1 };
+    function isAutomationAllowedForSchedule(snapshot) { return snapshot.enabled === true; }
+    ${explicitDisableAdmissionSourceF90}
+    ${isAutomationAllowedSourceF90}
+    return {
+      preemptAutomaticOnForExplicitDisable,
+      releaseExplicitDisableAdmission,
+      isAutomationAllowed,
+      blocked: () => automaticOnAdmissionBlocked,
+      epoch: () => automaticDisableAdmissionEpoch,
+      revision: () => pwmRuntimeRevision
+    };`
+  )(
+    { alarms: { clear: async () => disableClearGateF90 } },
+    async () => {},
+    () => {},
+    () => {},
+    testConsole
+  );
+  const pendingExplicitDisableF90 = explicitDisableAdmissionHarnessF90
+    .preemptAutomaticOnForExplicitDisable();
+  const blocksBeforeQueuedMutationF90 = explicitDisableAdmissionHarnessF90.blocked() === true
+    && explicitDisableAdmissionHarnessF90.epoch() === 1
+    && explicitDisableAdmissionHarnessF90.revision() === 32
+    && explicitDisableAdmissionHarnessF90.isAutomationAllowed() === false;
+  releaseDisableClearF90();
+  await pendingExplicitDisableF90;
+  const blocksUntilTransactionFinishesF90 = explicitDisableAdmissionHarnessF90.blocked() === true
+    && explicitDisableAdmissionHarnessF90.isAutomationAllowed() === false;
+  explicitDisableAdmissionHarnessF90.releaseExplicitDisableAdmission(1);
+  assertPass(blocksBeforeQueuedMutationF90
+      && blocksUntilTransactionFinishesF90
+      && explicitDisableAdmissionHarnessF90.blocked() === false
+      && explicitDisableAdmissionHarnessF90.isAutomationAllowed() === true
+      && updateScheduleBody.includes('finally {')
+      && updateScheduleBody.includes('explicitDisableDurablyPersisted')
+      && updateScheduleBody.includes('releaseExplicitDisableAdmission(explicitDisableAdmissionEpoch);'),
+    '16M-3: 明确停用从抢占开始即锁住自动 ON 准入，跨过串行等待并在事务 finally 释放');
+
+  const preemptFailureLogsF90 = [];
+  const preemptFailureHarnessF90 = new Function(
+    'chrome', 'cancelAutomaticOnRequests', 'invalidateTimerBasedShutdown',
+    'appendDiagnosticLog', 'console',
+    `let automaticDisableAdmissionEpoch = 0;
+    let automaticOnAdmissionBlocked = false;
+    let pwmRuntimeRevision = 5;
+    let schedule = { enabled: true, comfortStartUntil: 1, comfortStartOnConfirmedAt: 1 };
+    function isAutomationAllowedForSchedule(snapshot) { return snapshot.enabled === true; }
+    ${explicitDisableAdmissionSourceF90}
+    ${isAutomationAllowedSourceF90}
+    return {
+      preemptAutomaticOnForExplicitDisable,
+      isAutomationAllowed,
+      blocked: () => automaticOnAdmissionBlocked,
+      epoch: () => automaticDisableAdmissionEpoch
+    };`
+  )(
+    { alarms: { clear: async () => { throw new Error('clear rejected'); } } },
+    async () => { throw new Error('cancel rejected'); },
+    () => {},
+    (level, source) => { preemptFailureLogsF90.push(`${level}:${source}`); },
+    testConsole
+  );
+  const rejectedPreemptEpochF90 = await preemptFailureHarnessF90
+    .preemptAutomaticOnForExplicitDisable();
+  assertPass(rejectedPreemptEpochF90 === 1
+      && preemptFailureHarnessF90.blocked() === true
+      && preemptFailureHarnessF90.epoch() === 1
+      && preemptFailureHarnessF90.isAutomationAllowed() === false
+      && preemptFailureLogsF90.length === 2,
+    '16M-4: 停用预清理的 clear/cancel 即使同时失败也保持 fail-closed，并继续交给持久化事务');
+
+  let failClosedPersistCallF90 = 0;
+  const failClosedHarnessF90 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async () => {
+      failClosedPersistCallF90 += 1;
+      if (failClosedPersistCallF90 === 2) throw new Error('storage rejected');
+    },
+    async () => {},
+    async () => {},
+    async () => {},
+    async () => ({ success: true }),
+    async () => {},
+    () => {}
+  );
+  const explicitEnableMessageF90 = {
+    type: 'updateSchedule',
+    data: {
+      enabled: true,
+      restart: true,
+      onMinutes: 15,
+      offMinutes: 45,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  };
+  await failClosedHarnessF90.dispatch(explicitEnableMessageF90, () => {});
+  let failedDisableErrorF90 = '';
+  try {
+    await failClosedHarnessF90.dispatch({
+      ...explicitEnableMessageF90,
+      data: { ...explicitEnableMessageF90.data, enabled: false }
+    }, () => {});
+  } catch (error) {
+    failedDisableErrorF90 = error?.message || String(error);
+  }
+  const remainsFailClosedAfterPersistFailureF90 = failedDisableErrorF90 === 'storage rejected'
+    && failClosedHarnessF90.state().enabled === false
+    && failClosedHarnessF90.admissionBlocked() === true
+    && failClosedHarnessF90.automationAllowed() === false;
+  let recoveredEnableResponseF90 = null;
+  await failClosedHarnessF90.dispatch(
+    explicitEnableMessageF90,
+    response => { recoveredEnableResponseF90 = response; }
+  );
+  const persistBeforeComfortStartF90 = updateScheduleBody.indexOf(
+    "await persistSchedule('updateSchedule');"
+  ) < updateScheduleBody.indexOf("comfortStart = await runComfortStart('user-enable');");
+  const releaseBeforeComfortStartF90 = updateScheduleBody.indexOf(
+    'releaseExplicitDisableAdmission(updateAdmissionEpoch);'
+  ) < updateScheduleBody.indexOf("comfortStart = await runComfortStart('user-enable');");
+  assertPass(remainsFailClosedAfterPersistFailureF90
+      && failClosedHarnessF90.state().enabled === true
+      && failClosedHarnessF90.admissionBlocked() === false
+      && failClosedHarnessF90.automationAllowed() === true
+      && failClosedHarnessF90.comfortStartRuns() === 2
+      && recoveredEnableResponseF90?.comfortStart?.success === true
+      && persistBeforeComfortStartF90
+      && releaseBeforeComfortStartF90,
+    '16M-5: 停用落盘失败保持 fail-closed；后续明确 enable 先成功落盘解锁，再真正执行五分钟舒适启动');
 
   let releaseFailingSyncApplyF90;
   let markFailingSyncApplyStartedF90;
@@ -7212,7 +9439,7 @@ return { reapplySmartSensitivityNow };`
     'async function adoptPhaseAndRearm(remote, automationAllowed) {'
   );
   const adoptPhaseEnd16 = applySyncedPhaseBody.indexOf(
-    '\n\n  const phaseChanged = await adoptPhaseAndRearm',
+    '\n\n  const localPwmAlarm =',
     adoptPhaseStart16
   );
   const adoptPhaseSource16 = adoptPhaseStart16 >= 0 && adoptPhaseEnd16 > adoptPhaseStart16
@@ -7235,7 +9462,7 @@ return { reapplySmartSensitivityNow };`
   assertPass(pwmAlarmCreationBody16.includes('automationRevision = null')
       && pwmAlarmCreationBody16.includes('isAutomationOperationCurrent(automationRevision)')
       && pwmAlarmCreationBody16.includes('pwmAlarmWriteChain')
-      && countOccurrences(backgroundSource, "chrome.alarms.clear('ac-pwm')") === 3
+      && countOccurrences(backgroundSource, "chrome.alarms.clear('ac-pwm')") >= 2
       && countOccurrences(backgroundSource, 'clearPwmAlarm(') >= 11
       && [reapplyBody, advanceBody, applySyncedPhaseBody, adoptTimerBody, pwmBody, repairBody]
         .every(source => source.includes('automationRevision')),
@@ -7317,6 +9544,59 @@ return { reapplySmartSensitivityNow };`
       && revisionOwnedSchedule16.nextTriggerAt === newPwmTarget16,
     '16U-1: 旧 PWM 创建失效并清理后，新 revision 才串行建 alarm，最终时钟只属于新 lifecycle');
 
+  let rejectedVerifyCreateCalls16 = 0;
+  let rejectedVerifyClearCalls16 = 0;
+  const rejectedVerifySchedule16 = {
+    enabled: true,
+    nextTriggerAt: 0,
+    alarmCreatedAt: 0,
+    alarmDelayMinutes: 0
+  };
+  const rejectedVerifyPwmAlarm16 = new Function(
+    'schedule', 'createAlarm', 'chrome', 'isAutomationAllowed',
+    'isAutomationOperationCurrent', 'setNextTriggerAt',
+    `${pwmAlarmCreationBody16}; return {
+      createPwmAlarmWithVerify,
+      createPwmAlarmFromPlan
+    };`
+  )(
+    rejectedVerifySchedule16,
+    async () => { rejectedVerifyCreateCalls16 += 1; return true; },
+    {
+      alarms: {
+        async get() { throw new Error('verify rejected'); },
+        async clear() { rejectedVerifyClearCalls16 += 1; return true; }
+      }
+    },
+    () => true,
+    () => true,
+    value => { rejectedVerifySchedule16.nextTriggerAt = value; }
+  );
+  const rejectedPlanVerify16 = await rejectedVerifyPwmAlarm16.createPwmAlarmFromPlan(
+    { nextTriggerAt: Date.now() + 120_000 },
+    'verify-reject-plan',
+    1
+  );
+  const rejectedDelayVerify16 = await rejectedVerifyPwmAlarm16.createPwmAlarmWithVerify(
+    2,
+    'verify-reject-delay',
+    1
+  );
+  const createCallsBeforeExpiredPlan16 = rejectedVerifyCreateCalls16;
+  const rejectedExpiredPlan16 = await rejectedVerifyPwmAlarm16.createPwmAlarmFromPlan(
+    { nextTriggerAt: Date.now() - 1 },
+    'expired-plan',
+    1
+  );
+  assertPass(rejectedPlanVerify16 === false
+      && rejectedDelayVerify16 === false
+      && rejectedExpiredPlan16 === false
+      && rejectedVerifyCreateCalls16 === 2
+      && rejectedVerifyCreateCalls16 === createCallsBeforeExpiredPlan16
+      && rejectedVerifyClearCalls16 === 2
+      && rejectedVerifySchedule16.nextTriggerAt === 0,
+    '16U-2: 绝对/延迟建钟的 verify reject 与排队后过期都归一为 false，调用方红灯/watchdog 分支不会被 throw 绕过');
+
   const pwmStepOwnershipSource16 = extractSourceSection(
     backgroundSource,
     'function isCurrentPwmStepRunning() {',
@@ -7385,7 +9665,7 @@ return { reapplySmartSensitivityNow };`
   const restartRevisionIndex16 = setupImmediateBody16.indexOf('pwmRuntimeRevision += 1');
   const restartCooldownIndex16 = setupImmediateBody16.indexOf('lastPwmStepAt = 0');
   const restartClearIndex16 = setupImmediateBody16.indexOf('await clearPwmAlarm(');
-  const restartRunIndex16 = setupImmediateBody16.indexOf('await runPwmStep();');
+  const restartRunIndex16 = setupImmediateBody16.indexOf('await executePwmStepWithRecovery({');
   assertPass(restartRevisionIndex16 >= 0
       && restartCooldownIndex16 > restartRevisionIndex16
       && restartClearIndex16 > restartCooldownIndex16
@@ -7505,6 +9785,314 @@ return { reapplySmartSensitivityNow };`
       && comfortSource17.includes('await setPageTimer(')
       && comfortSource17.includes('await createPwmAlarmFromPlan('),
     '17F: 舒适启动复用唯一 ON 事务，预置并新鲜验证页面定时器后以绝对目标建立 PWM 闹钟');
+  const deferComfortStartSource17 = extractSourceSection(
+    backgroundSource,
+    'async function deferComfortStart(error, automationRevision) {',
+    '\nasync function runComfortStart(',
+    'comfort start retry transaction'
+  );
+  const loadDeferComfortStart17 = ({ staleDuringCreate = false } = {}) => {
+    const now = Date.now();
+    const testSchedule = {
+      enabled: true,
+      pwmState: 'on',
+      comfortStartUntil: now + 5 * 60_000,
+      nextTriggerAt: 0,
+      pageTimerError: ''
+    };
+    let current = true;
+    const order = [];
+    const persisted = [];
+    const defer = new Function(
+      'schedule', 'COMFORT_START_RETRY_MS', 'COMFORT_START_MINUTES', 'isAutomationOperationCurrent',
+      'setNextTriggerAt', 'persistSchedule', 'createPwmAlarmFromPlan',
+      'scheduleComfortStartEndAlarm', 'scheduleComfortRetryFallback',
+      'createAlarm', 'updateBadge', 'appendDiagnosticLog',
+      `${deferComfortStartSource17}; return deferComfortStart;`
+    )(
+      testSchedule,
+      60_000,
+      5,
+      () => current,
+      value => { testSchedule.nextTriggerAt = value; },
+      async reason => {
+        order.push(`persist:${reason}`);
+        persisted.push(JSON.parse(JSON.stringify(testSchedule)));
+      },
+      async () => {
+        order.push('create-pwm:false');
+        if (staleDuringCreate) {
+          current = false;
+          Object.assign(testSchedule, {
+            enabled: false,
+            pwmState: 'off',
+            comfortStartUntil: 0,
+            nextTriggerAt: 0,
+            pageTimerError: 'NEW-COMFORT-LIFECYCLE'
+          });
+        }
+        return false;
+      },
+      async () => { order.push('end-alarm'); return true; },
+      async () => { order.push('fallback-alarm'); return true; },
+      async name => { order.push(`alarm:${name}`); return true; },
+      async () => { order.push('update-badge'); },
+      () => { order.push('diagnostic'); }
+    );
+    return { defer, schedule: testSchedule, order, persisted };
+  };
+  const comfortRetryFailure17 = loadDeferComfortStart17();
+  const comfortRetryFailureResult17 = await comfortRetryFailure17.defer(
+    'synthetic comfort failure',
+    31
+  );
+  assertPass(comfortRetryFailure17.order.join(',')
+        === 'persist:comfort-start-retry-intent,create-pwm:false,fallback-alarm,persist:comfort-start-retry,update-badge,diagnostic'
+      && comfortRetryFailure17.persisted.length === 2
+      && comfortRetryFailure17.persisted[0]?.nextTriggerAt > Date.now()
+      && comfortRetryFailure17.schedule.nextTriggerAt
+        === comfortRetryFailure17.persisted[0]?.nextTriggerAt
+      && comfortRetryFailure17.schedule.pageTimerError.includes('已改用舒适恢复闹钟')
+      && comfortRetryFailureResult17.fallbackCreated === true
+      && comfortRetryFailureResult17.retryAt === comfortRetryFailure17.schedule.nextTriggerAt,
+    '17F-1: 舒适 ON 失败先持久化一分钟 retry intent；PWM 建钟 false 时 fallback alarm 接力且错误保持可见');
+  const staleComfortRetry17 = loadDeferComfortStart17({ staleDuringCreate: true });
+  const staleComfortRetryResult17 = await staleComfortRetry17.defer(
+    'stale comfort failure',
+    32
+  );
+  assertPass(staleComfortRetryResult17.cancelled === true
+      && staleComfortRetry17.order.join(',')
+        === 'persist:comfort-start-retry-intent,create-pwm:false'
+      && staleComfortRetry17.schedule.pageTimerError === 'NEW-COMFORT-LIFECYCLE'
+      && staleComfortRetry17.schedule.enabled === false
+      && staleComfortRetry17.schedule.nextTriggerAt === 0,
+    '17F-2: 舒适 retry 建钟期间 revision 失效后不创建 fallback、不追加旧错误或 persist');
+
+  const deferComfortFinishSource17 = extractSourceSection(
+    backgroundSource,
+    'async function deferComfortFinish(',
+    '\nasync function finishComfortStart(',
+    'comfort finish retry transaction'
+  );
+  const loadDeferComfortFinish17 = ({
+    staleDuringCreate = false,
+    failAllPersists = false
+  } = {}) => {
+    const testSchedule = {
+      enabled: true,
+      pwmState: 'off',
+      comfortStartUntil: 0,
+      comfortStartOnConfirmedAt: 123,
+      nextTriggerAt: 0,
+      pageTimerError: ''
+    };
+    let current = true;
+    const order = [];
+    const persisted = [];
+    const defer = new Function(
+      'schedule', 'pwmRuntimeRevision', 'COMFORT_START_RETRY_MS',
+      'isAutomationOperationCurrent', 'setNextTriggerAt', 'persistSchedule',
+      'createPwmAlarmFromPlan', 'scheduleComfortRetryFallback', 'createAlarm',
+      'updateBadge', 'appendDiagnosticLog',
+      `${deferComfortFinishSource17}; return deferComfortFinish;`
+    )(
+      testSchedule,
+      41,
+      60_000,
+      () => current,
+      value => { testSchedule.nextTriggerAt = value; },
+      async reason => {
+        order.push(`persist:${reason}`);
+        if (failAllPersists) throw new Error('synthetic storage unavailable');
+        persisted.push(JSON.parse(JSON.stringify(testSchedule)));
+      },
+      async () => {
+        order.push('create-pwm:false');
+        if (staleDuringCreate) {
+          current = false;
+          Object.assign(testSchedule, {
+            enabled: false,
+            comfortStartUntil: 0,
+            nextTriggerAt: 0,
+            pageTimerError: 'NEW-FINISH-LIFECYCLE'
+          });
+        }
+        return false;
+      },
+      async () => { order.push('fallback-alarm'); return true; },
+      async name => { order.push(`alarm:${name}`); return true; },
+      async () => { order.push('update-badge'); },
+      () => { order.push('diagnostic'); }
+    );
+    return { defer, schedule: testSchedule, order, persisted };
+  };
+  const comfortFinishFailure17 = loadDeferComfortFinish17();
+  const comfortFinishFailureResult17 = await comfortFinishFailure17.defer(
+    new Error('finish transition failed'),
+    41,
+    123
+  );
+  assertPass(comfortFinishFailure17.order.join(',')
+        === 'persist:comfort-finish-retry-intent,create-pwm:false,fallback-alarm,alarm:ac-badge-tick,alarm:ac-watchdog,persist:comfort-finish-retry-alarm-failed,update-badge,diagnostic'
+      && comfortFinishFailure17.persisted.length === 2
+      && comfortFinishFailure17.schedule.comfortStartUntil > Date.now()
+      && comfortFinishFailure17.schedule.nextTriggerAt
+        === comfortFinishFailure17.persisted[0]?.nextTriggerAt
+      && comfortFinishFailure17.schedule.pageTimerError.includes('已改用舒适恢复闹钟')
+      && comfortFinishFailureResult17.deferred === true
+      && comfortFinishFailureResult17.fallbackCreated === true,
+    '17F-3: 舒适结束事务抛错恢复 marker/截止，intent-first 并以一分钟 fallback alarm 重试，不留下 ON 无钟态');
+  const staleComfortFinish17 = loadDeferComfortFinish17({ staleDuringCreate: true });
+  const staleComfortFinishResult17 = await staleComfortFinish17.defer(
+    new Error('stale finish transition'),
+    41,
+    123
+  );
+  assertPass(staleComfortFinishResult17.cancelled === true
+      && staleComfortFinish17.order.join(',')
+        === 'persist:comfort-finish-retry-intent,create-pwm:false'
+      && staleComfortFinish17.schedule.pageTimerError === 'NEW-FINISH-LIFECYCLE'
+      && staleComfortFinish17.schedule.enabled === false
+      && staleComfortFinish17.schedule.nextTriggerAt === 0,
+    '17F-4: 舒适结束恢复建钟期间 revision 失效后不触碰新 lifecycle sentinel');
+  const storageFailedComfortFinish17 = loadDeferComfortFinish17({
+    failAllPersists: true
+  });
+  const storageFailedComfortFinishResult17 = await storageFailedComfortFinish17.defer(
+    new Error('finish and storage failed'),
+    41,
+    123
+  );
+  assertPass(storageFailedComfortFinishResult17.deferred === true
+      && storageFailedComfortFinishResult17.intentPersisted === false
+      && storageFailedComfortFinishResult17.fallbackCreated === true
+      && storageFailedComfortFinishResult17.watchdogCreated === true
+      && storageFailedComfortFinish17.schedule.comfortStartUntil > Date.now()
+      && storageFailedComfortFinish17.order.includes('fallback-alarm')
+      && storageFailedComfortFinish17.order.includes('alarm:ac-watchdog'),
+    '17F-4A: reset 后 storage 持续失败仍先建 comfort fallback/watchdog，不靠旧 revision 静默丢掉所有恢复钟');
+  const finishComfortStartSource17 = extractSourceSection(
+    backgroundSource,
+    "async function finishComfortStart(reason = '') {",
+    '\nasync function deferComfortStart(',
+    'comfort finish transition'
+  );
+  const finishOwnerResult17 = await new Function(
+    'testNow',
+    `const schedule = {
+      enabled: true,
+      comfortStartUntil: testNow - 1,
+      comfortStartOnConfirmedAt: 456,
+      pageTimerError: ''
+    };
+    let pwmRuntimeRevision = 51;
+    const chrome = { alarms: { clear: async () => true } };
+    const Date = { now: () => testNow };
+    function isAutomationAllowed() { return schedule.enabled; }
+    function isWithinActiveHours() { return false; }
+    async function scheduleComfortStartEndAlarm() { return true; }
+    async function resetDisabledPwmRuntime() { pwmRuntimeRevision += 1; }
+    async function persistSchedule(reason) {
+      if (reason === 'comfort-start-ended-outside-hours-pre-shutdown') {
+        throw new Error('synthetic post-reset failure');
+      }
+    }
+    async function requestTimerBasedShutdown() { return { success: true }; }
+    async function rescheduleSmartWeatherAlarm() {}
+    function appendDiagnosticLog() {}
+    async function deferComfortFinish(error, automationRevision, priorConfirmedAt) {
+      return { deferred: true, automationRevision, priorConfirmedAt, error: error.message };
+    }
+    ${finishComfortStartSource17}
+    return finishComfortStart('owner-test');`
+  )(Date.now());
+  assertPass(finishOwnerResult17.deferred === true
+      && finishOwnerResult17.automationRevision === 52
+      && finishOwnerResult17.priorConfirmedAt === 456,
+    '17F-5: 舒适结束在时段外 reset claim 新 revision 后再失败，恢复沿用新 owner 而非 stale 静默丢钟');
+  const retryComfortDeadlineSource17 = extractSourceSection(
+    backgroundSource,
+    "async function retryComfortStartAndFinishIfExpired(reason = 'retry') {",
+    '\nasync function deferComfortStart(',
+    'comfort retry deadline bridge'
+  );
+  const runComfortDeadlineCase17 = async throwDuringRetry => new Function(
+    'throwDuringRetry',
+    `let testNow = 1_000_000;
+    const deadline = testNow + 1000;
+    const Date = { now: () => testNow };
+    const schedule = {
+      enabled: true,
+      pwmState: 'on',
+      comfortStartUntil: deadline,
+      nextTriggerAt: 0,
+      pageTimerError: ''
+    };
+    let pwmRuntimeRevision = 61;
+    const COMFORT_START_RETRY_MS = 60_000;
+    const COMFORT_START_MINUTES = 5;
+    let pwmCreateCalls = 0;
+    let fallbackCalls = 0;
+    let finishCalls = 0;
+    function isAutomationOperationCurrent() { return true; }
+    function isComfortStartActive() {
+      return schedule.enabled && schedule.comfortStartUntil > testNow;
+    }
+    function setNextTriggerAt(value) { schedule.nextTriggerAt = value > 0 ? value : 0; }
+    async function persistSchedule() {}
+    async function createPwmAlarmFromPlan() { pwmCreateCalls += 1; return false; }
+    async function scheduleComfortStartEndAlarm() { return true; }
+    async function scheduleComfortRetryFallback() { fallbackCalls += 1; return false; }
+    async function createAlarm() { return true; }
+    async function updateBadge() {}
+    function appendDiagnosticLog() {}
+    ${deferComfortStartSource17}
+    async function runComfortStart() {
+      testNow = deadline + 1;
+      if (throwDuringRetry) throw new Error('synthetic retry crossed deadline');
+      return deferComfortStart('crossed deadline', pwmRuntimeRevision);
+    }
+    async function finishComfortStart() {
+      finishCalls += 1;
+      schedule.comfortStartUntil = 0;
+      return { handled: true, automationAllowed: true };
+    }
+    ${retryComfortDeadlineSource17}
+    return retryComfortStartAndFinishIfExpired('retry').then(result => ({
+      result,
+      pwmCreateCalls,
+      fallbackCalls,
+      finishCalls,
+      nextTriggerAt: schedule.nextTriggerAt
+    }));`
+  )(throwDuringRetry);
+  const resolvedComfortDeadline17 = await runComfortDeadlineCase17(false);
+  const thrownComfortDeadline17 = await runComfortDeadlineCase17(true);
+  assertPass(resolvedComfortDeadline17.finishCalls === 1
+      && resolvedComfortDeadline17.result.continuePwm === true
+      && resolvedComfortDeadline17.pwmCreateCalls === 0
+      && resolvedComfortDeadline17.fallbackCalls === 1
+      && resolvedComfortDeadline17.nextTriggerAt === 0
+      && thrownComfortDeadline17.finishCalls === 1
+      && thrownComfortDeadline17.result.continuePwm === true
+      && thrownComfortDeadline17.result.retryError?.message
+        === 'synthetic retry crossed deadline',
+    '17F-6: comfort retry 的真实 defer/throw 跨截止且无未来钟时都立即 finish，不把已消费 alarm 当成功');
+  const comfortResumeDecisionSource17 = extractSourceSection(
+    backgroundSource,
+    'function shouldResumePwmAfterComfortFinish(',
+    '\nasync function deferComfortStart(',
+    'comfort finish resume decision'
+  );
+  const shouldResumeComfort17 = new Function(
+    `${comfortResumeDecisionSource17}; return shouldResumePwmAfterComfortFinish;`
+  )();
+  const allowedComfortFinish17 = { handled: true, automationAllowed: true };
+  assertPass(shouldResumeComfort17(allowedComfortFinish17, 0) === true
+      && shouldResumeComfort17(allowedComfortFinish17, Date.now() + 15 * 60000) === false
+      && shouldResumeComfort17({ ...allowedComfortFinish17, deferred: true }, 0) === false,
+    '17F-7: comfort fallback 无主钟时恢复 PWM；保留的更晚 main clock 或已 defer finish 均不提前消费');
   const comfortTimerBeforeOn17 = comfortSource17.indexOf(
     'const pageTimerBeforeOn = await getCurrentPageTimer()'
   );
@@ -7532,8 +10120,10 @@ return { reapplySmartSensitivityNow };`
         || comfortSource17.includes('createAlarm(COMFORT_START_END_ALARM'))
       && comfortSource17.includes("chrome.alarms.clear('ac-comfort-end')")
       && comfortSource17.includes('isWithinActiveHours()')
-      && comfortSource17.includes("requestTimerBasedShutdown('comfort-start-ended-outside-hours')"),
-    '17H: 独立舒适截止闹钟跨越运行时段边界，五分钟后才恢复时段外页面定时关机策略');
+      && comfortSource17.includes("requestTimerBasedShutdown('comfort-start-ended-outside-hours')")
+      && comfortSource17.includes('return deferComfortFinish(error, automationRevision, priorConfirmedAt);')
+      && comfortSource17.includes("persistSchedule('comfort-finish-retry-intent'"),
+    '17H: 独立舒适截止闹钟跨时段；结束事务异常恢复 marker 并 intent-first 一分钟重试，不因先清 marker 失联');
 
   const updateComfortRequested17 = updateScheduleBody.indexOf(
     'const comfortRequested = !wasEnabled && schedule.enabled;'
@@ -7573,10 +10163,13 @@ return { reapplySmartSensitivityNow };`
     'comfort-aware ac-pwm alarm'
   );
   assertPass(alarmComfortBody17.includes('isComfortStartActive(')
-      && alarmComfortBody17.includes("runComfortStart('retry')")
+      && alarmComfortBody17.includes("retryComfortStartAndFinishIfExpired('retry')")
       && alarmComfortBody17.includes('finishComfortStart(')
-      && backgroundSource.includes("if (alarm.name === 'ac-comfort-end')"),
-    '17K: 五分钟内的 ac-pwm 只重试布防，截止点统一结束舒适阶段，不会误跑普通智能 ON');
+      && backgroundSource.includes("if (alarm.name === 'ac-comfort-end')")
+      && backgroundSource.includes("retryComfortStartAndFinishIfExpired('retry')")
+      && backgroundSource.includes("schedule.pwmState === 'on'")
+      && alarmComfortBody17.includes('comfortEnd?.deferred'),
+    '17K: ac-pwm/comfort fallback 在 marker 内只重试布防；结束事务已 defer 时不继续误跑普通 PWM');
   assertPass(resetDisabledPwmRuntimeSource.includes('schedule.comfortStartUntil = 0;')
       && resetDisabledPwmRuntimeSource.includes("chrome.alarms.clear('ac-comfort-end')")
       && backgroundSource.includes('preemptAutomaticOnForExplicitDisable')

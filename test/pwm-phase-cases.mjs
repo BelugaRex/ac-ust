@@ -12,6 +12,7 @@ const {
   smartModePageTimerTargetAt,
   nextSafePageTimerTargetAt,
   planSmartModeOnWindow,
+  planSmartOnRetryExceptionRecovery,
   alignSmartModeNextTrigger
 } = pwmPhase;
 
@@ -31,7 +32,7 @@ export function runPwmPhaseCases(assertPass) {
 
   assertPass(
     Object.keys(pwmPhase).sort().join(',')
-      === 'alignSmartModeNextTrigger,halfHourBoundaryAtOrBefore,nextHalfHourBoundary,nextSafePageTimerTargetAt,planNextSmartWeatherPrefetch,planPwmRecovery,planPwmStep,planSmartModeOnWindow,reconcilePwmTrigger,smartModePageTimerTargetAt,smartWeatherTargetBoundaryAt'
+      === 'alignSmartModeNextTrigger,halfHourBoundaryAtOrBefore,nextHalfHourBoundary,nextSafePageTimerTargetAt,planNextSmartWeatherPrefetch,planPwmRecovery,planPwmStep,planSmartModeOnWindow,planSmartOnRetryExceptionRecovery,reconcilePwmTrigger,smartModePageTimerTargetAt,smartWeatherTargetBoundaryAt'
       && typeof nextSafePageTimerTargetAt === 'function'
       && typeof halfHourBoundaryAtOrBefore === 'function',
     'PWM phase module 导出规划函数、天气预取槽与半点对齐函数'
@@ -64,6 +65,23 @@ export function runPwmPhaseCases(assertPass) {
     'nextHalfHourBoundary: 13:45 → 14:00');
   assertPass(nextHalfHourBoundary(hourTime(13, 30)) === hourTime(14, 0),
     'nextHalfHourBoundary: 半点也进到下一个半点');
+
+  const safeRetryException = planSmartOnRetryExceptionRecovery(
+    { onMinutes: 21 },
+    hourTime(13, 30),
+    { now: hourTime(13, 31), retryAt: hourTime(13, 32) }
+  );
+  const unsafeRetryException = planSmartOnRetryExceptionRecovery(
+    { onMinutes: 21 },
+    hourTime(13, 30),
+    { now: hourTime(13, 49, 30), retryAt: hourTime(13, 50, 30) }
+  );
+  assertPass(safeRetryException.kind === 'retry-smart-on-exception'
+      && safeRetryException.nextTriggerAt === hourTime(13, 32)
+      && safeRetryException.pageTimerTargetAt === hourTime(13, 51)
+      && unsafeRetryException.kind === 'defer'
+      && unsafeRetryException.nextTriggerAt === hourTime(14, 0),
+    'planSmartOnRetryExceptionRecovery: 异常只续一分钟且保留原截止；余量不足明确延至下一半点');
 
   const smartBeforeWindow = planSmartModeOnWindow(
     { onMinutes: 25 },
@@ -112,6 +130,67 @@ export function runPwmPhaseCases(assertPass) {
       && smartAfterHourWindow.kind === 'defer'
       && smartAfterHourWindow.nextTriggerAt === hourTime(14, 30),
     'planSmartModeOnWindow: 智能自动 ON 仅在 :00/:30 分钟执行，并锚定半点绝对关机截止时间');
+
+  const delayedBoundaryNow = hourTime(13, 31, 5);
+  const delayedBoundaryTarget = hourTime(13, 55);
+  const driftedBoundary1ms = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    {
+      now: delayedBoundaryNow,
+      maxOnMinutes: 25,
+      acIsOn: false,
+      triggeredBoundaryAt: hourTime(13, 30, 0, 1)
+    }
+  );
+  const driftedBoundary1499ms = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    {
+      now: delayedBoundaryNow,
+      maxOnMinutes: 25,
+      acIsOn: false,
+      triggeredBoundaryAt: hourTime(13, 30, 1, 499)
+    }
+  );
+  const driftedBoundary1500ms = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    {
+      now: delayedBoundaryNow,
+      maxOnMinutes: 25,
+      acIsOn: false,
+      triggeredBoundaryAt: hourTime(13, 30, 1, 500)
+    }
+  );
+  const driftedFractionalBoundary = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    {
+      now: delayedBoundaryNow,
+      maxOnMinutes: 25,
+      acIsOn: false,
+      triggeredBoundaryAt: hourTime(13, 30) + 500.5
+    }
+  );
+  const untrustedBoundary1501ms = planSmartModeOnWindow(
+    { onMinutes: 25 },
+    {
+      now: delayedBoundaryNow,
+      maxOnMinutes: 25,
+      acIsOn: false,
+      triggeredBoundaryAt: hourTime(13, 30, 1, 501)
+    }
+  );
+  assertPass(driftedBoundary1ms.kind === 'allow'
+      && driftedBoundary1ms.reason === 'smart-on-scheduled-boundary'
+      && driftedBoundary1ms.boundaryAt === hourTime(13, 30)
+      && driftedBoundary1ms.pageTimerTargetAt === delayedBoundaryTarget
+      && driftedBoundary1499ms.kind === 'allow'
+      && driftedBoundary1499ms.boundaryAt === hourTime(13, 30)
+      && driftedBoundary1499ms.pageTimerTargetAt === delayedBoundaryTarget
+      && driftedBoundary1500ms.kind === 'allow'
+      && driftedBoundary1500ms.boundaryAt === hourTime(13, 30)
+      && driftedFractionalBoundary.kind === 'allow'
+      && driftedFractionalBoundary.boundaryAt === hourTime(13, 30)
+      && untrustedBoundary1501ms.kind === 'defer',
+    'planSmartModeOnWindow: 浏览器半点闹钟不超过 1500ms 漂移仍归一到原边界，超过上限才拒绝');
   assertPass(planSmartModeOnWindow(
     { onMinutes: 26 },
     { now: hourTime(13, 30), maxOnMinutes: 25 }

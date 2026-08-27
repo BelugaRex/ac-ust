@@ -1144,6 +1144,7 @@ async function run() {
         : null;
       const recoveredSchedule = {
         ...smartSchedule,
+        pwmState: 'on',
         onMinutes: 21,
         offMinutes: 9
       };
@@ -1161,6 +1162,7 @@ async function run() {
           now: boundaryAt + 7 * 60_000,
           plannedActionAt: boundaryAt + 8 * 60_000,
           liveAlarmAt: boundaryAt + 8 * 60_000,
+          allowNonBoundarySmartClock: true,
           maxOnMinutes: 25,
           missingClockAction: 'repair-clock'
         })
@@ -1816,10 +1818,13 @@ async function run() {
           === pausedAutomationState.schedule?.pageTimerTargetAt
         && pausedAutomationState.pageTimer?.found === true
         && pausedAutomationState.pageTimer?.value
-        && comfortFreshTabs.length === 1
-        && comfortFreshTabs[0]?.wasActive === false
-        && comfortFreshTabs[0]?.seedReady === true
-        && comfortFreshTabs[0]?.rerouted === true
+        // 预置后的新鲜证明尚有效时可复用；否则 ON 后补第二张确认 timer 仍保留。
+        // 两种路径都不能刷新或抢占用户正在看的 AC home。
+        && comfortFreshTabs.length >= 1
+        && comfortFreshTabs.length <= 2
+        && comfortFreshTabs.every(tab => tab.wasActive === false
+          && tab.seedReady === true
+          && tab.rerouted === true)
         && settingsSwitchClicksAfterComfort === 1
         && [zhCN, en].some(messages => pausedAutomationState.status.includes(
           messages.statusComfortStartOK.message
@@ -1853,7 +1858,8 @@ async function run() {
         && finalSettingsState.timerPressed === 'true'
         && finalSettingsState.onValue === '21'
         && finalSettingsState.offValue === '9'
-        && settingsFreshTabs.length === 2
+        // 停用时的一分钟关机保险必须在舒适启动证明页之外再增加一张。
+        && settingsFreshTabs.length === comfortFreshTabs.length + 1
         && settingsFreshTabs.every(tab => tab.wasActive === false
           && tab.seedReady === true
           && tab.rerouted === true)

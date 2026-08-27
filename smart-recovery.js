@@ -18,6 +18,7 @@
   function planSmartRecovery(schedule, context = {}) {
     if (!schedule?.enabled) return passSmartRecovery('automation-disabled');
     if (!schedule?.smartMode?.enabled) return passSmartRecovery('smart-mode-disabled');
+    if (schedule?.pwmState !== 'on') return passSmartRecovery('next-action-not-on');
     if (typeof planSmartModeOnWindow !== 'function') {
       return passSmartRecovery('smart-window-planner-unavailable');
     }

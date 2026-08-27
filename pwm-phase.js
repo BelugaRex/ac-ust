@@ -1,6 +1,7 @@
 const PWM_PHASE_MINUTE_MS = 60_000;
 const PWM_PHASE_RETRY_MINUTES = 1;
 const SMART_MODE_ON_HARD_MAX_MINUTES = 25;
+const PWM_ALARM_BOUNDARY_TOLERANCE_MS = 1500;
 
 function pwmPhaseNow(opts) {
   return Number.isFinite(opts?.now) ? opts.now : Date.now();
@@ -379,6 +380,23 @@ function isHalfHourBoundary(timestamp) {
     && d.getMilliseconds() === 0;
 }
 
+// chrome.alarms 的 scheduledTime 可能与请求的整半点有极小漂移。这里只把距离
+// 最近 :00/:30 不超过 1500ms 的值归一化；更远的普通调用仍不能冒充可信半点。
+function normalizeHalfHourAlarmBoundary(timestamp) {
+  const value = Number(timestamp);
+  if (!Number.isFinite(value) || value <= 0) return 0;
+  const lowerBoundary = halfHourBoundaryAtOrBefore(value);
+  const upperBoundary = nextHalfHourBoundary(value);
+  const lowerDistance = Math.abs(value - lowerBoundary);
+  const upperDistance = Math.abs(upperBoundary - value);
+  const boundaryAt = lowerDistance <= upperDistance
+    ? lowerBoundary
+    : upperBoundary;
+  return Math.abs(value - boundaryAt) <= PWM_ALARM_BOUNDARY_TOLERANCE_MS
+    ? boundaryAt
+    : 0;
+}
+
 function nextHalfHourBoundaryAtOrAfter(timestamp) {
   return isHalfHourBoundary(timestamp)
     ? Number(timestamp)
@@ -432,7 +450,9 @@ function planSmartModeOnWindow(schedule, opts = {}) {
   const acIsOn = opts?.acIsOn === true;
   const recoverCurrentCycle = opts?.recoverCurrentCycle === true;
   const storedBoundaryAt = Number(opts?.boundaryAt);
-  const triggeredBoundaryAt = Number(opts?.triggeredBoundaryAt);
+  const triggeredBoundaryAt = normalizeHalfHourAlarmBoundary(
+    opts?.triggeredBoundaryAt
+  );
   const triggeredPageTimerTargetAt = smartModePageTimerTargetAt(
     onMinutes,
     now,
@@ -521,6 +541,46 @@ function planSmartModeOnWindow(schedule, opts = {}) {
   };
 }
 
+// typed smart-on retry 自身异常时仍须保持原半点事务：只有下一次一分钟重试
+// 到达时还留有完整页面定时器安全余量才续试，否则明确延至下一半点。
+function planSmartOnRetryExceptionRecovery(schedule, boundaryAt, opts = {}) {
+  const now = pwmPhaseNow(opts);
+  const requestedRetryAt = Number.isFinite(opts?.retryAt)
+    ? Number(opts.retryAt)
+    : now + PWM_PHASE_MINUTE_MS;
+  const onMinutes = Number(schedule?.onMinutes);
+  const normalizedBoundaryAt = normalizeHalfHourAlarmBoundary(boundaryAt);
+  const targetAt = normalizedBoundaryAt + onMinutes * PWM_PHASE_MINUTE_MS;
+  const canRetry = Number.isInteger(onMinutes)
+    && onMinutes > 0
+    && onMinutes <= SMART_MODE_ON_HARD_MAX_MINUTES
+    && isHalfHourBoundary(normalizedBoundaryAt)
+    && normalizedBoundaryAt > 0
+    && requestedRetryAt > now
+    && targetAt >= nextSafePageTimerTargetAt(requestedRetryAt);
+  if (canRetry) {
+    return {
+      kind: 'retry-smart-on-exception',
+      reason: 'smart-on-retry-exception-safe',
+      nextAction: 'on',
+      nextTriggerAt: requestedRetryAt,
+      boundaryAt: normalizedBoundaryAt,
+      pageTimerTargetAt: targetAt,
+      phasePatch: { pwmState: 'on', nextTriggerAt: requestedRetryAt }
+    };
+  }
+
+  const nextTriggerAt = nextHalfHourBoundary(now);
+  return {
+    kind: 'defer',
+    reason: 'smart-on-retry-exception-unsafe',
+    nextAction: 'on',
+    nextTriggerAt,
+    delayMinutes: Math.max(1, (nextTriggerAt - now) / PWM_PHASE_MINUTE_MS),
+    phasePatch: { pwmState: 'on', nextTriggerAt }
+  };
+}
+
 // 智能模式：把 OFF 提交的下一 ON 触发锚定到半点，使 30 分钟周期与半点对齐。
 // ON 提交（nextAction='off'）保持 now + onMinutes 不变——因 ON 相位已在半点开始，
 // 其结束时刻（半点 + onMinutes）天然落在半点节奏上。
@@ -556,6 +616,7 @@ if (typeof module !== 'undefined' && module.exports) {
     smartModePageTimerTargetAt,
     nextSafePageTimerTargetAt,
     planSmartModeOnWindow,
+    planSmartOnRetryExceptionRecovery,
     alignSmartModeNextTrigger
   };
 }

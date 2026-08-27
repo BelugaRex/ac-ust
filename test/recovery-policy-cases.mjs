@@ -64,8 +64,13 @@ export function runRecoveryPolicyCases(assertPass) {
         now,
         plannedActionAt: at(18, 0),
         maxOnMinutes: 25
-      }).reason === 'smart-mode-disabled',
-    '智能恢复模块对停用自动控制与非智能模式明确旁路');
+      }).reason === 'smart-mode-disabled'
+      && planSmartRecovery({ ...smartSchedule, pwmState: 'off' }, {
+        now,
+        plannedActionAt: at(18, 0),
+        maxOnMinutes: 25
+      }).reason === 'next-action-not-on',
+    '智能恢复模块对停用自动控制、非智能模式与非 ON 动作明确旁路');
 
   assertPass(planIntervalRecovery({
     now,
@@ -138,4 +143,80 @@ export function runRecoveryPolicyCases(assertPass) {
       && coordinatedInterval.strategy === 'interval'
       && coordinatedInterval.smartDecisionReason === 'smart-mode-disabled',
     '恢复协调器在智能策略旁路后交由普通循环策略处理');
+
+  const untrustedSmartStoredClock = planPwmLifecycleRecovery({
+    ...smartSchedule,
+    onMinutes: 0,
+    offMinutes: 30,
+    pwmState: 'on'
+  }, {
+    now: at(22, 25),
+    plannedActionAt: at(22, 50),
+    liveAlarmAt: 0,
+    storedAlarmAt: at(22, 50),
+    maxOnMinutes: 25,
+    missingClockAction: 'repair-clock'
+  });
+  const ownedSmartRetryClock = planPwmLifecycleRecovery({
+    ...smartSchedule,
+    pwmState: 'on'
+  }, {
+    now: at(22, 25),
+    plannedActionAt: at(22, 26),
+    liveAlarmAt: 0,
+    storedAlarmAt: at(22, 26),
+    maxOnMinutes: 25,
+    allowNonBoundarySmartClock: true,
+    missingClockAction: 'repair-clock'
+  });
+  const driftedSmartBoundary = planPwmLifecycleRecovery({
+    ...smartSchedule,
+    pwmState: 'on'
+  }, {
+    now: at(22, 30) + 200.25,
+    plannedActionAt: at(22, 30) + 500.5,
+    liveAlarmAt: at(22, 30) + 500.5,
+    storedAlarmAt: at(22, 30) + 500.5,
+    maxOnMinutes: 25,
+    smartBoundaryToleranceMs: 1500,
+    missingClockAction: 'repair-clock'
+  });
+  const preparedWeatherProjectedOff = planPwmLifecycleRecovery({
+    ...smartSchedule,
+    pwmState: 'off',
+    onMinutes: 0,
+    offMinutes: 30
+  }, {
+    now: at(22, 31),
+    plannedActionAt: at(22, 50),
+    liveAlarmAt: at(22, 50),
+    storedAlarmAt: at(22, 50),
+    smartNextAction: 'on',
+    maxOnMinutes: 25,
+    missingClockAction: 'repair-clock'
+  });
+  const actualOffPhaseClock = planPwmLifecycleRecovery({
+    ...smartSchedule,
+    pwmState: 'off',
+    onMinutes: 0,
+    offMinutes: 30
+  }, {
+    now: at(22, 31),
+    plannedActionAt: at(22, 50),
+    liveAlarmAt: at(22, 50),
+    storedAlarmAt: at(22, 50),
+    smartNextAction: 'off',
+    maxOnMinutes: 25,
+    missingClockAction: 'repair-clock'
+  });
+  assertPass(untrustedSmartStoredClock.kind === 'repair-clock'
+      && untrustedSmartStoredClock.reason === 'untrusted-smart-on-clock'
+      && ownedSmartRetryClock.kind === 'restore-stored-alarm'
+      && ownedSmartRetryClock.scheduledTime === at(22, 26)
+      && driftedSmartBoundary.kind === 'preserve-live-alarm'
+      && driftedSmartBoundary.scheduledTime === at(22, 30) + 500.5
+      && preparedWeatherProjectedOff.kind === 'repair-clock'
+      && preparedWeatherProjectedOff.reason === 'untrusted-smart-on-clock'
+      && actualOffPhaseClock.kind === 'preserve-live-alarm',
+    '智能 ON 拒绝 22:50 残留钟；天气临时投影 OFF 仍沿用原 ON 所有权；真实 OFF、typed retry 与 1500ms 内边界漂移可保留');
 }
