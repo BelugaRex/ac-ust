@@ -79,6 +79,8 @@
   "statusClosedNoResponse": { "message": "Timer stopped, but the shutdown command is not confirmed" },
   "statusOnOK": { "message": "Cycle timer is on" },
   "statusSmartOnOK": { "message": "Smart control is on" },
+  "statusComfortStartOK": { "message": "Automatic control is on; AC will run for at least 5 minutes" },
+  "statusComfortStartRetry": { "message": "Automatic control is on; five-minute comfort start is unconfirmed and will retry in 1 minute" },
   "statusModeSaved": { "message": "Automation mode saved" },
   "statusSettingsSaved": { "message": "Settings saved" },
   "statusError": { "message": "Update failed" },

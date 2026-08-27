@@ -3683,6 +3683,7 @@ async function runTests() {
     'schedule', 'readStoredSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE', 'persistSchedule',
     `let pwmStepRunning = false;
 let pwmRuntimeRevision = 0;
+function isComfortStartActive() { return false; }
 ${reapplyBody}
 return {
   reapplySmartSensitivityNow,
@@ -3724,6 +3725,7 @@ return {
     'schedule', 'readStoredSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE', 'persistSchedule',
     `let pwmStepRunning = false;
 let pwmRuntimeRevision = 0;
+function isComfortStartActive() { return false; }
 ${reapplyBody}
 return { reapplySmartSensitivityNow };`
   )(
@@ -3760,6 +3762,7 @@ return { reapplySmartSensitivityNow };`
     'applyPreparedSmartModeDurations',
     'Date',
     `let pwmRuntimeRevision = 0;
+    function isComfortStartActive() { return false; }
     function isAutomationAllowed() { return schedule.enabled; }
     async function abortStaleAutomation() { return false; }
     ${repairFunctionSource}; return repairScheduleClock;`
@@ -4139,6 +4142,10 @@ return { reapplySmartSensitivityNow };`
         : 0;
     }
     function isWithinActiveHours() { return insideActiveHours !== false; }
+    function isComfortStartActive() {
+      return schedule.enabled === true
+        && Number(schedule.comfortStartUntil) > Date.now();
+    }
     function isCurrentPwmStepRunning() { return false; }
     let currentActualStatus = actualStatus;
     async function getCurrentACStatus() { return currentActualStatus; }
@@ -4475,6 +4482,8 @@ return { reapplySmartSensitivityNow };`
     pageTimerError: 'keep',
     pageTimerRetryAt: Date.now() + 60_000,
     pageTimerRetryMinutes: 1,
+    comfortStartUntil: Date.now() + 5 * 60_000,
+    comfortStartOnConfirmedAt: Date.now(),
     smartOnBoundaryAt: Date.now() - 30 * 60_000
   };
   const resetDisabledPwmRuntimeHarness = loadResetDisabledPwmRuntime(
@@ -4498,6 +4507,8 @@ return { reapplySmartSensitivityNow };`
       && resetRuntimeSchedule.nextTriggerAt === 0
       && resetRuntimeSchedule.alarmCreatedAt === 0
       && resetRuntimeSchedule.alarmDelayMinutes === 0
+      && resetRuntimeSchedule.comfortStartUntil === 0
+      && resetRuntimeSchedule.comfortStartOnConfirmedAt === 0
       && resetRuntimeSchedule.smartOnBoundaryAt === 0
       && resetRuntimeSchedule.pageTimerMinutes === 30
       && resetRuntimeSchedule.pageTimerError === 'keep'
@@ -4510,9 +4521,10 @@ return { reapplySmartSensitivityNow };`
     'clear:ac-pwm',
     'clear:ac-badge-tick',
     'clear:ac-watchdog',
+    'clear:ac-comfort-end',
     'updateBadge'
   ].join(','),
-  '13J: 停用运行态 helper 只清三种自动运行闹钟并刷新 badge，保留页面关机重试');
+  '13J: 停用运行态 helper 清空 PWM、badge、watchdog 与舒适截止闹钟并刷新 badge，保留页面关机重试');
 
   const activeBoundaryBody = extractSourceSection(
     backgroundSource,
@@ -4541,11 +4553,11 @@ return { reapplySmartSensitivityNow };`
   const updateResetIndex = updateScheduleBody.indexOf('await resetDisabledPwmRuntime();');
   const updatePersistIndex = updateScheduleBody.indexOf("persistSchedule('updateSchedule')");
   const updateShutdownIndex = updateScheduleBody.indexOf("requestTimerBasedShutdown('schedule-disabled')");
-  assertPass(countOccurrences(backgroundSource, 'await resetDisabledPwmRuntime();') === 3
+  assertPass(countOccurrences(backgroundSource, 'await resetDisabledPwmRuntime();') === 4
       && activeResetIndex >= 0 && activePersistIndex > activeResetIndex && activeShutdownIndex > activePersistIndex
       && syncResetIndex >= 0 && syncPersistIndex > syncResetIndex && syncShutdownIndex > syncPersistIndex
       && updateResetIndex >= 0 && updatePersistIndex > updateResetIndex && updateShutdownIndex > updatePersistIndex,
-    '13K: 三条停用路径统一委派 helper，且均保持 B1 先持久化再页面定时器关机');
+    '13K: 原三条停用路径继续统一委派 helper 并保持 B1 顺序；舒适截止新增第四个受控调用点');
 
   const persistReconciledPwmTriggerSource = extractSourceSection(
     backgroundSource,
@@ -5894,13 +5906,15 @@ return { reapplySmartSensitivityNow };`
     };
     const activeBoundaryAt16 = new Date(2026, 7, 18, 23, 0, 0, 0).getTime();
     const nowAt16 = new Date(2026, 7, 18, 22, 59, 0, 0);
+    let comfortActive16 = false;
     const getAutomaticOnDeadline16 = new Function(
-      'schedule', 'isWithinActiveHours', 'getNextActiveBoundary',
+      'schedule', 'isWithinActiveHours', 'getNextActiveBoundary', 'isComfortStartActive',
       `${automaticOnDeadlineSource16}; return getAutomaticOnDeadline;`
     )(
       deadlineSchedule16,
       () => true,
-      () => activeBoundaryAt16
+      () => activeBoundaryAt16,
+      () => comfortActive16
     );
     const earlierSmartDeadline16 = activeBoundaryAt16 - 30_000;
     const laterSmartDeadline16 = activeBoundaryAt16 + 30_000;
@@ -5909,17 +5923,21 @@ return { reapplySmartSensitivityNow };`
     const earlierDeadline16 = getAutomaticOnDeadline16(earlierSmartDeadline16, nowAt16);
     const cappedDeadline16 = getAutomaticOnDeadline16(laterSmartDeadline16, nowAt16);
     const expiredDeadline16 = getAutomaticOnDeadline16(expiredSmartDeadline16, nowAt16);
+    comfortActive16 = true;
+    const comfortDeadline16 = getAutomaticOnDeadline16(laterSmartDeadline16, nowAt16);
+    comfortActive16 = false;
     deadlineSchedule16.activeHours.enabled = false;
     const smartOnlyDeadline16 = getAutomaticOnDeadline16(laterSmartDeadline16, nowAt16);
     automaticOnDeadlinePass16 = activeOnlyDeadline16 === activeBoundaryAt16
       && earlierDeadline16 === earlierSmartDeadline16
       && cappedDeadline16 === activeBoundaryAt16
       && expiredDeadline16 === expiredSmartDeadline16
+      && comfortDeadline16 === laterSmartDeadline16
       && smartOnlyDeadline16 === laterSmartDeadline16;
   }
   assertPass(automaticOnDeadlinePass16
       && automaticOnBody16.includes('getAutomaticOnDeadline('),
-    '16K-1: 自动 ON 页面递归截止于智能首分钟与运行时段结束的更早者');
+    '16K-1: 普通自动 ON 截止于智能窗口/运行时段较早者；舒适启动不被五分钟内的时段边界提前截断');
 
   const ensureDiagnosticPausedSchedule16 = {
     enabled: true,
@@ -6148,6 +6166,18 @@ return { reapplySmartSensitivityNow };`
     let smartReapplyInFlight = false;
     let smartReapplyPending = false;
     function isAutomationAllowed() { return schedule.enabled; }
+    function isComfortStartActive() {
+      return schedule.enabled && Number(schedule.comfortStartUntil) > Date.now();
+    }
+    async function runComfortStart() {
+      schedule.comfortStartUntil = Date.now() + 5 * 60_000;
+      schedule.pwmState = 'off';
+      return { success: true, minimumMinutes: 5 };
+    }
+    async function preemptAutomaticOnForExplicitDisable() {
+      schedule.comfortStartUntil = 0;
+    }
+    async function rescheduleSmartWeatherAlarm() {}
     function sanitizeMinutes(value, fallback) {
       const parsed = Number.parseInt(value, 10);
       return Number.isFinite(parsed) && parsed >= 1 ? parsed : fallback;
@@ -7313,6 +7343,189 @@ return { reapplySmartSensitivityNow };`
       && pageConfirmSource.includes('automaticOnCancellationRevision')
       && pageConfirmSource.includes('请求已被后台取消'),
     '16Z: 停用、离开时段或显式 restart 会取消主世界递归自动 ON，每次后续点击与确认都可被撤销');
+
+  // ===== 用例 17: 自动控制启用后的五分钟舒适启动 =====
+  beginSuite('用例 17：五分钟舒适启动',
+    '\n\n=== 用例 17: 自动控制启用后的五分钟舒适启动 ===\n');
+
+  const planComfortStart = syncHelpers.planComfortStart;
+  assertPass(typeof planComfortStart === 'function',
+    '17A: sync helper 导出纯函数 planComfortStart，启动目标可脱离浏览器副作用验证');
+
+  if (typeof planComfortStart === 'function') {
+    const comfortNow17 = new Date(2026, 7, 27, 12, 0, 1, 0).getTime();
+    const minimumTarget17 = new Date(2026, 7, 27, 12, 6, 0, 0).getTime();
+    const laterTarget17 = new Date(2026, 7, 27, 12, 20, 0, 0).getTime();
+    const minimumPlan17 = planComfortStart({}, { found: true, value: '12:03' }, {
+      now: comfortNow17,
+      minutes: 5
+    });
+    assertPass(minimumPlan17.minimumTargetAt === minimumTarget17
+        && minimumPlan17.targetAt === minimumTarget17
+        && minimumPlan17.timerMinutes === 6
+        && minimumPlan17.reuseFreshProof === false,
+      '17B: HH:mm 精度向上取整，12:00:01 启用至少运行到 12:06，较早页面定时器不能截短五分钟');
+
+    const liveLaterPlan17 = planComfortStart({}, { found: true, value: '12:20' }, {
+      now: comfortNow17,
+      minutes: 5
+    });
+    assertPass(liveLaterPlan17.minimumTargetAt === minimumTarget17
+        && liveLaterPlan17.targetAt === laterTarget17
+        && liveLaterPlan17.timerMinutes === 20
+        && liveLaterPlan17.reuseFreshProof === false,
+      '17C: 页面已有更晚关机时间时保留更晚目标，并要求重新取得本机新鲜证明');
+
+    const freshLaterPlan17 = planComfortStart({
+      pageTimerMinutes: 20,
+      pageTimerTargetAt: laterTarget17,
+      pageTimerRetryAt: 0
+    }, { found: true, value: '12:20' }, {
+      now: comfortNow17,
+      minutes: 5
+    });
+    assertPass(freshLaterPlan17.targetAt === laterTarget17
+        && freshLaterPlan17.reuseFreshProof === true,
+      '17D: storage 与页面一致的更晚新鲜证明直接复用，不重复写 Power-off after');
+
+    const contradictedFreshPlan17 = planComfortStart({
+      pageTimerMinutes: 20,
+      pageTimerTargetAt: laterTarget17,
+      pageTimerRetryAt: 0
+    }, { found: true, value: '12:10' }, {
+      now: comfortNow17,
+      minutes: 5
+    });
+    assertPass(contradictedFreshPlan17.targetAt === laterTarget17
+        && contradictedFreshPlan17.reuseFreshProof === false,
+      '17D-1: 页面当前读数与 storage 新鲜证明矛盾时保留较晚目标，但必须重新写入并验证');
+
+    const restoredFloorPlan17 = planComfortStart({}, { found: true, value: '12:04' }, {
+      now: comfortNow17,
+      minutes: 5,
+      minimumTargetAt: laterTarget17
+    });
+    assertPass(restoredFloorPlan17.minimumTargetAt === laterTarget17
+        && restoredFloorPlan17.targetAt === laterTarget17,
+      '17E: SW 恢复或一分钟重试沿用既有舒适截止点，不因重入反复延长五分钟');
+  }
+
+  const comfortSource17 = extractSourceSection(
+    backgroundSource,
+    '// ===== 五分钟舒适启动',
+    '\n// ===== Active Hours',
+    'five-minute comfort lifecycle'
+  );
+  assertPass(backgroundSource.includes('comfortStartUntil: 0')
+      && comfortSource17.includes('function isComfortStartActive(')
+      && comfortSource17.includes('async function runComfortStart(')
+      && comfortSource17.includes("toggleAC('on', {")
+      && comfortSource17.includes('requireAutomationAllowed: true')
+      && comfortSource17.includes('await getCurrentPageTimer()')
+      && comfortSource17.includes('await setPageTimer(')
+      && comfortSource17.includes('await createPwmAlarmFromPlan('),
+    '17F: 舒适启动复用唯一 ON 确认链，随后读页面定时器、新鲜验证并以绝对目标建立 PWM 闹钟');
+  assertPass(comfortSource17.indexOf("toggleAC('on', {")
+        < comfortSource17.indexOf('schedule.comfortStartUntil = confirmedFloorPlan.minimumTargetAt')
+      && comfortSource17.indexOf('schedule.comfortStartUntil = confirmedFloorPlan.minimumTargetAt')
+        < comfortSource17.indexOf('await persistSchedule(`comfort-start-${reason}-confirmed-on`')
+      && comfortSource17.indexOf('await persistSchedule(`comfort-start-${reason}-confirmed-on`')
+        < comfortSource17.indexOf('await getCurrentPageTimer()')
+      && comfortSource17.indexOf('await getCurrentPageTimer()')
+        < comfortSource17.indexOf('await setPageTimer('),
+    '17G: ON/Execution succeeded 确认后先持久化新的五分钟 floor，再读取和设置 Power-off after');
+  assertPass((comfortSource17.includes("createAlarm('ac-comfort-end'")
+        || comfortSource17.includes('createAlarm(COMFORT_START_END_ALARM'))
+      && comfortSource17.includes("chrome.alarms.clear('ac-comfort-end')")
+      && comfortSource17.includes('isWithinActiveHours()')
+      && comfortSource17.includes("requestTimerBasedShutdown('comfort-start-ended-outside-hours')"),
+    '17H: 独立舒适截止闹钟跨越运行时段边界，五分钟后才恢复时段外页面定时关机策略');
+
+  const updateComfortRequested17 = updateScheduleBody.indexOf(
+    'const comfortRequested = !wasEnabled && schedule.enabled;'
+  );
+  assertPass(updateComfortRequested17 >= 0
+      && updateScheduleBody.includes("await runComfortStart('user-enable')")
+      && updateScheduleBody.includes('!isComfortStartActive()')
+      && !updateScheduleBody.includes("runComfortStart('popup-open')"),
+    '17I: 仅本机 enabled false→true 请求舒适启动；普通 restart/Popup 打开不重新开机或延长保护');
+
+  const installedBody17 = extractSourceSection(
+    backgroundSource,
+    'chrome.runtime.onInstalled.addListener(async (details) => {',
+    '\n\n// ----- 官方推荐：检测到新版本自动热更新',
+    'onInstalled comfort trigger'
+  );
+  const installBranch17 = installedBody17.slice(
+    installedBody17.indexOf("if (details.reason === 'install')"),
+    installedBody17.indexOf("} else if (details.reason === 'update')")
+  );
+  const updateBranch17 = installedBody17.slice(
+    installedBody17.indexOf("} else if (details.reason === 'update')")
+  );
+  assertPass(installBranch17.includes("runComfortStart('install')")
+      && installBranch17.includes('if (schedule.enabled)')
+      && installBranch17.includes('existing[INSTALL_BOOTSTRAP_KEY] !== true')
+      && installBranch17.includes('firstInstallBootstrap')
+      && installBranch17.includes("chrome.storage.local.set({ [INSTALL_BOOTSTRAP_KEY]: true })")
+      && installBranch17.includes('&& existing[STORAGE_KEY]?.enabled === true')
+      && !updateBranch17.includes('runComfortStart('),
+    '17J: 首次安装以本机 marker 只认领一次已有启用配置，重启/安装尾声不抢用户操作；更新绝不触发');
+
+  const alarmComfortBody17 = extractSourceSection(
+    backgroundSource,
+    "if (alarm.name === 'ac-pwm') {",
+    "\n\n  if (alarm.name === 'ac-watchdog')",
+    'comfort-aware ac-pwm alarm'
+  );
+  assertPass(alarmComfortBody17.includes('isComfortStartActive(')
+      && alarmComfortBody17.includes("runComfortStart('retry')")
+      && alarmComfortBody17.includes('finishComfortStart(')
+      && backgroundSource.includes("if (alarm.name === 'ac-comfort-end')"),
+    '17K: 五分钟内的 ac-pwm 只重试布防，截止点统一结束舒适阶段，不会误跑普通智能 ON');
+  assertPass(resetDisabledPwmRuntimeSource.includes('schedule.comfortStartUntil = 0;')
+      && resetDisabledPwmRuntimeSource.includes("chrome.alarms.clear('ac-comfort-end')")
+      && backgroundSource.includes('preemptAutomaticOnForExplicitDisable')
+      && backgroundSource.includes("msg.data?.enabled === false"),
+    '17L: 用户主动关闭立即失效长开机流程并清除舒适标记/闹钟，停用优先于五分钟保护');
+
+  const snapshotSource17 = extractSourceSection(
+    backgroundSource,
+    'async function getScheduleSnapshot(lite = false) {',
+    '\nasync function toggleNowAndSync(action)',
+    'comfort-aware schedule snapshot'
+  );
+  assertPass(snapshotSource17.includes('snapshot._comfortStartActive = isComfortStartActive()')
+      && snapshotSource17.includes('&& !snapshot._comfortStartActive'),
+    '17M: Popup 快照明确暴露舒适启动，跨时段的五分钟不被误显示为暂停');
+  const popupActiveHoursSource17 = extractSourceSection(
+    popupSource,
+    'function isAutomationPausedByActiveHours(schedule, now = new Date()) {',
+    '\n\nasync function refreshStatus()',
+    'comfort-aware popup active-hours fallback'
+  );
+  const popupPausedByActiveHours17 = new Function(
+    `${popupActiveHoursSource17}; return isAutomationPausedByActiveHours;`
+  )();
+  const outsideHours17 = new Date(2026, 7, 27, 12, 0, 0, 0);
+  const popupComfortSchedule17 = {
+    enabled: true,
+    activeHours: { enabled: true, start: '13:00', end: '14:00' },
+    comfortStartUntil: outsideHours17.getTime() + 5 * 60_000
+  };
+  assertPass(popupPausedByActiveHours17(popupComfortSchedule17, outsideHours17) === false
+      && popupPausedByActiveHours17({
+        ...popupComfortSchedule17,
+        comfortStartUntil: 0,
+        _comfortStartActive: false
+      }, outsideHours17) === true,
+    '17M-1: Popup storage 降级与诊断也把有效舒适阶段视为运行中，截止后才恢复时段外暂停');
+  assertPass(popupSource.includes("response.comfortStart?.success === true")
+      && popupSource.includes("t('statusComfortStartOK'")
+      && popupSource.includes("t('statusComfortStartRetry'")
+      && zhCN.statusComfortStartOK?.message.includes('5 分钟')
+      && en.statusComfortStartOK?.message.includes('5 minutes'),
+    '17N: Popup 在原有状态区内反馈五分钟启动成功/重试，不使用启动弹窗');
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;

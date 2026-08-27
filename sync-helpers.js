@@ -186,6 +186,51 @@ function isPageTimerProofFresh(schedule, opts = {}) {
     && targetAt <= now + minutes * 60000 + graceMs;
 }
 
+// 规划自动控制启用后的舒适启动关机目标。页面控件只有 HH:MM 精度，因此
+// 最短目标向上取整到整分钟，保证实际运行时间不会少于 requested minutes。
+// 已有更晚页面目标一律保留；只有本机 storage 的新鲜证明与最终目标完全
+// 一致，且当前可读页面不与证明矛盾时，才可跳过重写；否则 background
+// 仍需走一次新鲜页持久化验证。
+function planComfortStart(localSchedule, pageTimerInput, opts = {}) {
+  const now = Number.isFinite(opts.now) ? opts.now : Date.now();
+  const requestedMinutes = Math.max(1, Math.ceil(Number(opts.minutes) || 5));
+  const minuteMs = 60_000;
+  const computedMinimumTargetAt = Math.ceil(
+    (now + requestedMinutes * minuteMs) / minuteMs
+  ) * minuteMs;
+  const restoredMinimumTargetAt = Number(opts.minimumTargetAt);
+  const minimumTargetAt = Number.isSafeInteger(restoredMinimumTargetAt)
+      && restoredMinimumTargetAt > now
+    ? Math.ceil(restoredMinimumTargetAt / minuteMs) * minuteMs
+    : computedMinimumTargetAt;
+
+  const storedTargetAt = Number(localSchedule?.pageTimerTargetAt);
+  const freshStoredTargetAt = isPageTimerProofFresh(localSchedule, { now })
+      && Number.isSafeInteger(storedTargetAt)
+      && storedTargetAt > now
+    ? storedTargetAt
+    : 0;
+  const parsedPageTimer = pageTimerInput?.found === true
+    ? parsePageTimerValue(pageTimerInput.value, now)
+    : null;
+  const liveTargetAt = parsedPageTimer?.valid === true
+    ? parsedPageTimer.targetMs
+    : 0;
+  const targetAt = Math.max(
+    minimumTargetAt,
+    freshStoredTargetAt,
+    liveTargetAt
+  );
+
+  return {
+    minimumTargetAt,
+    targetAt,
+    timerMinutes: Math.max(1, Math.ceil((targetAt - now) / minuteMs)),
+    reuseFreshProof: freshStoredTargetAt === targetAt
+      && (pageTimerInput?.found !== true || liveTargetAt === targetAt)
+  };
+}
+
 // 决策是否采纳页面 page timer 值作为跨设备 PWM 相位对齐的权威源。
 // pageTimerInput 是 content.js getPagePowerOffTimer() 的返回值
 //   { found: bool, value: 'HH:MM'|null }
@@ -279,6 +324,7 @@ if (typeof module !== 'undefined' && module.exports) {
     computeConfigDiff,
     parsePageTimerValue,
     isPageTimerProofFresh,
+    planComfortStart,
     computePageTimerAdoption
   };
 }

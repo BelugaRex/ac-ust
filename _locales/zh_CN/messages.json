@@ -79,6 +79,8 @@
   "statusClosedNoResponse": { "message": "定时已关闭，但关机命令未确认", "description": "定时关但无确认结果的状态提示" },
   "statusOnOK": { "message": "循环定时已开启", "description": "定时开成功的状态提示" },
   "statusSmartOnOK": { "message": "智能控制已开启", "description": "智能控制开启成功的状态提示" },
+  "statusComfortStartOK": { "message": "自动控制已开启，冷气至少运行 5 分钟", "description": "自动控制由关到开且舒适启动完成的状态提示" },
+  "statusComfortStartRetry": { "message": "自动控制已开启；五分钟舒适启动未确认，1 分钟后重试", "description": "舒适启动安全链未确认时的非模态状态提示" },
   "statusModeSaved": { "message": "自动模式已保存", "description": "循环与智能模式选择保存成功" },
   "statusSettingsSaved": { "message": "设置已保存", "description": "自动控制关闭时参数预设保存成功" },
   "statusError": { "message": "更新失败", "description": "更新设置失败的状态提示" },

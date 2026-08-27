@@ -14,7 +14,8 @@
 // 7. 真实写入页面关机定时器，并由独立新鲜页确认持久化；验证失败关闭与 OFF 零点击
 // 8. 完整重启后验证智能缓存消费，再以四个生产 URL 获取确定性 HKO 响应
 // 9. 验证 fetch→解析→缓存→边界计划→Popup，以及失败时保留上次成功数据
-// 10. 从真实 Popup 操作总开关、运行时段、两种模式、分钟数与灵敏度
+// 10. 从真实 Popup 操作总开关、运行时段、两种模式、分钟数与灵敏度；
+//     false→true 还要经过一次 ON 成功确认与至少五分钟页面关机保险
 // 11. 以确定性中／英文 locale 验证布局、24h 字段、键盘顺序、帮助及完整诊断复制
 
 const { chromium } = require('playwright');
@@ -162,7 +163,9 @@ async function run() {
           alarmDelayMinutes: 0,
           pageTimerMinutes: null,
           pageTimerError: '',
-          pageTimerRetryAt: 0
+          pageTimerRetryAt: 0,
+          comfortStartUntil: 0,
+          comfortStartOnConfirmedAt: 0
         }
       });
       await chrome.storage.local.remove('ac_balance_cache');
@@ -1214,9 +1217,31 @@ async function run() {
       waitUntil: 'load'
     });
     await settingsHome.evaluate(() => {
+      localStorage.removeItem('ac-e2e-page-timer');
+      const timerInput = document.querySelector('.timer-row .ant-picker input');
+      if (timerInput) {
+        timerInput.value = '';
+        timerInput.setAttribute('title', '');
+      }
       globalThis.__acSettingsSwitchClicks = 0;
-      document.querySelector('button.ant-switch[role="switch"]')?.addEventListener('click', () => {
+      const switchElement = document.querySelector('button.ant-switch[role="switch"]');
+      switchElement?.addEventListener('click', () => {
         globalThis.__acSettingsSwitchClicks += 1;
+        if (switchElement.getAttribute('aria-checked') === 'true') return;
+        setTimeout(() => {
+          const notice = document.createElement('div');
+          notice.className = 'ant-message-notice-content';
+          const success = document.createElement('div');
+          success.className = 'ant-message-custom-content ant-message-success';
+          success.textContent = 'Execution succeeded';
+          notice.appendChild(success);
+          document.body.appendChild(notice);
+          setTimeout(() => notice.remove(), 250);
+        }, 20);
+        setTimeout(() => {
+          switchElement.setAttribute('aria-checked', 'true');
+          switchElement.textContent = 'ON';
+        }, 450);
       });
     });
     let settingsHomeStatus = null;
@@ -1251,6 +1276,8 @@ async function run() {
         pageTimerError: '',
         pageTimerRetryAt: 0,
         pageTimerRetryMinutes: 0,
+        comfortStartUntil: 0,
+        comfortStartOnConfirmedAt: 0,
         activeHours: { enabled: false, start: '08:00', end: '23:00' },
         smartMode: { enabled: false, sensitivity: 5 }
       };
@@ -1260,6 +1287,7 @@ async function run() {
         'ac-badge-tick',
         'ac-watchdog',
         'ac-active-boundary',
+        'ac-comfort-end',
         'ac-page-timer-retry'
       ].map(name => chrome.alarms.clear(name)));
       await chrome.storage.local.set({ ac_schedule: disabled });
@@ -1286,8 +1314,14 @@ async function run() {
       input.dispatchEvent(new Event('input', { bubbles: true }));
       input.dispatchEvent(new Event('change', { bubbles: true }));
     });
+    const sensitivityUpdateResult = await restartedPopup.evaluate(
+      () => waitForLatestScheduleUpdateResult()
+    );
     await restartedPopup.waitForFunction(async () => (
       (await chrome.storage.local.get('ac_schedule')).ac_schedule?.smartMode?.sensitivity === 8
+      && pendingScheduleUpdates === 0
+      && document.getElementById('smartModeToggle')?.disabled === false
+      && document.getElementById('smartSensitivityValue')?.textContent === '8'
     ), null, { timeout: 10000 });
     const smartInteractionState = await restartedPopup.evaluate(async () => ({
       smartPressed: document.getElementById('smartModeToggle')?.getAttribute('aria-pressed'),
@@ -1336,18 +1370,114 @@ async function run() {
         && activeHours?.end === end;
     }, excludedHours, { timeout: 10000 });
 
+    // 与步骤 2.7 相同：Playwright 不拦截 chrome.tabs.create 新 target 的首次导航。
+    // 把舒适启动的新鲜验证页先附着到扩展页，再导回 home fixture；生产代码仍然
+    // 创建 active:false 的独立页并执行完整持久化读回。
+    await restartedWorker.evaluate(() => {
+      const homeUrl = 'https://w5.ab.ust.hk/njggt/app/home';
+      const seedUrl = chrome.runtime.getURL('manifest.json');
+      globalThis.__AC_E2E_COMFORT_FRESH_TABS__ = [];
+      globalThis.__AC_E2E_COMFORT_ON_CREATED__ = (tab) => {
+        const targetUrl = tab?.pendingUrl || tab?.url || '';
+        if (targetUrl !== homeUrl) return;
+        const entry = { id: tab.id, wasActive: tab.active, targetUrl };
+        globalThis.__AC_E2E_COMFORT_FRESH_TABS__.push(entry);
+        void (async () => {
+          try {
+            await chrome.tabs.update(tab.id, { url: seedUrl, active: true });
+            for (let index = 0; index < 40; index += 1) {
+              const current = await chrome.tabs.get(tab.id);
+              if (current.status === 'complete' && current.url === seedUrl) {
+                entry.seedReady = true;
+                break;
+              }
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            await chrome.tabs.update(tab.id, { url: homeUrl, active: true });
+            entry.rerouted = true;
+          } catch (error) {
+            entry.error = error?.message || String(error);
+          }
+        })();
+      };
+      chrome.tabs.onCreated.addListener(globalThis.__AC_E2E_COMFORT_ON_CREATED__);
+    });
+
+    const settingsEnabledAt = Date.now();
     await restartedPopup.locator('label:has(#automationToggle)').click();
-    await restartedPopup.waitForFunction(async () => (
-      (await chrome.storage.local.get('ac_schedule')).ac_schedule?.enabled === true
-      && document.getElementById('automationToggle')?.disabled === false
-    ), null, { timeout: 10000 });
+    // ON 确认、页面定时器新鲜页验证和 Popup 解锁是三个异步阶段。
+    // 连续观察到两个完全稳定的快照才继续，避免刚解锁又被安装尾声旧事务抢回。
+    let comfortWaitState = null;
+    let comfortStableReads = 0;
+    let comfortStableSignature = '';
+    const comfortReadyDeadline = Date.now() + 60000;
+    while (Date.now() < comfortReadyDeadline && comfortStableReads < 2) {
+      comfortWaitState = await restartedPopup.evaluate(async () => {
+        const schedule = (await chrome.storage.local.get('ac_schedule')).ac_schedule;
+        return {
+          schedule,
+          modeSwitchInFlight: typeof modeSwitchInFlight === 'boolean' ? modeSwitchInFlight : null,
+          pendingScheduleUpdates: typeof pendingScheduleUpdates === 'number'
+            ? pendingScheduleUpdates
+            : null,
+          automationDisabled: document.getElementById('automationToggle')?.disabled,
+          timerDisabled: document.getElementById('timerToggle')?.disabled,
+          smartDisabled: document.getElementById('smartModeToggle')?.disabled
+        };
+      });
+      const ready = comfortWaitState.schedule?.enabled === true
+        && comfortWaitState.schedule?.pwmState === 'off'
+        && comfortWaitState.schedule?.comfortStartUntil > Date.now()
+        && comfortWaitState.schedule?.comfortStartOnConfirmedAt >= settingsEnabledAt
+        && comfortWaitState.schedule?.nextTriggerAt
+          === comfortWaitState.schedule?.pageTimerTargetAt
+        && comfortWaitState.modeSwitchInFlight === false
+        && comfortWaitState.pendingScheduleUpdates === 0
+        && comfortWaitState.automationDisabled === false
+        && comfortWaitState.timerDisabled === false
+        && comfortWaitState.smartDisabled === false;
+      const signature = ready
+        ? JSON.stringify({
+          comfortStartUntil: comfortWaitState.schedule.comfortStartUntil,
+          comfortStartOnConfirmedAt: comfortWaitState.schedule.comfortStartOnConfirmedAt,
+          nextTriggerAt: comfortWaitState.schedule.nextTriggerAt,
+          pageTimerTargetAt: comfortWaitState.schedule.pageTimerTargetAt
+        })
+        : '';
+      comfortStableReads = ready && signature === comfortStableSignature
+        ? comfortStableReads + 1
+        : (ready ? 1 : 0);
+      comfortStableSignature = signature;
+      if (comfortStableReads < 2) await new Promise(resolve => setTimeout(resolve, 250));
+    }
+    if (comfortStableReads < 2) {
+      throw new Error(`舒适启动未在 60 秒内稳定完成：${JSON.stringify(comfortWaitState)}`);
+    }
     const pausedAutomationState = await restartedPopup.evaluate(async () => ({
       schedule: (await chrome.storage.local.get('ac_schedule')).ac_schedule,
       snapshot: await chrome.runtime.sendMessage({ type: 'getScheduleLite' }),
       activeBoundaryAlarm: await chrome.alarms.get('ac-active-boundary'),
+      pwmAlarm: await chrome.alarms.get('ac-pwm'),
+      comfortEndAlarm: await chrome.alarms.get('ac-comfort-end'),
+      pageTimer: await chrome.runtime.sendMessage({ type: 'getPageTimer' }),
+      status: document.getElementById('status')?.textContent || '',
       observedAt: Date.now()
     }));
+    const settingsSwitchClicksAfterComfort = await settingsHome.evaluate(
+      () => globalThis.__acSettingsSwitchClicks
+    );
+    const comfortFreshTabs = await restartedWorker.evaluate(() => (
+      Array.isArray(globalThis.__AC_E2E_COMFORT_FRESH_TABS__)
+        ? globalThis.__AC_E2E_COMFORT_FRESH_TABS__.map(entry => ({ ...entry }))
+        : []
+    ));
+    console.log('  舒适启动 Popup 状态:', JSON.stringify(pausedAutomationState));
 
+    await restartedPopup.waitForFunction(() => (
+      document.getElementById('automationToggle')?.disabled === false
+      && document.getElementById('timerToggle')?.disabled === false
+      && document.getElementById('smartModeToggle')?.disabled === false
+    ), null, { timeout: 60000 });
     await restartedPopup.click('#timerToggle');
     await restartedPopup.waitForFunction(async () => (
       (await chrome.storage.local.get('ac_schedule')).ac_schedule?.smartMode?.enabled === false
@@ -1381,19 +1511,39 @@ async function run() {
 
     // 非法分钟数不能阻止安全停用；后台应识别页面已 OFF，绝不点击开关。
     await restartedPopup.locator('label:has(#automationToggle)').click();
+    const disableAutomationResult = await restartedPopup.evaluate(
+      () => waitForLatestScheduleUpdateResult()
+    );
     await restartedPopup.waitForFunction(async () => (
       (await chrome.storage.local.get('ac_schedule')).ac_schedule?.enabled === false
+      && modeSwitchInFlight === false
+      && pendingScheduleUpdates === 0
       && document.getElementById('automationToggle')?.disabled === false
-    ), null, { timeout: 10000 });
+    ), null, { timeout: 60000 });
     await restartedPopup.evaluate(() => {
       const on = document.getElementById('onMinutes');
       on.value = '21';
       on.dispatchEvent(new Event('change', { bubbles: true }));
     });
+    const restoredMinutesResult = await restartedPopup.evaluate(
+      () => waitForLatestScheduleUpdateResult()
+    );
     await restartedPopup.locator('label:has(#activeHoursToggle)').click();
+    const disableActiveHoursResult = await restartedPopup.evaluate(
+      () => waitForLatestScheduleUpdateResult()
+    );
     await restartedPopup.waitForFunction(async () => (
       (await chrome.storage.local.get('ac_schedule')).ac_schedule?.activeHours?.enabled === false
+      && pendingScheduleUpdates === 0
     ), null, { timeout: 10000 });
+    const settingsFreshTabs = await restartedWorker.evaluate(() => {
+      const listener = globalThis.__AC_E2E_COMFORT_ON_CREATED__;
+      if (typeof listener === 'function') chrome.tabs.onCreated.removeListener(listener);
+      globalThis.__AC_E2E_COMFORT_ON_CREATED__ = null;
+      return Array.isArray(globalThis.__AC_E2E_COMFORT_FRESH_TABS__)
+        ? globalThis.__AC_E2E_COMFORT_FRESH_TABS__.map(entry => ({ ...entry }))
+        : [];
+    });
     const finalSettingsState = await restartedPopup.evaluate(async () => ({
       schedule: (await chrome.storage.local.get('ac_schedule')).ac_schedule,
       automationChecked: document.getElementById('automationToggle')?.checked,
@@ -1401,11 +1551,19 @@ async function run() {
       timerPressed: document.getElementById('timerToggle')?.getAttribute('aria-pressed'),
       onValue: document.getElementById('onMinutes')?.value,
       offValue: document.getElementById('offMinutes')?.value,
-      status: document.getElementById('status')?.textContent || ''
+      status: document.getElementById('status')?.textContent || '',
+      pwmAlarm: await chrome.alarms.get('ac-pwm'),
+      comfortEndAlarm: await chrome.alarms.get('ac-comfort-end')
     }));
     const settingsSwitchClicks = await settingsHome.evaluate(
       () => globalThis.__acSettingsSwitchClicks
     );
+    console.log('  舒适启动新鲜页:', JSON.stringify(comfortFreshTabs));
+    console.log('  设置旅程最终状态:', JSON.stringify({
+      finalSettingsState,
+      settingsFreshTabs,
+      settingsSwitchClicks
+    }));
 
     assert(settingsHomeStatus?.isOn === false
         && settingsFixture.enabled === false
@@ -1414,6 +1572,7 @@ async function run() {
       '设置旅程从真实 OFF 页面与停用的 17/13 循环配置开始');
     assert(smartInteractionState.smartPressed === 'true'
         && smartInteractionState.timerPressed === 'false'
+        && sensitivityUpdateResult?.success === true
         && smartInteractionState.sensitivity === '8'
         && smartInteractionState.bubble === '8'
         && smartInteractionState.schedule?.smartMode?.enabled === true
@@ -1434,8 +1593,26 @@ async function run() {
         && pausedAutomationState.schedule?.activeHours?.start === excludedHours.start
         && pausedAutomationState.schedule?.activeHours?.end === excludedHours.end
         && pausedAutomationState.snapshot?._insideActiveHours === false
-        && pausedAutomationState.snapshot?._automationPausedByActiveHours === true,
-      'Popup 以规范化 24h 时段启用自动控制，时段外保持已启用但暂停运行');
+        && pausedAutomationState.snapshot?._automationPausedByActiveHours === false
+        && pausedAutomationState.snapshot?._comfortStartActive === true
+        && pausedAutomationState.schedule?.comfortStartOnConfirmedAt >= settingsEnabledAt
+        && pausedAutomationState.schedule?.comfortStartUntil
+          >= pausedAutomationState.schedule?.comfortStartOnConfirmedAt + 5 * 60 * 1000
+        && pausedAutomationState.schedule?.pageTimerTargetAt
+          >= pausedAutomationState.schedule?.comfortStartUntil
+        && pausedAutomationState.pwmAlarm?.scheduledTime
+          === pausedAutomationState.schedule?.pageTimerTargetAt
+        && pausedAutomationState.pageTimer?.found === true
+        && pausedAutomationState.pageTimer?.value
+        && comfortFreshTabs.length === 1
+        && comfortFreshTabs[0]?.wasActive === false
+        && comfortFreshTabs[0]?.seedReady === true
+        && comfortFreshTabs[0]?.rerouted === true
+        && settingsSwitchClicksAfterComfort === 1
+        && [zhCN, en].some(messages => pausedAutomationState.status.includes(
+          messages.statusComfortStartOK.message
+        )),
+      'Popup 在规范化 24h 时段外启用自动控制：仅确认一次 ON，并以页面定时器保证至少五分钟舒适启动');
     assert(pausedAutomationState.activeBoundaryAlarm?.scheduledTime
           > pausedAutomationState.observedAt
         && pausedAutomationState.activeBoundaryAlarm.scheduledTime
@@ -1450,8 +1627,13 @@ async function run() {
         && invalidMinutesState.schedule?.offMinutes === minutesSavedState.offMinutes,
       '循环分钟数 0 原位报错并保留原文，已保存 21/9 不被静默改写');
     assert(finalSettingsState.schedule?.enabled === false
+        && disableAutomationResult?.success === true
+        && restoredMinutesResult?.success === true
+        && disableActiveHoursResult?.success === true
         && finalSettingsState.schedule?.activeHours?.enabled === false
         && finalSettingsState.schedule?.smartMode?.enabled === false
+        && finalSettingsState.schedule?.comfortStartUntil === 0
+        && finalSettingsState.schedule?.comfortStartOnConfirmedAt === 0
         && finalSettingsState.schedule?.onMinutes === 21
         && finalSettingsState.schedule?.offMinutes === 9
         && finalSettingsState.automationChecked === false
@@ -1459,10 +1641,16 @@ async function run() {
         && finalSettingsState.timerPressed === 'true'
         && finalSettingsState.onValue === '21'
         && finalSettingsState.offValue === '9'
+        && settingsFreshTabs.length === 2
+        && settingsFreshTabs.every(tab => tab.wasActive === false
+          && tab.seedReady === true
+          && tab.rerouted === true)
+        && !finalSettingsState.pwmAlarm
+        && !finalSettingsState.comfortEndAlarm
         && finalSettingsState.status.trim().length > 0,
       '非法分钟数不阻止总开关安全停用，最终 Popup 与 storage 回到停用循环 21/9');
-    assert(settingsSwitchClicks === 0,
-      '总开关、模式、时段和分钟设置全旅程不直接点击真实 AC OFF 开关');
+    assert(settingsSwitchClicks === 1,
+      '全旅程只有 false→true 舒适启动点击一次真实 AC ON；模式、时段、分钟和停用均零额外点击');
 
     // === 英文 locale：真实渲染、键盘顺序、帮助与完整诊断复制 ===
     console.log('\n--- 步骤 7: 验证英文 Popup 与键盘/复制旅程 ---\n');

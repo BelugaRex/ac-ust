@@ -11,7 +11,11 @@ const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const AC_PAGE = 'https://w5.ab.ust.hk/njggt/app/home';
 const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [10000, 15000, 20000];
+const COMFORT_START_MINUTES = 5;
+const COMFORT_START_RETRY_MS = 60_000;
+const COMFORT_START_END_ALARM = 'ac-comfort-end';
 const STORAGE_KEY = 'ac_schedule';
+const INSTALL_BOOTSTRAP_KEY = 'ac_install_bootstrap_complete';
 const DIAGNOSTIC_LOG_KEY = 'ac_diagnostic_log';
 const DIAGNOSTIC_LOG_MAX_ENTRIES = 50;
 const DIAGNOSTIC_LOG_MAX_MESSAGE_LENGTH = 300;
@@ -84,6 +88,8 @@ let schedule = {
   pageTimerError: '',
   pageTimerRetryAt: 0,
   pageTimerRetryMinutes: 0,
+  comfortStartUntil: 0,
+  comfortStartOnConfirmedAt: 0,
   smartOnBoundaryAt: 0,
   activeHours: { enabled: false, start: '08:00', end: '23:00' },  // 两种自动控制共用的运行时段（白名单，同日）
   smartMode: { enabled: false, sensitivity: 5 }  // v0.8.0: 智能模式（天气驱动的开启时长，灵敏度 0~10 档位）
@@ -141,7 +147,8 @@ function releasePwmStepOwnership(automationRevision) {
 const AUTOMATION_RUNTIME_ALARMS = new Set([
   'ac-pwm',
   'ac-badge-tick',
-  'ac-watchdog'
+  'ac-watchdog',
+  COMFORT_START_END_ALARM
 ]);
 
 const PWM_TRIGGER_STRICT_OPTIONS = Object.freeze({
@@ -157,6 +164,251 @@ const PWM_TRIGGER_SNAPSHOT_OPTIONS = Object.freeze({
   ...PWM_TRIGGER_NEXT_ONLY_OPTIONS,
   allowDisabled: true
 });
+
+// ===== 五分钟舒适启动（仅 false→true / 首次安装） =====
+// 这是本机运行态，不进入 chrome.storage.sync。它临时越过 active-hours 门禁，
+// 但不绕过任何页面安全条件：ON 仍必须经唯一 toggleAC 链确认新的
+// `Execution succeeded`；Power-off after 仍必须经独立新鲜页读回。
+function isComfortStartActive(now = Date.now()) {
+  const nowMs = now instanceof Date ? now.getTime() : Number(now);
+  const until = Number(schedule.comfortStartUntil) || 0;
+  return schedule.enabled === true
+    && Number.isFinite(nowMs)
+    && until > nowMs;
+}
+
+async function scheduleComfortStartEndAlarm() {
+  await chrome.alarms.clear('ac-comfort-end');
+  const until = Number(schedule.comfortStartUntil) || 0;
+  if (!isComfortStartActive() || until <= Date.now()) return false;
+  return createAlarm(COMFORT_START_END_ALARM, { when: until });
+}
+
+async function finishComfortStart(reason = '') {
+  const until = Number(schedule.comfortStartUntil) || 0;
+  if (!until) {
+    await chrome.alarms.clear('ac-comfort-end');
+    return { handled: false, automationAllowed: isAutomationAllowed() };
+  }
+
+  if (Date.now() + 1000 < until) {
+    await scheduleComfortStartEndAlarm();
+    return { handled: true, active: true, automationAllowed: true };
+  }
+
+  schedule.comfortStartUntil = 0;
+  schedule.comfortStartOnConfirmedAt = 0;
+  await chrome.alarms.clear('ac-comfort-end');
+  if (!schedule.enabled) {
+    await persistSchedule(`comfort-start-ended-${reason || 'disabled'}`, {
+      syncFromLiveAlarm: false
+    });
+    return { handled: true, automationAllowed: false };
+  }
+
+  if (!isWithinActiveHours()) {
+    await resetDisabledPwmRuntime();
+    await persistSchedule('comfort-start-ended-outside-hours-pre-shutdown', {
+      syncFromLiveAlarm: false
+    });
+    const shutdownResult = await requestTimerBasedShutdown('comfort-start-ended-outside-hours');
+    if (!shutdownResult?.success) {
+      schedule.pageTimerError = `五分钟舒适启动结束后页面关机定时器未确认：${shutdownResult?.error || '未知错误'}`;
+      await persistSchedule('comfort-start-ended-outside-hours-failed', {
+        syncFromLiveAlarm: false
+      });
+    }
+    await rescheduleSmartWeatherAlarm();
+    return { handled: true, automationAllowed: false, shutdownResult };
+  }
+
+  await persistSchedule(`comfort-start-ended-${reason || 'inside-hours'}`, {
+    syncFromLiveAlarm: false
+  });
+  return { handled: true, automationAllowed: true };
+}
+
+async function deferComfortStart(error, automationRevision) {
+  if (!isAutomationOperationCurrent(automationRevision)) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
+
+  const now = Date.now();
+  const until = Number(schedule.comfortStartUntil) || 0;
+  const retryAt = Math.min(now + COMFORT_START_RETRY_MS, until || (now + COMFORT_START_RETRY_MS));
+  schedule.pwmState = 'on';
+  schedule.pageTimerError = `五分钟舒适启动未确认：${error || '未知错误'}；1 分钟后重试`;
+  const alarmCreated = retryAt > now
+    ? await createPwmAlarmFromPlan(
+      { nextTriggerAt: retryAt },
+      'comfort-start-retry',
+      automationRevision
+    )
+    : false;
+  await scheduleComfortStartEndAlarm();
+  if (alarmCreated) await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+  if (!isAutomationOperationCurrent(automationRevision)) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
+  await persistSchedule('comfort-start-retry', { syncFromLiveAlarm: false });
+  await updateBadge();
+  void appendDiagnosticLog('warn', 'comfort-start', new Error(schedule.pageTimerError));
+  return {
+    success: false,
+    error: schedule.pageTimerError,
+    retryAt: alarmCreated ? schedule.nextTriggerAt : 0,
+    minimumMinutes: COMFORT_START_MINUTES
+  };
+}
+
+async function runComfortStart(reason = 'user-enable') {
+  if (!schedule.enabled) {
+    return { success: false, cancelled: true, error: '自动控制未启用' };
+  }
+
+  const now = Date.now();
+  const existingMinimumTargetAt = Number(schedule.comfortStartUntil) || 0;
+  const existingOnConfirmedAt = Number(schedule.comfortStartOnConfirmedAt) || 0;
+  const restoreExistingMinimum = (reason === 'retry' || reason === 'startup-recovery')
+    && existingMinimumTargetAt > now;
+  const reuseConfirmedMinimum = restoreExistingMinimum && existingOnConfirmedAt > 0;
+  const provisionalPlan = planComfortStart({}, null, {
+    now,
+    minutes: COMFORT_START_MINUTES,
+    ...(restoreExistingMinimum ? { minimumTargetAt: existingMinimumTargetAt } : {})
+  });
+
+  pwmRuntimeRevision += 1;
+  const automationRevision = pwmRuntimeRevision;
+  invalidateTimerBasedShutdown();
+  schedule.comfortStartUntil = provisionalPlan.minimumTargetAt;
+  if (!restoreExistingMinimum) schedule.comfortStartOnConfirmedAt = 0;
+  schedule.pwmState = 'on';
+  setNextTriggerAt(0);
+  schedule.alarmCreatedAt = 0;
+  schedule.alarmDelayMinutes = 0;
+  schedule.pageTimerRetryAt = 0;
+  schedule.pageTimerRetryMinutes = 0;
+  await cancelAutomaticOnRequests();
+  if (acToggleInFlight) {
+    await acToggleInFlight.catch(() => {});
+  }
+  await clearPwmAlarm(automationRevision);
+  await chrome.alarms.clear('ac-page-timer-retry');
+  await chrome.alarms.clear('ac-comfort-end');
+  if (!isAutomationOperationCurrent(automationRevision)) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
+  await persistSchedule(`comfort-start-${reason}-claim`, { syncFromLiveAlarm: false });
+
+  const toggleResult = await toggleAC('on', {
+    notAfterAt: schedule.comfortStartUntil,
+    requireAutomationAllowed: true,
+    automationRevision
+  });
+  if (!isAutomationOperationCurrent(automationRevision)) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
+  if (!toggleResult?.success) {
+    return deferComfortStart(
+      toggleResult?.error || '页面未确认新的 Execution succeeded',
+      automationRevision
+    );
+  }
+
+  // 新点击必须先等 Execution succeeded + ON 收敛；已经 ON 则由 toggleAC
+  // 幂等预检零点击成功。两条路径到这里才允许读取并设置 Power-off after。
+  const confirmedAt = Date.now();
+  if (!reuseConfirmedMinimum) {
+    const confirmedFloorPlan = planComfortStart({}, null, {
+      now: confirmedAt,
+      minutes: COMFORT_START_MINUTES
+    });
+    schedule.comfortStartOnConfirmedAt = confirmedAt;
+    // 在下一次页面 await 前立即换成“确认 ON 后五分钟”的 floor。否则 ON 若在
+    // 原尝试窗口末尾才收敛，getPageTimer 的几秒等待会被旧截止误判为失效。
+    schedule.comfortStartUntil = confirmedFloorPlan.minimumTargetAt;
+  }
+  await persistSchedule(`comfort-start-${reason}-confirmed-on`, {
+    syncFromLiveAlarm: false
+  });
+  const pageTimerInput = await getCurrentPageTimer();
+  if (!isAutomationOperationCurrent(automationRevision)) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
+  const comfortPlan = planComfortStart(schedule, pageTimerInput, {
+    now: confirmedAt,
+    minutes: COMFORT_START_MINUTES,
+    ...(reuseConfirmedMinimum ? { minimumTargetAt: existingMinimumTargetAt } : {})
+  });
+  schedule.comfortStartUntil = comfortPlan.minimumTargetAt;
+
+  const timerResult = comfortPlan.reuseFreshProof
+    ? {
+      success: true,
+      alreadyArmed: true,
+      targetAt: comfortPlan.targetAt,
+      actualDelayMinutes: comfortPlan.timerMinutes
+    }
+    : await setPageTimer(comfortPlan.timerMinutes, {
+      retryOnFailure: false,
+      targetAt: comfortPlan.targetAt,
+      automationRevision
+    });
+  if (!isAutomationOperationCurrent(automationRevision)) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
+  if (!timerResult?.success) {
+    return deferComfortStart(
+      timerResult?.error || 'Power-off after 新鲜页验证失败',
+      automationRevision
+    );
+  }
+
+  schedule.pwmState = 'off';
+  schedule.pageTimerError = '';
+  schedule.pageTimerRetryAt = 0;
+  schedule.pageTimerRetryMinutes = 0;
+  const alarmCreated = await createPwmAlarmFromPlan(
+    { nextTriggerAt: comfortPlan.targetAt },
+    'comfort-start-complete',
+    automationRevision
+  );
+  if (!alarmCreated) {
+    return deferComfortStart('PWM 主闹钟创建失败', automationRevision);
+  }
+  await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+  await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+  if (comfortPlan.targetAt > comfortPlan.minimumTargetAt + 1000) {
+    await scheduleComfortStartEndAlarm();
+  } else {
+    await chrome.alarms.clear('ac-comfort-end');
+  }
+  if (!isAutomationOperationCurrent(automationRevision)) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
+  await persistSchedule(`comfort-start-${reason}-complete`, {
+    syncFromLiveAlarm: false
+  });
+  await updateBadge();
+  return {
+    success: true,
+    alreadyOn: toggleResult.alreadyDone === true,
+    targetAt: comfortPlan.targetAt,
+    minimumTargetAt: comfortPlan.minimumTargetAt,
+    preservedLaterTimer: comfortPlan.targetAt > comfortPlan.minimumTargetAt,
+    minimumMinutes: COMFORT_START_MINUTES
+  };
+}
+
+async function preemptAutomaticOnForExplicitDisable() {
+  pwmRuntimeRevision += 1;
+  schedule.comfortStartUntil = 0;
+  schedule.comfortStartOnConfirmedAt = 0;
+  invalidateTimerBasedShutdown();
+  await chrome.alarms.clear('ac-comfort-end');
+  await cancelAutomaticOnRequests();
+}
 
 // ===== Active Hours（两种自动控制共用的运行时段白名单） =====
 // 启用后：在 [start, end) 时段内允许循环定时或智能控制运行；时段外暂停自动执行。
@@ -181,7 +433,10 @@ function isWithinActiveHours(now = new Date()) {
 }
 
 function isAutomationAllowed(now = new Date()) {
-  return schedule.enabled && isWithinActiveHours(now);
+  const nowMs = now instanceof Date ? now.getTime() : Number(now);
+  const comfortActive = Number.isFinite(nowMs)
+    && Number(schedule.comfortStartUntil) > nowMs;
+  return schedule.enabled && (isWithinActiveHours(now) || comfortActive);
 }
 
 function isAutomationOperationCurrent(automationRevision) {
@@ -228,7 +483,8 @@ function getAutomaticOnDeadline(requestedDeadline = 0, now = new Date()) {
     ? requested
     : 0;
 
-  if (schedule.activeHours?.enabled && isWithinActiveHours(now)) {
+  if (!isComfortStartActive(now)
+      && schedule.activeHours?.enabled && isWithinActiveHours(now)) {
     const activeBoundaryAt = getNextActiveBoundary(now);
     if (activeBoundaryAt > nowMs) {
       deadline = deadline > 0
@@ -264,6 +520,13 @@ async function rescheduleSmartWeatherAlarm() {
 async function onActiveBoundaryCrossed() {
   // 重新调度下一次边界（先调度，避免后续 await 抛出时漏掉）
   await rescheduleActiveBoundary();
+
+  // 舒适启动是用户刚刚显式开启自动控制后的短暂优先阶段。边界到达只记录并
+  // 调度下一次；独立 ac-comfort-end 会在满五分钟后恢复正常时段策略。
+  if (isComfortStartActive()) {
+    console.log('[ac-ust] active hours boundary: comfort start still active');
+    return;
+  }
 
   // 提取（Fowler Extract Function）：退出运行时段暂停路径——B1 顺序：先 persist 已重置运行态再执行长流程关机。
   async function shutdownAfterActiveHoursLeave() {
@@ -536,6 +799,7 @@ async function applyPreparedSmartModeDurations(options = {}) {
 async function reapplySmartSensitivityNow() {
   if ((typeof isAutomationAllowed === 'function' && !isAutomationAllowed())
       || !schedule.smartMode?.enabled) return;
+  if (isComfortStartActive()) return { comfortStartActive: true };
   if (pwmStepRunning) return { deferred: true };  // PWM 释放后尾随重算
 
   const wasOnPhase = schedule.pwmState === 'off';
@@ -687,6 +951,8 @@ async function resetDisabledPwmRuntime() {
   await cancelAutomaticOnRequests();
   scheduleLoadBlockedRevision = pwmRuntimeRevision;
   lastPwmStepAt = 0;
+  schedule.comfortStartUntil = 0;
+  schedule.comfortStartOnConfirmedAt = 0;
   schedule.pwmState = 'off';
   schedule.smartOnBoundaryAt = 0;
   setNextTriggerAt(0);
@@ -695,6 +961,7 @@ async function resetDisabledPwmRuntime() {
   await clearPwmAlarm(null, true);
   await chrome.alarms.clear('ac-badge-tick');
   await chrome.alarms.clear('ac-watchdog');
+  await chrome.alarms.clear('ac-comfort-end');
   await updateBadge();
 }
 
@@ -977,6 +1244,8 @@ async function clearAutomationRuntimeAlarmsWhileBlocked(
   await chrome.alarms.clear('ac-badge-tick');
   if (!blockIsCurrent()) return false;
   await chrome.alarms.clear('ac-watchdog');
+  if (!blockIsCurrent()) return false;
+  await chrome.alarms.clear('ac-comfort-end');
   return blockIsCurrent();
 }
 
@@ -1183,6 +1452,7 @@ async function applySyncedPhase(remote, reason = '') {
     const automationRevision = pwmRuntimeRevision;
     const adopt = computePhaseAdoption(schedule, remote, { lastSyncedAt });
     if (!adopt) return false;
+    if (isComfortStartActive()) return false;
     if (!automationAllowed || !isAutomationOperationCurrent(automationRevision)) return false;
 
     const oldPwmState = schedule.pwmState;
@@ -1377,7 +1647,9 @@ async function tryAdoptSyncedState(reason = '', explicitRemote = null) {
 // 优雅降级：page timer 并非服务器同步时，读回的是本机刚写的值——偏差 <
 // toleranceMs(60s)，computePageTimerAdoption 返回 null，不干预，功能等于关闭。
 async function tryAdoptPageTimer(reason = '') {
-  if (!isAutomationAllowed() || isCurrentPwmStepRunning()) return false;
+  if (!isAutomationAllowed()
+      || isComfortStartActive()
+      || isCurrentPwmStepRunning()) return false;
   const automationRevision = pwmRuntimeRevision;
   try {
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
@@ -1389,7 +1661,8 @@ async function tryAdoptPageTimer(reason = '') {
 
     const adopt = computePageTimerAdoption(schedule, result, { now: Date.now() });
     if (!adopt) return false;
-    if (isCurrentPwmStepRunning()
+    if (isComfortStartActive()
+        || isCurrentPwmStepRunning()
         || !isAutomationOperationCurrent(automationRevision)) return false;
 
     // 采纳 page timer 值作为权威"关"时刻
@@ -1603,10 +1876,17 @@ async function init() {
     // 新装在另一台设备的扩展启动时会先采用主机的 nextTriggerAt，避免本地从默认值跑偏。
     await tryAdoptSyncedState('init');
     // v0.5.10：page timer 已升为跨设备主同步通道（无论 pwmState 都会尝试对齐）
-    await tryAdoptPageTimer('init');
+    if (!isComfortStartActive()) {
+      await tryAdoptPageTimer('init');
+    }
     await ensureOffscreen();
     startHeartbeat();
-    await setupAlarms();
+    if (isComfortStartActive()) {
+      // 仅恢复 storage 中已存在的舒适事务；普通 SW 重启不会创建新事务。
+      await runSerializedScheduleUpdate(() => runComfortStart('startup-recovery'));
+    } else {
+      await setupAlarms();
+    }
     await updateBadge();
     if (isAutomationAllowed()) {
       await createAlarm('ac-watchdog', { periodInMinutes: 5 });
@@ -2423,6 +2703,18 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     // （init()→setupAlarms()→syncStoredTriggerFromAlarm() 会覆写 alarmCreatedAt 为 Date.now()，
     //   导致 alarm.scheduledTime ≈ Date.now() ≤ alarmCreatedAt+1000 成立，闹钟被丢弃）。
     try {
+      const comfortUntil = Number(schedule.comfortStartUntil) || 0;
+      if (comfortUntil > 0) {
+        const alarmAt = Number(alarm.scheduledTime) || Date.now();
+        if (isComfortStartActive() && alarmAt + 1000 < comfortUntil) {
+          await runSerializedScheduleUpdate(() => runComfortStart('retry'));
+          return;
+        }
+        const comfortEnd = await runSerializedScheduleUpdate(
+          () => finishComfortStart('pwm-boundary')
+        );
+        if (!comfortEnd?.automationAllowed) return;
+      }
       await runPwmStep({ scheduledTime: alarm.scheduledTime });
     } catch (e) {
       console.error('[AC扩展] PWM 步骤执行失败:', e);
@@ -2440,6 +2732,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
         await persistSchedule('onAlarm-error-recovery');
       }
     }
+    return;
   }
 
   if (alarm.name === 'ac-watchdog') {
@@ -2465,6 +2758,17 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       void appendDiagnosticLog('warn', 'alarm-active-boundary', e);
       rescheduleActiveBoundary();  // 出错也重新调度，避免漏掉下次
     }
+  }
+
+  if (alarm.name === 'ac-comfort-end') {
+    try {
+      await runSerializedScheduleUpdate(() => finishComfortStart('end-alarm'));
+    } catch (e) {
+      console.warn('[AC扩展] 五分钟舒适启动结束处理失败:', e?.message);
+      void appendDiagnosticLog('warn', 'alarm-comfort-start-end', e);
+      await scheduleComfortStartEndAlarm();
+    }
+    return;
   }
 
   if (alarm.name === 'ac-smart-weather') {
@@ -3012,6 +3316,7 @@ async function getCurrentPageTimer() {
 
 async function ensureScheduleClock() {
   await loadScheduleFromStorage();
+  if (isComfortStartActive()) return;
   if (!isAutomationAllowed()) return;
   await backfillNextTriggerAt(false);
   // 间隔模式
@@ -3044,6 +3349,9 @@ async function ensureScheduleClock() {
 }
 
 async function repairScheduleClock() {
+  if (isComfortStartActive()) {
+    return { success: false, reason: '五分钟舒适启动进行中', schedule };
+  }
   const automationRevision = pwmRuntimeRevision;
   // 提取（Fowler Extract Function）：当前为 ON 时的关机过渡——先保留 ON 安全检查点，新鲜页确认定时器后才恢复 OFF。
   async function tryArmOffTransition(status) {
@@ -3386,7 +3694,10 @@ async function getScheduleSnapshot(lite = false) {
     ? isWithinActiveHours()
     : true;
   snapshot._insideActiveHours = insideActiveHours;
-  snapshot._automationPausedByActiveHours = schedule.enabled && !insideActiveHours;
+  snapshot._comfortStartActive = isComfortStartActive();
+  snapshot._automationPausedByActiveHours = schedule.enabled
+    && !insideActiveHours
+    && !snapshot._comfortStartActive;
 
   enrichScheduleSnapshot(snapshot, alarm, liveAlarmEnd);
 
@@ -3629,8 +3940,10 @@ async function ensureDiagnosticAlarms() {
     }
   }
 
-  const pwmNeededRepair = !pwmAlarm || pwmAlarm.scheduledTime <= Date.now() - 60000;
-  if (!pwmAlarm || pwmAlarm.scheduledTime <= Date.now() - 60000) {
+  const comfortStartInFlight = isComfortStartActive() && !pwmAlarm;
+  const pwmNeededRepair = !comfortStartInFlight
+    && (!pwmAlarm || pwmAlarm.scheduledTime <= Date.now() - 60000);
+  if (pwmNeededRepair) {
     await ensureScheduleClock();
   }
 
@@ -3659,7 +3972,7 @@ async function ensureDiagnosticAlarms() {
     repairs.push('pwm-trigger');
   }
 
-  const pwmStepInFlight = isCurrentPwmStepRunning();
+  const pwmStepInFlight = isCurrentPwmStepRunning() || comfortStartInFlight;
 
   return {
     success: !!badgeAlarm
@@ -3671,7 +3984,7 @@ async function ensureDiagnosticAlarms() {
     before: beforeAlarms,
     repairs,
     schedule: { ...schedule },
-    pwmStepRunning: isCurrentPwmStepRunning(),
+    pwmStepRunning: pwmStepInFlight,
     alarms: {
       badge: badgeAlarm ? { scheduledTime: badgeAlarm.scheduledTime } : null,
       watchdog: watchdogAlarm ? { scheduledTime: watchdogAlarm.scheduledTime, periodInMinutes: watchdogAlarm.periodInMinutes } : null,
@@ -3742,6 +4055,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     await initReady;
 
     if (msg.type === 'updateSchedule') {
+      // 明确停用不排在长达数十秒的页面确认之后：先失效 revision 并向主世界
+      // 发送取消，再进入串行事务完成 storage/闹钟/关机定时器收口。
+      if (msg.data?.enabled === false) {
+        await preemptAutomaticOnForExplicitDisable();
+      }
       await runSerializedScheduleUpdate(async () => {
       // 提取（Fowler Extract Function）：用户停用路径——B1 顺序：先持久化"已关闭"状态再执行关机。
       const shutdownAfterScheduleDisable = async ({ activeHoursPause = false } = {}) => {
@@ -3806,22 +4124,34 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
       const activeHoursChanged = previousActiveHours !== JSON.stringify(schedule.activeHours);
       const automationAllowed = isAutomationAllowed();
+      const comfortRequested = !wasEnabled && schedule.enabled;
       let offResult = null;
+      let comfortStart = null;
+      let startImmediately = false;
       if (!schedule.enabled) {
         if (wasEnabled) {
           offResult = await shutdownAfterScheduleDisable();
         }
+      } else if (comfortRequested) {
+        comfortStart = await runComfortStart('user-enable');
       } else if (!automationAllowed
           && (wasAutomationAllowed || !wasEnabled || activeHoursChanged || restart)) {
         offResult = await shutdownAfterScheduleDisable({ activeHoursPause: true });
-      } else if (automationAllowed && (!wasAutomationAllowed || restart)) {
+      } else if (automationAllowed
+          && (!wasAutomationAllowed || restart)
+          && !isComfortStartActive()) {
         schedule.pwmState = 'on';
+        startImmediately = true;
         // 不在这里 clear nextTriggerAt——让接下来的 runPwmStep() 用正确值覆写。
         // 如果在这里清零，storage 会被写入 nextTriggerAt=0，弹窗读到就会显示缺失。
       }
 
       await persistSchedule('updateSchedule');
-      await setupAlarms(automationAllowed && (!wasAutomationAllowed || restart));
+      if (comfortRequested) {
+        await rescheduleSmartWeatherAlarm();
+      } else {
+        await setupAlarms(startImmediately);
+      }
       // 管理看门狗和每分钟 PWM 心跳闹钟
       if (isAutomationAllowed()) {
         await createAlarm('ac-watchdog', { periodInMinutes: 5 });
@@ -3831,7 +4161,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // [v0.5.6] 跨设备同步：用户改设置 / toggle 是低频事件，立即推送
       // 在 sendResponse 之前完成推送，让 popup 拿到已推送的状态（虽然异步到达对端有时延）。
       await syncScheduleToSync('updateSchedule');
-      sendResponse({ success: true, schedule, offResult });
+      sendResponse({ success: true, schedule, offResult, comfortStart });
       });
       return;
     }
@@ -3929,7 +4259,16 @@ chrome.runtime.onInstalled.addListener(async (details) => {
     // [v0.5.6] init() 已先尝试从 chrome.storage.sync 采用远端状态。
     // 这里仅当本地仍无 schedule 时才写默认值——避免在另一台设备已运行 PWM 时
     // 用本地默认值覆盖刚被 sync 同步过来的相位。
-    const existing = await chrome.storage.local.get(STORAGE_KEY);
+    const existing = await chrome.storage.local.get([STORAGE_KEY, INSTALL_BOOTSTRAP_KEY]);
+    // Load Unpacked 等环境可能在同一 profile 的后续启动中再次报告 install。
+    // 先以 local marker 认领且只处理一次；否则安装回调尾声会把普通浏览器重启
+    // 或用户稍后的 false→true 误认成首次安装，再启动第二条舒适事务。
+    const firstInstallBootstrap = existing[INSTALL_BOOTSTRAP_KEY] !== true;
+    const installComfortEligible = firstInstallBootstrap
+      && existing[STORAGE_KEY]?.enabled === true;
+    if (firstInstallBootstrap) {
+      await chrome.storage.local.set({ [INSTALL_BOOTSTRAP_KEY]: true });
+    }
     if (!existing[STORAGE_KEY]) {
       await chrome.storage.local.set({
         [STORAGE_KEY]: {
@@ -3944,6 +4283,8 @@ chrome.runtime.onInstalled.addListener(async (details) => {
           alarmDelayMinutes: 0,
           pageTimerTargetAt: 0,
           pageTimerRetryMinutes: 0,
+          comfortStartUntil: 0,
+          comfortStartOnConfirmedAt: 0,
           smartOnBoundaryAt: 0,
           activeHours: { enabled: false, start: '08:00', end: '23:00' },
           smartMode: { enabled: false, sensitivity: 5 }
@@ -3964,6 +4305,12 @@ chrome.runtime.onInstalled.addListener(async (details) => {
       }
     } else {
       console.log('[AC扩展] 首次安装：检测到 schedule 已存在（init 采用 sync 或迁移）跳过默认写入');
+    }
+    await loadScheduleFromStorage();
+    if (schedule.enabled) {
+      if (installComfortEligible && !isComfortStartActive()) {
+        await runSerializedScheduleUpdate(() => runComfortStart('install'));
+      }
     }
   } else if (details.reason === 'update') {
     console.log(`[AC扩展] 已更新（${details.previousVersion} → ${chrome.runtime.getManifest().version}）`);

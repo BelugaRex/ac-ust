@@ -430,6 +430,11 @@ function attachCachedActualStatus(schedule) {
 
 function isAutomationPausedByActiveHours(schedule, now = new Date()) {
   if (!schedule?.enabled || schedule.activeHours?.enabled !== true) return false;
+  const nowMs = now instanceof Date ? now.getTime() : Number(now);
+  if (schedule._comfortStartActive === true
+      || (Number.isFinite(nowMs) && Number(schedule.comfortStartUntil) > nowMs)) {
+    return false;
+  }
   const start = String(schedule.activeHours.start || '').match(/^(\d{2}):(\d{2})$/);
   const end = String(schedule.activeHours.end || '').match(/^(\d{2}):(\d{2})$/);
   if (!start || !end) return true;
@@ -764,12 +769,21 @@ async function updateSchedule(enabled, restart = false) {
 
         currentScheduleEnabled = data.enabled;
         // background 已负责关闭路径；popup 不再发送第二次 toggleNow。
-        showStatus(
-          t(data.enabled
-            ? (data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK')
-            : 'statusClosedOK'),
-          'success'
-        );
+        if (data.enabled && response.comfortStart) {
+          const comfortSucceeded = response.comfortStart?.success === true;
+          if (comfortSucceeded) {
+            showStatus(t('statusComfortStartOK'), 'success');
+          } else {
+            showStatus(t('statusComfortStartRetry'), 'error');
+          }
+        } else {
+          showStatus(
+            t(data.enabled
+              ? (data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK')
+              : 'statusClosedOK'),
+            'success'
+          );
+        }
 
         const alarm = await chrome.alarms.get('ac-pwm');
         if (updateRevision === scheduleUpdateRevision) {

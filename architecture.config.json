@@ -94,7 +94,8 @@
           "computeConfigDiff",
           "parsePageTimerValue",
           "isPageTimerProofFresh",
-          "computePageTimerAdoption"
+          "computePageTimerAdoption",
+          "planComfortStart"
         ]
       },
       "consumers": [
@@ -105,7 +106,8 @@
             "computePhaseAdoption",
             "computeConfigDiff",
             "isPageTimerProofFresh",
-            "computePageTimerAdoption"
+            "computePageTimerAdoption",
+            "planComfortStart"
           ]
         }
       ]
