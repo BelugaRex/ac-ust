@@ -29,6 +29,7 @@ node tools/verify-architecture.mjs
 
 - `pwm-phase-cases.mjs`：PWM、天气预取槽与智能半点规划。
 - `smart-mode-cases.mjs`：智能分钟数、天气解析、精度和降雨边界。
+- `recovery-policy-cases.mjs`：智能当前周期、普通循环 alarm/storage 与两者协调优先级。
 
 **前置条件**:
 - Node.js 20（在仓库根目录运行 `nvm install && nvm use`）
@@ -96,6 +97,7 @@ python3 test/verify-icon.py
 **前置条件**:
 - `npm install playwright`(临时安装,不入 package.json)
 - 优先使用可启动的系统 Chrome/Edge；不可用时脚本会尝试 Playwright Chromium 与 headed/headless 候选
+- 每个浏览器候选只有在真实扩展 Service Worker 注册后才算启动成功；系统浏览器忽略扩展参数时会自动尝试下一候选
 - **WSL2 额外依赖**(2026-08-16 实证):系统缺 `libnspr4/libnss3/libasound` 时,
 把 noble 版 deb 提取出的库放 `.test-profile/libs/extracted/`(已忽略),运行时先
 `export LD_LIBRARY_PATH="$PWD/.test-profile/libs/extracted/usr/lib/x86_64-linux-

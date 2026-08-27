@@ -11,6 +11,7 @@ import pwmPhase from '../pwm-phase.js';
 import smartMode from '../smart-mode.js';
 import { runPwmPhaseCases } from './pwm-phase-cases.mjs';
 import { runSmartModeCases } from './smart-mode-cases.mjs';
+import { runRecoveryPolicyCases } from './recovery-policy-cases.mjs';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -303,6 +304,9 @@ async function runTests() {
 
   beginSuite('智能控制纯决策', '\n\n=== 智能控制纯决策接口 (v0.8.0) ===\n');
   runSmartModeCases(assertPass);
+
+  beginSuite('恢复策略纯决策', '\n\n=== 恢复策略模块化纯决策接口 ===\n');
+  runRecoveryPolicyCases(assertPass);
 
   setSuite('用例 1：诊断自愈');
   verboseLog('\n--- 断言 ---');
@@ -771,7 +775,10 @@ async function runTests() {
 
   const distRequiredFiles = [
     'manifest.json', 'background.js', 'content.js', 'page-confirm.js',
-    'popup.html', 'popup.js', 'popup-diagnostic-fallback.js', 'i18n.js', 'sync-helpers.js', 'pwm-phase.js', 'billing-helpers.js',
+    'popup.html', 'popup.js', 'popup-diagnostic-fallback.js', 'i18n.js',
+    'sync-helpers.js', 'pwm-phase.js', 'smart-recovery.js',
+    'interval-recovery.js', 'recovery-coordinator.js', 'smart-mode.js',
+    'billing-helpers.js',
     'offscreen.html', 'offscreen.js',
     'popup.css',
     '_locales/zh_CN/messages.json', '_locales/en/messages.json',
@@ -1235,7 +1242,27 @@ async function runTests() {
   const backgroundSource = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
   const contentSource = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
   const pageConfirmSource = fs.readFileSync(path.join(ROOT, 'page-confirm.js'), 'utf8');
+  const smartRecoverySource = fs.readFileSync(path.join(ROOT, 'smart-recovery.js'), 'utf8');
+  const intervalRecoverySource = fs.readFileSync(path.join(ROOT, 'interval-recovery.js'), 'utf8');
+  const recoveryCoordinatorSource = fs.readFileSync(path.join(ROOT, 'recovery-coordinator.js'), 'utf8');
   const countOccurrences = (source, needle) => source.split(needle).length - 1;
+
+  const recoveryDecisionSources = [
+    smartRecoverySource,
+    intervalRecoverySource,
+    recoveryCoordinatorSource
+  ];
+  assertPass(recoveryDecisionSources.every(source => (
+    !/\bchrome\s*\./.test(source)
+    && !/\bdocument\s*\./.test(source)
+    && !/\bwindow\s*\./.test(source)
+    && !/\bimportScripts\s*\(/.test(source)
+    && !/\bfetch\s*\(/.test(source)
+  )), 'recovery: 三个模式恢复模块保持浏览器无关的纯决策边界');
+  assertPass(backgroundSource.includes("importScripts('smart-recovery.js');")
+      && backgroundSource.includes("importScripts('interval-recovery.js');")
+      && backgroundSource.includes("importScripts('recovery-coordinator.js');"),
+    'recovery: Service Worker 显式加载智能策略、循环策略与恢复协调器');
 
   assertPass(!popupJs.includes('function clampSmartSensitivityLocal(')
       && !backgroundSource.includes('function clampSmartSensitivity(')
@@ -1353,7 +1380,7 @@ async function runTests() {
 
   const pwmBody = extractSourceSection(
     backgroundSource,
-    'async function runPwmStep({ scheduledTime = 0, recoverSmartCurrentCycle = false } = {})',
+    'async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {})',
     '\n// ----- 设置页面自带定时器',
     'runPwmStep'
   );
@@ -3626,7 +3653,7 @@ async function runTests() {
       && !preparedDurationBody.includes('getSmartWeather(')
       && !preparedDurationBody.includes('fetchSmartWeather')
       && pwmBody.includes('boundaryAt: smartPreparedBoundaryAt')
-      && pwmBody.includes('allowActiveOnPhase: recoverSmartCurrentCycle')
+      && pwmBody.includes('allowActiveOnPhase: recoveringSmartCurrentCycle')
       && !pwmBody.includes('getSmartWeather(')
       && !pwmBody.includes('fetchSmartWeather')
       && !pwmBody.includes('prepareSmartWeatherForBoundary('),
@@ -4031,8 +4058,13 @@ return { reapplySmartSensitivityNow };`
       && backgroundSource.includes('const PWM_TRIGGER_NEXT_ONLY_OPTIONS = Object.freeze({')
       && backgroundSource.includes('const PWM_TRIGGER_SNAPSHOT_OPTIONS = Object.freeze({')
       && /persistReconciledPwmTrigger\([\s\S]{0,160}PWM_TRIGGER_STRICT_OPTIONS,[\s\S]{0,40}automationRevision/.test(backgroundSource)
-      && reconciliationSites.every(([, source]) => source.includes('reconcilePwmTrigger(')
-        || source.includes('persistReconciledPwmTrigger(')),
+      && reconciliationSites.every(([name, source]) => name === 'watchdogCheck'
+        ? source.includes('recoverPwmLifecycle({')
+          && source.includes("preserveLiveStrategy: 'next-only'")
+        : source.includes('reconcilePwmTrigger(')
+          || source.includes('persistReconciledPwmTrigger('))
+      && backgroundSource.includes("context.preserveLiveStrategy === 'next-only'")
+      && backgroundSource.includes('PWM_TRIGGER_NEXT_ONLY_OPTIONS,'),
     '11M: strict、next-only 与只读 snapshot profile 显式委派给 PWM trigger planner');
   assertPass(reconciliationSites.every(([, source]) => !/Math\.abs\([^\n]*(?:scheduledTime|liveDueAt)/.test(source))
       && !backgroundSource.includes('schedule.nextTriggerAt = liveDueAt;'),
@@ -4415,14 +4447,15 @@ return { reapplySmartSensitivityNow };`
       && initBody13.includes('PWM_TRIGGER_NEXT_ONLY_OPTIONS,')
       && initBody13.includes('automationRevision'),
     '13A: Service Worker 初始化会从 legacy/live alarm 回填并持久化 nextTriggerAt');
-  assertPass(setupBody13.includes('await syncStoredTriggerFromAlarm(existingAlarm')
-      && setupBody13.includes('await repairScheduleClock();'),
-    '13B: 启动恢复会同步 live alarm；双重缺失时会安全重建 PWM');
-    assertPass(watchdogBody13.includes("'watchdogCheck'")
-      && watchdogBody13.includes('PWM_TRIGGER_NEXT_ONLY_OPTIONS,')
+  assertPass(setupBody13.includes("source: 'setupAlarms'")
+      && setupBody13.includes("missingClockAction: 'repair-clock'")
+      && setupBody13.includes('await recoverPwmLifecycle({'),
+    '13B: 启动恢复统一委托生命周期协调器；双重缺失时会安全重建 PWM');
+    assertPass(watchdogBody13.includes("source: 'watchdogCheck'")
+      && watchdogBody13.includes("preserveLiveStrategy: 'next-only'")
       && watchdogBody13.includes('automationRevision')
-      && watchdogBody13.includes('restoreIntervalAlarmFromStorage'),
-    '13C: 5 分钟看门狗会校准 storage，并恢复缺失的 PWM alarm');
+      && watchdogBody13.includes('await recoverPwmLifecycle({'),
+    '13C: 5 分钟看门狗经统一协调器校准 storage 并恢复缺失的 PWM alarm');
     assertPass(alarmListenerBody13.includes("'badge-tick-sync'")
       && alarmListenerBody13.includes('PWM_TRIGGER_NEXT_ONLY_OPTIONS,')
       && alarmListenerBody13.includes('automationRevision')
@@ -4646,9 +4679,12 @@ return { reapplySmartSensitivityNow };`
         && initBody13.includes("'init-finalSync'")
         && alarmListenerBody13.includes("'badge-tick-sync'")
         && ensureDiagnosticAlarmsBody.includes("'ensureDiagnosticAlarms'")
-        && [watchdogBody13, initBody13, alarmListenerBody13, ensureDiagnosticAlarmsBody]
+        && [initBody13, alarmListenerBody13, ensureDiagnosticAlarmsBody]
           .every(source => source.includes('PWM_TRIGGER_NEXT_ONLY_OPTIONS,')
-            && /(?:automationRevision|diagnosticRevision)/.test(source)),
+            && /(?:automationRevision|diagnosticRevision)/.test(source))
+        && watchdogBody13.includes("preserveLiveStrategy: 'next-only'")
+        && backgroundSource.includes('context.preserveLiveStrategy === \'next-only\'')
+        && backgroundSource.includes('PWM_TRIGGER_NEXT_ONLY_OPTIONS,'),
     '13M: strict wrapper 与四条副作用校准路径统一委派持久化 helper，并显式保留各自 profile');
   assertPass(ensureDiagnosticAlarmsBody.includes('schedule.smartMode?.enabled && !smartWeatherAlarm')
       && ensureDiagnosticAlarmsBody.includes('await rescheduleSmartWeatherAlarm();')
@@ -5680,7 +5716,10 @@ return { reapplySmartSensitivityNow };`
       'await runPwmStep({ scheduledTime: alarm.scheduledTime });'
     )
       && setupAlarmsBody16.includes(
-        'await runPwmStep({ scheduledTime: existingEnd });'
+        'storedAlarmAt: storedDueAt'
+      )
+      && backgroundSource.includes(
+        'await runPwmStep({ scheduledTime: plan.scheduledTime });'
       )
       && backgroundSource.includes('triggeredBoundaryAt: pwmTriggerScheduledTime'),
     '16F-0B: alarm 与启动期 storage 补执行都传递原计划时刻，异步状态读取后不再丢失 :00/:30 身份');
@@ -5694,15 +5733,15 @@ return { reapplySmartSensitivityNow };`
         '页面已 ON，零点击，直接设置 Power-off after'
       ),
     '16F-0C: 主世界已 ON 的幂等结果显式回传，PWM 零点击后直接进入页面关机定时器');
-  assertPass(backgroundSource.includes('async function recoverSmartCurrentCycleIfNeeded(')
-      && backgroundSource.includes('recoverCurrentCycle: true')
-      && backgroundSource.includes(
-        'scheduledTime: recoveryPlan.boundaryAt,'
-      )
-      && advanceBody.includes('recoverSmartCurrentCycleIfNeeded({')
-      && setupAlarmsBody16.includes('recoverSmartCurrentCycleIfNeeded({')
-      && watchdogBody13.includes('recoverSmartCurrentCycleIfNeeded({'),
-    '16F-0E: 过期闹钟、启动恢复与看门狗都显式接入当前智能 ON 周期恢复，不影响普通入口');
+  assertPass(!backgroundSource.includes('async function recoverSmartCurrentCycleIfNeeded(')
+      && !backgroundSource.includes('function planSmartCurrentCycleRecovery(')
+      && smartRecoverySource.includes('function planSmartRecovery(')
+      && smartRecoverySource.includes('recoverCurrentCycle: true')
+      && recoveryCoordinatorSource.includes('function planPwmLifecycleRecovery(')
+      && advanceBody.includes("source: 'expired-alarm'")
+      && setupAlarmsBody16.includes("source: 'setupAlarms'")
+      && watchdogBody13.includes("source: 'watchdogCheck'"),
+    '16F-0E: 过期闹钟、启动恢复与看门狗共享协调器，智能与普通循环策略各自独立');
   const rescheduleActiveBoundaryBody16 = extractSourceSection(
     backgroundSource,
     'async function rescheduleActiveBoundary() {',
@@ -7335,7 +7374,7 @@ return { reapplySmartSensitivityNow };`
     '16W: 页面定时器相位采纳在 PWM step 已持有当前 revision 时直接跳过，避免并发覆盖相位');
 
   const setupImmediateStart16 = setupAlarmsBody16.indexOf('if (startImmediately) {');
-  const setupImmediateEnd16 = setupAlarmsBody16.indexOf('\n  // ----- 间隔模式 -----', setupImmediateStart16);
+  const setupImmediateEnd16 = setupAlarmsBody16.indexOf('\n  // 恢复入口', setupImmediateStart16);
   const setupImmediateBody16 = setupImmediateStart16 >= 0 && setupImmediateEnd16 > setupImmediateStart16
     ? setupAlarmsBody16.slice(setupImmediateStart16, setupImmediateEnd16)
     : '';

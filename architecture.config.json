@@ -3,7 +3,15 @@
   "entrypoints": {
     "serviceWorker": {
       "file": "background.js",
-      "imports": ["i18n.js", "sync-helpers.js", "pwm-phase.js", "smart-mode.js"]
+      "imports": [
+        "i18n.js",
+        "sync-helpers.js",
+        "pwm-phase.js",
+        "smart-recovery.js",
+        "interval-recovery.js",
+        "recovery-coordinator.js",
+        "smart-mode.js"
+      ]
     },
     "contentScripts": [
       {
@@ -143,6 +151,53 @@
             "planSmartModeOnWindow",
             "alignSmartModeNextTrigger"
           ]
+        },
+        {
+          "file": "smart-recovery.js",
+          "symbols": ["planSmartModeOnWindow"]
+        }
+      ]
+    },
+    {
+      "name": "smart recovery decisions",
+      "provider": {
+        "file": "smart-recovery.js",
+        "symbols": ["planSmartRecovery"]
+      },
+      "consumers": [
+        {
+          "file": "recovery-coordinator.js",
+          "symbols": ["planSmartRecovery"]
+        },
+        {
+          "file": "background.js",
+          "symbols": ["planSmartRecovery"]
+        }
+      ]
+    },
+    {
+      "name": "interval recovery decisions",
+      "provider": {
+        "file": "interval-recovery.js",
+        "symbols": ["planIntervalRecovery"]
+      },
+      "consumers": [
+        {
+          "file": "recovery-coordinator.js",
+          "symbols": ["planIntervalRecovery"]
+        }
+      ]
+    },
+    {
+      "name": "PWM lifecycle recovery decisions",
+      "provider": {
+        "file": "recovery-coordinator.js",
+        "symbols": ["planPwmLifecycleRecovery"]
+      },
+      "consumers": [
+        {
+          "file": "background.js",
+          "symbols": ["planPwmLifecycleRecovery"]
         }
       ]
     },
@@ -196,6 +251,9 @@
       "billing-helpers.js",
       "sync-helpers.js",
       "pwm-phase.js",
+      "smart-recovery.js",
+      "interval-recovery.js",
+      "recovery-coordinator.js",
       "smart-mode.js",
       "offscreen.html",
       "offscreen.js",
@@ -234,6 +292,22 @@
         "\\bdocument\\s*\\.",
         "\\bwindow\\s*\\.",
         "\\blocalStorage\\b",
+        "\\bimportScripts\\s*\\("
+      ]
+    },
+    {
+      "name": "recovery decisions remain browser independent",
+      "files": [
+        "smart-recovery.js",
+        "interval-recovery.js",
+        "recovery-coordinator.js"
+      ],
+      "forbidPatterns": [
+        "\\bchrome\\s*\\.",
+        "\\bdocument\\s*\\.",
+        "\\bwindow\\s*\\.",
+        "\\blocalStorage\\b",
+        "\\bfetch\\s*\\(",
         "\\bimportScripts\\s*\\("
       ]
     },

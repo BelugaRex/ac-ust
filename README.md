@@ -97,6 +97,9 @@ ac-ust/
 ├── billing-helpers.js # 冷气余额解析与 PWM 可用时间估算纯函数
 ├── sync-helpers.js    # 跨设备同步纯函数（chrome.storage.sync + page timer 对齐）
 ├── pwm-phase.js       # PWM 阶段推进、过期恢复与 live alarm 对齐纯函数
+├── smart-recovery.js  # 智能模式当前周期恢复策略（纯决策）
+├── interval-recovery.js # 普通循环 alarm/storage 恢复策略（纯决策）
+├── recovery-coordinator.js # 智能优先、循环兜底的生命周期恢复协调器
 ├── smart-mode.js      # 智能控制纯决策（灵敏度→K、等效温度、开启分钟数，无 chrome.* 副作用）
 ├── offscreen.js       # 冗余保活心跳
 ├── offscreen.html     # offscreen 入口

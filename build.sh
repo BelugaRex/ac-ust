@@ -23,6 +23,9 @@ RUNTIME_FILES=(
   billing-helpers.js
   sync-helpers.js
   pwm-phase.js
+  smart-recovery.js
+  interval-recovery.js
+  recovery-coordinator.js
   smart-mode.js
   offscreen.html
   offscreen.js

@@ -53,17 +53,22 @@ async function launchExtensionContext(preferredOptions = null) {
   let launchError = null;
   const candidates = preferredOptions ? [preferredOptions] : LAUNCH_OPTIONS;
   for (const launchOptions of candidates) {
+    let candidateContext = null;
     try {
       console.log('尝试启动浏览器:', JSON.stringify(launchOptions));
-      const context = await chromium.launchPersistentContext(PROFILE_DIR, {
+      candidateContext = await chromium.launchPersistentContext(PROFILE_DIR, {
         ...launchOptions,
         args: LAUNCH_ARGS
       });
-      console.log('启动成功:', JSON.stringify(launchOptions), '\n');
-      return { context, launchOptions };
+      const serviceWorker = await waitForExtensionServiceWorker(candidateContext);
+      console.log('启动成功且扩展已加载:', JSON.stringify(launchOptions), '\n');
+      return { context: candidateContext, launchOptions, serviceWorker };
     } catch (error) {
       console.log('  失败:', error.message.split('\n')[0]);
       launchError = error;
+      if (candidateContext) {
+        await candidateContext.close().catch(() => {});
+      }
     }
   }
 
@@ -120,7 +125,8 @@ async function run() {
 
   try {
     // 等待 service worker 注册(扩展加载完成的信号)
-    const serviceWorker = await waitForExtensionServiceWorker(context);
+    const serviceWorker = launched.serviceWorker
+      || await waitForExtensionServiceWorker(context);
 
     // 等待扩展完成 init(给 SW 时间跑 init 流程,用 evaluate 轮询而非 waitForFunction)
     const initDeadline = Date.now() + 8000;
@@ -849,7 +855,8 @@ async function run() {
 
     const restarted = await launchExtensionContext(successfulLaunchOptions);
     restartedContext = restarted.context;
-    const restartedWorker = await waitForExtensionServiceWorker(restartedContext, extensionId);
+    const restartedWorker = restarted.serviceWorker
+      || await waitForExtensionServiceWorker(restartedContext, extensionId);
     const restartedWorkerIdentity = await readWorkerIdentity(restartedWorker);
     const restartedColdStorage = await restartedWorker.evaluate(async () => {
       const local = await chrome.storage.local.get('ac_balance_cache');
@@ -950,7 +957,9 @@ async function run() {
 
       const productionFunctionsAvailable = typeof loadScheduleFromStorage === 'function'
         && typeof applyPreparedSmartModeDurations === 'function'
-        && typeof persistSchedule === 'function';
+        && typeof persistSchedule === 'function'
+        && typeof planSmartRecovery === 'function'
+        && typeof planPwmLifecycleRecovery === 'function';
       const planMissing = (await chrome.storage.local.get('ac_smart_weather_plan'))
         .ac_smart_weather_plan === undefined;
       if (!productionFunctionsAvailable) {
@@ -1008,25 +1017,36 @@ async function run() {
           }
         )
         : null;
-      const lifecycleRecoveryPlan = typeof planSmartCurrentCycleRecovery === 'function'
-        ? planSmartCurrentCycleRecovery({
+      const recoveredSchedule = {
+        ...smartSchedule,
+        onMinutes: 21,
+        offMinutes: 9
+      };
+      const lifecycleRecoveryPlan = typeof planPwmLifecycleRecovery === 'function'
+        ? planPwmLifecycleRecovery(recoveredSchedule, {
           now: boundaryAt + 7 * 60_000,
-          scheduledOnAt: boundaryAt + 30 * 60_000,
-          allowStalePhase: true
+          plannedActionAt: boundaryAt + 30 * 60_000,
+          liveAlarmAt: boundaryAt + 30 * 60_000,
+          maxOnMinutes: 25,
+          missingClockAction: 'repair-clock'
         })
         : null;
-      const preservedShortRetryPlan = typeof planSmartCurrentCycleRecovery === 'function'
-        ? planSmartCurrentCycleRecovery({
+      const preservedShortRetryPlan = typeof planPwmLifecycleRecovery === 'function'
+        ? planPwmLifecycleRecovery(recoveredSchedule, {
           now: boundaryAt + 7 * 60_000,
-          scheduledOnAt: boundaryAt + 8 * 60_000,
-          allowStalePhase: true
+          plannedActionAt: boundaryAt + 8 * 60_000,
+          liveAlarmAt: boundaryAt + 8 * 60_000,
+          maxOnMinutes: 25,
+          missingClockAction: 'repair-clock'
         })
         : undefined;
-      const rejectedLateLifecyclePlan = typeof planSmartCurrentCycleRecovery === 'function'
-        ? planSmartCurrentCycleRecovery({
+      const rejectedLateLifecyclePlan = typeof planPwmLifecycleRecovery === 'function'
+        ? planPwmLifecycleRecovery(recoveredSchedule, {
           now: boundaryAt + 20 * 60_000 + 30_000,
-          scheduledOnAt: boundaryAt + 30 * 60_000,
-          allowStalePhase: true
+          plannedActionAt: boundaryAt + 30 * 60_000,
+          liveAlarmAt: boundaryAt + 30 * 60_000,
+          maxOnMinutes: 25,
+          missingClockAction: 'repair-clock'
         })
         : undefined;
       await persistSchedule('e2e-smart-duration', { syncFromLiveAlarm: false });
@@ -1087,13 +1107,17 @@ async function run() {
           === smartBoundaryAt + 21 * 60 * 1000
         && smartWorkerState.tooLateRecoveryPlan?.kind === 'defer',
       '真实 Worker 在明确恢复路径补当前剩余 ON 窗口，安全余量不足时仍等待下个半点');
-    assert(smartWorkerState.lifecycleRecoveryPlan?.kind === 'allow'
+    assert(smartWorkerState.lifecycleRecoveryPlan?.kind === 'recover-smart-current-cycle'
         && smartWorkerState.lifecycleRecoveryPlan?.reason
           === 'smart-on-current-cycle-recovery'
         && smartWorkerState.lifecycleRecoveryPlan?.pageTimerTargetAt
           === smartBoundaryAt + 21 * 60 * 1000
-        && smartWorkerState.preservedShortRetryPlan === null
-        && smartWorkerState.rejectedLateLifecyclePlan === null,
+        && smartWorkerState.preservedShortRetryPlan?.kind === 'preserve-live-alarm'
+        && smartWorkerState.preservedShortRetryPlan?.smartDecisionReason
+          === 'current-cycle-action-preserved'
+        && smartWorkerState.rejectedLateLifecyclePlan?.kind === 'preserve-live-alarm'
+        && smartWorkerState.rejectedLateLifecyclePlan?.smartDecisionReason
+          === 'wait-for-smart-on-window',
       '真实 Worker 生命周期门禁修复跨周期未来闹钟，同时保留本周期短重试并拒绝过迟开机');
     assert(smartPopupReady
         && smartPopupState.smartPressed

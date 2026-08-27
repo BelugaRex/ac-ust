@@ -6,6 +6,9 @@
 importScripts('i18n.js');
 importScripts('sync-helpers.js');  // 跨设备同步的纯函数（composeSyncPayload / computePhaseAdoption）
 importScripts('pwm-phase.js');  // PWM 阶段推进、恢复与 live alarm 对齐的纯决策
+importScripts('smart-recovery.js');  // 智能当前周期恢复策略（纯决策）
+importScripts('interval-recovery.js');  // 普通循环 alarm/storage 恢复策略（纯决策）
+importScripts('recovery-coordinator.js');  // 智能优先、循环兜底的恢复协调策略（纯决策）
 importScripts('smart-mode.js');  // 智能模式纯决策（computeSmartOnMinutes 等，无 chrome.* 副作用）
 const t = (key, ...subs) => I18n.t(key, ...subs);
 
@@ -573,58 +576,125 @@ function setNextTriggerAt(nextTriggerAt) {
   schedule.nextTriggerAt = nextTriggerAt > 0 ? nextTriggerAt : 0;
 }
 
-function planSmartCurrentCycleRecovery({
-  now = Date.now(),
-  scheduledOnAt = 0,
-  allowStalePhase = false
-} = {}) {
-  if (!schedule.enabled || !schedule.smartMode?.enabled) return null;
-  if (!allowStalePhase && schedule.pwmState !== 'on') return null;
-
-  const recoveryPlan = planSmartModeOnWindow(schedule, {
-    now,
-    maxOnMinutes: SMART_MODE.ON_MAX,
-    acIsOn: false,
-    recoverCurrentCycle: true
-  });
-  if (recoveryPlan?.kind !== 'allow'
-      || recoveryPlan.reason !== 'smart-on-current-cycle-recovery') {
-    return null;
+async function executePwmLifecycleRecoveryFallback(action, context) {
+  if (action === 'execute-current') {
+    await runPwmStep();
+    return { handled: true, fallbackAction: action };
   }
-
-  const plannedOnAt = Number(scheduledOnAt);
-  const currentWindowEndsAt = Number(recoveryPlan.pageTimerTargetAt);
-  // 非半点的近期未来闹钟可能是失败后的 1 分钟重试；它早于本周期截止时保留。
-  // 只有缺闹钟、已过期，或下一次 ON 已被推到当前周期之后，才立即恢复。
-  if (Number.isFinite(plannedOnAt)
-      && plannedOnAt > now
-      && plannedOnAt <= currentWindowEndsAt) {
-    return null;
+  if (action === 'repair-clock') {
+    await repairScheduleClock();
+    return { handled: true, fallbackAction: action };
   }
-  return recoveryPlan;
+  return { handled: false, fallbackAction: 'none' };
 }
 
-async function recoverSmartCurrentCycleIfNeeded(options = {}) {
-  if (!isAutomationAllowed()) return false;
-  const now = Number.isFinite(options?.now) ? options.now : Date.now();
+async function recoverPwmLifecycle(context = {}) {
+  const automationRevision = Number.isSafeInteger(context.automationRevision)
+    ? context.automationRevision
+    : pwmRuntimeRevision;
+  if (!isAutomationOperationCurrent(automationRevision)) {
+    return { handled: false, plan: { kind: 'noop', reason: 'automation-stale' } };
+  }
+
+  const now = Number.isFinite(context.now) ? context.now : Date.now();
   const boundaryAt = halfHourBoundaryAtOrBefore(now);
   await applyPreparedSmartModeDurations({
     allowActiveOnPhase: true,
     boundaryAt
   });
-  if (!isAutomationAllowed()) return false;
+  if (!isAutomationOperationCurrent(automationRevision)) {
+    return { handled: false, plan: { kind: 'noop', reason: 'automation-stale' } };
+  }
 
-  const recoveryPlan = planSmartCurrentCycleRecovery({ ...options, now });
-  if (!recoveryPlan) return false;
-
-  console.warn(
-    `[AC扩展] 智能当前周期恢复：立即补执行 ON，绝对关机点=${new Date(recoveryPlan.pageTimerTargetAt).toLocaleTimeString()}`
-  );
-  await runPwmStep({
-    scheduledTime: recoveryPlan.boundaryAt,
-    recoverSmartCurrentCycle: true
+  const rawLiveAlarmAt = Number(context.existingAlarm?.scheduledTime);
+  const liveAlarmAt = Object.hasOwn(context, 'liveAlarmAt')
+    ? Number(context.liveAlarmAt) || 0
+    : (Number.isFinite(rawLiveAlarmAt) && rawLiveAlarmAt > now ? rawLiveAlarmAt : 0);
+  const storedAlarmAt = Object.hasOwn(context, 'storedAlarmAt')
+    ? Number(context.storedAlarmAt) || 0
+    : getStoredAlarmEndMs();
+  const plannedActionAt = Object.hasOwn(context, 'plannedActionAt')
+    ? Number(context.plannedActionAt) || 0
+    : (liveAlarmAt || (storedAlarmAt > now ? storedAlarmAt : 0));
+  const plan = planPwmLifecycleRecovery(schedule, {
+    now,
+    plannedActionAt,
+    liveAlarmAt,
+    storedAlarmAt,
+    expiredAlarmAt: Number(context.expiredAlarmAt) || 0,
+    missingClockAction: context.missingClockAction,
+    maxOnMinutes: SMART_MODE.ON_MAX
   });
-  return true;
+
+  if (plan.kind === 'recover-smart-current-cycle') {
+    console.warn(
+      `[AC扩展] 智能当前周期恢复：立即补执行 ON，绝对关机点=${new Date(plan.pageTimerTargetAt).toLocaleTimeString()}`
+    );
+    await runPwmStep({ scheduledTime: plan.scheduledTime, recoveryPlan: plan });
+    return { handled: true, plan };
+  }
+
+  if (plan.kind === 'preserve-live-alarm') {
+    const reason = context.preserveLiveReason
+      || `${context.source || 'lifecycle'}: 同步现有 PWM 闹钟`;
+    if (context.preserveLiveStrategy === 'next-only') {
+      const triggerPlan = await persistReconciledPwmTrigger(
+        context.existingAlarm,
+        reason,
+        PWM_TRIGGER_NEXT_ONLY_OPTIONS,
+        automationRevision
+      );
+      return { handled: true, plan, triggerPlan };
+    }
+    const synced = await syncStoredTriggerFromAlarm(
+      context.existingAlarm,
+      reason,
+      automationRevision
+    );
+    return { handled: synced, plan };
+  }
+
+  if (plan.kind === 'restore-stored-alarm') {
+    const restored = await restoreIntervalAlarmFromStorage(
+      context.restoreReason || `${context.source || 'lifecycle'}: 按 storage 恢复 PWM 闹钟`
+    );
+    if (restored) return { handled: true, plan };
+    const fallback = await executePwmLifecycleRecoveryFallback(
+      context.failureAction,
+      context
+    );
+    return { ...fallback, plan };
+  }
+
+  if (plan.kind === 'advance-expired-alarm') {
+    const advanced = await executeExpiredIntervalRecovery(
+      plan.scheduledTime,
+      automationRevision
+    );
+    if (advanced) return { handled: true, plan };
+    const fallback = await executePwmLifecycleRecoveryFallback(
+      context.failureAction,
+      context
+    );
+    return { ...fallback, plan };
+  }
+
+  if (plan.kind === 'execute-due-action') {
+    await runPwmStep({ scheduledTime: plan.scheduledTime });
+    return { handled: true, plan };
+  }
+
+  if (plan.kind === 'execute-current-action') {
+    await runPwmStep();
+    return { handled: true, plan };
+  }
+
+  if (plan.kind === 'repair-clock') {
+    await repairScheduleClock();
+    return { handled: true, plan };
+  }
+
+  return { handled: false, plan };
 }
 
 // ===== 智能模式：将军澳 JKB 天气取数 + 动态时长 =====
@@ -1110,12 +1180,26 @@ async function advanceExpiredAlarmToNextBoundary(
   expiredScheduledTime,
   automationRevision = pwmRuntimeRevision
 ) {
-  if (!isAutomationOperationCurrent(automationRevision)) return false;
+  const recovery = await recoverPwmLifecycle({
+    source: 'expired-alarm',
+    automationRevision,
+    expiredAlarmAt: expiredScheduledTime,
+    liveAlarmAt: 0,
+    storedAlarmAt: 0,
+    plannedActionAt: 0,
+    missingClockAction: 'noop',
+    failureAction: 'none'
+  });
+  return recovery.handled;
+}
 
-  if (await recoverSmartCurrentCycleIfNeeded({
-    scheduledOnAt: 0,
-    allowStalePhase: true
-  })) return true;
+// 普通循环模式的过期相位执行器。策略选择由 recoverPwmLifecycle 统一完成；
+// 本函数只保留页面定时器、闹钟与 storage 等副作用。
+async function executeExpiredIntervalRecovery(
+  expiredScheduledTime,
+  automationRevision = pwmRuntimeRevision
+) {
+  if (!isAutomationOperationCurrent(automationRevision)) return false;
 
   const recoverySchedule = { ...schedule };
   let observations = {};
@@ -1821,48 +1905,40 @@ async function watchdogCheck() {
     if (!isAutomationAllowed()) return;
   }
 
-  // 提取（Fowler Extract Function）：看门狗缺失闹钟恢复——按剩余时间补恢复，失败则补执行当前阶段动作。
-  async function recoverMissingPwmAlarm() {
-    const restored = await restoreIntervalAlarmFromStorage('看门狗：PWM 闹钟缺失，已按剩余时间补恢复');
-    if (restored) return;
-    console.warn('[AC扩展] 看门狗：PWM 闹钟缺失，补执行当前阶段动作');
-    try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
-  }
-
-  // 提取（Fowler Extract Function）：看门狗过期闹钟恢复——补恢复 → 推进下一周期边界 → 补执行。
-  async function recoverExpiredPwmAlarm(alarm) {
-    const restored = await restoreIntervalAlarmFromStorage('看门狗：PWM 闹钟过期，已按剩余时间补恢复');
-    if (restored) return;
-    // 尝试从已过期闹钟推进到下一周期边界，避免重置为整段 60 分钟
-    const advanced = await advanceExpiredAlarmToNextBoundary(alarm.scheduledTime);
-    if (advanced) return;
-    console.warn('[AC扩展] 看门狗：PWM 闹钟已过期，触发执行...');
-    try { await runPwmStep(); } catch (e) { /* 已在 onAlarm 中有恢复逻辑 */ }
-  }
-
   const automationRevision = pwmRuntimeRevision;
   const alarm = await chrome.alarms.get('ac-pwm');
   if (!isAutomationOperationCurrent(automationRevision)) return;
-  if (await recoverSmartCurrentCycleIfNeeded({
-    scheduledOnAt: getLiveAlarmEndMs(alarm) || getStoredAlarmEndMs(),
-    allowStalePhase: true
-  })) return;
+  const now = Date.now();
+  const rawAlarmAt = Number(alarm?.scheduledTime) || 0;
+  const storedAlarmAt = getStoredAlarmEndMs();
+  const alarmIsFuture = rawAlarmAt > now;
+  const alarmIsExpired = rawAlarmAt > 0 && rawAlarmAt <= now - 60000;
+  const storedRecoveryAt = storedAlarmAt > now ? storedAlarmAt : 0;
+  const recovery = await recoverPwmLifecycle({
+    source: 'watchdogCheck',
+    now,
+    automationRevision,
+    existingAlarm: alarm,
+    liveAlarmAt: alarmIsFuture ? rawAlarmAt : 0,
+    storedAlarmAt: alarmIsFuture || !alarm || alarmIsExpired
+      ? storedRecoveryAt
+      : 0,
+    expiredAlarmAt: alarmIsExpired ? rawAlarmAt : 0,
+    plannedActionAt: alarmIsFuture ? rawAlarmAt : storedRecoveryAt,
+    missingClockAction: !alarm ? 'execute-current' : 'noop',
+    failureAction: 'execute-current',
+    preserveLiveStrategy: 'next-only',
+    preserveLiveReason: 'watchdogCheck',
+    restoreReason: alarmIsExpired
+      ? '看门狗：PWM 闹钟过期，已按剩余时间补恢复'
+      : '看门狗：PWM 闹钟缺失，已按剩余时间补恢复'
+  });
 
-  // 活闹钟存在 → 确保 storage 的 nextTriggerAt 与 alarm 同步（防止 SW 被 kill 后丢失）
-  const triggerPlan = await persistReconciledPwmTrigger(
-    alarm,
-    'watchdogCheck',
-    PWM_TRIGGER_NEXT_ONLY_OPTIONS,
-    automationRevision
-  );
-  if (triggerPlan) {
+  if (recovery.triggerPlan) {
     console.log('[AC扩展] 看门狗：已同步 nextTriggerAt ← live alarm');
   }
-
-  if (!alarm) {
-    await recoverMissingPwmAlarm();
-  } else if (alarm.scheduledTime <= Date.now() - 60000) {
-    await recoverExpiredPwmAlarm(alarm);
+  if (recovery.fallbackAction === 'execute-current') {
+    console.warn(`[AC扩展] 看门狗：PWM 闹钟${alarm ? '恢复失败' : '缺失'}，补执行当前阶段动作`);
   }
 }
 
@@ -1998,56 +2074,37 @@ async function setupAlarms(startImmediately = false) {
     return;
   }
 
-  // ----- 间隔模式 -----
-  // 提取（Fowler Extract Function）：间隔模式下的闹钟恢复链——live 沿用 → storage 恢复 → 过期推进 → 立即补执行 → 重建。
-  async function recoverIntervalAlarm() {
-    const now = Date.now();
-    const existingAlarm = await chrome.alarms.get('ac-pwm');
-    const liveDueAt = getLiveAlarmEndMs(existingAlarm);
-    const storedDueAt = getStoredAlarmEndMs();
-    if (await recoverSmartCurrentCycleIfNeeded({
-      now,
-      scheduledOnAt: liveDueAt || storedDueAt,
-      allowStalePhase: true
-    })) return;
-    if (liveDueAt) {
-      await syncStoredTriggerFromAlarm(existingAlarm, 'setupAlarms: 沿用现有 PWM 闹钟');
-      await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-      await updateBadge();
-      console.log('[AC扩展] 沿用浏览器中已有的 PWM 闹钟');
-      return;
-    }
+  // 恢复入口只提供事实与来源策略；智能/循环选择由纯协调器完成。
+  const now = Date.now();
+  const existingAlarm = await chrome.alarms.get('ac-pwm');
+  const rawAlarmAt = Number(existingAlarm?.scheduledTime) || 0;
+  const liveDueAt = rawAlarmAt > now ? rawAlarmAt : 0;
+  const storedDueAt = getStoredAlarmEndMs();
+  const recovery = await recoverPwmLifecycle({
+    source: 'setupAlarms',
+    now,
+    existingAlarm,
+    liveAlarmAt: liveDueAt,
+    storedAlarmAt: storedDueAt,
+    expiredAlarmAt: rawAlarmAt > 0 && rawAlarmAt <= now ? rawAlarmAt : 0,
+    plannedActionAt: liveDueAt || (storedDueAt > now ? storedDueAt : 0),
+    missingClockAction: 'repair-clock',
+    failureAction: 'repair-clock',
+    preserveLiveReason: 'setupAlarms: 沿用现有 PWM 闹钟',
+    restoreReason: 'PWM 闹钟已恢复'
+  });
 
-    const existingEnd = storedDueAt;
-    const remainingMinutes = existingEnd > now
-      ? Math.max(1, (existingEnd - now) / 60000)
-      : null;
-
-    if (remainingMinutes) {
-      const restored = await restoreIntervalAlarmFromStorage('PWM 闹钟已恢复');
-      if (restored) return;
-    }
-
-    // 闹钟和 storage 都不在将来 → 尝试从已过期的闹钟时间推进
-    if (existingAlarm?.scheduledTime && existingAlarm.scheduledTime <= now) {
-      const advanced = await advanceExpiredAlarmToNextBoundary(existingAlarm.scheduledTime);
-      if (advanced) {
-        console.log('[AC扩展] 已从过期闹钟推进到下一周期边界');
-        return;
-      }
-    }
-
-    if (existingEnd && existingEnd <= now) {
-      console.warn('[AC扩展] PWM 计划时间已过，立即补执行到期动作');
-      await runPwmStep({ scheduledTime: existingEnd });
-      return;
-    }
-
-    await repairScheduleClock();
+  if (recovery.plan.kind === 'preserve-live-alarm') {
+    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+    await updateBadge();
+    console.log('[AC扩展] 沿用浏览器中已有的 PWM 闹钟');
+  } else if (recovery.plan.kind === 'advance-expired-alarm' && recovery.handled) {
+    console.log('[AC扩展] 已从过期闹钟推进到下一周期边界');
+  } else if (recovery.plan.kind === 'execute-due-action') {
+    console.warn('[AC扩展] PWM 计划时间已过，立即补执行到期动作');
+  } else if (recovery.plan.kind === 'repair-clock') {
     console.log('[AC扩展] PWM 闹钟缺失，已按当前状态重建');
   }
-
-  await recoverIntervalAlarm();
 }
 
 function sanitizeMinutes(value, fallback) {
@@ -2099,7 +2156,7 @@ async function clearBadge() {
   await chrome.action.setTitle({ title: t('badgeDefault') });
 }
 
-async function runPwmStep({ scheduledTime = 0, recoverSmartCurrentCycle = false } = {}) {
+async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
   if (!isAutomationAllowed()) return;
   if (isCurrentPwmStepRunning()) {
     console.warn('[AC扩展] PWM 步骤已在执行，跳过重复触发');
@@ -2117,6 +2174,8 @@ async function runPwmStep({ scheduledTime = 0, recoverSmartCurrentCycle = false 
     && requestedScheduledTime > 0
     ? requestedScheduledTime
     : 0;
+  const recoveringSmartCurrentCycle = recoveryPlan?.kind
+    === 'recover-smart-current-cycle';
 
   function planSmartAutomaticOn(targetAction, acIsOn) {
     if (!(schedule.smartMode?.enabled && targetAction === 'on')) return null;
@@ -2221,7 +2280,7 @@ async function runPwmStep({ scheduledTime = 0, recoverSmartCurrentCycle = false 
     // 智能模式：只消费 :20/:50 为当前控制边界准备的本地快照，不等待天气网络。
     const smartPreparedBoundaryAt = currentSmartControlBoundary(pwmTriggerScheduledTime);
     await applyPreparedSmartModeDurations({
-      allowActiveOnPhase: recoverSmartCurrentCycle,
+      allowActiveOnPhase: recoveringSmartCurrentCycle,
       ...(smartPreparedBoundaryAt > 0 ? { boundaryAt: smartPreparedBoundaryAt } : {})
     });
     if (await abortStaleAutomation(
@@ -2229,12 +2288,13 @@ async function runPwmStep({ scheduledTime = 0, recoverSmartCurrentCycle = false 
       'runPwmStep-weather-active-hours-paused'
     )) return;
 
-    if (recoverSmartCurrentCycle) {
-      const recoveryPlan = planSmartCurrentCycleRecovery({
-        scheduledOnAt: 0,
-        allowStalePhase: true
+    if (recoveringSmartCurrentCycle) {
+      const refreshedRecoveryPlan = planSmartRecovery(schedule, {
+        now: Date.now(),
+        plannedActionAt: 0,
+        maxOnMinutes: SMART_MODE.ON_MAX
       });
-      if (!recoveryPlan) return;
+      if (refreshedRecoveryPlan.kind !== 'recover-smart-current-cycle') return;
       schedule.pwmState = 'on';
       await clearPwmAlarm(automationRevision);
       if (await abortStaleAutomation(
@@ -3409,33 +3469,25 @@ async function ensureScheduleClock() {
   if (isComfortStartActive()) return;
   if (!isAutomationAllowed()) return;
   await backfillNextTriggerAt(false);
-  // 间隔模式
+  const now = Date.now();
   const existingAlarm = await chrome.alarms.get('ac-pwm');
-  if (getLiveAlarmEndMs(existingAlarm)) {
-    await syncStoredTriggerFromAlarm(existingAlarm, 'ensureScheduleClock: 同步现有 PWM 闹钟');
-    return;
-  }
-
-  const restored = await restoreIntervalAlarmFromStorage('PWM 主闹钟缺失，已按剩余时间补建');
-  if (restored) return;
-
-  const alarmEnd = getStoredAlarmEndMs();
-  const hasClock = !!alarmEnd;
-
-  if (alarmEnd > Date.now()) return;
-
-  // 尝试从已过期的闹钟时间推进到下一周期边界
-  if (existingAlarm?.scheduledTime && existingAlarm.scheduledTime <= Date.now()) {
-    const advanced = await advanceExpiredAlarmToNextBoundary(existingAlarm.scheduledTime);
-    if (advanced) return;
-  }
-
-  if (hasClock) {
-    await runPwmStep();
-    return;
-  }
-
-  await repairScheduleClock();
+  const rawAlarmAt = Number(existingAlarm?.scheduledTime) || 0;
+  const liveAlarmAt = rawAlarmAt > now ? rawAlarmAt : 0;
+  const storedAlarmAt = getStoredAlarmEndMs();
+  const hasClock = storedAlarmAt > 0;
+  await recoverPwmLifecycle({
+    source: 'ensureScheduleClock',
+    now,
+    existingAlarm,
+    liveAlarmAt,
+    storedAlarmAt,
+    expiredAlarmAt: rawAlarmAt > 0 && rawAlarmAt <= now ? rawAlarmAt : 0,
+    plannedActionAt: liveAlarmAt || (storedAlarmAt > now ? storedAlarmAt : 0),
+    missingClockAction: 'repair-clock',
+    failureAction: hasClock ? 'execute-current' : 'repair-clock',
+    preserveLiveReason: 'ensureScheduleClock: 同步现有 PWM 闹钟',
+    restoreReason: 'PWM 主闹钟缺失，已按剩余时间补建'
+  });
 }
 
 async function repairScheduleClock() {
