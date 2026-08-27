@@ -573,6 +573,60 @@ function setNextTriggerAt(nextTriggerAt) {
   schedule.nextTriggerAt = nextTriggerAt > 0 ? nextTriggerAt : 0;
 }
 
+function planSmartCurrentCycleRecovery({
+  now = Date.now(),
+  scheduledOnAt = 0,
+  allowStalePhase = false
+} = {}) {
+  if (!schedule.enabled || !schedule.smartMode?.enabled) return null;
+  if (!allowStalePhase && schedule.pwmState !== 'on') return null;
+
+  const recoveryPlan = planSmartModeOnWindow(schedule, {
+    now,
+    maxOnMinutes: SMART_MODE.ON_MAX,
+    acIsOn: false,
+    recoverCurrentCycle: true
+  });
+  if (recoveryPlan?.kind !== 'allow'
+      || recoveryPlan.reason !== 'smart-on-current-cycle-recovery') {
+    return null;
+  }
+
+  const plannedOnAt = Number(scheduledOnAt);
+  const currentWindowEndsAt = Number(recoveryPlan.pageTimerTargetAt);
+  // 非半点的近期未来闹钟可能是失败后的 1 分钟重试；它早于本周期截止时保留。
+  // 只有缺闹钟、已过期，或下一次 ON 已被推到当前周期之后，才立即恢复。
+  if (Number.isFinite(plannedOnAt)
+      && plannedOnAt > now
+      && plannedOnAt <= currentWindowEndsAt) {
+    return null;
+  }
+  return recoveryPlan;
+}
+
+async function recoverSmartCurrentCycleIfNeeded(options = {}) {
+  if (!isAutomationAllowed()) return false;
+  const now = Number.isFinite(options?.now) ? options.now : Date.now();
+  const boundaryAt = halfHourBoundaryAtOrBefore(now);
+  await applyPreparedSmartModeDurations({
+    allowActiveOnPhase: true,
+    boundaryAt
+  });
+  if (!isAutomationAllowed()) return false;
+
+  const recoveryPlan = planSmartCurrentCycleRecovery({ ...options, now });
+  if (!recoveryPlan) return false;
+
+  console.warn(
+    `[AC扩展] 智能当前周期恢复：立即补执行 ON，绝对关机点=${new Date(recoveryPlan.pageTimerTargetAt).toLocaleTimeString()}`
+  );
+  await runPwmStep({
+    scheduledTime: recoveryPlan.boundaryAt,
+    recoverSmartCurrentCycle: true
+  });
+  return true;
+}
+
 // ===== 智能模式：将军澳 JKB 天气取数 + 动态时长 =====
 // 香港天文台为将军澳提供独立的气温、相对湿度、10 分钟平均风与站点雨量开放数据。
 // smart-mode.js 按同一站名精确合并四个源，并由 JKB 气温 + 湿度推导露点；天气仅作为
@@ -1057,6 +1111,11 @@ async function advanceExpiredAlarmToNextBoundary(
   automationRevision = pwmRuntimeRevision
 ) {
   if (!isAutomationOperationCurrent(automationRevision)) return false;
+
+  if (await recoverSmartCurrentCycleIfNeeded({
+    scheduledOnAt: 0,
+    allowStalePhase: true
+  })) return true;
 
   const recoverySchedule = { ...schedule };
   let observations = {};
@@ -1784,6 +1843,10 @@ async function watchdogCheck() {
   const automationRevision = pwmRuntimeRevision;
   const alarm = await chrome.alarms.get('ac-pwm');
   if (!isAutomationOperationCurrent(automationRevision)) return;
+  if (await recoverSmartCurrentCycleIfNeeded({
+    scheduledOnAt: getLiveAlarmEndMs(alarm) || getStoredAlarmEndMs(),
+    allowStalePhase: true
+  })) return;
 
   // 活闹钟存在 → 确保 storage 的 nextTriggerAt 与 alarm 同步（防止 SW 被 kill 后丢失）
   const triggerPlan = await persistReconciledPwmTrigger(
@@ -1941,6 +2004,12 @@ async function setupAlarms(startImmediately = false) {
     const now = Date.now();
     const existingAlarm = await chrome.alarms.get('ac-pwm');
     const liveDueAt = getLiveAlarmEndMs(existingAlarm);
+    const storedDueAt = getStoredAlarmEndMs();
+    if (await recoverSmartCurrentCycleIfNeeded({
+      now,
+      scheduledOnAt: liveDueAt || storedDueAt,
+      allowStalePhase: true
+    })) return;
     if (liveDueAt) {
       await syncStoredTriggerFromAlarm(existingAlarm, 'setupAlarms: 沿用现有 PWM 闹钟');
       await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
@@ -1949,7 +2018,7 @@ async function setupAlarms(startImmediately = false) {
       return;
     }
 
-    const existingEnd = getStoredAlarmEndMs();
+    const existingEnd = storedDueAt;
     const remainingMinutes = existingEnd > now
       ? Math.max(1, (existingEnd - now) / 60000)
       : null;
@@ -2030,7 +2099,7 @@ async function clearBadge() {
   await chrome.action.setTitle({ title: t('badgeDefault') });
 }
 
-async function runPwmStep({ scheduledTime = 0 } = {}) {
+async function runPwmStep({ scheduledTime = 0, recoverSmartCurrentCycle = false } = {}) {
   if (!isAutomationAllowed()) return;
   if (isCurrentPwmStepRunning()) {
     console.warn('[AC扩展] PWM 步骤已在执行，跳过重复触发');
@@ -2150,11 +2219,32 @@ async function runPwmStep({ scheduledTime = 0 } = {}) {
     if (!isAutomationAllowed()) return;
 
     // 智能模式：只消费 :20/:50 为当前控制边界准备的本地快照，不等待天气网络。
-    await applyPreparedSmartModeDurations();
+    const smartPreparedBoundaryAt = currentSmartControlBoundary(pwmTriggerScheduledTime);
+    await applyPreparedSmartModeDurations({
+      allowActiveOnPhase: recoverSmartCurrentCycle,
+      ...(smartPreparedBoundaryAt > 0 ? { boundaryAt: smartPreparedBoundaryAt } : {})
+    });
     if (await abortStaleAutomation(
       automationRevision,
       'runPwmStep-weather-active-hours-paused'
     )) return;
+
+    if (recoverSmartCurrentCycle) {
+      const recoveryPlan = planSmartCurrentCycleRecovery({
+        scheduledOnAt: 0,
+        allowStalePhase: true
+      });
+      if (!recoveryPlan) return;
+      schedule.pwmState = 'on';
+      await clearPwmAlarm(automationRevision);
+      if (await abortStaleAutomation(
+        automationRevision,
+        'runPwmStep-smart-current-cycle-active-hours-paused'
+      )) return;
+      setNextTriggerAt(0);
+      schedule.alarmCreatedAt = 0;
+      schedule.alarmDelayMinutes = 0;
+    }
 
     const targetAction = schedule.pwmState === 'on' ? 'on' : 'off';
     const currentDuration = Number(

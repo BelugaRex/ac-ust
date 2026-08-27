@@ -28,7 +28,7 @@
 | 页面发现 | 只操作完整等于 AC home 的未丢弃标签 | E2E 精确 home；Logic URL 反例 | 登录重定向：Manual |
 | 页面读取 | status、Charge Mode 余额、空/已设 page timer | E2E content；Logic DOM fixtures | 线上 DOM 漂移：Manual |
 | 自动 ON | 新 `Execution succeeded`＋迟到 ON 才成功，一次点击 | E2E 短 toast；Logic 歧义/确认框/取消 | 真实设备响应：Manual |
-| 智能半点 | 可信 alarm 迟醒时执行原 ON 相位剩余部分且不延长绝对关机点；普通迟到仍 defer | E2E 真实 Worker 计划；Logic alarm/storage 转发与安全余量 | 真实钟点唤醒：Manual smoke |
+| 智能半点 | 可信 alarm 迟醒，或生命周期发现下一 ON 已越过当前安全窗口时，执行原 ON 相位剩余部分且不延长绝对关机点；普通迟到、既有短重试与余量不足仍 defer／保留 | E2E 真实 Worker 计划；Logic 过期 alarm、启动、watchdog 接线及安全余量 | 真实钟点唤醒：Manual smoke |
 | ON 幂等 | 页面已 ON 时零额外点击、显式 `alreadyDone`，直接进入页面 timer | E2E 真实 Worker＋页面点击计数；Logic PWM 分支 | 真实 UST timer 写入：Manual |
 | ON 失败 | 缺成功提示或截止到期时失败关闭，不继续推进 | E2E 短截止；Logic 重试/恢复矩阵 | — |
 | 自动 OFF | content 拒绝 OFF，所有自动关机只走页面 timer | E2E 零点击计数；Logic 全调用链 | 真实关机生效：Manual |

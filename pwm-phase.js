@@ -410,8 +410,9 @@ function nextSafePageTimerTargetAt(now = Date.now()) {
 }
 
 // 智能控制自动 ON 门禁：普通调用只允许在 HH:00/HH:30 这一分钟内启动；
-// 真正的半点 ac-pwm alarm 可在迟唤醒后补执行当前剩余 ON 相位。两者都把关机
-// 截止固定为“半点边界 + onMinutes”，不把延迟补到周期末尾。循环定时不调用。
+// 真正的半点 ac-pwm alarm，或明确的生命周期恢复路径，可补执行当前剩余 ON
+// 相位。三者都把关机截止固定为“半点边界 + onMinutes”，不把延迟补到周期末尾。
+// 循环定时不调用。
 function planSmartModeOnWindow(schedule, opts = {}) {
   const now = pwmPhaseNow(opts);
   const onMinutes = Number(schedule?.onMinutes);
@@ -429,6 +430,7 @@ function planSmartModeOnWindow(schedule, opts = {}) {
   }
 
   const acIsOn = opts?.acIsOn === true;
+  const recoverCurrentCycle = opts?.recoverCurrentCycle === true;
   const storedBoundaryAt = Number(opts?.boundaryAt);
   const triggeredBoundaryAt = Number(opts?.triggeredBoundaryAt);
   const triggeredPageTimerTargetAt = smartModePageTimerTargetAt(
@@ -487,6 +489,17 @@ function planSmartModeOnWindow(schedule, opts = {}) {
     };
   }
 
+  if (recoverCurrentCycle
+      && pageTimerTargetAt >= nextSafePageTimerTargetAt(now)) {
+    return {
+      kind: 'allow',
+      reason: 'smart-on-current-cycle-recovery',
+      boundaryAt,
+      windowEndsAt: pageTimerTargetAt,
+      pageTimerTargetAt
+    };
+  }
+
   if (now - boundaryAt < PWM_PHASE_MINUTE_MS && pageTimerTargetAt > now) {
     return {
       kind: 'allow',
@@ -539,6 +552,7 @@ if (typeof module !== 'undefined' && module.exports) {
     planNextSmartWeatherPrefetch,
     smartWeatherTargetBoundaryAt,
     nextHalfHourBoundary,
+    halfHourBoundaryAtOrBefore,
     smartModePageTimerTargetAt,
     nextSafePageTimerTargetAt,
     planSmartModeOnWindow,

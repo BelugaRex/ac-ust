@@ -123,6 +123,7 @@
           "planNextSmartWeatherPrefetch",
           "smartWeatherTargetBoundaryAt",
           "nextHalfHourBoundary",
+          "halfHourBoundaryAtOrBefore",
           "smartModePageTimerTargetAt",
           "planSmartModeOnWindow",
           "alignSmartModeNextTrigger"
@@ -137,6 +138,7 @@
             "reconcilePwmTrigger",
             "planNextSmartWeatherPrefetch",
             "smartWeatherTargetBoundaryAt",
+            "halfHourBoundaryAtOrBefore",
             "smartModePageTimerTargetAt",
             "planSmartModeOnWindow",
             "alignSmartModeNextTrigger"

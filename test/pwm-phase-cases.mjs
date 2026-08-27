@@ -8,6 +8,7 @@ const {
   planNextSmartWeatherPrefetch,
   smartWeatherTargetBoundaryAt,
   nextHalfHourBoundary,
+  halfHourBoundaryAtOrBefore,
   smartModePageTimerTargetAt,
   nextSafePageTimerTargetAt,
   planSmartModeOnWindow,
@@ -30,8 +31,9 @@ export function runPwmPhaseCases(assertPass) {
 
   assertPass(
     Object.keys(pwmPhase).sort().join(',')
-      === 'alignSmartModeNextTrigger,nextHalfHourBoundary,nextSafePageTimerTargetAt,planNextSmartWeatherPrefetch,planPwmRecovery,planPwmStep,planSmartModeOnWindow,reconcilePwmTrigger,smartModePageTimerTargetAt,smartWeatherTargetBoundaryAt'
-      && typeof nextSafePageTimerTargetAt === 'function',
+      === 'alignSmartModeNextTrigger,halfHourBoundaryAtOrBefore,nextHalfHourBoundary,nextSafePageTimerTargetAt,planNextSmartWeatherPrefetch,planPwmRecovery,planPwmStep,planSmartModeOnWindow,reconcilePwmTrigger,smartModePageTimerTargetAt,smartWeatherTargetBoundaryAt'
+      && typeof nextSafePageTimerTargetAt === 'function'
+      && typeof halfHourBoundaryAtOrBefore === 'function',
     'PWM phase module 导出规划函数、天气预取槽与半点对齐函数'
   );
 

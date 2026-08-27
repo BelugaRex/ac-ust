@@ -986,6 +986,49 @@ async function run() {
           { now: boundaryAt + 65_000, maxOnMinutes: 25, acIsOn: false }
         )
         : null;
+      const delayedRecoveryPlan = typeof planSmartModeOnWindow === 'function'
+        ? planSmartModeOnWindow(
+          { onMinutes: 21 },
+          {
+            now: boundaryAt + 7 * 60_000,
+            maxOnMinutes: 25,
+            acIsOn: false,
+            recoverCurrentCycle: true
+          }
+        )
+        : null;
+      const tooLateRecoveryPlan = typeof planSmartModeOnWindow === 'function'
+        ? planSmartModeOnWindow(
+          { onMinutes: 21 },
+          {
+            now: boundaryAt + 20 * 60_000 + 30_000,
+            maxOnMinutes: 25,
+            acIsOn: false,
+            recoverCurrentCycle: true
+          }
+        )
+        : null;
+      const lifecycleRecoveryPlan = typeof planSmartCurrentCycleRecovery === 'function'
+        ? planSmartCurrentCycleRecovery({
+          now: boundaryAt + 7 * 60_000,
+          scheduledOnAt: boundaryAt + 30 * 60_000,
+          allowStalePhase: true
+        })
+        : null;
+      const preservedShortRetryPlan = typeof planSmartCurrentCycleRecovery === 'function'
+        ? planSmartCurrentCycleRecovery({
+          now: boundaryAt + 7 * 60_000,
+          scheduledOnAt: boundaryAt + 8 * 60_000,
+          allowStalePhase: true
+        })
+        : undefined;
+      const rejectedLateLifecyclePlan = typeof planSmartCurrentCycleRecovery === 'function'
+        ? planSmartCurrentCycleRecovery({
+          now: boundaryAt + 20 * 60_000 + 30_000,
+          scheduledOnAt: boundaryAt + 30 * 60_000,
+          allowStalePhase: true
+        })
+        : undefined;
       await persistSchedule('e2e-smart-duration', { syncFromLiveAlarm: false });
       const persisted = (await chrome.storage.local.get('ac_schedule')).ac_schedule;
       return {
@@ -995,6 +1038,11 @@ async function run() {
         applied,
         delayedAlarmPlan,
         delayedWithoutAlarmPlan,
+        delayedRecoveryPlan,
+        tooLateRecoveryPlan,
+        lifecycleRecoveryPlan,
+        preservedShortRetryPlan,
+        rejectedLateLifecyclePlan,
         persisted
       };
     }, { boundaryAt: smartBoundaryAt, weather: smartWeather });
@@ -1032,6 +1080,21 @@ async function run() {
           === smartBoundaryAt + 21 * 60 * 1000
         && smartWorkerState.delayedWithoutAlarmPlan?.kind === 'defer',
       '真实 Worker 只让可信半点 alarm 补执行迟到 ON，并保持原半点绝对关机点');
+    assert(smartWorkerState.delayedRecoveryPlan?.kind === 'allow'
+        && smartWorkerState.delayedRecoveryPlan?.reason
+          === 'smart-on-current-cycle-recovery'
+        && smartWorkerState.delayedRecoveryPlan?.pageTimerTargetAt
+          === smartBoundaryAt + 21 * 60 * 1000
+        && smartWorkerState.tooLateRecoveryPlan?.kind === 'defer',
+      '真实 Worker 在明确恢复路径补当前剩余 ON 窗口，安全余量不足时仍等待下个半点');
+    assert(smartWorkerState.lifecycleRecoveryPlan?.kind === 'allow'
+        && smartWorkerState.lifecycleRecoveryPlan?.reason
+          === 'smart-on-current-cycle-recovery'
+        && smartWorkerState.lifecycleRecoveryPlan?.pageTimerTargetAt
+          === smartBoundaryAt + 21 * 60 * 1000
+        && smartWorkerState.preservedShortRetryPlan === null
+        && smartWorkerState.rejectedLateLifecyclePlan === null,
+      '真实 Worker 生命周期门禁修复跨周期未来闹钟，同时保留本周期短重试并拒绝过迟开机');
     assert(smartPopupReady
         && smartPopupState.smartPressed
         && smartPopupState.smartBodyVisible

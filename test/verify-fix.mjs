@@ -1353,7 +1353,7 @@ async function runTests() {
 
   const pwmBody = extractSourceSection(
     backgroundSource,
-    'async function runPwmStep({ scheduledTime = 0 } = {})',
+    'async function runPwmStep({ scheduledTime = 0, recoverSmartCurrentCycle = false } = {})',
     '\n// ----- 设置页面自带定时器',
     'runPwmStep'
   );
@@ -3625,7 +3625,8 @@ async function runTests() {
       && preparedDurationBody.includes('consumeStoredSmartWeatherDecision(')
       && !preparedDurationBody.includes('getSmartWeather(')
       && !preparedDurationBody.includes('fetchSmartWeather')
-      && pwmBody.includes('await applyPreparedSmartModeDurations();')
+      && pwmBody.includes('boundaryAt: smartPreparedBoundaryAt')
+      && pwmBody.includes('allowActiveOnPhase: recoverSmartCurrentCycle')
       && !pwmBody.includes('getSmartWeather(')
       && !pwmBody.includes('fetchSmartWeather')
       && !pwmBody.includes('prepareSmartWeatherForBoundary('),
@@ -5617,6 +5618,15 @@ return { reapplySmartSensitivityNow };`
     { onMinutes: 21 },
     { now: delayedSmartNow16, maxOnMinutes: 25, acIsOn: false }
   );
+  const delayedCurrentCycleRecovery16 = pwmPhase.planSmartModeOnWindow(
+    { onMinutes: 21 },
+    {
+      now: delayedSmartNow16,
+      maxOnMinutes: 25,
+      acIsOn: false,
+      recoverCurrentCycle: true
+    }
+  );
   const tooLateForSafeTimerPlan16 = pwmPhase.planSmartModeOnWindow(
     { onMinutes: 21 },
     {
@@ -5642,6 +5652,24 @@ return { reapplySmartSensitivityNow };`
       && alreadyOnAtDelayedAlarm16.kind === 'hold'
       && alreadyOnAtDelayedAlarm16.prerequisite === 'set-page-timer',
     '16F-0A: 可信半点 alarm 可补执行剩余 ON 相位且保持原绝对关机点；普通迟到调用仍等待，已 ON 直接进入页面 timer');
+  const tooLateCurrentCycleRecovery16 = pwmPhase.planSmartModeOnWindow(
+    { onMinutes: 21 },
+    {
+      now: delayedSmartTarget16 - 30_000,
+      maxOnMinutes: 25,
+      acIsOn: false,
+      recoverCurrentCycle: true
+    }
+  );
+  assertPass(delayedCurrentCycleRecovery16.kind === 'allow'
+      && delayedCurrentCycleRecovery16.reason === 'smart-on-current-cycle-recovery'
+      && delayedCurrentCycleRecovery16.boundaryAt === delayedSmartBoundary16
+      && delayedCurrentCycleRecovery16.pageTimerTargetAt === delayedSmartTarget16
+      && delayedCurrentCycleRecovery16.windowEndsAt === delayedSmartTarget16
+      && tooLateCurrentCycleRecovery16.kind === 'defer'
+      && tooLateCurrentCycleRecovery16.nextTriggerAt
+        === new Date(2026, 7, 18, 11, 0, 0, 0).getTime(),
+    '16F-0D: 明确生命周期恢复可补当前剩余 ON 窗口；不足一分钟安全余量时仍等待下个半点');
   const alarmPwmBranch16 = extractSourceSection(
     backgroundSource,
     "if (alarm.name === 'ac-pwm') {",
@@ -5666,6 +5694,15 @@ return { reapplySmartSensitivityNow };`
         '页面已 ON，零点击，直接设置 Power-off after'
       ),
     '16F-0C: 主世界已 ON 的幂等结果显式回传，PWM 零点击后直接进入页面关机定时器');
+  assertPass(backgroundSource.includes('async function recoverSmartCurrentCycleIfNeeded(')
+      && backgroundSource.includes('recoverCurrentCycle: true')
+      && backgroundSource.includes(
+        'scheduledTime: recoveryPlan.boundaryAt,'
+      )
+      && advanceBody.includes('recoverSmartCurrentCycleIfNeeded({')
+      && setupAlarmsBody16.includes('recoverSmartCurrentCycleIfNeeded({')
+      && watchdogBody13.includes('recoverSmartCurrentCycleIfNeeded({'),
+    '16F-0E: 过期闹钟、启动恢复与看门狗都显式接入当前智能 ON 周期恢复，不影响普通入口');
   const rescheduleActiveBoundaryBody16 = extractSourceSection(
     backgroundSource,
     'async function rescheduleActiveBoundary() {',
