@@ -2,9 +2,10 @@
 
 ## 0.8.2
 
+- 自动 ON 改为同页“先保险后开机”事务：初始 OFF 时先在锁定的精确 home tab 写入并确认 `Power-off after`，再进行唯一 ON 点击，最后沿既有独立新鲜页链记录正式 proof；预置失败、URL 漂移和 BFCache 断口均不点击且预置后禁用刷新接力。正常点击仍要求新的 `Execution succeeded` + ON；若返回含糊但同页实际已 ON，则零追加点击，只验证保险。PWM、舒适启动与手动 ON 共用该链，页面原本已 ON 继续零点击直设 timer。
 - 按 Fowler 的 Move Function、Introduce Parameter Object 与 Replace Flag Argument 拆分 PWM 生命周期恢复：`smart-recovery.js` 只判断智能当前周期，`interval-recovery.js` 只判断普通循环 alarm/storage，`recovery-coordinator.js` 负责智能优先、循环兜底；启动、看门狗、过期闹钟与诊断时钟统一提交恢复上下文，`background.js` 继续独占开关、`Execution succeeded`、页面定时器、闹钟和 storage 副作用，不新增第二套开机链。
 - 修复智能模式在生命周期恢复时把当前理论 ON 窗口快进到下个半点，造成冷气关闭后仍等待十几分钟：启动、过期闹钟和看门狗会在下一 ON 已越过本周期绝对截止时立即补执行剩余窗口，并消费当前半点的新鲜天气建议；关机仍锁定原半点加建议分钟，既有本周期关机闹钟／一分钟失败重试不被抢占，安全余量不足时仍等待下个半点。
-- 新增自动控制五分钟舒适启动：仅在本机 `enabled: false→true`，或首次安装采用到已启用配置时执行一次；普通 Popup 打开、浏览器／Service Worker 重启和扩展更新零触发。实际开机先等待新的 `Execution succeeded` 与 ON 收敛，已 ON 则零点击；随后取“确认 ON 后至少五分钟”与既有更晚页面 timer 的较晚者，经独立新鲜页确认并与 `ac-pwm` 对齐。失败保持 ON 安全相位并一分钟后重试，时段外先完成舒适期，用户主动停用仍有最高优先级。Popup 以原位双语状态反馈，不弹启动 alert。
+- 新增自动控制五分钟舒适启动：仅在本机 `enabled: false→true`，或首次安装采用到已启用配置时执行一次；普通 Popup 打开、浏览器／Service Worker 重启和扩展更新零触发。实际开机前先保留既有更晚页面 timer 并预置至少五分钟保险，正常点击仍等待新的 `Execution succeeded` 与 ON 收敛，已 ON 则零点击；随后按确认 ON 的时刻校准五分钟 floor，经独立新鲜页确认并与 `ac-pwm` 对齐。失败保持安全相位并一分钟后重试，时段外先完成舒适期，用户主动停用仍有最高优先级。Popup 以原位双语状态反馈，不弹启动 alert。
 - 修复智能 `:00`/`:30` 闹钟因 Service Worker 唤醒及页面状态读取耗时而整段跳过：`ac-pwm` alarm 与启动期 storage 补执行会把原计划半点传入纯计划器，只在原 ON 绝对截止前且仍能可靠写入 `Power-off after` 时执行剩余相位，不从处理时刻补足时长。页面已经 ON 时显式返回 `alreadyDone`，零开机点击、无需新 `Execution succeeded`，直接进入页面关机定时器链；实际发生点击时的成功提示要求不变。
 - 修复智能建议与实际周期不一致：目标边界 plan 丢失时，`:00`/`:30` 执行会改用边界前一小时内的新鲜本地天气按当前灵敏度重算；Service Worker 在 ON 周期中途重启并修复时钟时也会先刷新派生时长并保留原半点锚点，因此界面显示 `21/30` 不再实际沿用旧的 12 分钟。两条路径都不在控制边界联网；过期、边界后或标记 stale 的观测仍拒绝使用。
 - 修复不足一分钟的紧急页面定时器目标：例如 `02:11:01` 不再请求会被 UST 归一化的 `02:12`，而是直接写入并验证 `02:13`。诊断同时把已触发但仍在执行的 `ac-pwm` 标为边界处理中，并以实时 AC=OFF 否决陈旧 ON 相位的缺 timer 假警报。

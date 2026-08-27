@@ -845,6 +845,131 @@ async function run() {
         && ambiguousTimerFixture.switchClicks === sourceTimerValue.switchClicks,
       'Power-off after 控件歧义时拒绝写入，不改变已确认值且不点击 AC 开关');
 
+    // === 先保险后开机：同一 tab 预置，歧义零点击，含糊 ON 零重复点击 ===
+    console.log('\n--- 步骤 2.8: 验证同页预置关机保险后开机 ---\n');
+    const preparedOnTargetAt = Math.ceil((Date.now() + 4 * 60 * 1000) / 60000) * 60000;
+    const preparedOnFixture = await acPage.evaluate(() => {
+      const oldSwitch = document.querySelector('button.ant-switch[role="switch"]');
+      const switchElement = oldSwitch.cloneNode(true);
+      oldSwitch.replaceWith(switchElement);
+      switchElement.setAttribute('aria-checked', 'false');
+      switchElement.textContent = 'OFF';
+      globalThis.__acPreparedOnClickCount = 0;
+      globalThis.__acPreparedTimerAtClick = '';
+      globalThis.__acPreparedLoadTokenAtClick = '';
+      switchElement.addEventListener('click', () => {
+        globalThis.__acPreparedOnClickCount += 1;
+        globalThis.__acPreparedTimerAtClick = String(
+          document.querySelector('.timer-row .ant-picker input')?.value || ''
+        ).trim();
+        globalThis.__acPreparedLoadTokenAtClick = globalThis.__acMockLoadToken;
+        if (globalThis.__acPreparedOnClickCount > 1) return;
+        // 故意不生成 Execution succeeded：模拟页面响应快于 toast 捕获，
+        // background 必须只读看见 ON 后验证 timer，不能再点第二次。
+        setTimeout(() => {
+          switchElement.setAttribute('aria-checked', 'true');
+          switchElement.textContent = 'ON';
+        }, 250);
+      });
+      const duplicate = document.querySelector('.timer-row').cloneNode(true);
+      duplicate.id = 'prepared-on-ambiguous-timer';
+      document.body.appendChild(duplicate);
+      return { loadToken: globalThis.__acMockLoadToken };
+    });
+    const preparedOnRejected = await serviceWorker.evaluate(async (targetAt) => {
+      if (typeof toggleAC !== 'function') {
+        return { success: false, productionFunctionMissing: true };
+      }
+      return toggleAC('on', {
+        pageTimerMinutes: 4,
+        pageTimerTargetAt: targetAt,
+        notAfterAt: Date.now() + 5000
+      });
+    }, preparedOnTargetAt);
+    const rejectedPreparedOnState = await acPage.evaluate(() => {
+      document.getElementById('prepared-on-ambiguous-timer')?.remove();
+      return {
+        clicks: globalThis.__acPreparedOnClickCount,
+        isOn: document.querySelector('button.ant-switch[role="switch"]')
+          ?.getAttribute('aria-checked') === 'true'
+      };
+    });
+
+    const preparedOnFreshTabs = await serviceWorker.evaluate(async (targetAt) => {
+      const freshTabs = [];
+      const redirectTasks = [];
+      const homeUrl = 'https://w5.ab.ust.hk/njggt/app/home';
+      const seedUrl = chrome.runtime.getURL('manifest.json');
+      const activateFreshTab = (tab) => {
+        const targetUrl = tab?.pendingUrl || tab?.url || '';
+        if (targetUrl !== homeUrl) return;
+        const entry = { id: tab.id, wasActive: tab.active, targetUrl };
+        freshTabs.push(entry);
+        redirectTasks.push((async () => {
+          try {
+            await chrome.tabs.update(tab.id, { url: seedUrl, active: true });
+            for (let index = 0; index < 40; index += 1) {
+              const current = await chrome.tabs.get(tab.id);
+              if (current.status === 'complete' && current.url === seedUrl) {
+                entry.seedReady = true;
+                break;
+              }
+              await new Promise(resolve => setTimeout(resolve, 25));
+            }
+            await chrome.tabs.update(tab.id, { url: homeUrl, active: true });
+            entry.rerouted = true;
+          } catch (error) {
+            entry.error = error?.message || String(error);
+          }
+        })());
+      };
+      chrome.tabs.onCreated.addListener(activateFreshTab);
+      try {
+        const result = await toggleAC('on', {
+          pageTimerMinutes: 4,
+          pageTimerTargetAt: targetAt,
+          notAfterAt: Date.now() + 5000
+        });
+        await Promise.allSettled(redirectTasks);
+        return { result, freshTabs };
+      } finally {
+        chrome.tabs.onCreated.removeListener(activateFreshTab);
+      }
+    }, preparedOnTargetAt);
+    const preparedOnResult = preparedOnFreshTabs.result;
+    const preparedOnSourceState = await acPage.evaluate(() => ({
+      clicks: globalThis.__acPreparedOnClickCount,
+      timerAtClick: globalThis.__acPreparedTimerAtClick,
+      loadTokenAtClick: globalThis.__acPreparedLoadTokenAtClick,
+      loadTokenNow: globalThis.__acMockLoadToken,
+      isOn: document.querySelector('button.ant-switch[role="switch"]')
+        ?.getAttribute('aria-checked') === 'true',
+      timerNow: String(document.querySelector('.timer-row .ant-picker input')?.value || '').trim()
+    }));
+
+    assert(preparedOnRejected?.success === false
+        && preparedOnRejected?.pageTimerPrepared === false
+        && rejectedPreparedOnState.clicks === 0
+        && rejectedPreparedOnState.isOn === false,
+      '真实 picker 歧义时预置失败并零开机点击');
+    assert(preparedOnResult?.success === true
+        && preparedOnResult?.toggleAmbiguous === true
+        && preparedOnResult?.actualOn === true
+        && preparedOnResult?.pageTimerPrepared === true
+        && preparedOnResult?.pageTimerResult?.verified === true
+        && preparedOnResult?.pageTimerResult?.targetAt === preparedOnTargetAt
+        && preparedOnSourceState.clicks === 1
+        && preparedOnSourceState.isOn === true,
+      '缺少新 Execution succeeded 但同页已 ON 时只点击一次，并完成页面关机保险新鲜页证明');
+    assert(preparedOnSourceState.timerAtClick === preparedOnSourceState.timerNow
+        && preparedOnSourceState.timerAtClick === preparedOnResult?.pageTimerResult?.value
+        && preparedOnSourceState.loadTokenAtClick === preparedOnFixture.loadToken
+        && preparedOnSourceState.loadTokenNow === preparedOnFixture.loadToken
+        && preparedOnFreshTabs.freshTabs?.length === 1
+        && preparedOnFreshTabs.freshTabs[0]?.seedReady === true
+        && preparedOnFreshTabs.freshTabs[0]?.rerouted === true,
+      '物理 ON 点击前同一未刷新 home tab 已持有目标 timer；验证页独立创建且不刷新来源页');
+
     await acPage.close();
 
     // === 完整关闭并重启浏览器：storage.session 会清空，local 必须承担常驻边界 ===

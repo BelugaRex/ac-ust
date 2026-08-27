@@ -108,6 +108,8 @@ let acToggleInFlightAction = null;
 let acToggleInFlightNotAfterAt = 0;
 let acToggleInFlightRequiresAutomation = false;
 let acToggleInFlightAutomationRevision = null;
+let acToggleInFlightPageTimerMinutes = 0;
+let acToggleInFlightPageTimerTargetAt = 0;
 let timerBasedShutdownRevision = 0;
 
 function claimTimerBasedShutdown() {
@@ -275,7 +277,7 @@ async function runComfortStart(reason = 'user-enable') {
   const restoreExistingMinimum = (reason === 'retry' || reason === 'startup-recovery')
     && existingMinimumTargetAt > now;
   const reuseConfirmedMinimum = restoreExistingMinimum && existingOnConfirmedAt > 0;
-  const provisionalPlan = planComfortStart({}, null, {
+  let provisionalPlan = planComfortStart({}, null, {
     now,
     minutes: COMFORT_START_MINUTES,
     ...(restoreExistingMinimum ? { minimumTargetAt: existingMinimumTargetAt } : {})
@@ -304,10 +306,24 @@ async function runComfortStart(reason = 'user-enable') {
   }
   await persistSchedule(`comfort-start-${reason}-claim`, { syncFromLiveAlarm: false });
 
+  // OFF 页面先读取当前 picker，预置时保留用户已有的更晚关机目标；随后
+  // toggleAC 把预置、ON 与新鲜页确认锁在同一 tab 事务中。
+  const pageTimerBeforeOn = await getCurrentPageTimer();
+  if (!isAutomationOperationCurrent(automationRevision)) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
+  provisionalPlan = planComfortStart(schedule, pageTimerBeforeOn, {
+    now: Date.now(),
+    minutes: COMFORT_START_MINUTES,
+    minimumTargetAt: schedule.comfortStartUntil
+  });
+
   const toggleResult = await toggleAC('on', {
     notAfterAt: schedule.comfortStartUntil,
     requireAutomationAllowed: true,
-    automationRevision
+    automationRevision,
+    pageTimerMinutes: provisionalPlan.timerMinutes,
+    pageTimerTargetAt: provisionalPlan.targetAt
   });
   if (!isAutomationOperationCurrent(automationRevision)) {
     return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
@@ -2194,16 +2210,27 @@ async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
       const toggleResult = await toggleAC('on', {
         notAfterAt: getAutomaticOnDeadline(observations.smartOnWindowEndsAt || 0),
         requireAutomationAllowed: true,
-        automationRevision
+        automationRevision,
+        pageTimerMinutes: schedule.onMinutes,
+        pageTimerTargetAt: observations.smartPageTimerTargetAt || 0
       });
-      observations.toggleSucceeded = !!toggleResult?.success;
+      observations.toggleSucceeded = toggleResult?.toggleSucceeded === true
+        || (!!toggleResult?.success && !toggleResult?.pageTimerResult);
       observations.toggleAlreadyDone = toggleResult?.alreadyDone === true;
       observations.toggleError = toggleResult?.error || '';
+      if (toggleResult?.actualOn === true) observations.acIsOn = true;
+      if (toggleResult?.pageTimerResult) {
+        observations.pageTimerSucceeded = toggleResult.pageTimerResult.success === true;
+        observations.pageTimerTargetAt = Number(toggleResult.pageTimerResult.targetAt);
+        observations.pageTimerError = toggleResult.pageTimerResult.error || '';
+      }
       if (observations.toggleAlreadyDone) {
         observations.acIsOn = true;
-        console.log('[AC扩展] 页面已 ON，零点击，直接设置 Power-off after');
+        console.log('[AC扩展] 页面已 ON，零点击，已直接确认 Power-off after');
       }
-      if (!observations.toggleSucceeded) {
+      if (observations.toggleSucceeded && observations.pageTimerSucceeded === false) {
+        schedule.pageTimerError = `开机已确认，但页面关机定时器未确认：${observations.pageTimerError || observations.toggleError || '未知错误'}`;
+      } else if (!observations.toggleSucceeded) {
         schedule.pageTimerError = `自动开启未确认：${toggleResult?.error || '未知错误'}`;
       }
     } catch (e) {
@@ -2604,12 +2631,50 @@ function sendSerializedPageTimerMessage(
   return operation;
 }
 
+// 提取（Fowler Extract Function）：只在已锁定的精确 home tab 写入 picker。
+// 这是“先保险后开机”的 provisional 写入原语；本函数不写 storage proof，
+// 正式证明仍由 setPageTimer() 在 ON 后通过独立新鲜页确认。
+async function writePageTimerOnExactHomeTab(
+  tabId,
+  minutes,
+  {
+    targetAt = 0,
+    automationRevision = null,
+    shutdownRevision = null
+  } = {}
+) {
+  const pageReady = await waitForTabReady(tabId, 30000, isACHomePageTab);
+  if (!pageReady) return { success: false, error: 'AC 页面等待就绪超时' };
+  const tab = await getExactACHomeTab(tabId);
+  if (!tab || tab.discarded) {
+    return { success: false, invalidTarget: true, error: '页面定时器目标标签已离开精确 home URL' };
+  }
+  const contentReady = await ensureContentScriptLoaded(tabId);
+  if (!contentReady) return { success: false, error: 'AC 页面 content script 未就绪' };
+
+  const result = await sendSerializedPageTimerMessage(tabId, {
+    action: 'setTimer',
+    minutes,
+    targetAt
+  }, automationRevision, shutdownRevision);
+  if (result?.automationStale || result?.shutdownStale || !result?.success) {
+    return result || { success: false, error: t('bgPageTimerFailed') };
+  }
+  const value = String(result.value || '').trim();
+  const resolvedTargetAt = Number(result.targetAt);
+  if (!value || !Number.isSafeInteger(resolvedTargetAt) || resolvedTargetAt <= Date.now()) {
+    return { success: false, error: '页面定时器预置未返回可验证的未来目标时间' };
+  }
+  return result;
+}
+
 // ----- 设置页面自带定时器（安全网，自动关不用手动开）-----
 async function setPageTimer(
   minutes,
   {
     retryOnFailure = true,
     targetAt = 0,
+    preferredTabId = null,
     automationRevision = null,
     shutdownRevision = null
   } = {}
@@ -2674,8 +2739,17 @@ async function setPageTimer(
 
   try {
     if (!automationWriteIsCurrent()) return staleAutomationResult();
-    const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-    let tab = tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded) || null;
+    let tab = Number.isInteger(preferredTabId)
+      ? await getExactACHomeTab(preferredTabId)
+      : null;
+    if (Number.isInteger(preferredTabId) && (!tab || tab.discarded)) {
+      throw new Error('指定的页面定时器标签已离开精确 home URL');
+    }
+
+    if (!tab) {
+      const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
+      tab = tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded) || null;
+    }
 
     if (!tab?.id) {
       tab = await chrome.tabs.create({ url: AC_PAGE, active: false });
@@ -2684,18 +2758,11 @@ async function setPageTimer(
       console.log('[AC扩展] 页面定时器：无现有 AC 页面，已创建隐藏标签页');
     }
 
-    const pageReady = await waitForTabReady(tab.id, 30000, isACHomePageTab);
-    if (!pageReady) throw new Error('AC 页面等待就绪超时');
-    tab = await chrome.tabs.get(tab.id);
-    if (!isACHomePageTab(tab)) throw new Error('页面定时器目标标签已离开精确 home URL');
-    const contentReady = await ensureContentScriptLoaded(tab.id);
-    if (!contentReady) throw new Error('AC 页面 content script 未就绪');
-
-    const result = await sendSerializedPageTimerMessage(tab.id, {
-      action: 'setTimer',
-      minutes,
-      targetAt
-    }, automationRevision, shutdownRevision);
+    const result = await writePageTimerOnExactHomeTab(tab.id, minutes, {
+      targetAt,
+      automationRevision,
+      shutdownRevision
+    });
     if (result?.automationStale || result?.shutdownStale) return result;
     if (!result?.success) {
       return await finishFailure(result || { success: false, error: t('bgPageTimerFailed') }, 'failed');
@@ -3121,13 +3188,129 @@ async function cancelAutomaticOnRequests() {
     }));
 }
 
+// 提取（Fowler Extract Function）：同一精确 home tab 上完成
+// OFF → 预置 Power-off after → ON → 新鲜页确认。预置后的物理 ON 禁止刷新
+// 恢复；失败由外围下一轮从重新预置开始，避免刷新丢 timer 后再开机。
+async function turnOnWithPreparedPageTimer(
+  tab,
+  {
+    pageTimerMinutes,
+    pageTimerTargetAt = 0,
+    notAfterAt = 0,
+    requireAutomationAllowed = false,
+    automationRevision = null
+  } = {}
+) {
+  const timerMinutes = sanitizeMinutes(pageTimerMinutes, 0);
+  if (!Number.isInteger(tab?.id) || timerMinutes <= 0) {
+    return { success: false, pageTimerPrepared: false, error: '开机前页面定时器参数无效' };
+  }
+
+  const timerOptions = {
+    retryOnFailure: false,
+    targetAt: pageTimerTargetAt,
+    preferredTabId: tab.id,
+    automationRevision
+  };
+  const initialStatus = await getACStatusFromExactHomeTab(tab.id);
+  if (initialStatus?.isOn === true) {
+    const pageTimerResult = await setPageTimer(timerMinutes, timerOptions);
+    return {
+      success: pageTimerResult?.success === true,
+      alreadyDone: true,
+      toggleSucceeded: true,
+      actualOn: true,
+      pageTimerPrepared: false,
+      pageTimerResult,
+      error: pageTimerResult?.success ? '' : pageTimerResult?.error
+    };
+  }
+
+  const preparedTimer = await writePageTimerOnExactHomeTab(tab.id, timerMinutes, {
+    targetAt: pageTimerTargetAt,
+    automationRevision
+  });
+  if (!preparedTimer?.success) {
+    return {
+      success: false,
+      pageTimerPrepared: false,
+      error: preparedTimer?.error || '开机前页面关机定时器预置失败',
+      preparedTimer
+    };
+  }
+
+  const exactTabAfterPrepare = await getExactACHomeTab(tab.id);
+  if (!exactTabAfterPrepare || exactTabAfterPrepare.discarded) {
+    return {
+      success: false,
+      invalidTarget: true,
+      pageTimerPrepared: true,
+      error: '页面定时器预置后标签未停留在精确 home URL；本轮拒绝开机'
+    };
+  }
+
+  const toggleResult = await attemptACToggleWithRecovery(
+    tab.id,
+    'on',
+    0,
+    '',
+    { notAfterAt, requireAutomationAllowed, automationRevision }
+  );
+  let actualOn = toggleResult?.success === true;
+  let toggleAmbiguous = false;
+  if (!actualOn) {
+    const actualStatus = await getACStatusFromExactHomeTab(tab.id);
+    actualOn = actualStatus?.isOn === true;
+    if (!actualOn) {
+      return {
+        ...toggleResult,
+        success: false,
+        actualOn: false,
+        pageTimerPrepared: true,
+        error: toggleResult?.error || '开机未确认，保留预置 timer 并等待整笔重试'
+      };
+    }
+    toggleAmbiguous = true;
+    console.warn('[AC扩展] 开机结果含糊但同页状态已 ON；不再点击，仅验证预置关机保险');
+  }
+
+  // 正常路径已经等到新的 Execution succeeded + ON；含糊路径只读确认 ON。
+  // 两者都在同一来源 tab 重写同一计划，然后才由独立新鲜页记录正式 proof。
+  const pageTimerResult = await setPageTimer(timerMinutes, timerOptions);
+  if (!pageTimerResult?.success) {
+    return {
+      success: false,
+      toggleSucceeded: true,
+      toggleAmbiguous,
+      actualOn: true,
+      pageTimerPrepared: true,
+      toggleResult,
+      pageTimerResult,
+      error: pageTimerResult?.error || '开机已完成，但页面关机定时器未通过新鲜页验证'
+    };
+  }
+
+  return {
+    success: true,
+    alreadyDone: toggleResult?.alreadyDone === true,
+    toggleSucceeded: true,
+    toggleAmbiguous,
+    actualOn: true,
+    pageTimerPrepared: true,
+    toggleResult,
+    pageTimerResult
+  };
+}
+
 // ----- 切换 AC 状态 -----
 async function toggleAC(
   action,
   {
     notAfterAt = 0,
     requireAutomationAllowed = false,
-    automationRevision = null
+    automationRevision = null,
+    pageTimerMinutes = 0,
+    pageTimerTargetAt = 0
   } = {}
 ) {
   const requestedNotAfterAt = notAfterAt === 0
@@ -3137,8 +3320,22 @@ async function toggleAC(
   const requestedAutomationRevision = requestedRequiresAutomation
     ? automationRevision
     : null;
+  const requestedPageTimerMinutes = action === 'on'
+    ? sanitizeMinutes(pageTimerMinutes, 0)
+    : 0;
+  const requestedPageTimerTargetAt = action === 'on'
+    ? Number(pageTimerTargetAt) || 0
+    : 0;
   if (requestedNotAfterAt !== 0 && !Number.isSafeInteger(requestedNotAfterAt)) {
     return { success: false, error: '自动开启窗口截止时间无效' };
+  }
+  if (pageTimerMinutes !== 0 && requestedPageTimerMinutes <= 0) {
+    return { success: false, error: '开机前页面定时器分钟数无效' };
+  }
+  if (requestedPageTimerTargetAt !== 0
+      && (!Number.isSafeInteger(requestedPageTimerTargetAt)
+        || requestedPageTimerTargetAt <= Date.now())) {
+    return { success: false, error: '开机前页面定时器绝对目标无效' };
   }
   const requestedAutomationIsCurrent = requestedAutomationRevision === null
     ? isAutomationAllowed()
@@ -3148,9 +3345,11 @@ async function toggleAC(
   }
   if (acToggleInFlight) {
     if (acToggleInFlightAction === action
-        && acToggleInFlightNotAfterAt === requestedNotAfterAt
+      && acToggleInFlightNotAfterAt === requestedNotAfterAt
       && acToggleInFlightRequiresAutomation === requestedRequiresAutomation
-      && acToggleInFlightAutomationRevision === requestedAutomationRevision) {
+      && acToggleInFlightAutomationRevision === requestedAutomationRevision
+      && acToggleInFlightPageTimerMinutes === requestedPageTimerMinutes
+      && acToggleInFlightPageTimerTargetAt === requestedPageTimerTargetAt) {
       console.log(`[AC扩展] 合并重复的 toggleAC(${action}) 请求`);
       return acToggleInFlight;
     }
@@ -3165,10 +3364,14 @@ async function toggleAC(
   acToggleInFlightNotAfterAt = requestedNotAfterAt;
   acToggleInFlightRequiresAutomation = requestedRequiresAutomation;
   acToggleInFlightAutomationRevision = requestedAutomationRevision;
+  acToggleInFlightPageTimerMinutes = requestedPageTimerMinutes;
+  acToggleInFlightPageTimerTargetAt = requestedPageTimerTargetAt;
   acToggleInFlight = toggleACOnce(action, {
     notAfterAt: requestedNotAfterAt,
     requireAutomationAllowed: requestedRequiresAutomation,
-    automationRevision: requestedAutomationRevision
+    automationRevision: requestedAutomationRevision,
+    pageTimerMinutes: requestedPageTimerMinutes,
+    pageTimerTargetAt: requestedPageTimerTargetAt
   });
   try {
     return await acToggleInFlight;
@@ -3178,19 +3381,24 @@ async function toggleAC(
     acToggleInFlightNotAfterAt = 0;
     acToggleInFlightRequiresAutomation = false;
     acToggleInFlightAutomationRevision = null;
+    acToggleInFlightPageTimerMinutes = 0;
+    acToggleInFlightPageTimerTargetAt = 0;
   }
 }
 
 async function toggleACOnce(action, options = {}) {
   // A1: 顶层幂等预检 — 先查当前 AC 真实状态，已是目标则跳过，避免多余开关噪音
   const needOn = action === 'on';
-  try {
-    const preStatus = await getCurrentACStatus();
-    if (typeof preStatus?.isOn === 'boolean' && preStatus.isOn === needOn) {
-      console.log(`[AC扩展] 幂等预检：AC 已在目标状态 (${action})，跳过切换`);
-      return { success: true, alreadyDone: true, action };
-    }
-  } catch (_) { /* 预检失败不影响主流程 */ }
+  const preparePageTimer = needOn && Number(options?.pageTimerMinutes) > 0;
+  if (!preparePageTimer) {
+    try {
+      const preStatus = await getCurrentACStatus();
+      if (typeof preStatus?.isOn === 'boolean' && preStatus.isOn === needOn) {
+        console.log(`[AC扩展] 幂等预检：AC 已在目标状态 (${action})，跳过切换`);
+        return { success: true, alreadyDone: true, action };
+      }
+    } catch (_) { /* 预检失败不影响主流程 */ }
+  }
 
   const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
   const homeTab = tabs.find(tab => isACHomePageTab(tab) && !tab.discarded);
@@ -3213,6 +3421,10 @@ async function _toggleOnExistingTab(tab, action, options = {}) {
       invalidTarget: true,
       error: '拒绝在非精确 AC home 标签执行空调操作'
     };
+  }
+
+  if (action === 'on' && Number(options?.pageTimerMinutes) > 0) {
+    return turnOnWithPreparedPageTimer(tab, options);
   }
 
   return attemptACToggleWithRecovery(tab.id, action, 1, '', options);
@@ -3438,6 +3650,14 @@ function isACHomePageTab(tab) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
+async function getACStatusFromExactHomeTab(tabId) {
+  try {
+    return await sendReadMessageToExactACHome(tabId, { action: 'status' });
+  } catch (error) {
+    return { isOn: null, error: error?.message || 'AC 页面未就绪' };
+  }
+}
+
 async function getCurrentACStatus() {
   const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
   const tab = tabs.find(isACHomePageTab);
@@ -3446,7 +3666,7 @@ async function getCurrentACStatus() {
   }
   try {
     return await sendReadMessageToExactACHome(tab.id, { action: 'status' });
-  } catch (e) {
+  } catch (_) {
     return { isOn: null, error: 'AC 页面未就绪' };
   }
 }
@@ -3859,7 +4079,7 @@ async function getScheduleSnapshot(lite = false) {
 
 async function toggleNowAndSync(action) {
   // 提取（Fowler Extract Function）：手动开机后的 ON 相位布防——清旧 alarm、新鲜页确认关机定时器，失败保持 on 相位 1 分钟重试。
-  async function armOnPhaseTimerAndAlarms() {
+  async function armOnPhaseTimerAndAlarms(preparedTimerResult = null) {
     // 手动开机同样是一个新的 PWM ON 阶段。先清旧 alarm 以免验证期间旧的
     // OFF 边界抢跑；新鲜页确认失败则保持 pwmState='on'，下一次不会再点击。
     schedule.pwmState = 'on';
@@ -3868,10 +4088,12 @@ async function toggleNowAndSync(action) {
     schedule.alarmDelayMinutes = 0;
     await clearPwmAlarm(automationRevision);
 
-    const timerResult = await setPageTimer(schedule.onMinutes, {
-      retryOnFailure: false,
-      automationRevision
-    });
+    const timerResult = preparedTimerResult?.success === true
+      ? preparedTimerResult
+      : await setPageTimer(schedule.onMinutes, {
+        retryOnFailure: false,
+        automationRevision
+      });
     if (await abortStaleAutomation(
       automationRevision,
       'toggle-page-timer-active-hours-paused'
@@ -3923,7 +4145,15 @@ async function toggleNowAndSync(action) {
   }
 
   const automationWasAllowed = isAutomationAllowed();
-  const toggleResult = await toggleAC('on');
+  const automationRevision = pwmRuntimeRevision;
+  if (automationWasAllowed) {
+    clearPageTimerProofState();
+    await chrome.alarms.clear('ac-page-timer-retry');
+  }
+  const toggleResult = await toggleAC('on', {
+    pageTimerMinutes: schedule.onMinutes,
+    pageTimerTargetAt: 0
+  });
 
   if (!toggleResult?.success) {
     return {
@@ -3938,16 +4168,13 @@ async function toggleNowAndSync(action) {
     const status = await getCurrentACStatus();
     return { success: true, schedule: { ...schedule, actualStatus: status }, result: toggleResult };
   }
-  const automationRevision = pwmRuntimeRevision;
 
   // 间隔模式
   const currentOn = action === 'on';
   const delay = Math.max(1, currentOn ? schedule.onMinutes : schedule.offMinutes);
-  clearPageTimerProofState();
-  await chrome.alarms.clear('ac-page-timer-retry');
 
   if (currentOn) {
-    const failedResult = await armOnPhaseTimerAndAlarms();
+    const failedResult = await armOnPhaseTimerAndAlarms(toggleResult.pageTimerResult);
     if (failedResult) return failedResult;
   }
 

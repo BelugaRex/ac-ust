@@ -27,13 +27,13 @@
 | 天气调度 | `:20/:50` one-shot、目标 `:30/:00`、先续排后预取 | Logic 可控时钟/编排；E2E 观察 alarm | 真实钟点唤醒：Manual smoke |
 | 页面发现 | 只操作完整等于 AC home 的未丢弃标签 | E2E 精确 home；Logic URL 反例 | 登录重定向：Manual |
 | 页面读取 | status、Charge Mode 余额、空/已设 page timer | E2E content；Logic DOM fixtures | 线上 DOM 漂移：Manual |
-| 自动 ON | 新 `Execution succeeded`＋迟到 ON 才成功，一次点击 | E2E 短 toast；Logic 歧义/确认框/取消 | 真实设备响应：Manual |
+| 自动 ON | 同一精确 tab 先预置 timer 再执行唯一 ON；正常路径等新 `Execution succeeded`＋迟到 ON，含糊但实际 ON 时零追加点击 | E2E 预置歧义／点击瞬间 timer／缺 toast 实际 ON／独立新鲜页；Logic 事务轨迹、确认框与取消 | 真实设备响应：Manual |
 | 智能半点 | 可信 alarm 迟醒，或生命周期发现下一 ON 已越过当前安全窗口时，执行原 ON 相位剩余部分且不延长绝对关机点；普通迟到、既有短重试与余量不足仍 defer／保留 | E2E 真实 Worker 计划；Logic 过期 alarm、启动、watchdog 接线及安全余量 | 真实钟点唤醒：Manual smoke |
 | ON 幂等 | 页面已 ON 时零额外点击、显式 `alreadyDone`，直接进入页面 timer | E2E 真实 Worker＋页面点击计数；Logic PWM 分支 | 真实 UST timer 写入：Manual |
-| ON 失败 | 缺成功提示或截止到期时失败关闭，不继续推进 | E2E 短截止；Logic 重试/恢复矩阵 | — |
+| ON 失败 | 预置失败或 URL 漂移零点击；缺成功提示且仍非 ON、或截止到期时整笔失败，不刷新接力 | E2E picker 歧义／短截止；Logic 事务轨迹与重试矩阵 | — |
 | 自动 OFF | content 拒绝 OFF，所有自动关机只走页面 timer | E2E 零点击计数；Logic 全调用链 | 真实关机生效：Manual |
 | 页面 timer | 输入 HH:MM、新鲜页读回、绝对证明、重试清理 | E2E 同源持久 fixture；Logic 三轮退避 | UST 服务端持久化：Manual |
-| timer 安全 | picker 歧义拒绝且不覆盖已确认值 | E2E 双控件；Logic portal/React 竞态 | — |
+| timer 安全 | picker 歧义拒绝且不覆盖已确认值；初始 OFF 必须先在同页预置，ON 后才由新鲜页写正式 proof | E2E 双控件／同页 load token／新鲜页；Logic portal、React 竞态与组合事务 | — |
 | receiver | 旧 listener 吞包后原页重注入，不刷新/导航 | E2E 选择性吞包 | BFCache 真机：Manual smoke |
 | 诊断 | 健康/故障码、唯一下一步、alarm 修复、历史隔离 | E2E＋Logic | `chrome://extensions` 注册错误：Manual |
 | 诊断兜底 | `popup.js` 同步崩溃仍可采集并复制 Markdown | E2E 故障注入 | — |

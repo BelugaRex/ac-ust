@@ -2063,7 +2063,8 @@ async function runTests() {
       && pwmBody.includes('observations.smartPageTimerTargetAt = Number(smartOnWindow.pageTimerTargetAt);'),
     '9H-1: production 仅在智能自动 ON 分支统一规划；物理开机前持久化锚点并透传首分钟截止');
   assertPass(setTimerBody.includes('targetAt = 0')
-      && setTimerBody.includes("action: 'setTimer'")
+      && setTimerBody.includes('writePageTimerOnExactHomeTab(tab.id, minutes')
+      && backgroundSource.includes("action: 'setTimer'")
       && setTimerBody.includes('targetAt')
       && contentSource.includes('setPagePowerOffTimer(msg.minutes, msg.targetAt)'),
     '9H-2: 智能半点绝对关机截止时间由 background 透传到 content，不退化为相对分钟');
@@ -2465,8 +2466,10 @@ async function runTests() {
   assertPass(setTimerBody.includes('tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded)')
       && !setTimerBody.includes('tabs[0]')
       && !setTimerBody.includes('chrome.tabs.update(')
-      && /waitForTabReady\(\s*tab\.id,\s*30000,\s*isACHomePageTab\s*\)/.test(setTimerBody)
-      && setTimerBody.includes('if (!isACHomePageTab(tab)) throw new Error'),
+      && backgroundSource.includes('waitForTabReady(tabId, 30000, isACHomePageTab)')
+      && backgroundSource.includes('const tab = await getExactACHomeTab(tabId);')
+      && backgroundSource.includes("error: '页面定时器目标标签已离开精确 home URL'")
+      && setTimerBody.includes('getExactACHomeTab(preferredTabId)'),
     '9O-1: 页面定时器只等待／复用精确 home；隐藏页过渡业务子页不得抢跑，也不改写其他标签');
   assertPass(contentSource.includes('function normalizeContentLocale(raw)')
       && contentSource.includes("if (/^en(?:_|$)/i.test(normalized)) return 'en';")
@@ -5730,7 +5733,7 @@ return { reapplySmartSensitivityNow };`
         'observations.toggleAlreadyDone = toggleResult?.alreadyDone === true;'
       )
       && backgroundSource.includes(
-        '页面已 ON，零点击，直接设置 Power-off after'
+        '页面已 ON，零点击，已直接确认 Power-off after'
       ),
     '16F-0C: 主世界已 ON 的幂等结果显式回传，PWM 零点击后直接进入页面关机定时器');
   assertPass(!backgroundSource.includes('async function recoverSmartCurrentCycleIfNeeded(')
@@ -5892,7 +5895,7 @@ return { reapplySmartSensitivityNow };`
     '\nasync function _toggleOnNewTab',
     'sendACToggleMessage final gate'
   );
-  const manualOnIndex16 = toggleBody16.indexOf("toggleAC('on')");
+  const manualOnIndex16 = toggleBody16.indexOf("toggleAC('on', {");
   const manualStartGateIndex16 = toggleBody16.indexOf(
     'const automationWasAllowed = isAutomationAllowed();'
   );
@@ -7014,7 +7017,8 @@ return { reapplySmartSensitivityNow };`
     '16P: 启动、同步、看门狗、页面采纳、灵敏度重设、时钟修复与诊断统一遵守运行时段门禁');
   assertPass(resetDisabledPwmRuntimeSource.includes('pwmRuntimeRevision += 1;')
       && setTimerBody.includes('automationRevision = null')
-      && setTimerBody.includes('sendSerializedPageTimerMessage(')
+      && setTimerBody.includes('writePageTimerOnExactHomeTab(tab.id, minutes')
+      && backgroundSource.includes('sendSerializedPageTimerMessage(tabId, {')
       && setTimerBody.includes('isAutomationOperationCurrent(automationRevision)')
       && verifyBody.includes('automationRevision = null')
       && verifyBody.includes('isAutomationOperationCurrent(automationRevision)')
@@ -7500,16 +7504,30 @@ return { reapplySmartSensitivityNow };`
       && comfortSource17.includes('await getCurrentPageTimer()')
       && comfortSource17.includes('await setPageTimer(')
       && comfortSource17.includes('await createPwmAlarmFromPlan('),
-    '17F: 舒适启动复用唯一 ON 确认链，随后读页面定时器、新鲜验证并以绝对目标建立 PWM 闹钟');
-  assertPass(comfortSource17.indexOf("toggleAC('on', {")
-        < comfortSource17.indexOf('schedule.comfortStartUntil = confirmedFloorPlan.minimumTargetAt')
-      && comfortSource17.indexOf('schedule.comfortStartUntil = confirmedFloorPlan.minimumTargetAt')
-        < comfortSource17.indexOf('await persistSchedule(`comfort-start-${reason}-confirmed-on`')
-      && comfortSource17.indexOf('await persistSchedule(`comfort-start-${reason}-confirmed-on`')
-        < comfortSource17.indexOf('await getCurrentPageTimer()')
-      && comfortSource17.indexOf('await getCurrentPageTimer()')
-        < comfortSource17.indexOf('await setPageTimer('),
-    '17G: ON/Execution succeeded 确认后先持久化新的五分钟 floor，再读取和设置 Power-off after');
+    '17F: 舒适启动复用唯一 ON 事务，预置并新鲜验证页面定时器后以绝对目标建立 PWM 闹钟');
+  const comfortTimerBeforeOn17 = comfortSource17.indexOf(
+    'const pageTimerBeforeOn = await getCurrentPageTimer()'
+  );
+  const comfortToggle17 = comfortSource17.indexOf("toggleAC('on', {");
+  const comfortConfirmedFloor17 = comfortSource17.indexOf(
+    'schedule.comfortStartUntil = confirmedFloorPlan.minimumTargetAt'
+  );
+  const comfortTimerAfterOn17 = comfortSource17.indexOf(
+    'const pageTimerInput = await getCurrentPageTimer()',
+    comfortToggle17
+  );
+  const comfortCalibration17 = comfortSource17.indexOf(
+    'await setPageTimer(',
+    comfortTimerAfterOn17
+  );
+  assertPass(comfortTimerBeforeOn17 >= 0
+      && comfortTimerBeforeOn17 < comfortToggle17
+      && comfortSource17.indexOf('pageTimerMinutes: provisionalPlan.timerMinutes', comfortToggle17)
+        > comfortToggle17
+      && comfortConfirmedFloor17 > comfortToggle17
+      && comfortTimerAfterOn17 > comfortConfirmedFloor17
+      && comfortCalibration17 > comfortTimerAfterOn17,
+    '17G: 舒适启动先保留既有更晚 timer 并同页预置；ON/Execution succeeded 后再校准五分钟 floor');
   assertPass((comfortSource17.includes("createAlarm('ac-comfort-end'")
         || comfortSource17.includes('createAlarm(COMFORT_START_END_ALARM'))
       && comfortSource17.includes("chrome.alarms.clear('ac-comfort-end')")
@@ -7602,6 +7620,160 @@ return { reapplySmartSensitivityNow };`
       && zhCN.statusComfortStartOK?.message.includes('5 分钟')
       && en.statusComfortStartOK?.message.includes('5 minutes'),
     '17N: Popup 在原有状态区内反馈五分钟启动成功/重试，不使用启动弹窗');
+
+  // ===== 用例 18: 同页预置关机保险后开机 =====
+  beginSuite('用例 18：同页预置关机保险后开机',
+    '\n\n=== 用例 18: 同页预置关机保险后开机 ===\n');
+
+  const preparedOnStart18 = backgroundSource.indexOf(
+    'async function turnOnWithPreparedPageTimer('
+  );
+  const preparedOnEnd18 = backgroundSource.indexOf(
+    '\n// ----- 切换 AC 状态',
+    preparedOnStart18
+  );
+  const preparedOnBody18 = preparedOnStart18 >= 0 && preparedOnEnd18 > preparedOnStart18
+    ? backgroundSource.slice(preparedOnStart18, preparedOnEnd18)
+    : '';
+  const rawTimerStart18 = backgroundSource.indexOf(
+    'async function writePageTimerOnExactHomeTab('
+  );
+  const rawTimerEnd18 = backgroundSource.indexOf(
+    '\n// ----- 设置页面自带定时器',
+    rawTimerStart18
+  );
+  const rawTimerBody18 = rawTimerStart18 >= 0 && rawTimerEnd18 > rawTimerStart18
+    ? backgroundSource.slice(rawTimerStart18, rawTimerEnd18)
+    : '';
+
+  const prearmIndex18 = preparedOnBody18.indexOf('writePageTimerOnExactHomeTab(');
+  const exactTabRecheckIndex18 = preparedOnBody18.indexOf(
+    'getExactACHomeTab(tab.id)',
+    prearmIndex18
+  );
+  const toggleIndex18 = preparedOnBody18.indexOf(
+    'attemptACToggleWithRecovery(',
+    exactTabRecheckIndex18
+  );
+  const verifiedTimerIndex18 = preparedOnBody18.indexOf(
+    'await setPageTimer(',
+    toggleIndex18
+  );
+  assertPass(preparedOnBody18.length > 0
+      && rawTimerBody18.includes("action: 'setTimer'")
+      && prearmIndex18 >= 0
+      && exactTabRecheckIndex18 > prearmIndex18
+      && toggleIndex18 > exactTabRecheckIndex18
+      && verifiedTimerIndex18 > toggleIndex18
+      && countOccurrences(preparedOnBody18, 'attemptACToggleWithRecovery(') === 1
+      && /attemptACToggleWithRecovery\([\s\S]*?0,/.test(preparedOnBody18)
+      && !preparedOnBody18.includes('refreshACControlPage('),
+    '18A: 同一精确 tab 先预置 timer、再以零刷新预算开机，成功后才走正式新鲜页证明');
+
+  assertPass(setTimerBody.includes('preferredTabId = null')
+      && setTimerBody.includes('getExactACHomeTab(preferredTabId)')
+      && toggleOnceBody.includes('options?.pageTimerMinutes')
+      && existingTabBody.includes('turnOnWithPreparedPageTimer('),
+    '18B: setPageTimer 可锁定指定 tab，toggleAC 单飞范围覆盖整笔预置开机事务');
+
+  const comfortPrearmIndex18 = comfortSource17.indexOf('pageTimerMinutes: provisionalPlan.timerMinutes');
+  const comfortToggleIndex18 = comfortSource17.indexOf("toggleAC('on', {");
+  assertPass(automaticOnBody16.includes('pageTimerMinutes: schedule.onMinutes')
+      && automaticOnBody16.includes('pageTimerTargetAt: observations.smartPageTimerTargetAt || 0')
+      && comfortPrearmIndex18 > comfortToggleIndex18
+      && comfortSource17.includes('pageTimerTargetAt: provisionalPlan.targetAt')
+      && toggleBody16.includes('pageTimerMinutes: schedule.onMinutes'),
+    '18C: PWM、五分钟舒适启动与手动 ON 三入口复用同一个先保险后开机事务');
+
+  let preparedOnBehaviorPass18 = false;
+  if (preparedOnBody18) {
+    const makePreparedOnHarness18 = ({
+      statuses = [],
+      preparedResult = { success: true, value: '12:21', targetAt: 1_800_000 },
+      exactTab = { id: 7, url: 'https://w5.ab.ust.hk/njggt/app/home' },
+      toggleResult = { success: true },
+      timerResult = { success: true, verified: true, targetAt: 1_800_000 }
+    } = {}) => {
+      const calls = [];
+      const queue = [...statuses];
+      const fn = new Function(
+        'sanitizeMinutes', 'getACStatusFromExactHomeTab', 'writePageTimerOnExactHomeTab',
+        'getExactACHomeTab', 'attemptACToggleWithRecovery', 'setPageTimer',
+        `${preparedOnBody18}; return turnOnWithPreparedPageTimer;`
+      )(
+        (value, fallback) => {
+          const minutes = Number.parseInt(value, 10);
+          return Number.isFinite(minutes) && minutes >= 1 ? minutes : fallback;
+        },
+        async tabId => {
+          calls.push(`status:${tabId}`);
+          return queue.shift() || { isOn: null };
+        },
+        async (tabId, minutes, options) => {
+          calls.push(`prepare:${tabId}:${minutes}:${options.targetAt}`);
+          return preparedResult;
+        },
+        async tabId => {
+          calls.push(`exact:${tabId}`);
+          return exactTab;
+        },
+        async (tabId, action, refreshesRemaining) => {
+          calls.push(`toggle:${tabId}:${action}:${refreshesRemaining}`);
+          return toggleResult;
+        },
+        async (minutes, options) => {
+          calls.push(`verify:${options.preferredTabId}:${minutes}:${options.targetAt}`);
+          return timerResult;
+        }
+      );
+      return { fn, calls };
+    };
+    const options18 = {
+      pageTimerMinutes: 21,
+      pageTimerTargetAt: 1_800_000,
+      notAfterAt: 1_900_000,
+      requireAutomationAllowed: true,
+      automationRevision: 9
+    };
+
+    const prearmFailure18 = makePreparedOnHarness18({
+      statuses: [{ isOn: false }],
+      preparedResult: { success: false, error: 'picker ambiguous' }
+    });
+    const prearmFailureResult18 = await prearmFailure18.fn({ id: 7 }, options18);
+
+    const driftFailure18 = makePreparedOnHarness18({
+      statuses: [{ isOn: false }],
+      exactTab: null
+    });
+    const driftFailureResult18 = await driftFailure18.fn({ id: 7 }, options18);
+
+    const ambiguousOn18 = makePreparedOnHarness18({
+      statuses: [{ isOn: false }, { isOn: true }],
+      toggleResult: { success: false, error: 'missing toast' }
+    });
+    const ambiguousOnResult18 = await ambiguousOn18.fn({ id: 7 }, options18);
+
+    const alreadyOn18 = makePreparedOnHarness18({ statuses: [{ isOn: true }] });
+    const alreadyOnResult18 = await alreadyOn18.fn({ id: 7 }, options18);
+
+    preparedOnBehaviorPass18 = prearmFailureResult18?.success === false
+      && prearmFailureResult18?.pageTimerPrepared === false
+      && prearmFailure18.calls.join(',') === 'status:7,prepare:7:21:1800000'
+      && driftFailureResult18?.success === false
+      && driftFailureResult18?.invalidTarget === true
+      && driftFailure18.calls.join(',') === 'status:7,prepare:7:21:1800000,exact:7'
+      && ambiguousOnResult18?.success === true
+      && ambiguousOnResult18?.toggleAmbiguous === true
+      && ambiguousOnResult18?.actualOn === true
+      && ambiguousOn18.calls.join(',')
+        === 'status:7,prepare:7:21:1800000,exact:7,toggle:7:on:0,status:7,verify:7:21:1800000'
+      && alreadyOnResult18?.success === true
+      && alreadyOnResult18?.alreadyDone === true
+      && alreadyOn18.calls.join(',') === 'status:7,verify:7:21:1800000';
+  }
+  assertPass(preparedOnBehaviorPass18,
+    '18D: 预置失败/URL 漂移均零点击；含糊但实际 ON 只验证保险；已 ON 零点击直设 timer');
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;
