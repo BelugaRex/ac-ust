@@ -7367,6 +7367,12 @@ return { reapplySmartSensitivityNow };`
     '\n// 独立兜底脚本只在该标记缺失时接管诊断按钮。',
     'popup diagnostic click handler'
   );
+  const serviceWorkerRuntimeDiagnosticsSource14 = extractSourceSection(
+    popupSource,
+    'function appendServiceWorkerRuntimeDiagnostics(',
+    "\n\nbtnDiagnose.addEventListener('click', async () => {",
+    'Popup service worker runtime diagnostics reporter'
+  );
   const captureDiagnosticInputsSource = extractSourceSection(
     popupSource,
     'async function capturePopupDiagnosticInputs(report, runtime = {}) {',
@@ -7815,7 +7821,11 @@ return { reapplySmartSensitivityNow };`
       && areDiagnosticTriggersAligned(10000, 11500)
       && !areDiagnosticTriggersAligned(10000, 11501)
       && !areDiagnosticTriggersAligned(10000, 0)
-      && countOccurrences(diagnoseHandlerSource, 'areDiagnosticTriggersAligned(') >= 2
+      && countOccurrences(diagnoseHandlerSource, 'areDiagnosticTriggersAligned(') === 1
+      && countOccurrences(
+        serviceWorkerRuntimeDiagnosticsSource14,
+        'areDiagnosticTriggersAligned('
+      ) === 1
       && !diagnoseHandlerSource.includes('memNext === memLive'),
     '14O: 两方与三方触发时间共用 1500ms 容差，浏览器毫秒小数不再误报时钟失步');
 
@@ -8232,7 +8242,7 @@ return { reapplySmartSensitivityNow };`
   const smartWeatherDiagnosticsSource14 = extractSourceSection(
     popupSource,
     'function appendSmartWeatherDiagnostics(',
-    "\n\nbtnDiagnose.addEventListener('click', async () => {",
+    '\n\nfunction appendServiceWorkerRuntimeDiagnostics(',
     'Popup smart weather diagnostics reporter'
   );
   const appendSmartWeatherDiagnostics14 = new Function(
@@ -8506,6 +8516,271 @@ return { reapplySmartSensitivityNow };`
       && defaultWeatherTrace14.join(',') === 'get:ac_smart_weather,age:456'
       && defaultWeatherAgeThrown14 === defaultWeatherAgeFailure14,
     '14Q-P15: 天气默认 chrome/age 依赖真实执行；inactive 零读取，age 异常保持同一 rejection reason');
+
+  const loadServiceWorkerRuntimeDiagnostics14 = ({
+    matchBuild,
+    alignTriggers
+  }) => new Function(
+    'isMatchingServiceWorkerBuild', 'areDiagnosticTriggersAligned', 'BUILD_TIME',
+    `'use strict'; ${serviceWorkerRuntimeDiagnosticsSource14};`
+      + ' return appendServiceWorkerRuntimeDiagnostics;'
+  )(matchBuild, alignTriggers, 'BUILD-14');
+  const baseSwRuntimeCaptured14 = Object.freeze({
+    sw: Object.freeze({
+      success: true,
+      swAgeMs: 12_400,
+      initAgeMs: 5_400,
+      buildTime: 'BUILD-14',
+      initCompleted: true,
+      offscreenAlive: true,
+      liveAlarmScheduledTime: 1_700_000_000_000,
+      memorySchedule: Object.freeze({ nextTriggerAt: 1_700_000_000_000 })
+    }),
+    runtimeBuildCompatible: true,
+    contentRuntimeBefore: Object.freeze({
+      runtimeIdentityAssessment: Object.freeze({ valid: true })
+    }),
+    contentRuntimeAfter: Object.freeze({
+      found: true,
+      runtimeIdentityAssessment: Object.freeze({
+        valid: true,
+        actual: Object.freeze({
+          content: Object.freeze({ buildTime: 'CONTENT-14' }),
+          main: Object.freeze({ buildTime: 'MAIN-14' })
+        })
+      })
+    }),
+    storedSchedule: Object.freeze({ nextTriggerAt: 1_700_000_000_000 })
+  });
+  const baseSwRuntimeState14 = Object.freeze({
+    automationEnabled: true,
+    automationPausedByActiveHours: false,
+    pwmStepInFlight: false,
+    pwmTriggerRepaired: false
+  });
+  const runServiceWorkerRuntimeDiagnostics14 = ({
+    captured = baseSwRuntimeCaptured14,
+    state = baseSwRuntimeState14,
+    matchBuild = () => true,
+    alignTriggers = (...values) => values.every(value => value === values[0])
+  } = {}) => {
+    const calls = [];
+    let thrown = null;
+    let result;
+    try {
+      result = loadServiceWorkerRuntimeDiagnostics14({ matchBuild, alignTriggers })(
+        {
+          add(ok, message, metadata) { calls.push({ ok, message, metadata }); },
+          translate: (key, ...args) => `${key}|${args.join('|')}`
+        },
+        captured,
+        state,
+        value => value ? `time:${value}` : 'empty-time'
+      );
+    } catch (error) {
+      thrown = error;
+    }
+    return { calls, thrown, result };
+  };
+  let healthySwAlignCalls14 = 0;
+  const healthySwRuntimeDiagnostics14 = runServiceWorkerRuntimeDiagnostics14({
+    alignTriggers(...values) {
+      healthySwAlignCalls14 += 1;
+      return values.every(value => value === values[0]);
+    }
+  });
+  assertPass(healthySwRuntimeDiagnostics14.result === undefined
+      && healthySwRuntimeDiagnostics14.thrown === null
+      && healthySwAlignCalls14 === 1
+      && healthySwRuntimeDiagnostics14.calls.length === 5
+      && healthySwRuntimeDiagnostics14.calls.every(call => call.ok === true)
+      && healthySwRuntimeDiagnostics14.calls.map(call => (
+        call.message.split('|')[0]
+      )).join(',') === (
+        'diagnoseSWBuildMatch,diagnoseContentBuildMatch,diagnoseSWInitDone,'
+          + 'diagnoseOffscreenPresent,diagnoseTriMatch'
+      )
+      && !/\bawait\b|\bchrome\b|sendMessage|storage/.test(
+        serviceWorkerRuntimeDiagnosticsSource14
+      ),
+    '14Q-P16: SW 健康首现场同步按 build→content→init→offscreen→三方时钟输出');
+
+  const mismatchedSwRuntimeDiagnostics14 = runServiceWorkerRuntimeDiagnostics14({
+    captured: Object.freeze({
+      ...baseSwRuntimeCaptured14,
+      sw: Object.freeze({
+        ...baseSwRuntimeCaptured14.sw,
+        initCompleted: false,
+        offscreenAlive: false,
+        liveAlarmScheduledTime: 1_700_000_000_003,
+        memorySchedule: Object.freeze({ nextTriggerAt: 1_700_000_000_002 })
+      }),
+      contentRuntimeAfter: Object.freeze({
+        found: true,
+        runtimeIdentityAssessment: Object.freeze({
+          valid: false,
+          actual: Object.freeze({
+            content: Object.freeze({ buildTime: 'STALE-CONTENT' }),
+            main: Object.freeze({ buildTime: 'STALE-MAIN' })
+          })
+        })
+      })
+    }),
+    matchBuild: () => false,
+    alignTriggers: () => false
+  });
+  const devReinjectedSwRuntimeDiagnostics14 = runServiceWorkerRuntimeDiagnostics14({
+    captured: Object.freeze({
+      ...baseSwRuntimeCaptured14,
+      sw: Object.freeze({
+        ...baseSwRuntimeCaptured14.sw,
+        initCompleted: false,
+        offscreenAlive: undefined
+      }),
+      contentRuntimeBefore: Object.freeze({
+        runtimeIdentityAssessment: Object.freeze({ valid: false })
+      })
+    }),
+    state: Object.freeze({ ...baseSwRuntimeState14, automationEnabled: false }),
+    matchBuild: () => null
+  });
+  const pendingContentSwRuntimeDiagnostics14 = runServiceWorkerRuntimeDiagnostics14({
+    captured: Object.freeze({
+      ...baseSwRuntimeCaptured14,
+      contentRuntimeAfter: Object.freeze({ found: false })
+    })
+  });
+  const incompatibleContentSwRuntimeDiagnostics14 = runServiceWorkerRuntimeDiagnostics14({
+    captured: Object.freeze({
+      ...baseSwRuntimeCaptured14,
+      runtimeBuildCompatible: false,
+      contentRuntimeAfter: Object.freeze({
+        found: true,
+        runtimeIdentityAssessment: Object.freeze({ valid: false })
+      })
+    })
+  });
+  assertPass(mismatchedSwRuntimeDiagnostics14.calls.map(call => (
+        call.metadata?.code
+      )).join(',') === (
+        'SW-BUILD-MISMATCH,CONTENT-RUNTIME-MISMATCH,SW-INIT-INCOMPLETE,'
+          + 'SW-OFFSCREEN-MISSING,SCHED-THREE-WAY-DESYNC'
+      )
+      && mismatchedSwRuntimeDiagnostics14.calls[3].metadata.level === 'warning'
+      && mismatchedSwRuntimeDiagnostics14.calls[3].metadata.priority === 70
+      && devReinjectedSwRuntimeDiagnostics14.calls.length === 4
+      && devReinjectedSwRuntimeDiagnostics14.calls[0].metadata.code === 'SW-BUILD-DEV'
+      && devReinjectedSwRuntimeDiagnostics14.calls[1].metadata.code
+        === 'CONTENT-RUNTIME-REINJECTED'
+      && devReinjectedSwRuntimeDiagnostics14.calls[1].metadata.level === 'repaired'
+      && devReinjectedSwRuntimeDiagnostics14.calls[3].metadata.code
+        === 'SW-OFFSCREEN-UNKNOWN'
+      && pendingContentSwRuntimeDiagnostics14.calls.length === 5
+      && pendingContentSwRuntimeDiagnostics14.calls[1].metadata.code
+        === 'CONTENT-BUILD-NOT-CHECKED'
+      && incompatibleContentSwRuntimeDiagnostics14.calls.length === 4
+      && incompatibleContentSwRuntimeDiagnostics14.calls.every(call => (
+        !String(call.message).startsWith('diagnoseContentBuild')
+      )),
+    '14Q-P17: SW formal/dev、content mismatch/reinjected、init 与 offscreen 三态保持原 code/顺序');
+
+  const suppressedSwAlignCalls14 = [];
+  for (const statePatch of [
+    { automationEnabled: false },
+    { automationPausedByActiveHours: true },
+    { pwmStepInFlight: true }
+  ]) {
+    const inFlightWithoutLiveAlarm = statePatch.pwmStepInFlight === true;
+    const captured = inFlightWithoutLiveAlarm
+      ? Object.freeze({
+          ...baseSwRuntimeCaptured14,
+          sw: Object.freeze({
+            ...baseSwRuntimeCaptured14.sw,
+            liveAlarmScheduledTime: 0
+          })
+        })
+      : baseSwRuntimeCaptured14;
+    let alignCalls = 0;
+    const result = runServiceWorkerRuntimeDiagnostics14({
+      captured,
+      state: Object.freeze({ ...baseSwRuntimeState14, ...statePatch }),
+      alignTriggers() {
+        alignCalls += 1;
+        return true;
+      }
+    });
+    suppressedSwAlignCalls14.push({ alignCalls, lineCount: result.calls.length });
+  }
+  const degradedSwRuntimeDiagnostics14 = runServiceWorkerRuntimeDiagnostics14({
+    captured: Object.freeze({
+      ...baseSwRuntimeCaptured14,
+      sw: Object.freeze({ success: false, error: 'should-be-shadowed' })
+    }),
+    state: Object.freeze({ ...baseSwRuntimeState14, pwmTriggerRepaired: true })
+  });
+  const failedSwRuntimeDiagnostics14 = runServiceWorkerRuntimeDiagnostics14({
+    captured: Object.freeze({
+      ...baseSwRuntimeCaptured14,
+      sw: Object.freeze({ success: false, error: 'sw-failed' })
+    })
+  });
+  const abnormalSwRuntimeDiagnostics14 = runServiceWorkerRuntimeDiagnostics14({
+    captured: Object.freeze({ ...baseSwRuntimeCaptured14, sw: Object.freeze({ marker: 1 }) })
+  });
+  const missingSwRuntimeDiagnostics14 = runServiceWorkerRuntimeDiagnostics14({
+    captured: Object.freeze({ ...baseSwRuntimeCaptured14, sw: null })
+  });
+  assertPass(suppressedSwAlignCalls14.every(item => (
+        item.alignCalls === 0 && item.lineCount === 4
+      ))
+      && degradedSwRuntimeDiagnostics14.calls.length === 1
+      && degradedSwRuntimeDiagnostics14.calls[0].metadata.code === 'SW-STATUS-DEGRADED'
+      && degradedSwRuntimeDiagnostics14.calls[0].metadata.level === 'warning'
+      && degradedSwRuntimeDiagnostics14.calls[0].metadata.priority === 50
+      && failedSwRuntimeDiagnostics14.calls[0].metadata.code === 'SW-STATUS-FAILED'
+      && failedSwRuntimeDiagnostics14.calls[0].message.startsWith('diagnoseGetSwFailed|')
+      && abnormalSwRuntimeDiagnostics14.calls[0].message.startsWith('diagnoseGetSwAbnormal|')
+      && missingSwRuntimeDiagnostics14.calls[0].message.startsWith('diagnoseGetSwNone|'),
+    '14Q-P18: disabled/paused/in-flight 省略三方校验；repaired degraded 优先于各失败 envelope');
+
+  const swMatcherFailure14 = new Error('sw-build-matcher-failed');
+  const matcherFailedSwRuntimeDiagnostics14 = runServiceWorkerRuntimeDiagnostics14({
+    matchBuild() { throw swMatcherFailure14; }
+  });
+  const swAlignerFailure14 = new Error('sw-trigger-aligner-failed');
+  const alignerFailedSwRuntimeDiagnostics14 = runServiceWorkerRuntimeDiagnostics14({
+    alignTriggers() { throw swAlignerFailure14; }
+  });
+  assertPass(matcherFailedSwRuntimeDiagnostics14.thrown === swMatcherFailure14
+      && matcherFailedSwRuntimeDiagnostics14.calls.length === 0
+      && alignerFailedSwRuntimeDiagnostics14.thrown === swAlignerFailure14
+      && alignerFailedSwRuntimeDiagnostics14.calls.length === 4,
+    '14Q-P19: SW matcher 零行抛错；aligner 在前四行后抛错，均保持原异常 identity');
+
+  const pageTimerRetryAt14 = diagnoseHandlerSource.indexOf(
+    'const retryMin = Number(s.pageTimerRetryMinutes) || 0;'
+  );
+  const swRuntimeAppendAt14 = diagnoseHandlerSource.indexOf(
+    'appendServiceWorkerRuntimeDiagnostics('
+  );
+  const diagnosticVersionAt14 = diagnoseHandlerSource.indexOf('let diagVersion;');
+  assertPass(pageTimerRetryAt14 >= 0
+      && swRuntimeAppendAt14 > pageTimerRetryAt14
+      && diagnosticVersionAt14 > swRuntimeAppendAt14
+      && countOccurrences(
+        diagnoseHandlerSource,
+        'appendServiceWorkerRuntimeDiagnostics('
+      ) === 1
+      && /appendServiceWorkerRuntimeDiagnostics\(\s*\{ add, translate: t \},\s*captured,\s*diagnosticState,\s*fmt\s*\);/.test(
+        diagnoseHandlerSource
+      )
+      && !diagnoseHandlerSource.includes('const swAgeSec')
+      && !diagnoseHandlerSource.includes('const contentBeforeAssessment')
+      && !diagnoseHandlerSource.includes('const memNext')
+      && !/\bawait\b|\bchrome\b|sendMessage|storage/.test(
+        serviceWorkerRuntimeDiagnosticsSource14
+      ),
+    '14Q-P20: page-timer retry→SW helper→version 顺序与四实参接线固定，handler 不再内联呈现细节');
 
   const diagnosticReportStart = popupSource.indexOf('const DIAGNOSTIC_LEVEL_SYMBOLS =');
   const diagnosticReportEnd = popupSource.indexOf(

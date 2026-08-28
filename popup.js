@@ -1903,6 +1903,161 @@ function appendSmartWeatherDiagnostics(report, state, alarms, runtime = {}) {
   });
 }
 
+function appendServiceWorkerRuntimeDiagnostics(
+  report,
+  captured,
+  state,
+  formatTime
+) {
+  const { add, translate: t } = report;
+  const {
+    sw,
+    runtimeBuildCompatible,
+    contentRuntimeBefore,
+    contentRuntimeAfter,
+    storedSchedule
+  } = captured;
+  const {
+    automationEnabled,
+    automationPausedByActiveHours,
+    pwmStepInFlight,
+    pwmTriggerRepaired
+  } = state;
+  const fmt = formatTime;
+
+  // sw 已在任何诊断修复之前只读取得；这里复用首现场，禁止为了展示
+  // 状态再次用后置快照覆盖其 runtime/lastOutcome。
+  if (sw && sw.success === true) {
+    // SW 响应成功:显示三方一致校验
+    const swAgeSec = Math.round((sw.swAgeMs || 0) / 1000);
+    const initAgeSec = sw.initAgeMs >= 0 ? Math.round(sw.initAgeMs / 1000) : -1;
+    const swBuildMatches = isMatchingServiceWorkerBuild(sw);
+    if (swBuildMatches === true) {
+      add(true, t('diagnoseSWBuildMatch', BUILD_TIME));
+    } else if (swBuildMatches === false) {
+      add(false, t('diagnoseSWBuildMismatch', BUILD_TIME, sw.buildTime || '?'), {
+        code: 'SW-BUILD-MISMATCH',
+        domain: t('diagnoseDomainBackground'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 1
+      });
+    } else {
+      add(true, t('diagnoseSWBuildUnknown'), {
+        level: 'info',
+        code: 'SW-BUILD-DEV',
+        domain: t('diagnoseDomainBackground')
+      });
+    }
+    const contentBeforeAssessment = contentRuntimeBefore?.runtimeIdentityAssessment;
+    const contentAfterAssessment = contentRuntimeAfter?.runtimeIdentityAssessment;
+    if (contentRuntimeAfter?.found === false) {
+      add(true, t('diagnoseContentBuildPending'), {
+        level: 'info',
+        code: 'CONTENT-BUILD-NOT-CHECKED',
+        domain: t('diagnoseDomainPage')
+      });
+    } else if (contentAfterAssessment?.valid === true) {
+      const runtimeWasReinjected = contentBeforeAssessment?.valid === false;
+      add(true, t(
+        runtimeWasReinjected
+          ? 'diagnoseContentBuildReinjected'
+          : 'diagnoseContentBuildMatch',
+        contentAfterAssessment.actual?.content?.buildTime || '?',
+        contentAfterAssessment.actual?.main?.buildTime || '?'
+      ), runtimeWasReinjected ? {
+        level: 'repaired',
+        code: 'CONTENT-RUNTIME-REINJECTED',
+        domain: t('diagnoseDomainPage')
+      } : {});
+    } else if (runtimeBuildCompatible) {
+      add(false, t(
+        'diagnoseContentBuildMismatch',
+        contentAfterAssessment?.actual?.content?.buildTime || '?',
+        contentAfterAssessment?.actual?.main?.buildTime || '?',
+        BUILD_TIME
+      ), {
+        code: 'CONTENT-RUNTIME-MISMATCH',
+        domain: t('diagnoseDomainPage'),
+        action: t('diagnoseActionReloadACPage'),
+        priority: 1
+      });
+    }
+    add(sw.initCompleted, t(sw.initCompleted ? 'diagnoseSWInitDone' : 'diagnoseSWInitPending', swAgeSec, initAgeSec), {
+      code: 'SW-INIT-INCOMPLETE',
+      domain: t('diagnoseDomainBackground'),
+      action: t('diagnoseActionReloadExtension'),
+      priority: 5
+    });
+    // L2 offscreen 长连接保活页(阶段58):每分钟 badge-tick 顺带 ensureOffscreen 重建。
+    // 三态兼容:v0.6.7+ SW 返回 offscreenAlive 真值(true/false);旧 SW 不返回该字段(undefined),
+    // 视为 SW 跑旧代码,不打红灯避免误导用户以为 offscreen 失效。
+    if (sw.offscreenAlive === true) {
+      add(true, t('diagnoseOffscreenPresent'));
+    } else if (sw.offscreenAlive === false) {
+      add(false, t('diagnoseOffscreenMissing'), {
+        level: 'warning',
+        code: 'SW-OFFSCREEN-MISSING',
+        domain: t('diagnoseDomainBackground'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 70
+      });
+    } else {
+      add(true, t('diagnoseOffscreenUnknown'), {
+        level: 'info',
+        code: 'SW-OFFSCREEN-UNKNOWN',
+        domain: t('diagnoseDomainBackground')
+      });
+    }
+    const memNext = sw.memorySchedule?.nextTriggerAt || 0;
+    const storedNext = storedSchedule.nextTriggerAt || 0;
+    const memLive = sw.liveAlarmScheduledTime || 0;
+    if (!automationEnabled || automationPausedByActiveHours) {
+      // 停用／暂停态预期没有 PWM 时钟，不把三方全空误报为失步。
+    } else if (pwmStepInFlight && !memLive) {
+      // 前面的 alarm 检查已经显示一次“边界处理中”；此处只跳过瞬态三方校验。
+    } else if (areDiagnosticTriggersAligned(memLive, memNext, storedNext)) {
+      add(true, t('diagnoseTriMatch', fmt(memLive)));
+    } else {
+      add(false, t('diagnoseTriMismatch', fmt(memLive), fmt(memNext), fmt(storedNext)), {
+        code: 'SCHED-THREE-WAY-DESYNC',
+        domain: t('diagnoseDomainScheduler'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 5
+      });
+    }
+  } else if (pwmTriggerRepaired) {
+    add(false, t('diagnoseBgRepairedSw'), {
+      level: 'warning',
+      code: 'SW-STATUS-DEGRADED',
+      domain: t('diagnoseDomainBackground'),
+      action: t('diagnoseActionReloadExtension'),
+      priority: 50
+    });
+  } else if (sw && sw.success === false) {
+    add(false, t('diagnoseGetSwFailed') + (sw.error||'?').slice(0,80), {
+      code: 'SW-STATUS-FAILED',
+      domain: t('diagnoseDomainBackground'),
+      action: t('diagnoseActionReloadExtension'),
+      priority: 0
+    });
+  } else if (sw) {
+    add(false, t('diagnoseGetSwAbnormal') + JSON.stringify(sw).slice(0,80), {
+      code: 'SW-STATUS-FAILED',
+      domain: t('diagnoseDomainBackground'),
+      action: t('diagnoseActionReloadExtension'),
+      priority: 0
+    });
+  } else {
+    // SW 完全无响应且 popup 未自愈 — 这是真问题
+    add(false, t('diagnoseGetSwNone'), {
+      code: 'SW-STATUS-FAILED',
+      domain: t('diagnoseDomainBackground'),
+      action: t('diagnoseActionReloadExtension'),
+      priority: 0
+    });
+  }
+}
+
 btnDiagnose.addEventListener('click', async () => {
   diagnoseResult.style.display = 'block';
   document.getElementById('diagContent').textContent = t('diagnoseInProgress');
@@ -1930,13 +2085,9 @@ btnDiagnose.addEventListener('click', async () => {
   try {
     const captured = await capturePopupDiagnosticInputs({ add, translate: t });
     const {
-      sw,
-      runtimeBuildCompatible,
-      contentRuntimeBefore,
       ensured,
       bg,
       bgProbeFailed,
-      contentRuntimeAfter,
       storedSchedule
     } = captured;
 
@@ -2434,142 +2585,13 @@ btnDiagnose.addEventListener('click', async () => {
       });
     }
 
-    // 5. SW 状态可观测性:启动时间 / init 完成时间 / 内存 schedule 与 storage 是否一致
-    // 注意:getSwStatus 失败、未响应、或 SW 跑旧代码时 sw 可能为 undefined/success:false,
-    // 必须在所有分支都显示信息,避免静默盲区。
-    // 正式构建必须能核对 Popup/SW 身份。storage 自愈不能证明正在执行的旧 SW
-    // 已加载同一套调度逻辑，因此正式构建缺少 getSwStatus 时必须报红并要求重载。
-    // sw 已在任何诊断修复之前只读取得；这里复用首现场，禁止为了展示
-    // 状态再次用后置快照覆盖其 runtime/lastOutcome。
-    if (sw && sw.success === true) {
-      // SW 响应成功:显示三方一致校验
-      const swAgeSec = Math.round((sw.swAgeMs || 0) / 1000);
-      const initAgeSec = sw.initAgeMs >= 0 ? Math.round(sw.initAgeMs / 1000) : -1;
-      const swBuildMatches = isMatchingServiceWorkerBuild(sw);
-      if (swBuildMatches === true) {
-        add(true, t('diagnoseSWBuildMatch', BUILD_TIME));
-      } else if (swBuildMatches === false) {
-        add(false, t('diagnoseSWBuildMismatch', BUILD_TIME, sw.buildTime || '?'), {
-          code: 'SW-BUILD-MISMATCH',
-          domain: t('diagnoseDomainBackground'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 1
-        });
-      } else {
-        add(true, t('diagnoseSWBuildUnknown'), {
-          level: 'info',
-          code: 'SW-BUILD-DEV',
-          domain: t('diagnoseDomainBackground')
-        });
-      }
-      const contentBeforeAssessment = contentRuntimeBefore?.runtimeIdentityAssessment;
-      const contentAfterAssessment = contentRuntimeAfter?.runtimeIdentityAssessment;
-      if (contentRuntimeAfter?.found === false) {
-        add(true, t('diagnoseContentBuildPending'), {
-          level: 'info',
-          code: 'CONTENT-BUILD-NOT-CHECKED',
-          domain: t('diagnoseDomainPage')
-        });
-      } else if (contentAfterAssessment?.valid === true) {
-        const runtimeWasReinjected = contentBeforeAssessment?.valid === false;
-        add(true, t(
-          runtimeWasReinjected
-            ? 'diagnoseContentBuildReinjected'
-            : 'diagnoseContentBuildMatch',
-          contentAfterAssessment.actual?.content?.buildTime || '?',
-          contentAfterAssessment.actual?.main?.buildTime || '?'
-        ), runtimeWasReinjected ? {
-          level: 'repaired',
-          code: 'CONTENT-RUNTIME-REINJECTED',
-          domain: t('diagnoseDomainPage')
-        } : {});
-      } else if (runtimeBuildCompatible) {
-        add(false, t(
-          'diagnoseContentBuildMismatch',
-          contentAfterAssessment?.actual?.content?.buildTime || '?',
-          contentAfterAssessment?.actual?.main?.buildTime || '?',
-          BUILD_TIME
-        ), {
-          code: 'CONTENT-RUNTIME-MISMATCH',
-          domain: t('diagnoseDomainPage'),
-          action: t('diagnoseActionReloadACPage'),
-          priority: 1
-        });
-      }
-      add(sw.initCompleted, t(sw.initCompleted ? 'diagnoseSWInitDone' : 'diagnoseSWInitPending', swAgeSec, initAgeSec), {
-        code: 'SW-INIT-INCOMPLETE',
-        domain: t('diagnoseDomainBackground'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 5
-      });
-      // L2 offscreen 长连接保活页(阶段58):每分钟 badge-tick 顺带 ensureOffscreen 重建。
-      // 三态兼容:v0.6.7+ SW 返回 offscreenAlive 真值(true/false);旧 SW 不返回该字段(undefined),
-      // 视为 SW 跑旧代码,不打红灯避免误导用户以为 offscreen 失效。
-      if (sw.offscreenAlive === true) {
-        add(true, t('diagnoseOffscreenPresent'));
-      } else if (sw.offscreenAlive === false) {
-        add(false, t('diagnoseOffscreenMissing'), {
-          level: 'warning',
-          code: 'SW-OFFSCREEN-MISSING',
-          domain: t('diagnoseDomainBackground'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 70
-        });
-      } else {
-        add(true, t('diagnoseOffscreenUnknown'), {
-          level: 'info',
-          code: 'SW-OFFSCREEN-UNKNOWN',
-          domain: t('diagnoseDomainBackground')
-        });
-      }
-      const memNext = sw.memorySchedule?.nextTriggerAt || 0;
-      const storedNext = storedSchedule.nextTriggerAt || 0;
-      const memLive = sw.liveAlarmScheduledTime || 0;
-      if (!automationEnabled || automationPausedByActiveHours) {
-        // 停用／暂停态预期没有 PWM 时钟，不把三方全空误报为失步。
-      } else if (pwmStepInFlight && !memLive) {
-        // 前面的 alarm 检查已经显示一次“边界处理中”；此处只跳过瞬态三方校验。
-      } else if (areDiagnosticTriggersAligned(memLive, memNext, storedNext)) {
-        add(true, t('diagnoseTriMatch', fmt(memLive)));
-      } else {
-        add(false, t('diagnoseTriMismatch', fmt(memLive), fmt(memNext), fmt(storedNext)), {
-          code: 'SCHED-THREE-WAY-DESYNC',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 5
-        });
-      }
-    } else if (pwmTriggerRepaired) {
-      add(false, t('diagnoseBgRepairedSw'), {
-        level: 'warning',
-        code: 'SW-STATUS-DEGRADED',
-        domain: t('diagnoseDomainBackground'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 50
-      });
-    } else if (sw && sw.success === false) {
-      add(false, t('diagnoseGetSwFailed') + (sw.error||'?').slice(0,80), {
-        code: 'SW-STATUS-FAILED',
-        domain: t('diagnoseDomainBackground'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 0
-      });
-    } else if (sw) {
-      add(false, t('diagnoseGetSwAbnormal') + JSON.stringify(sw).slice(0,80), {
-        code: 'SW-STATUS-FAILED',
-        domain: t('diagnoseDomainBackground'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 0
-      });
-    } else {
-      // SW 完全无响应且 popup 未自愈 — 这是真问题
-      add(false, t('diagnoseGetSwNone'), {
-        code: 'SW-STATUS-FAILED',
-        domain: t('diagnoseDomainBackground'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 0
-      });
-    }
+    // 5. SW 状态可观测性：只同步呈现诊断开始时捕获的首现场。
+    appendServiceWorkerRuntimeDiagnostics(
+      { add, translate: t },
+      captured,
+      diagnosticState,
+      fmt
+    );
 
     // 6. 构建时间戳:让用户/诊断能直接判断扩展实际加载的是哪次 build
     //    (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
