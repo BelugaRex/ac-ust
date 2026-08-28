@@ -950,10 +950,23 @@ function classifyDiagnosticEvidence(envelope) {
   if (Number(envelope?.schemaVersion) !== 2) return 'absent';
   const before = envelope?.evidence?.before;
   const after = envelope?.evidence?.after;
-  if (!before || !after || before.complete === false || after.complete === false) {
+  const hasSnapshotShape = snapshot => !!snapshot
+    && typeof snapshot === 'object'
+    && Object.hasOwn(snapshot, 'complete')
+    && Object.hasOwn(snapshot, 'coherent')
+    && snapshot.memorySchedule && typeof snapshot.memorySchedule === 'object'
+    && snapshot.storedSchedule && typeof snapshot.storedSchedule === 'object'
+    && snapshot.alarms && typeof snapshot.alarms === 'object'
+    && snapshot.owner && typeof snapshot.owner === 'object'
+    && snapshot.runtime && typeof snapshot.runtime === 'object'
+    && Array.isArray(snapshot.readErrors);
+  if (!hasSnapshotShape(before)
+      || !hasSnapshotShape(after)
+      || before.complete !== true
+      || after.complete !== true) {
     return 'incomplete';
   }
-  if (before.coherent === false || after.coherent === false) return 'incoherent';
+  if (before.coherent !== true || after.coherent !== true) return 'incoherent';
   return 'usable';
 }
 

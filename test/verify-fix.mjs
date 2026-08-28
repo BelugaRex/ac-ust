@@ -7085,7 +7085,14 @@ return { reapplySmartSensitivityNow };`
     ${diagnosticEvidenceReaderSource14}
     return { classifyDiagnosticEvidence, readDiagnosticEvidence };`
   )();
+  const completeSnapshotShape14 = {
+    memorySchedule: {},
+    storedSchedule: {},
+    alarms: {},
+    readErrors: []
+  };
   const evidenceBefore14 = {
+    ...completeSnapshotShape14,
     coherent: true,
     complete: true,
     owner: { action: 'on' },
@@ -7104,6 +7111,7 @@ return { reapplySmartSensitivityNow };`
     evidence: {
       before: evidenceBefore14,
       after: {
+        ...completeSnapshotShape14,
         coherent: true,
         complete: true,
         owner: { action: 'off' },
@@ -7119,14 +7127,30 @@ return { reapplySmartSensitivityNow };`
     schemaVersion: 2,
     evidence: {
       before: evidenceBefore14,
-      after: { coherent: true, complete: false, runtime: {} }
+      after: {
+        ...completeSnapshotShape14,
+        coherent: true,
+        complete: false,
+        owner: { action: 'off' },
+        runtime: {}
+      }
     }
+  });
+  const missingStructureEvidence14 = diagnosticEvidenceReaders14.readDiagnosticEvidence({
+    schemaVersion: 2,
+    evidence: { before: {}, after: {} }
   });
   const incoherentEvidence14 = diagnosticEvidenceReaders14.readDiagnosticEvidence({
     schemaVersion: 2,
     evidence: {
       before: evidenceBefore14,
-      after: { coherent: false, complete: true, runtime: {} }
+      after: {
+        ...completeSnapshotShape14,
+        coherent: false,
+        complete: true,
+        owner: { action: 'off' },
+        runtime: {}
+      }
     }
   });
   const concurrentEvidence14 = diagnosticEvidenceReaders14.readDiagnosticEvidence({
@@ -7134,8 +7158,10 @@ return { reapplySmartSensitivityNow };`
     evidence: {
       before: evidenceBefore14,
       after: {
+        ...completeSnapshotShape14,
         coherent: true,
         complete: true,
+        owner: { action: 'off' },
         runtime: {
           currentAttempt: attemptBefore14,
           currentAttempts: [attemptBefore14, attemptAfter14],
@@ -7158,6 +7184,8 @@ return { reapplySmartSensitivityNow };`
       && settledEvidence14.pwmStepRunning === false
       && incompleteEvidence14.status === 'incomplete'
       && incompleteEvidence14.currentAttempt === null
+      && missingStructureEvidence14.status === 'incomplete'
+      && missingStructureEvidence14.usable === false
       && incoherentEvidence14.status === 'incoherent'
       && concurrentEvidence14.currentAttempts.length === 2
       && concurrentEvidence14.currentAttempts[1] === attemptAfter14
