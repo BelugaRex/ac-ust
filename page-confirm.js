@@ -5,6 +5,78 @@
 // ============================================================
 
 (() => {
+  const PAGE_BUILD_TIME = 'dev';
+  const PAGE_BUILD_TIME_EPOCH_MS = 0;
+  const PAGE_MAIN_LISTENER_ID = `${PAGE_BUILD_TIME_EPOCH_MS || 'dev'}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  const MAIN_BRIDGE_CHANNEL = `__AC_EXTENSION_${PAGE_BUILD_TIME_EPOCH_MS || 'dev'}`;
+  const MAIN_BRIDGE_EVENTS = {
+    cancel: `${MAIN_BRIDGE_CHANNEL}_CANCEL_AUTOMATIC_ON__`,
+    toggle: `${MAIN_BRIDGE_CHANNEL}_TOGGLE_AC__`,
+    toggleResult: `${MAIN_BRIDGE_CHANNEL}_TOGGLE_AC_RESULT__`,
+    status: `${MAIN_BRIDGE_CHANNEL}_GET_STATUS__`,
+    statusResult: `${MAIN_BRIDGE_CHANNEL}_GET_STATUS_RESULT__`,
+    runtime: `${MAIN_BRIDGE_CHANNEL}_GET_RUNTIME__`,
+    runtimeResult: `${MAIN_BRIDGE_CHANNEL}_GET_RUNTIME_RESULT__`
+  };
+  const previousMainBridge = window.__AC_EXTENSION_MAIN_BRIDGE__;
+  const previousMainBridgeLease = window.__AC_EXTENSION_MAIN_BRIDGE_LEASE__;
+  const mainBridgeLease = previousMainBridgeLease || {
+    cancelRevision: 0,
+    inFlight: null,
+    target: null,
+    notAfterAt: 0,
+    ownerGeneration: 0,
+    blockedUntil: 0,
+    uncertainClickOwner: '',
+    uncertainClickUntil: 0
+  };
+  window.__AC_EXTENSION_MAIN_BRIDGE_LEASE__ = mainBridgeLease;
+  const legacyBridgeIsolated = window.__AC_EXTENSION_TOGGLE_PATCHED__ === true
+    && !previousMainBridge;
+  let predecessorMainBridgeDrain = Promise.resolve(null);
+  let predecessorMainBridgeUnknown = false;
+  try {
+    if (typeof previousMainBridge?.cancelAndDrain === 'function') {
+      predecessorMainBridgeDrain = Promise.resolve(
+        previousMainBridge.cancelAndDrain()
+      ).catch(() => null);
+      previousMainBridge.dispose?.({ cancel: false });
+    } else if (previousMainBridge || legacyBridgeIsolated) {
+      predecessorMainBridgeUnknown = true;
+      const cancelEvents = new Set(['__AC_EXTENSION_CANCEL_AUTOMATIC_ON__']);
+      if (previousMainBridge?.channel) {
+        cancelEvents.add(`${previousMainBridge.channel}_CANCEL_AUTOMATIC_ON__`);
+      }
+      for (const type of cancelEvents) {
+        window.dispatchEvent(new CustomEvent(type));
+      }
+      previousMainBridge?.dispose?.();
+    }
+  } catch (_) {
+    predecessorMainBridgeUnknown = true;
+  }
+  const mainBridgeOwnerGeneration = (Number(mainBridgeLease.ownerGeneration) || 0) + 1;
+  mainBridgeLease.ownerGeneration = mainBridgeOwnerGeneration;
+  const mainBridgeListeners = [];
+  const addMainBridgeListener = (type, listener) => {
+    window.addEventListener(type, listener);
+    mainBridgeListeners.push([type, listener]);
+  };
+
+  function getMainRuntimeIdentity() {
+    return {
+      runtimeIdentity: {
+        main: {
+          buildTime: PAGE_BUILD_TIME,
+          buildTimeEpochMs: PAGE_BUILD_TIME_EPOCH_MS,
+          listenerId: PAGE_MAIN_LISTENER_ID,
+          channel: MAIN_BRIDGE_CHANNEL,
+          legacyBridgeIsolated
+        }
+      }
+    };
+  }
+
   // 主世界错误桥接（仅注册一次）：page-confirm 无法调用 chrome.runtime，
   // 只把扩展自身脚本的未捕获异常经 CustomEvent 交给 content.js 回传 SW。
   if (!window.__AC_EXTENSION_ERROR_PATCHED__) {
@@ -34,34 +106,45 @@
     });
   }
 
-  if (window.__AC_EXTENSION_TOGGLE_PATCHED__) return;
+  // 旧版用永久 boolean 阻止重注入。现在保留该标志仅供兼容识别；当前
+  // build 使用版本化事件频道和可释放 registry，因此无需刷新页面即可接管。
   window.__AC_EXTENSION_TOGGLE_PATCHED__ = true;
 
   const MAX_AC_SWITCH_CLICKS = 3;
   const AC_STATE_SETTLE_MS = 10000;
   const AC_ON_SUCCESS_TEXT = 'Execution succeeded';
   const AC_EXECUTION_SUCCESS_TIMEOUT_MS = 15000;
+  const HOT_TAKEOVER_CLICK_QUIET_MS = 60_000;
+  if (predecessorMainBridgeUnknown) {
+    mainBridgeLease.blockedUntil = Math.max(
+      Number(mainBridgeLease.blockedUntil) || 0,
+      Date.now() + HOT_TAKEOVER_CLICK_QUIET_MS
+    );
+  }
   let acStateRequestInFlight = null;
   let acStateRequestTarget = null;
   let acStateRequestNotAfterAt = 0;
-  let automaticOnCancellationRevision = 0;
+  let automaticOnCancellationRevision = Number(mainBridgeLease.cancelRevision) || 0;
 
-  window.addEventListener('__AC_EXTENSION_CANCEL_AUTOMATIC_ON__', () => {
+  const handleAutomaticOnCancel = () => {
     automaticOnCancellationRevision += 1;
-  });
+    mainBridgeLease.cancelRevision = automaticOnCancellationRevision;
+  };
+  addMainBridgeListener(MAIN_BRIDGE_EVENTS.cancel, handleAutomaticOnCancel);
 
-  window.addEventListener('__AC_EXTENSION_TOGGLE_AC__', async (event) => {
+  const handleToggleRequest = async (event) => {
     const { requestId, action, notAfterAt = 0 } = event.detail || {};
     if (!requestId || action !== 'on') {
       if (requestId) {
-        window.dispatchEvent(new CustomEvent('__AC_EXTENSION_TOGGLE_AC_RESULT__', {
+        window.dispatchEvent(new CustomEvent(MAIN_BRIDGE_EVENTS.toggleResult, {
           detail: {
             requestId,
             action,
             success: false,
             verified: false,
             error: 'OFF 操作已禁用；自动关机只允许使用 Power-off after',
-            via: 'main-world-ensureACState'
+            via: 'main-world-ensureACState',
+            ...getMainRuntimeIdentity()
           }
         }));
       }
@@ -70,7 +153,32 @@
 
     let result;
     try {
-      result = await requestACState(true, notAfterAt);
+      await predecessorMainBridgeDrain;
+      if (mainBridgeLease.ownerGeneration !== mainBridgeOwnerGeneration) {
+        result = {
+          success: false,
+          verified: false,
+          busy: true,
+          takeoverPending: true,
+          error: '主世界控制已由更新的脚本接管',
+          via: 'main-world-ensureACState'
+        };
+      }
+      const takeoverStatus = getACStatusInPageWorld();
+      if (!result
+          && Number(mainBridgeLease.blockedUntil) > Date.now()
+          && takeoverStatus?.isOn !== true) {
+        result = {
+          success: false,
+          verified: false,
+          busy: true,
+          takeoverPending: true,
+          error: '旧主世界 ON 请求已取消，等待下一轮安全重试',
+          via: 'main-world-ensureACState'
+        };
+      } else if (!result) {
+        result = await requestACState(true, notAfterAt);
+      }
     } catch (error) {
       // ensureACState 异常时也必须回包，否则隔离世界会静默等满超时拿到 null，
       // 并误触发后台的「刷新恢复」链路。这里显式回失败，让上层可诊断。
@@ -81,20 +189,55 @@
         via: 'main-world-ensureACState'
       };
     }
-    window.dispatchEvent(new CustomEvent('__AC_EXTENSION_TOGGLE_AC_RESULT__', {
-      detail: { requestId, action, ...result }
+    window.dispatchEvent(new CustomEvent(MAIN_BRIDGE_EVENTS.toggleResult, {
+      detail: { requestId, action, ...result, ...getMainRuntimeIdentity() }
     }));
-  });
+  };
+  addMainBridgeListener(MAIN_BRIDGE_EVENTS.toggle, handleToggleRequest);
 
-  window.addEventListener('__AC_EXTENSION_GET_STATUS__', (event) => {
+  const handleStatusRequest = (event) => {
     const { requestId } = event.detail || {};
     if (!requestId) return;
 
     const result = getACStatusInPageWorld();
-    window.dispatchEvent(new CustomEvent('__AC_EXTENSION_GET_STATUS_RESULT__', {
-      detail: { requestId, ...result }
+    window.dispatchEvent(new CustomEvent(MAIN_BRIDGE_EVENTS.statusResult, {
+      detail: { requestId, ...result, ...getMainRuntimeIdentity() }
     }));
-  });
+  };
+  addMainBridgeListener(MAIN_BRIDGE_EVENTS.status, handleStatusRequest);
+
+  const handleRuntimeRequest = (event) => {
+    const { requestId } = event.detail || {};
+    if (!requestId) return;
+    window.dispatchEvent(new CustomEvent(MAIN_BRIDGE_EVENTS.runtimeResult, {
+      detail: { requestId, success: true, ...getMainRuntimeIdentity() }
+    }));
+  };
+  addMainBridgeListener(MAIN_BRIDGE_EVENTS.runtime, handleRuntimeRequest);
+
+  window.__AC_EXTENSION_MAIN_BRIDGE__ = {
+    buildTime: PAGE_BUILD_TIME,
+    buildTimeEpochMs: PAGE_BUILD_TIME_EPOCH_MS,
+    listenerId: PAGE_MAIN_LISTENER_ID,
+    channel: MAIN_BRIDGE_CHANNEL,
+    cancelAndDrain() {
+      handleAutomaticOnCancel();
+      const pending = acStateRequestInFlight || mainBridgeLease.inFlight;
+      return pending
+        ? Promise.resolve(pending).catch(() => null)
+        : Promise.resolve(null);
+    },
+    dispose({ cancel = true } = {}) {
+      const drain = cancel
+        ? this.cancelAndDrain()
+        : Promise.resolve(null);
+      for (const [type, listener] of mainBridgeListeners) {
+        window.removeEventListener(type, listener);
+      }
+      mainBridgeListeners.length = 0;
+      return drain;
+    }
+  };
 
   function getACStatusInPageWorld() {
     const sw = findACSwitchInPageWorld();
@@ -152,20 +295,41 @@
         via: 'main-world-ensureACState'
       };
     }
+    if (mainBridgeLease.inFlight
+        && mainBridgeLease.inFlight !== acStateRequestInFlight) {
+      return {
+        success: false,
+        busy: true,
+        error: '前一个主世界操作仍在收口，本次请求不重复点击',
+        via: 'main-world-ensureACState'
+      };
+    }
 
     acStateRequestTarget = targetState;
     acStateRequestNotAfterAt = requestedNotAfterAt;
     ensureACState.notAfterAt = requestedNotAfterAt;
     ensureACState.cancellationRevision = automaticOnCancellationRevision;
+    ensureACState.ownerGeneration = mainBridgeOwnerGeneration;
+    ensureACState.requestId = `${PAGE_MAIN_LISTENER_ID}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     acStateRequestInFlight = ensureACState(targetState);
+    mainBridgeLease.inFlight = acStateRequestInFlight;
+    mainBridgeLease.target = targetState;
+    mainBridgeLease.notAfterAt = requestedNotAfterAt;
     try {
       return await acStateRequestInFlight;
     } finally {
+      if (mainBridgeLease.inFlight === acStateRequestInFlight) {
+        mainBridgeLease.inFlight = null;
+        mainBridgeLease.target = null;
+        mainBridgeLease.notAfterAt = 0;
+      }
       acStateRequestInFlight = null;
       acStateRequestTarget = null;
       acStateRequestNotAfterAt = 0;
       ensureACState.notAfterAt = 0;
       ensureACState.cancellationRevision = automaticOnCancellationRevision;
+      ensureACState.ownerGeneration = mainBridgeOwnerGeneration;
+      ensureACState.requestId = '';
     }
   }
 
@@ -176,6 +340,11 @@
   async function ensureACState(targetState, clickCount = 0) {
     // 提取（Fowler Extract Function）：统一结果形状——避免三处成功/四处失败对象重复构造。
     function successResult(status, clickCount) {
+      if (targetState && status?.isOn === true) {
+        mainBridgeLease.uncertainClickOwner = '';
+        mainBridgeLease.uncertainClickUntil = 0;
+        mainBridgeLease.blockedUntil = 0;
+      }
       return {
         success: true,
         alreadyDone: clickCount === 0,
@@ -201,6 +370,9 @@
     function getOnWindowError() {
       if (ensureACState.cancellationRevision !== automaticOnCancellationRevision) {
         return '请求已被后台取消';
+      }
+      if (ensureACState.ownerGeneration !== mainBridgeLease.ownerGeneration) {
+        return '请求已由更新的主世界脚本接管';
       }
       const notAfterAt = Number(ensureACState.notAfterAt) || 0;
       if (!targetState || notAfterAt === 0) return '';
@@ -248,11 +420,28 @@
       return failureResult(beforeClick, clickCount, 'AC 开关被禁用（余额不足或页面加载中），无法切换');
     }
 
+    const clickOwner = String(ensureACState.requestId || '');
+    if (targetState
+        && mainBridgeLease.uncertainClickOwner
+        && mainBridgeLease.uncertainClickOwner !== clickOwner
+        && Number(mainBridgeLease.uncertainClickUntil) > Date.now()) {
+      return failureResult(beforeClick, clickCount, '前任 ON 点击仍可能在途', {
+        busy: true,
+        takeoverPending: true
+      });
+    }
+
     console.log(`[AC扩展] ensureACState: 当前=${beforeClick.isOn}，目标=${targetState}，执行第 ${clickCount + 1} 次单击`);
     const executionSuccessBaseline = new Set(
       findACToggleExecutionSuccessMessagesInPageWorld()
     );
+    mainBridgeLease.uncertainClickOwner = clickOwner;
+    mainBridgeLease.uncertainClickUntil = Date.now() + HOT_TAKEOVER_CLICK_QUIET_MS;
     if (!clickElementOnceInPageWorld(sw)) {
+      if (mainBridgeLease.uncertainClickOwner === clickOwner) {
+        mainBridgeLease.uncertainClickOwner = '';
+        mainBridgeLease.uncertainClickUntil = 0;
+      }
       return failureResult(beforeClick, clickCount, '主世界 AC 开关 click() 调用失败');
     }
 

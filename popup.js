@@ -939,6 +939,64 @@ function isMatchingServiceWorkerBuild(sw) {
     && String(sw?.buildTime || '') === BUILD_TIME;
 }
 
+// schema v2 的 after 快照包含“明确为空”的状态；null 代表已结算，不能用
+// truthy fallback 重新拾回 before 中的历史 in-flight。旧 schema 才回退 before。
+function selectDiagnosticRuntimeValue(afterSnapshot, beforeSnapshot, key) {
+  if (afterSnapshot) return afterSnapshot.runtime?.[key] ?? null;
+  return beforeSnapshot?.runtime?.[key] ?? null;
+}
+
+function classifyDiagnosticEvidence(envelope) {
+  if (Number(envelope?.schemaVersion) !== 2) return 'absent';
+  const before = envelope?.evidence?.before;
+  const after = envelope?.evidence?.after;
+  if (!before || !after || before.complete === false || after.complete === false) {
+    return 'incomplete';
+  }
+  if (before.coherent === false || after.coherent === false) return 'incoherent';
+  return 'usable';
+}
+
+function readDiagnosticEvidence(envelope) {
+  const status = classifyDiagnosticEvidence(envelope);
+  const before = envelope?.evidence?.before || null;
+  const after = envelope?.evidence?.after || null;
+  if (status !== 'usable') {
+    return {
+      status,
+      usable: false,
+      before,
+      after,
+      owner: null,
+      currentAttempt: null,
+      currentAttempts: [],
+      lastOutcome: null,
+      pwmStepRunning: null
+    };
+  }
+  const currentAttempt = selectDiagnosticRuntimeValue(
+    after,
+    before,
+    'currentAttempt'
+  );
+  return {
+    status,
+    usable: true,
+    before,
+    after,
+    owner: before.owner || null,
+    currentAttempt,
+    currentAttempts: Array.isArray(after.runtime?.currentAttempts)
+      ? after.runtime.currentAttempts
+      : (currentAttempt ? [currentAttempt] : []),
+    lastOutcome: selectDiagnosticRuntimeValue(after, before, 'lastOutcome'),
+    pwmStepRunning: after.runtime?.pwmStepRunning === true
+      || currentAttempt != null
+      || (Array.isArray(after.runtime?.currentAttempts)
+        && after.runtime.currentAttempts.length > 0)
+  };
+}
+
 function formatBuildTimeShort(buildTime) {
   const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):\d{2}$/.exec(buildTime);
   if (!match) return buildTime;
@@ -1303,24 +1361,51 @@ btnDiagnose.addEventListener('click', async () => {
   lines.push(t('diagnoseBrowser') + browserName + ' ' + browserVer);
   
   try {
-    let ensured = null;
+    // 先冻结只读 runtime 身份。Popup/SW 已混版时绝不能先让旧 SW 执行
+    // ensureDiagnostics；否则“诊断”会改写本应保留的首现场。
+    let sw = null;
     try {
-      ensured = await sendDiagnosticRuntimeMessage({ type: 'ensureDiagnostics' });
-      if (ensured?.success === false && ensured.error) {
-        add(false, t('diagnoseEnsureFailed') + String(ensured.error).slice(0, 80), {
+      sw = await sendDiagnosticRuntimeMessage({ type: 'getSwStatus' });
+    } catch (e) {
+      console.warn('getSwStatus preflight 异常:', e?.message);
+    }
+    const preflightSwBuildMatch = sw?.success === true
+      ? isMatchingServiceWorkerBuild(sw)
+      : false;
+    const runtimeBuildCompatible = Number(BUILD_TIME_EPOCH_MS) > 0
+      ? preflightSwBuildMatch === true
+      : true;
+    let contentRuntimeBefore = null;
+    if (runtimeBuildCompatible) {
+      try {
+        contentRuntimeBefore = await sendDiagnosticRuntimeMessage({
+          type: 'inspectContentRuntime'
+        });
+      } catch (e) {
+        contentRuntimeBefore = { success: false, error: e?.message || String(e) };
+      }
+    }
+
+    let ensured = null;
+    if (runtimeBuildCompatible) {
+      try {
+        ensured = await sendDiagnosticRuntimeMessage({ type: 'ensureDiagnostics' });
+        if (ensured?.success === false && ensured.error) {
+          add(false, t('diagnoseEnsureFailed') + String(ensured.error).slice(0, 80), {
+            code: 'SCHED-REPAIR-FAILED',
+            domain: t('diagnoseDomainScheduler'),
+            action: t('diagnoseActionReloadExtension'),
+            priority: 10
+          });
+        }
+      } catch (e) {
+        add(false, t('diagnoseEnsureFailed') + (e.message || '').slice(0, 80), {
           code: 'SCHED-REPAIR-FAILED',
           domain: t('diagnoseDomainScheduler'),
           action: t('diagnoseActionReloadExtension'),
           priority: 10
         });
       }
-    } catch (e) {
-      add(false, t('diagnoseEnsureFailed') + (e.message || '').slice(0, 80), {
-        code: 'SCHED-REPAIR-FAILED',
-        domain: t('diagnoseDomainScheduler'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 10
-      });
     }
 
     let bg = null;
@@ -1344,6 +1429,16 @@ btnDiagnose.addEventListener('click', async () => {
         action: t('diagnoseActionReloadExtension'),
         priority: 5
       });
+    }
+    let contentRuntimeAfter = contentRuntimeBefore;
+    if (runtimeBuildCompatible) {
+      try {
+        contentRuntimeAfter = await sendDiagnosticRuntimeMessage({
+          type: 'inspectContentRuntime'
+        });
+      } catch (e) {
+        contentRuntimeAfter = { success: false, error: e?.message || String(e) };
+      }
     }
 
     // 1. 检查 storage / 后台权威快照
@@ -1377,13 +1472,45 @@ btnDiagnose.addEventListener('click', async () => {
     const bgSchedule = bg?.success === false && bg?.schedule
       ? bg.schedule
       : (bg || {});
-    let s = { ...storedSchedule, ...(ensured?.schedule || {}), ...bgSchedule };
+    const diagnosticEvidence = readDiagnosticEvidence(ensured);
+    const diagnosticBefore = diagnosticEvidence.before;
+    const diagnosticAfter = diagnosticEvidence.after;
+    const diagnosticEvidenceUsable = diagnosticEvidence.usable;
+    const preRepairSchedule = (diagnosticEvidenceUsable
+      ? diagnosticBefore?.memorySchedule || diagnosticBefore?.storedSchedule
+      : null)
+      || storedSchedule;
+    let s = {
+      ...storedSchedule,
+      ...(diagnosticEvidenceUsable ? diagnosticAfter?.memorySchedule || {} : {}),
+      ...(diagnosticEvidenceUsable ? ensured?.schedule || {} : {}),
+      ...bgSchedule
+    };
     const automationPausedByActiveHours = s._automationPausedByActiveHours === true
       || isAutomationPausedByActiveHours(s);
     const automationEnabled = s.enabled === true;
-    const pwmStepInFlight = ensured?.pwmStepRunning === true
-      || s._pwmStepRunning === true;
-    const repairedItems = new Set(Array.isArray(ensured?.repairs) ? ensured.repairs : []);
+    const diagnosticOwner = diagnosticEvidence.owner;
+    const diagnosticCurrentAttempt = diagnosticEvidence.currentAttempt;
+    const diagnosticCurrentAttempts = diagnosticEvidence.currentAttempts;
+    const diagnosticLastOutcome = diagnosticEvidence.lastOutcome;
+    const ownerScheduledAt = Number(diagnosticOwner?.scheduledAt) || 0;
+    const ownerMatchesLastOutcome = ownerScheduledAt > 0
+      && Math.abs(Number(diagnosticLastOutcome?.scheduledAt) - ownerScheduledAt) < 1500
+      && diagnosticLastOutcome?.action === diagnosticOwner?.action;
+    const pwmBoundaryDuePending = !diagnosticCurrentAttempt
+      && !ownerMatchesLastOutcome
+      && ownerScheduledAt > 0
+      && Math.abs(
+        Number(diagnosticBefore?.capturedAt || Date.now()) - ownerScheduledAt
+      ) <= 60000;
+    const pwmStepInFlight = diagnosticEvidenceUsable
+      ? diagnosticEvidence.pwmStepRunning
+      : s._pwmStepRunning === true;
+    const repairedItems = new Set(
+      Array.isArray(ensured?.evidence?.repair?.items)
+        ? ensured.evidence.repair.items
+        : (Array.isArray(ensured?.repairs) ? ensured.repairs : [])
+    );
     if (repairedItems.has('smart-current-cycle-started')) {
       add(false, t('diagnoseSmartCurrentCycleRecoveryStarted'), {
         level: 'warning',
@@ -1395,68 +1522,92 @@ btnDiagnose.addEventListener('click', async () => {
     }
     const clearedAlarmCount = [...repairedItems]
       .filter(item => item.endsWith('-alarm-cleared')).length;
-    const leakedRuntimeAlarmCount = [
-      ensured?.alarms?.pwm,
-      ensured?.alarms?.badge,
-      ensured?.alarms?.watchdog,
-      ...(!automationEnabled ? [ensured?.alarms?.smartWeather] : [])
-    ].filter(Boolean).length;
+    let leakedRuntimeAlarmCount = 0;
     let effectiveNextTriggerAt = s.nextTriggerAt || 0;
 
-    // 1.5 自愈:storage.nextTriggerAt 缺失或已过期,但 live ac-pwm 在未来(间隔模式 + enabled),
-    // 直接在 popup 侧补写 storage。不依赖 background 是否跑最新代码——这是 popup 主动
-    // 修复路径,确保诊断面板能从根上消除"ac-pwm 在但 storage 缺/过期"的红灯。
-    // 触发条件扩展:不只 nextTriggerAt=0,nextTriggerAt < now(已过期)也触发。
-    // 这覆盖"SW 跑旧代码,storage 没跟上闹钟推进"的场景。
+    // 修复只允许后台执行。Popup 消费 before/repair/after，不再直接写 storage，
+    // 因而复制报告能同时保留事故首现场与修复后的收敛状态。
     const nowMs = Date.now();
-    const storedIsStale = !effectiveNextTriggerAt || effectiveNextTriggerAt < nowMs;
     let pwmAlarmEarly = await chrome.alarms.get('ac-pwm');
-    const liveClockAssessment = classifySmartOnClock(
-      s,
-      pwmAlarmEarly?.scheduledTime,
-      {
-        now: nowMs,
-        plannedAt: Number(s._clockPlannedAt)
-          || Number(storedSchedule.alarmCreatedAt)
-          || 0,
-        nextAction: s._nextAction || s.pwmState,
-        requirePlannedAt: true
-      }
-    );
-    let selfHealed = false;
-    if (s.enabled === true
-      && !automationPausedByActiveHours
-        && s._phaseAdoptionInFlight !== true
-        && s.clockMode === false
-        && storedIsStale
-        && pwmAlarmEarly?.scheduledTime
-        && pwmAlarmEarly.scheduledTime > nowMs
-        && (!liveClockAssessment.applicable || liveClockAssessment.valid)) {
-      try {
-        const repairedSchedule = projectPersistentSchedule({
-          ...storedSchedule,
-          ...s,
-          nextTriggerAt: pwmAlarmEarly.scheduledTime,
-          alarmCreatedAt: Date.now(),
-          alarmDelayMinutes: Math.max(1, (pwmAlarmEarly.scheduledTime - Date.now()) / 60000)
-        });
-        await chrome.storage.local.set({ ac_schedule: repairedSchedule });
-        // 等待 storage 写入完成
-        await new Promise(r => setTimeout(r, 200));
-        // 自愈成功后,直接使用 repairedSchedule 作为 s。
-        // 不能再合并旧的 ensured/bgSchedule——它们携带诊断开始时的快照(nextTriggerAt=0),
-        // 在合并时会把刚修复的值覆盖回 0(合并顺序 bug,Node 测试 verify-fix.mjs 发现)。
-        s = { ...s, ...repairedSchedule };
-        effectiveNextTriggerAt = s.nextTriggerAt || 0;
-        selfHealed = true;
-      } catch (e) {
-        add(false, t('diagnoseSelfHealFail') + (e.message||'').slice(0,60), {
-          code: 'SCHED-TRIGGER-REPAIR-FAILED',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 10
-        });
-      }
+    const selfHealed = repairedItems.has('pwm-trigger');
+    if (diagnosticEvidence.status === 'incomplete') {
+      const evidenceReadErrors = [
+        ...(diagnosticBefore?.readErrors || []),
+        ...(diagnosticAfter?.readErrors || [])
+      ];
+      add(false, t(
+        'diagnosePwmEvidenceIncomplete',
+        evidenceReadErrors.join('; ').slice(0, 240) || '?'
+      ), {
+        level: 'warning',
+        code: 'SCHED-EVIDENCE-INCOMPLETE',
+        domain: t('diagnoseDomainScheduler'),
+        action: t('diagnoseActionRecheckRecovery'),
+        priority: 15
+      });
+    } else if (diagnosticEvidence.status === 'incoherent') {
+      add(false, t('diagnosePwmEvidenceIncoherent'), {
+        level: 'warning',
+        code: 'SCHED-EVIDENCE-INCOHERENT',
+        domain: t('diagnoseDomainScheduler'),
+        action: t('diagnoseActionRecheckRecovery'),
+        priority: 15
+      });
+    } else if (diagnosticEvidenceUsable) {
+      add(true, t(
+        'diagnosePwmEvidenceBefore',
+        diagnosticOwner?.action || '?',
+        diagnosticOwner?.kind || '?',
+        fmt(diagnosticOwner?.boundaryAt),
+        fmt(diagnosticOwner?.scheduledAt),
+        fmt(diagnosticOwner?.liveAlarmAt)
+      ), {
+        level: 'info',
+        code: 'SCHED-EVIDENCE-BEFORE',
+        domain: t('diagnoseDomainScheduler')
+      });
+      const currentAttemptText = diagnosticCurrentAttempts.length
+        ? diagnosticCurrentAttempts.map(attempt => (
+            `#${attempt.attemptId} ${attempt.source}`
+              + ` ${attempt.action}@${fmt(attempt.scheduledAt)}`
+          )).join(' | ')
+        : (pwmBoundaryDuePending ? 'due-pending' : 'idle');
+      add(true, t('diagnosePwmEvidenceRuntime', currentAttemptText), {
+        level: 'info',
+        code: diagnosticCurrentAttempt
+          ? 'SCHED-PWM-IN-FLIGHT'
+          : (pwmBoundaryDuePending ? 'SCHED-PWM-DUE-PENDING' : 'SCHED-PWM-IDLE'),
+        domain: t('diagnoseDomainScheduler')
+      });
+      const lastOutcomeText = diagnosticLastOutcome
+        ? `#${diagnosticLastOutcome.attemptId} ${diagnosticLastOutcome.status}`
+          + ` ${diagnosticLastOutcome.action}@${fmt(diagnosticLastOutcome.scheduledAt)}`
+          + `${diagnosticLastOutcome.reason ? ` (${diagnosticLastOutcome.reason})` : ''}`
+        : 'none';
+      add(true, t('diagnosePwmEvidenceLastOutcome', lastOutcomeText), {
+        level: 'info',
+        code: 'SCHED-EVIDENCE-LAST-OUTCOME',
+        domain: t('diagnoseDomainScheduler')
+      });
+      add(true, t(
+        'diagnosePwmEvidenceRepair',
+        repairedItems.size ? [...repairedItems].join(',') : 'none'
+      ), {
+        level: repairedItems.size ? 'repaired' : 'info',
+        code: repairedItems.size ? 'SCHED-EVIDENCE-REPAIRED' : 'SCHED-EVIDENCE-NO-REPAIR',
+        domain: t('diagnoseDomainScheduler')
+      });
+      add(true, t(
+        'diagnosePwmEvidenceAfter',
+        diagnosticAfter?.owner?.action || '?',
+        diagnosticAfter?.owner?.kind || '?',
+        fmt(diagnosticAfter?.owner?.scheduledAt),
+        fmt(diagnosticAfter?.owner?.liveAlarmAt)
+      ), {
+        level: 'info',
+        code: 'SCHED-EVIDENCE-AFTER',
+        domain: t('diagnoseDomainScheduler')
+      });
     }
 
     // Popup 自身也属于诊断链路：报告当前文档、布局、控件投影和保活连接。
@@ -1598,7 +1749,15 @@ btnDiagnose.addEventListener('click', async () => {
 
     // 2. 检查闹钟 — 运行闹钟只允许后台自愈，确保创建前后都复核运行时段门禁。
     let alarms = await chrome.alarms.getAll();
-    const pwmAlarm = ensured?.alarms?.pwm || alarms.find(a => a.name === 'ac-pwm');
+    const pwmAlarm = alarms.find(a => a.name === 'ac-pwm');
+    leakedRuntimeAlarmCount = [
+      pwmAlarm,
+      alarms.find(a => a.name === 'ac-badge-tick'),
+      alarms.find(a => a.name === 'ac-watchdog'),
+      ...(!automationEnabled
+        ? [alarms.find(a => a.name === 'ac-smart-weather')]
+        : [])
+    ].filter(Boolean).length;
     if (!automationEnabled) {
       if (leakedRuntimeAlarmCount) {
         add(false, t('diagnoseRuntimeAlarmsLeaked', leakedRuntimeAlarmCount), {
@@ -1734,8 +1893,7 @@ btnDiagnose.addEventListener('click', async () => {
         });
       }
 
-      const badgeAlarm = ensured?.alarms?.badge
-        || alarms.find(a => a.name === 'ac-badge-tick');
+      const badgeAlarm = alarms.find(a => a.name === 'ac-badge-tick');
       const badgeWasRepaired = repairedItems.has('badge-alarm');
       add(!!badgeAlarm, t('diagnoseBadgeAlarm') + (badgeAlarm
         ? t(badgeWasRepaired ? 'diagnoseAlarmRebuilt' : 'diagnoseAlarmScheduled')
@@ -1753,8 +1911,7 @@ btnDiagnose.addEventListener('click', async () => {
           priority: 40
         });
 
-      const watchdogAlarm = ensured?.alarms?.watchdog
-        || alarms.find(a => a.name === 'ac-watchdog');
+      const watchdogAlarm = alarms.find(a => a.name === 'ac-watchdog');
       const watchdogWasRepaired = repairedItems.has('watchdog-alarm');
       add(!!watchdogAlarm, t('diagnoseWatchdog') + (watchdogAlarm
         ? t(watchdogWasRepaired ? 'diagnoseAlarmRebuilt' : 'diagnoseAlarmScheduled')
@@ -1791,7 +1948,7 @@ btnDiagnose.addEventListener('click', async () => {
       });
     } else {
       add(true, t('diagnoseSmartModeOn'));
-      const smartWeatherAlarm = ensured?.alarms?.smartWeather || alarms.find(a => a.name === 'ac-smart-weather');
+      const smartWeatherAlarm = alarms.find(a => a.name === 'ac-smart-weather');
       const smartWeatherWasRepaired = repairedItems.has('smart-weather-alarm');
       const smartWeatherAt = Number(smartWeatherAlarm?.scheduledTime) || 0;
       const smartWeatherDate = smartWeatherAt ? new Date(smartWeatherAt) : null;
@@ -1995,11 +2152,25 @@ btnDiagnose.addEventListener('click', async () => {
       // PWM 失败提示:runPwmStep 验证失败时会写 pageTimerError。
       // 主动展示在诊断面板,方便定位"到时间没关/没开"的根因。
       if (s.pageTimerError) {
-        add(false, t('diagnosePwmError') + String(s.pageTimerError).slice(0, 120), {
-          code: 'SAFETY-TIMER-FAILED',
+        const boundaryStillSettling = pwmStepInFlight || pwmBoundaryDuePending;
+        add(false, t(boundaryStillSettling
+          ? 'diagnosePwmPreviousErrorWhileSettling'
+          : 'diagnosePwmError') + String(s.pageTimerError).slice(0, 120), {
+          ...(boundaryStillSettling ? { level: 'warning' } : {}),
+          code: boundaryStillSettling
+            ? 'SAFETY-TIMER-PREVIOUS-FAILURE'
+            : 'SAFETY-TIMER-FAILED',
           domain: t('diagnoseDomainSafety'),
           action: t('diagnoseActionCheckTimer'),
-          priority: 0
+          priority: boundaryStillSettling ? 20 : 0
+        });
+      } else if (preRepairSchedule?.pageTimerError) {
+        add(true, t('diagnosePwmPreviousErrorRecovered')
+          + String(preRepairSchedule.pageTimerError).slice(0, 120), {
+          level: 'repaired',
+          code: 'SAFETY-TIMER-RECOVERED',
+          domain: t('diagnoseDomainSafety'),
+          priority: 20
         });
       } else {
         add(true, t('diagnosePwmErrorEmpty'));
@@ -2105,13 +2276,8 @@ btnDiagnose.addEventListener('click', async () => {
     // 必须在所有分支都显示信息,避免静默盲区。
     // 正式构建必须能核对 Popup/SW 身份。storage 自愈不能证明正在执行的旧 SW
     // 已加载同一套调度逻辑，因此正式构建缺少 getSwStatus 时必须报红并要求重载。
-    let sw = null;
-    try {
-      sw = await sendDiagnosticRuntimeMessage({ type: 'getSwStatus' });
-    } catch (e) {
-      // sendResponse 异常,记录但不直接红灯
-      console.warn('getSwStatus sendMessage 异常:', e?.message);
-    }
+    // sw 已在任何诊断修复之前只读取得；这里复用首现场，禁止为了展示
+    // 状态再次用后置快照覆盖其 runtime/lastOutcome。
     if (sw && sw.success === true) {
       // SW 响应成功:显示三方一致校验
       const swAgeSec = Math.round((sw.swAgeMs || 0) / 1000);
@@ -2131,6 +2297,40 @@ btnDiagnose.addEventListener('click', async () => {
           level: 'info',
           code: 'SW-BUILD-DEV',
           domain: t('diagnoseDomainBackground')
+        });
+      }
+      const contentBeforeAssessment = contentRuntimeBefore?.runtimeIdentityAssessment;
+      const contentAfterAssessment = contentRuntimeAfter?.runtimeIdentityAssessment;
+      if (contentRuntimeAfter?.found === false) {
+        add(true, t('diagnoseContentBuildPending'), {
+          level: 'info',
+          code: 'CONTENT-BUILD-NOT-CHECKED',
+          domain: t('diagnoseDomainPage')
+        });
+      } else if (contentAfterAssessment?.valid === true) {
+        const runtimeWasReinjected = contentBeforeAssessment?.valid === false;
+        add(true, t(
+          runtimeWasReinjected
+            ? 'diagnoseContentBuildReinjected'
+            : 'diagnoseContentBuildMatch',
+          contentAfterAssessment.actual?.content?.buildTime || '?',
+          contentAfterAssessment.actual?.main?.buildTime || '?'
+        ), runtimeWasReinjected ? {
+          level: 'repaired',
+          code: 'CONTENT-RUNTIME-REINJECTED',
+          domain: t('diagnoseDomainPage')
+        } : {});
+      } else if (runtimeBuildCompatible) {
+        add(false, t(
+          'diagnoseContentBuildMismatch',
+          contentAfterAssessment?.actual?.content?.buildTime || '?',
+          contentAfterAssessment?.actual?.main?.buildTime || '?',
+          BUILD_TIME
+        ), {
+          code: 'CONTENT-RUNTIME-MISMATCH',
+          domain: t('diagnoseDomainPage'),
+          action: t('diagnoseActionReloadACPage'),
+          priority: 1
         });
       }
       add(sw.initCompleted, t(sw.initCompleted ? 'diagnoseSWInitDone' : 'diagnoseSWInitPending', swAgeSec, initAgeSec), {

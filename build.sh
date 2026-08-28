@@ -71,11 +71,20 @@ for file in "${RUNTIME_FILES[@]}"; do
   fi
 done
 
-python3 - "$DIST/popup.js" "$DIST/background.js" "$DIST/popup.html" "$VERSION" "$BUILD_TIME" "$BUILD_TIME_EPOCH_MS" <<'PY'
+python3 - "$DIST/popup.js" "$DIST/background.js" "$DIST/content.js" "$DIST/page-confirm.js" "$DIST/popup.html" "$VERSION" "$BUILD_TIME" "$BUILD_TIME_EPOCH_MS" <<'PY'
 import re
 import sys
 
-popup_path, background_path, popup_html_path, version, build_time, build_time_epoch_ms = sys.argv[1:]
+(
+  popup_path,
+  background_path,
+  content_path,
+  page_confirm_path,
+  popup_html_path,
+  version,
+  build_time,
+  build_time_epoch_ms,
+) = sys.argv[1:]
 with open(popup_path, encoding='utf-8') as popup_file:
     content = popup_file.read()
 
@@ -124,6 +133,32 @@ if background_build_time_replacements != 1 or background_build_epoch_replacement
 with open(background_path, 'w', encoding='utf-8', newline='\n') as background_file:
   background_file.write(background_content)
 
+runtime_build_targets = (
+  (content_path, 'CONTENT_BUILD_TIME', 'CONTENT_BUILD_TIME_EPOCH_MS'),
+  (page_confirm_path, 'PAGE_BUILD_TIME', 'PAGE_BUILD_TIME_EPOCH_MS'),
+)
+for runtime_path, time_name, epoch_name in runtime_build_targets:
+  with open(runtime_path, encoding='utf-8') as runtime_file:
+    runtime_content = runtime_file.read()
+  runtime_content, time_replacements = re.subn(
+    rf"const {time_name} = '[^']*';",
+    f"const {time_name} = '{build_time}';",
+    runtime_content,
+    count=1,
+  )
+  runtime_content, epoch_replacements = re.subn(
+    rf"const {epoch_name} = \d+;",
+    f"const {epoch_name} = {build_time_epoch_ms};",
+    runtime_content,
+    count=1,
+  )
+  if time_replacements != 1 or epoch_replacements != 1:
+    raise SystemExit(
+      f'Could not inject the shared runtime build identity into {runtime_path}.'
+    )
+  with open(runtime_path, 'w', encoding='utf-8', newline='\n') as runtime_file:
+    runtime_file.write(runtime_content)
+
 with open(popup_html_path, encoding='utf-8') as popup_html_file:
   popup_html = popup_html_file.read()
 
@@ -138,7 +173,7 @@ if cache_version_replacements != 2:
 with open(popup_html_path, 'w', encoding='utf-8', newline='\n') as popup_html_file:
   popup_html_file.write(popup_html)
 PY
-echo "  OK  popup/SW identity (version: $VERSION, build: $BUILD_TIME, epoch: $BUILD_TIME_EPOCH_MS)"
+echo "  OK  popup/SW/content/main identity (version: $VERSION, build: $BUILD_TIME, epoch: $BUILD_TIME_EPOCH_MS)"
 
 ZIP_PATH="$RELEASES/ac-ust-v$VERSION.zip"
 rm -f "$ZIP_PATH"

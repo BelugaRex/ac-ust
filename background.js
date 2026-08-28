@@ -16,6 +16,35 @@ const t = (key, ...subs) => I18n.t(key, ...subs);
 const BUILD_TIME = 'dev';
 const BUILD_TIME_EPOCH_MS = 0;
 
+function isMatchingRuntimeComponentBuild(component) {
+  if (!(Number(BUILD_TIME_EPOCH_MS) > 0)) return null;
+  return Number(component?.buildTimeEpochMs) === Number(BUILD_TIME_EPOCH_MS)
+    && String(component?.buildTime || '') === BUILD_TIME;
+}
+
+function assessContentRuntimeIdentity(probe) {
+  const runtimeIdentity = probe?.runtimeIdentity || {};
+  const contentMatches = isMatchingRuntimeComponentBuild(runtimeIdentity.content);
+  const mainMatches = isMatchingRuntimeComponentBuild(runtimeIdentity.main);
+  const formalBuild = Number(BUILD_TIME_EPOCH_MS) > 0;
+  return {
+    formalBuild,
+    valid: formalBuild
+      ? contentMatches === true && mainMatches === true
+      : probe != null,
+    contentMatches,
+    mainMatches,
+    expected: {
+      buildTime: BUILD_TIME,
+      buildTimeEpochMs: BUILD_TIME_EPOCH_MS
+    },
+    actual: runtimeIdentity,
+    code: formalBuild && (contentMatches !== true || mainMatches !== true)
+      ? 'CONTENT-RUNTIME-MISMATCH'
+      : ''
+  };
+}
+
 const AC_PAGE = 'https://w5.ab.ust.hk/njggt/app/home';
 const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [10000, 15000, 20000];
 const COMFORT_START_MINUTES = 5;
@@ -23,6 +52,8 @@ const COMFORT_START_RETRY_MS = 60_000;
 const COMFORT_START_END_ALARM = 'ac-comfort-end';
 const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
 const STORAGE_KEY = 'ac_schedule';
+const PWM_LAST_OUTCOME_KEY = 'ac_pwm_last_outcome';
+const PWM_OUTCOME_SCHEMA_VERSION = 1;
 const ACTIVE_BOUNDARY_RETRY_KEY = 'ac_active_boundary_retry_at';
 const ACTIVE_BOUNDARY_RETRY_MODE_KEY = 'ac_active_boundary_retry_mode';
 const ACTIVE_BOUNDARY_RETRY_BOUNDARY_KEY = 'ac_active_boundary_retry_boundary_at';
@@ -135,6 +166,11 @@ let activeBoundaryOwnerReadDeferred = false;
 let activeBoundaryMutationChain = Promise.resolve();
 let activeBoundaryCompletionGeneration = 0;
 let pwmExecutionWithRecoveryCount = 0;
+let pwmDiagnosticAttemptSequence = 0;
+let activePwmAttempts = new Map();
+let currentPwmAttempt = null;
+let lastPwmOutcome = null;
+let pwmOutcomeWriteGeneration = 0;
 let deferredRepairAfterPwmOptions = null;
 let scheduleRepairEpoch = 0;
 let scheduleLoadBlockedRevision = null;
@@ -165,6 +201,168 @@ function isTimerBasedShutdownCurrent(shutdownRevision) {
 
 function isCurrentPwmStepRunning() {
   return pwmStepRunning && pwmStepRunningRevision === pwmRuntimeRevision;
+}
+
+function beginPwmDiagnosticAttempt({ source, scheduledTime, automationRevision }) {
+  const attempt = {
+    attemptId: ++pwmDiagnosticAttemptSequence,
+    source: String(source || 'pwm'),
+    scheduledAt: Number(scheduledTime) || 0,
+    action: schedule.pwmState === 'on' ? 'on' : 'off',
+    boundaryAt: Number(schedule.pwmRetryBoundaryAt)
+      || Number(schedule.smartOnBoundaryAt)
+      || 0,
+    retryKind: String(schedule.pwmRetryKind || ''),
+    retryScheduledAt: Number(schedule.pwmRetryScheduledAt) || 0,
+    automationRevision,
+    startedAt: Date.now()
+  };
+  activePwmAttempts.set(attempt.attemptId, attempt);
+  currentPwmAttempt = [...activePwmAttempts.values()]
+    .sort((left, right) => left.attemptId - right.attemptId)[0] || null;
+  return attempt.attemptId;
+}
+
+function getActivePwmDiagnosticAttempts() {
+  return [...activePwmAttempts.values()]
+    .sort((left, right) => left.attemptId - right.attemptId)
+    .slice(0, 8)
+    .map(attempt => ({ ...attempt }));
+}
+
+function normalizePwmDiagnosticOutcome(value) {
+  if (!value || typeof value !== 'object') return null;
+  const boundedText = (input, maxLength) => String(input || '').slice(0, maxLength);
+  const diagnosticText = (input, maxLength) => (
+    typeof normalizeDiagnosticMessage === 'function'
+      ? normalizeDiagnosticMessage(input).slice(0, maxLength)
+      : boundedText(input, maxLength)
+  );
+  const finiteNumber = input => Number.isFinite(Number(input)) ? Number(input) : 0;
+  const currentBuildTime = typeof BUILD_TIME === 'string' ? BUILD_TIME : 'dev';
+  const currentBuildEpoch = typeof BUILD_TIME_EPOCH_MS === 'number'
+    ? BUILD_TIME_EPOCH_MS
+    : 0;
+  const normalized = {
+    schemaVersion: typeof PWM_OUTCOME_SCHEMA_VERSION === 'number'
+      ? PWM_OUTCOME_SCHEMA_VERSION
+      : 1,
+    buildTime: Object.hasOwn(value, 'buildTime')
+      ? boundedText(value.buildTime, 32)
+      : currentBuildTime,
+    buildTimeEpochMs: Object.hasOwn(value, 'buildTimeEpochMs')
+      ? finiteNumber(value.buildTimeEpochMs)
+      : currentBuildEpoch,
+    workerStartedAt: Object.hasOwn(value, 'workerStartedAt')
+      ? finiteNumber(value.workerStartedAt)
+      : (typeof swStartupTime === 'number' ? swStartupTime : 0),
+    attemptId: finiteNumber(value.attemptId),
+    source: boundedText(value.source, 80),
+    scheduledAt: finiteNumber(value.scheduledAt),
+    action: value.action === 'off' ? 'off' : 'on',
+    boundaryAt: finiteNumber(value.boundaryAt),
+    retryKind: boundedText(value.retryKind, 80),
+    retryScheduledAt: finiteNumber(value.retryScheduledAt),
+    automationRevision: finiteNumber(value.automationRevision),
+    startedAt: finiteNumber(value.startedAt),
+    finishedAt: finiteNumber(value.finishedAt),
+    status: boundedText(value.status, 40),
+    reason: boundedText(value.reason, 160),
+    error: diagnosticText(value.error, 300),
+    nextTriggerAt: finiteNumber(value.nextTriggerAt),
+    retryBoundaryAt: finiteNumber(value.retryBoundaryAt),
+    pageTimerTargetAt: finiteNumber(value.pageTimerTargetAt),
+    pageTimerError: diagnosticText(value.pageTimerError, 300)
+  };
+  return normalized.finishedAt > 0 ? normalized : null;
+}
+
+function selectLatestPwmDiagnosticOutcome(memoryOutcome, persistedOutcome) {
+  const memory = normalizePwmDiagnosticOutcome(memoryOutcome);
+  const persisted = normalizePwmDiagnosticOutcome(persistedOutcome);
+  if (!memory) return persisted;
+  if (!persisted) return memory;
+  return persisted.finishedAt > memory.finishedAt ? persisted : memory;
+}
+
+async function readPersistedPwmDiagnosticOutcome() {
+  try {
+    const stored = await chrome.storage.local.get(PWM_LAST_OUTCOME_KEY);
+    const outcome = normalizePwmDiagnosticOutcome(stored?.[PWM_LAST_OUTCOME_KEY]);
+    if (!outcome) return null;
+    if (outcome.buildTimeEpochMs !== BUILD_TIME_EPOCH_MS
+        || outcome.buildTime !== BUILD_TIME) return null;
+    return outcome;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function persistPwmDiagnosticOutcomeBestEffort(outcome) {
+  const normalized = normalizePwmDiagnosticOutcome(outcome);
+  if (!normalized) return false;
+  let observedGeneration = ++pwmOutcomeWriteGeneration;
+  let candidate = normalized;
+  try {
+    // 每次写完成后都重检 generation。一次性纠偏仍可能被第三代结果穿插：
+    // A 补写 B 时 C 已落盘，迟到的 B 会再次覆盖 C。循环直到“本次写对应的
+    // generation 仍是当前值”，才能保证最后完成的旧 writer 也把最新内存结果盖回。
+    while (true) {
+      await chrome.storage.local.set({ [PWM_LAST_OUTCOME_KEY]: candidate });
+      if (observedGeneration === pwmOutcomeWriteGeneration) return true;
+      observedGeneration = pwmOutcomeWriteGeneration;
+      candidate = normalizePwmDiagnosticOutcome(lastPwmOutcome);
+      if (!candidate) return false;
+    }
+  } catch (error) {
+    console.warn('[AC扩展] 最近 PWM 结果持久化失败:', error?.message || error);
+    return false;
+  }
+}
+
+async function waitForPwmDiagnosticOutcomePersistence(
+  outcome,
+  timeoutMs = 250
+) {
+  const persistence = persistPwmDiagnosticOutcomeBestEffort(outcome);
+  try {
+    return await Promise.race([
+      persistence,
+      new Promise(resolve => setTimeout(() => resolve(false), timeoutMs))
+    ]);
+  } catch (_) {
+    return false;
+  }
+}
+
+function finishPwmDiagnosticAttempt(attemptId, status, reason = '', error = '') {
+  const attempt = activePwmAttempts.get(attemptId);
+  if (!attempt) return null;
+  lastPwmOutcome = normalizePwmDiagnosticOutcome({
+    ...attempt,
+    finishedAt: Date.now(),
+    status: String(status || 'unknown'),
+    reason: String(reason || ''),
+    error: String(error || ''),
+    nextTriggerAt: Number(schedule.nextTriggerAt) || 0,
+    retryKind: String(schedule.pwmRetryKind || ''),
+    retryBoundaryAt: Number(schedule.pwmRetryBoundaryAt) || 0,
+    retryScheduledAt: Number(schedule.pwmRetryScheduledAt) || 0,
+    pageTimerTargetAt: Number(schedule.pageTimerTargetAt) || 0,
+    pageTimerError: String(schedule.pageTimerError || '')
+  });
+  activePwmAttempts.delete(attemptId);
+  currentPwmAttempt = [...activePwmAttempts.values()]
+    .sort((left, right) => left.attemptId - right.attemptId)[0] || null;
+  return lastPwmOutcome ? { ...lastPwmOutcome } : null;
+}
+
+function inferPwmDiagnosticOutcomeStatus() {
+  if (schedule.pwmRetryKind === 'smart-on-safety-skip') return 'deferred';
+  if (schedule.pageTimerError && Number(schedule.nextTriggerAt) > Date.now()) {
+    return 'retry-scheduled';
+  }
+  return 'settled';
 }
 
 function claimPwmStepOwnership() {
@@ -5333,11 +5531,19 @@ async function executePwmStepWithRecovery({
   }
 
   pwmExecutionWithRecoveryCount += 1;
+  const diagnosticAttemptId = typeof beginPwmDiagnosticAttempt === 'function'
+    ? beginPwmDiagnosticAttempt({ source, scheduledTime, automationRevision })
+    : 0;
+  let diagnosticOutcomeStatus = 'failed';
+  let diagnosticOutcomeReason = 'executor did not settle';
+  let diagnosticOutcomeError = '';
   try {
   const triggerAt = Number(scheduledTime) || 0;
   if (waitedForRepair) {
     if (triggerAt <= 0) {
       console.warn('[AC扩展] repair 已收口，无绝对时钟的旧执行请求不再盲目补动作');
+      diagnosticOutcomeStatus = 'skipped';
+      diagnosticOutcomeReason = 'repair-finished-without-owned-clock';
       return false;
     }
     await loadScheduleFromStorage();
@@ -5357,6 +5563,8 @@ async function executePwmStepWithRecovery({
       console.warn(
         `[AC扩展] repair 后旧 PWM 事件已失去所有权 (${postRepairDelivery.reason})，零动作退出`
       );
+      diagnosticOutcomeStatus = 'stale';
+      diagnosticOutcomeReason = postRepairDelivery.reason || 'live-owner-changed';
       return false;
     }
   }
@@ -5386,7 +5594,11 @@ async function executePwmStepWithRecovery({
   try {
     if (typeof beforeRun === 'function') {
       const proceed = await beforeRun();
-      if (proceed === false) return true;
+      if (proceed === false) {
+        diagnosticOutcomeStatus = 'skipped';
+        diagnosticOutcomeReason = 'before-run-declined';
+        return true;
+      }
       if (Number.isSafeInteger(proceed?.automationRevision)) {
         continuationAutomationRevision = proceed.automationRevision;
       }
@@ -5394,6 +5606,8 @@ async function executePwmStepWithRecovery({
           || deferredRepairAfterPwmOptions
           || !isAutomationOperationCurrent(continuationAutomationRevision)) {
         console.warn('[AC扩展] PWM 前置恢复后 phase owner 已改变，零动作退出');
+        diagnosticOutcomeStatus = 'stale';
+        diagnosticOutcomeReason = 'phase-owner-changed-after-before-run';
         return false;
       }
     }
@@ -5403,6 +5617,12 @@ async function executePwmStepWithRecovery({
       expectedAutomationRevision: continuationAutomationRevision,
       phaseAdmissionEpoch
     });
+    diagnosticOutcomeStatus = typeof inferPwmDiagnosticOutcomeStatus === 'function'
+      ? inferPwmDiagnosticOutcomeStatus()
+      : 'settled';
+    diagnosticOutcomeReason = schedule.pageTimerError
+      ? 'schedule-retains-page-timer-error'
+      : 'run-pwm-step-settled';
     return true;
   } catch (error) {
     console.error(`[AC扩展] PWM 步骤执行失败 (${source}):`, error);
@@ -5410,7 +5630,12 @@ async function executePwmStepWithRecovery({
     const failedRevision = Number.isSafeInteger(error?.pwmAutomationRevision)
       ? error.pwmAutomationRevision
       : continuationAutomationRevision;
-    if (!isAutomationOperationCurrent(failedRevision)) return false;
+    diagnosticOutcomeError = error?.message || String(error);
+    if (!isAutomationOperationCurrent(failedRevision)) {
+      diagnosticOutcomeStatus = 'stale';
+      diagnosticOutcomeReason = 'exception-owner-revoked';
+      return false;
+    }
     const postPrepareContext = error?.pwmRecoveryContext;
     const recoveryRetryContext = postPrepareContext?.retryContext
       || incomingSmartOnRetryContext;
@@ -5428,16 +5653,41 @@ async function executePwmStepWithRecovery({
       failedRevision,
       Date.now(),
       recoveryRetryContext
-    )) return true;
-    return recoverGenericPwmAlarmException(
+    )) {
+      diagnosticOutcomeStatus = typeof inferPwmDiagnosticOutcomeStatus === 'function'
+        ? inferPwmDiagnosticOutcomeStatus()
+        : 'recovered';
+      diagnosticOutcomeReason = 'typed-smart-on-exception-recovered';
+      return true;
+    }
+    const genericRecovery = await recoverGenericPwmAlarmException(
       alarm,
       error,
       failedRevision,
       recoverySnapshot,
       recoverySmartOnWindow
     );
+    diagnosticOutcomeStatus = genericRecovery
+      ? (typeof inferPwmDiagnosticOutcomeStatus === 'function'
+          ? inferPwmDiagnosticOutcomeStatus()
+          : 'recovered')
+      : 'failed';
+    diagnosticOutcomeReason = genericRecovery
+      ? 'generic-exception-recovered'
+      : 'generic-exception-unrecovered';
+    return genericRecovery;
   }
   } finally {
+    let completedDiagnosticOutcome = null;
+    if (diagnosticAttemptId > 0
+        && typeof finishPwmDiagnosticAttempt === 'function') {
+      completedDiagnosticOutcome = finishPwmDiagnosticAttempt(
+        diagnosticAttemptId,
+        diagnosticOutcomeStatus,
+        diagnosticOutcomeReason,
+        diagnosticOutcomeError
+      );
+    }
     pwmExecutionWithRecoveryCount = Math.max(
       0,
       pwmExecutionWithRecoveryCount - 1
@@ -5445,6 +5695,12 @@ async function executePwmStepWithRecovery({
     // shared executor 的异常恢复也已经结束后，才允许 repair 观察/改写 phase。
     // phase adoption 若仍持有 reservation，队列会保留到完整 sync 收口后。
     drainDeferredScheduleRepair('pwm-executor-complete');
+    // local 持久化是诊断旁路：在 owner/repair 门禁释放后等待一个永不 reject
+    // 的 best-effort 写，不能改变 executor 原返回值或原异常。
+    if (completedDiagnosticOutcome
+        && typeof waitForPwmDiagnosticOutcomePersistence === 'function') {
+      await waitForPwmDiagnosticOutcomePersistence(completedDiagnosticOutcome);
+    }
   }
 }
 
@@ -6329,9 +6585,15 @@ async function ensureContentScriptLoaded(tabId) {
       { timeoutMs: CONTENT_SCRIPT_PROBE_TIMEOUT_MS }
     );
     if (probe?.success !== true) throw new Error('content script 健康探测返回异常');
+    const runtimeIdentityAssessment = assessContentRuntimeIdentity(probe);
+    if (!runtimeIdentityAssessment.valid) {
+      throw new Error(
+        `content/main 构建身份不一致 (${runtimeIdentityAssessment.code || 'unknown'})`
+      );
+    }
     return true;
   } catch (error) {
-    console.log('[AC扩展] content script 接收端缺失，尝试原页重新注入:', error?.message);
+    console.log('[AC扩展] content script 缺失或混版，尝试原页重新注入:', error?.message);
   }
 
   return injectContentScriptsIntoExactHome(tabId);
@@ -6368,6 +6630,10 @@ async function injectContentScriptsIntoExactHome(tabId) {
       { timeoutMs: CONTENT_SCRIPT_PROBE_TIMEOUT_MS }
     );
     if (probe?.success !== true) throw new Error('重注入后的 content script 健康探测返回异常');
+    const runtimeIdentityAssessment = assessContentRuntimeIdentity(probe);
+    if (!runtimeIdentityAssessment.valid) {
+      throw new Error('重注入后的 content/main 构建身份仍不一致');
+    }
     console.log('[AC扩展] scripting.executeScript 兜底注入并复核完成 (ISOLATED + MAIN)');
     return true;
   } catch (error) {
@@ -6379,6 +6645,46 @@ async function injectContentScriptsIntoExactHome(tabId) {
     console.error('[AC扩展] scripting.executeScript 兜底注入失败:', error?.message);
     void appendDiagnosticLog('error', 'content-script-injection', error);
     return false;
+  }
+}
+
+// 诊断首现场只读探针：不注入、不刷新、不导航。旧 content 只回
+// {success:true} 时会明确显示缺少 build 身份，而不会先自愈再假装原本正常。
+async function inspectContentRuntime() {
+  const tabs = await chrome.tabs.query({
+    url: 'https://w5.ab.ust.hk/njggt/app/*'
+  });
+  const exactHomeTabs = tabs.filter(isACHomePageTab);
+  const tab = exactHomeTabs.find(candidate => !candidate.discarded) || null;
+  if (!tab?.id) {
+    return {
+      success: true,
+      found: false,
+      exactHomeTabCount: exactHomeTabs.length,
+      runtimeIdentityAssessment: null
+    };
+  }
+  try {
+    const probe = await sendMessageToExactACHome(
+      tab.id,
+      { action: 'ping' },
+      { timeoutMs: CONTENT_SCRIPT_PROBE_TIMEOUT_MS }
+    );
+    return {
+      success: probe?.success === true,
+      found: true,
+      tabId: tab.id,
+      probe,
+      runtimeIdentityAssessment: assessContentRuntimeIdentity(probe)
+    };
+  } catch (error) {
+    return {
+      success: false,
+      found: true,
+      tabId: tab.id,
+      error: error?.message || String(error),
+      runtimeIdentityAssessment: assessContentRuntimeIdentity(null)
+    };
   }
 }
 
@@ -6435,18 +6741,28 @@ async function sendMessageToExactACHome(
   }
 
   const responsePromise = chrome.tabs.sendMessage(tabId, message);
-  if (!(timeoutMs > 0)) return responsePromise;
 
   let timeoutId;
   try {
-    return await Promise.race([
-      responsePromise,
-      new Promise((_, reject) => {
-        timeoutId = setTimeout(() => {
-          reject(new Error(`content script ${message?.action || 'unknown'} 探测超时`));
-        }, timeoutMs);
-      })
-    ]);
+    const response = timeoutMs > 0
+      ? await Promise.race([
+          responsePromise,
+          new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              reject(new Error(`content script ${message?.action || 'unknown'} 探测超时`));
+            }, timeoutMs);
+          })
+        ])
+      : await responsePromise;
+    if (message?.action !== 'ping') {
+      const runtimeIdentityAssessment = assessContentRuntimeIdentity(response);
+      if (!runtimeIdentityAssessment.valid) {
+        throw new Error(
+          `content/main 构建身份不一致，拒绝 ${message?.action || 'unknown'} 响应`
+        );
+      }
+    }
+    return response;
   } finally {
     clearTimeout(timeoutId);
   }
@@ -7869,23 +8185,227 @@ async function toggleNowAndSync(action) {
 }
 
 async function ensureDiagnosticAlarms() {
-  await loadScheduleFromStorage();
+  const diagnosticRequestAt = Date.now();
   const repairs = [];
+  const cloneDiagnosticValue = value => {
+    if (value == null) return value;
+    try {
+      return JSON.parse(JSON.stringify(value));
+    } catch (_) {
+      return null;
+    }
+  };
   const snapshotAlarm = alarm => alarm ? {
     scheduledTime: Number(alarm.scheduledTime) || 0,
     ...(Number.isFinite(Number(alarm.periodInMinutes))
       ? { periodInMinutes: Number(alarm.periodInMinutes) }
       : {})
   } : null;
-  const snapshotNamedAlarms = async () => ({
-    badge: snapshotAlarm(await chrome.alarms.get('ac-badge-tick')),
-    watchdog: snapshotAlarm(await chrome.alarms.get('ac-watchdog')),
-    pwm: snapshotAlarm(await chrome.alarms.get('ac-pwm')),
-    smartWeather: snapshotAlarm(await chrome.alarms.get('ac-smart-weather'))
-  });
+  const readDiagnosticExternal = async (label, read, readErrors) => {
+    try {
+      return await read();
+    } catch (error) {
+      readErrors.push(`${label}: ${String(error?.message || error).slice(0, 120)}`);
+      return null;
+    }
+  };
+  const snapshotNamedAlarms = async (
+    readErrors = [],
+    includePageTimerRetry = false
+  ) => {
+    const names = [
+      ['badge', 'ac-badge-tick'],
+      ['watchdog', 'ac-watchdog'],
+      ['pwm', 'ac-pwm'],
+      ['smartWeather', 'ac-smart-weather'],
+      ...(includePageTimerRetry
+        ? [['pageTimerRetry', 'ac-page-timer-retry']]
+        : [])
+    ];
+    const values = await Promise.all(names.map(([, alarmName]) => (
+      readDiagnosticExternal(
+        `alarm:${alarmName}`,
+        () => chrome.alarms.get(alarmName),
+        readErrors
+      )
+    )));
+    return Object.fromEntries(names.map(([key], index) => (
+      [key, snapshotAlarm(values[index])]
+    )));
+  };
+  function readDiagnosticRuntimeState() {
+    return {
+      memorySchedule: cloneDiagnosticValue(schedule) || {},
+      revision: typeof pwmRuntimeRevision === 'number' ? pwmRuntimeRevision : 0,
+      pwmStepRunning: typeof isCurrentPwmStepRunning === 'function'
+        ? isCurrentPwmStepRunning()
+        : false,
+      runningRevision: typeof pwmStepRunningRevision === 'number'
+        ? pwmStepRunningRevision
+        : null,
+      phaseAdoptionInFlight: typeof isSyncPhaseAdoptionAdmissionBlocked === 'function'
+        ? isSyncPhaseAdoptionAdmissionBlocked()
+        : false,
+      phaseAdoptionOwner: typeof syncPhaseAdoptionAdmissionOwner === 'number'
+        ? syncPhaseAdoptionAdmissionOwner
+        : 0,
+      pwmExecutionCount: typeof pwmExecutionWithRecoveryCount === 'number'
+        ? pwmExecutionWithRecoveryCount
+        : 0,
+      repairInFlight: typeof repairScheduleClock === 'function'
+        && !!repairScheduleClock.inFlight,
+      currentAttempt: typeof currentPwmAttempt === 'object'
+        ? cloneDiagnosticValue(currentPwmAttempt)
+        : null,
+      currentAttempts: typeof getActivePwmDiagnosticAttempts === 'function'
+        ? cloneDiagnosticValue(getActivePwmDiagnosticAttempts())
+        : [],
+      lastOutcome: typeof lastPwmOutcome === 'object'
+        ? cloneDiagnosticValue(lastPwmOutcome)
+        : null
+    };
+  }
+  function diagnosticSnapshotFingerprint(state) {
+    return JSON.stringify({
+      memorySchedule: state?.memorySchedule || {},
+      revision: state?.revision || 0,
+      pwmStepRunning: state?.pwmStepRunning === true,
+      runningRevision: state?.runningRevision ?? null,
+      phaseAdoptionInFlight: state?.phaseAdoptionInFlight === true,
+      phaseAdoptionOwner: state?.phaseAdoptionOwner || 0,
+      pwmExecutionCount: state?.pwmExecutionCount || 0,
+      repairInFlight: state?.repairInFlight === true,
+      currentAttempt: state?.currentAttempt || null,
+      currentAttempts: state?.currentAttempts || [],
+      lastOutcome: state?.lastOutcome || null
+    });
+  }
+  const captureDiagnosticSnapshotAttempt = async (
+    captureAttempts,
+    firstObservedAt
+  ) => {
+    const capturedAt = Date.now();
+    const startState = readDiagnosticRuntimeState();
+    const readErrors = [];
+    const storageAvailable = typeof chrome.storage?.local?.get === 'function';
+    const [stored, persistedEnvelope, alarms] = await Promise.all([
+      storageAvailable
+        ? readDiagnosticExternal(
+            'storage:ac_schedule',
+            () => chrome.storage.local.get('ac_schedule'),
+            readErrors
+          )
+        : Promise.resolve({}),
+      storageAvailable
+        ? readDiagnosticExternal(
+            `storage:${typeof PWM_LAST_OUTCOME_KEY === 'string'
+              ? PWM_LAST_OUTCOME_KEY
+              : 'ac_pwm_last_outcome'}`,
+            () => chrome.storage.local.get(
+              typeof PWM_LAST_OUTCOME_KEY === 'string'
+                ? PWM_LAST_OUTCOME_KEY
+                : 'ac_pwm_last_outcome'
+            ),
+            readErrors
+          )
+        : Promise.resolve({}),
+      snapshotNamedAlarms(readErrors, true)
+    ]);
+    const endState = readDiagnosticRuntimeState();
+    const coherent = diagnosticSnapshotFingerprint(startState)
+      === diagnosticSnapshotFingerprint(endState);
+    const persistedKey = typeof PWM_LAST_OUTCOME_KEY === 'string'
+      ? PWM_LAST_OUTCOME_KEY
+      : 'ac_pwm_last_outcome';
+    const persistedRaw = persistedEnvelope?.[persistedKey] || null;
+    let persistedOutcome = typeof normalizePwmDiagnosticOutcome === 'function'
+      ? normalizePwmDiagnosticOutcome(persistedRaw)
+      : cloneDiagnosticValue(persistedRaw);
+    if (persistedOutcome
+        && typeof BUILD_TIME === 'string'
+        && typeof BUILD_TIME_EPOCH_MS === 'number'
+        && (persistedOutcome.buildTime !== BUILD_TIME
+          || persistedOutcome.buildTimeEpochMs !== BUILD_TIME_EPOCH_MS)) {
+      persistedOutcome = null;
+    }
+    const latestOutcome = typeof selectLatestPwmDiagnosticOutcome === 'function'
+      ? selectLatestPwmDiagnosticOutcome(startState.lastOutcome, persistedOutcome)
+      : (startState.lastOutcome || persistedOutcome || null);
+    const liveAlarmAt = Number(alarms?.pwm?.scheduledTime) || 0;
+    return {
+      firstObservedAt,
+      capturedAt,
+      captureAttempts,
+      coherent,
+      complete: readErrors.length === 0,
+      readErrors,
+      coherenceReason: coherent ? '' : 'runtime-changed-during-capture',
+      memorySchedule: startState.memorySchedule,
+      storedSchedule: cloneDiagnosticValue(stored?.ac_schedule) || {},
+      alarms,
+      owner: {
+        action: startState.memorySchedule.pwmState === 'on' ? 'on' : 'off',
+        pwmState: startState.memorySchedule.pwmState || '',
+        kind: startState.memorySchedule.pwmRetryKind || 'phase',
+        boundaryAt: Number(startState.memorySchedule.pwmRetryBoundaryAt)
+          || Number(startState.memorySchedule.smartOnBoundaryAt)
+          || 0,
+        scheduledAt: Number(startState.memorySchedule.pwmRetryScheduledAt)
+          || Number(startState.memorySchedule.nextTriggerAt)
+          || liveAlarmAt,
+        liveAlarmAt
+      },
+      runtime: {
+        revision: startState.revision,
+        pwmStepRunning: startState.pwmStepRunning,
+        runningRevision: startState.runningRevision,
+        phaseAdoptionInFlight: startState.phaseAdoptionInFlight,
+        pwmExecutionCount: startState.pwmExecutionCount,
+        repairInFlight: startState.repairInFlight,
+        currentAttempt: startState.currentAttempt,
+        currentAttempts: startState.currentAttempts,
+        activeAttemptCount: startState.currentAttempts.length,
+        lastOutcome: latestOutcome
+      }
+    };
+  };
+  const captureDiagnosticSnapshot = async () => {
+    const firstObservedAt = Date.now();
+    const first = await captureDiagnosticSnapshotAttempt(1, firstObservedAt);
+    if (first.coherent && first.complete) return first;
+    const second = await captureDiagnosticSnapshotAttempt(2, firstObservedAt);
+    return {
+      ...second,
+      coherenceReason: second.coherent
+        ? (first.coherent ? '' : 'runtime-changed-during-first-capture')
+        : 'runtime-changed-during-capture',
+      completenessReason: second.complete
+        ? ''
+        : 'external-read-incomplete-after-retry'
+    };
+  };
+  const diagnosticBefore = await captureDiagnosticSnapshot();
+  await loadScheduleFromStorage();
+  const finalizeDiagnosticResult = async (result, lifecycle = null) => {
+    const diagnosticAfter = await captureDiagnosticSnapshot();
+    return {
+      ...result,
+      schemaVersion: 2,
+      evidence: {
+        requestAt: diagnosticRequestAt,
+        before: diagnosticBefore,
+        repair: {
+          requested: true,
+          items: [...repairs],
+          lifecycle: cloneDiagnosticValue(lifecycle)
+        },
+        after: diagnosticAfter
+      }
+    };
+  };
   const snapshotDeferredPhaseAdoption = async () => {
     const alarms = await snapshotNamedAlarms();
-    return {
+    return finalizeDiagnosticResult({
       success: false,
       deferred: true,
       reason: 'phase adoption in progress',
@@ -7896,7 +8416,7 @@ async function ensureDiagnosticAlarms() {
       schedule: { ...schedule, _phaseAdoptionInFlight: true },
       pwmStepRunning: isCurrentPwmStepRunning(),
       alarms
-    };
+    });
   };
   const recordClearedAlarmRepairs = (before, after) => {
     const names = {
@@ -7925,7 +8445,7 @@ async function ensureDiagnosticAlarms() {
     if (schedule.enabled) return ensureDiagnosticAlarms();
     const afterAlarms = await snapshotNamedAlarms();
     recordClearedAlarmRepairs(beforeAlarms, afterAlarms);
-    return {
+    return finalizeDiagnosticResult({
       success: Object.values(afterAlarms).every(alarm => !alarm),
       enabled: false,
       repaired: repairs.length > 0,
@@ -7934,7 +8454,7 @@ async function ensureDiagnosticAlarms() {
       schedule: { ...schedule },
       pwmStepRunning: false,
       alarms: afterAlarms
-    };
+    });
   }
 
   if (!isAutomationAllowed()) {
@@ -7953,7 +8473,7 @@ async function ensureDiagnosticAlarms() {
     if (isAutomationAllowed()) return ensureDiagnosticAlarms();
     const afterAlarms = await snapshotNamedAlarms();
     recordClearedAlarmRepairs(beforeAlarms, afterAlarms);
-    return {
+    return finalizeDiagnosticResult({
       success: !afterAlarms.badge
         && !afterAlarms.watchdog
         && !afterAlarms.pwm
@@ -7970,7 +8490,7 @@ async function ensureDiagnosticAlarms() {
       },
       pwmStepRunning: false,
       alarms: afterAlarms
-    };
+    });
   }
 
   let badgeAlarm = await chrome.alarms.get('ac-badge-tick');
@@ -8067,7 +8587,7 @@ async function ensureDiagnosticAlarms() {
 
   const pwmStepInFlight = isCurrentPwmStepRunning() || comfortStartInFlight;
 
-  return {
+  return finalizeDiagnosticResult({
     success: !!badgeAlarm
       && !!watchdogAlarm
       && (!!pwmAlarm || pwmStepInFlight)
@@ -8084,7 +8604,7 @@ async function ensureDiagnosticAlarms() {
       pwm: pwmAlarm ? { scheduledTime: pwmAlarm.scheduledTime } : null,
       smartWeather: smartWeatherAlarm ? { scheduledTime: smartWeatherAlarm.scheduledTime } : null
     }
-  };
+  }, diagnosticLifecycleRecovery);
 }
 
 const BACKGROUND_MESSAGE_TYPES = new Set([
@@ -8093,6 +8613,7 @@ const BACKGROUND_MESSAGE_TYPES = new Set([
   'getSchedule',
   'getScheduleLite',
   'getPageTimer',
+  'inspectContentRuntime',
   'refreshSmartWeather',
   'reapplySmartNow',
   'repairSchedule',
@@ -8112,8 +8633,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     // 早期 Edge 可能抛异常,catch 后 false 兼容老版本。
     Promise.all([
       chrome.alarms.get('ac-pwm'),
-      chrome.offscreen.hasDocument().catch(() => false)
-    ]).then(([liveAlarm, offscreenAlive]) => {
+      chrome.offscreen.hasDocument().catch(() => false),
+      readPersistedPwmDiagnosticOutcome()
+    ]).then(([liveAlarm, offscreenAlive, persistedPwmOutcome]) => {
+      const latestPwmOutcome = selectLatestPwmDiagnosticOutcome(
+        lastPwmOutcome,
+        persistedPwmOutcome
+      );
       sendResponse({
         success: true,
         swStartupTime,
@@ -8123,6 +8649,13 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         initAgeMs: initCompletedAt ? (now - initCompletedAt) : -1,
         memorySchedule: { ...schedule },
         liveAlarmScheduledTime: liveAlarm?.scheduledTime || 0,
+        pwmRuntimeRevision,
+        pwmStepRunning: isCurrentPwmStepRunning(),
+        pwmExecutionWithRecoveryCount,
+        currentPwmAttempt: currentPwmAttempt ? { ...currentPwmAttempt } : null,
+        currentPwmAttempts: getActivePwmDiagnosticAttempts(),
+        activePwmAttemptCount: activePwmAttempts.size,
+        lastPwmOutcome: latestPwmOutcome ? { ...latestPwmOutcome } : null,
         offscreenAlive: !!offscreenAlive,
         buildTime: BUILD_TIME,
         buildTimeEpochMs: BUILD_TIME_EPOCH_MS
@@ -8340,6 +8873,11 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type === 'getPageTimer') {
       const pageTimer = await getCurrentPageTimer();
       sendResponse(pageTimer);
+      return;
+    }
+    if (msg.type === 'inspectContentRuntime') {
+      const result = await inspectContentRuntime();
+      sendResponse(result);
       return;
     }
     if (msg.type === 'refreshSmartWeather') {

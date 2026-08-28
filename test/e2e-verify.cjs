@@ -479,15 +479,38 @@ async function run() {
         </div>
         <script>
           globalThis.__acMockLoadToken = Math.random().toString(36).slice(2);
-          const timerInput = document.querySelector('.timer-row .ant-picker input');
           const persistedTimer = localStorage.getItem('ac-e2e-page-timer') || '';
-          timerInput.value = persistedTimer;
-          timerInput.setAttribute('title', persistedTimer);
-          timerInput.addEventListener('change', () => {
-            const value = String(timerInput.value || '').trim();
-            timerInput.setAttribute('title', value);
-            localStorage.setItem('ac-e2e-page-timer', value);
-          });
+          globalThis.__acControlledTimerCommits = 0;
+          globalThis.__acControlledTimerReplacements = 0;
+          globalThis.__acControlledTimerLastDelayMs = 0;
+          const installControlledTimerInput = (input, committedValue) => {
+            input.value = committedValue;
+            input.setAttribute('title', committedValue);
+            input.setAttribute('readonly', '');
+            input.addEventListener('change', () => {
+              const submittedValue = String(input.value || '').trim();
+              const submittedAt = Date.now();
+              const previousValue = localStorage.getItem('ac-e2e-page-timer') || '';
+              // 模拟真实 React 受控 picker：先回退未提交值，稍后才用新节点提交。
+              input.value = previousValue;
+              input.setAttribute('title', previousValue);
+              setTimeout(() => {
+                const liveInput = document.querySelector('.timer-row .ant-picker input');
+                if (!liveInput) return;
+                const replacement = liveInput.cloneNode(true);
+                localStorage.setItem('ac-e2e-page-timer', submittedValue);
+                installControlledTimerInput(replacement, submittedValue);
+                liveInput.replaceWith(replacement);
+                globalThis.__acControlledTimerCommits += 1;
+                globalThis.__acControlledTimerReplacements += 1;
+                globalThis.__acControlledTimerLastDelayMs = Date.now() - submittedAt;
+              }, 550);
+            });
+          };
+          installControlledTimerInput(
+            document.querySelector('.timer-row .ant-picker input'),
+            persistedTimer
+          );
         </script>
       </body></html>`;
     let mockHomeRequestCount = 0;
@@ -803,7 +826,10 @@ async function run() {
       value: document.querySelector('.timer-row .ant-picker input')?.value || '',
       title: document.querySelector('.timer-row .ant-picker input')?.getAttribute('title') || '',
       persisted: localStorage.getItem('ac-e2e-page-timer') || '',
-      switchClicks: globalThis.__acMockSwitchClickCount
+      switchClicks: globalThis.__acMockSwitchClickCount,
+      controlledCommits: globalThis.__acControlledTimerCommits,
+      controlledReplacements: globalThis.__acControlledTimerReplacements,
+      controlledLastDelayMs: globalThis.__acControlledTimerLastDelayMs
     }));
 
     await acPage.evaluate(() => {
@@ -836,8 +862,11 @@ async function run() {
         && homeRequestsDuringTimerProof === 1
         && pageTimerResult?.targetAt === pageTimerTargetAt
         && pageTimerResult?.value === sourceTimerValue.persisted
-        && sourceTimerValue.value === sourceTimerValue.title,
-      '真实页面输入 Power-off after，并由第一张独立新鲜页精确读回');
+        && sourceTimerValue.value === sourceTimerValue.title
+        && sourceTimerValue.controlledCommits >= 1
+        && sourceTimerValue.controlledReplacements >= 1
+        && sourceTimerValue.controlledLastDelayMs >= 500,
+      '真实受控 picker 延迟提交并替换节点后，由第一张独立新鲜页精确读回');
     assert(pageTimerState.pageTimerTargetAt === pageTimerTargetAt
         && Number(pageTimerState.pageTimerMinutes) > 0
         && pageTimerState.pageTimerError === ''
@@ -851,6 +880,15 @@ async function run() {
 
     // === 先保险后开机：同一 tab 预置，歧义零点击，含糊 ON 零重复点击 ===
     console.log('\n--- 步骤 2.8: 验证同页预置关机保险后开机 ---\n');
+    // 2.6 故意留下“物理 click 已发出、结果未知”的 60s 页面租约；那项安全
+    // 静默窗正是被测行为，不能让紧邻的独立正向用例绕过它。这里在任何 timer
+    // 预置之前加载一张新页面隔离用例；下方 loadToken 仍会证明预置→ON→proof
+    // 事务自身没有刷新或导航来源页。
+    await acPage.reload({ timeout: 10000, waitUntil: 'load' });
+    await acPage.waitForFunction(() => (
+      !!document.querySelector('button.ant-switch[role="switch"]')
+      && !!document.querySelector('.timer-row .ant-picker input')
+    ), null, { timeout: 5000 });
     const preparedOnTargetAt = Math.ceil((Date.now() + 4 * 60 * 1000) / 60000) * 60000;
     const preparedOnFixture = await acPage.evaluate(() => {
       const oldSwitch = document.querySelector('button.ant-switch[role="switch"]');

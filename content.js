@@ -9,6 +9,53 @@
 // 后旧页面可能保留 JS global，却已失去旧 extension runtime 的消息接收端。
 (() => {
 
+const CONTENT_BUILD_TIME = 'dev';
+const CONTENT_BUILD_TIME_EPOCH_MS = 0;
+const CONTENT_LISTENER_ID = `${CONTENT_BUILD_TIME_EPOCH_MS || 'dev'}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+const MAIN_BRIDGE_CHANNEL = `__AC_EXTENSION_${CONTENT_BUILD_TIME_EPOCH_MS || 'dev'}`;
+const MAIN_BRIDGE_EVENTS = {
+  cancel: `${MAIN_BRIDGE_CHANNEL}_CANCEL_AUTOMATIC_ON__`,
+  toggle: `${MAIN_BRIDGE_CHANNEL}_TOGGLE_AC__`,
+  toggleResult: `${MAIN_BRIDGE_CHANNEL}_TOGGLE_AC_RESULT__`,
+  status: `${MAIN_BRIDGE_CHANNEL}_GET_STATUS__`,
+  statusResult: `${MAIN_BRIDGE_CHANNEL}_GET_STATUS_RESULT__`,
+  runtime: `${MAIN_BRIDGE_CHANNEL}_GET_RUNTIME__`,
+  runtimeResult: `${MAIN_BRIDGE_CHANNEL}_GET_RUNTIME_RESULT__`
+};
+let cachedMainRuntimeIdentity = null;
+
+function attachContentRuntimeIdentity(result, mainResult = result) {
+  const mainIdentity = mainResult?.runtimeIdentity?.main
+    || cachedMainRuntimeIdentity;
+  if (mainIdentity) cachedMainRuntimeIdentity = { ...mainIdentity };
+  return {
+    ...(result || {}),
+    runtimeIdentity: {
+      content: {
+        buildTime: CONTENT_BUILD_TIME,
+        buildTimeEpochMs: CONTENT_BUILD_TIME_EPOCH_MS,
+        listenerId: CONTENT_LISTENER_ID,
+        channel: MAIN_BRIDGE_CHANNEL
+      },
+      main: mainIdentity ? { ...mainIdentity } : null
+    }
+  };
+}
+
+async function requestMainWorldRuntimeIdentity(timeoutMs = 750) {
+  const result = await requestMainWorldResult({
+    requestIdPrefix: 'ac-runtime',
+    requestEvent: MAIN_BRIDGE_EVENTS.runtime,
+    resultEvent: MAIN_BRIDGE_EVENTS.runtimeResult,
+    timeoutMs,
+    timeoutResult: { success: false, error: '主世界构建身份读取超时' }
+  });
+  if (result?.runtimeIdentity?.main) {
+    cachedMainRuntimeIdentity = { ...result.runtimeIdentity.main };
+  }
+  return result;
+}
+
 // i18n — content script 运行在隔离世界，不能 importScripts，用内联 fetch loader
 const _i18nCache = {};
 let _i18nReady = false;
@@ -60,8 +107,13 @@ if (typeof previousContentMessageListener === 'function') {
 const contentMessageListener = (msg, sender, sendResponse) => {
   const action = msg?.action;
   if (action === 'ping') {
-    sendResponse({ success: true });
-    return false;
+    requestMainWorldRuntimeIdentity().then(mainResult => {
+      sendResponse(attachContentRuntimeIdentity({
+        success: true,
+        mainRuntimeReachable: mainResult?.success === true
+      }, mainResult));
+    });
+    return true;
   }
 
   const isACOperation = action === 'on'
@@ -71,36 +123,53 @@ const contentMessageListener = (msg, sender, sendResponse) => {
     || action === 'setTimer'
     || action === 'getPageTimer';
   if (isACOperation && !isExactACHomeContext()) {
-    sendResponse({ success: false, invalidTarget: true, error: '拒绝在非精确 AC home 页面执行空调操作' });
+    sendResponse(attachContentRuntimeIdentity({
+      success: false,
+      invalidTarget: true,
+      error: '拒绝在非精确 AC home 页面执行空调操作'
+    }));
     return false;
   }
   if (action === 'cancelAutomaticOn') {
-    window.dispatchEvent(new CustomEvent('__AC_EXTENSION_CANCEL_AUTOMATIC_ON__'));
-    sendResponse({ success: true, cancelled: true });
+    // 新 build 用版本化频道；同时通知一次 legacy 频道，收口升级瞬间可能仍在
+    // 等待的旧 ON 请求。两条频道都只改取消 revision，不会点击页面。
+    for (const eventType of new Set([
+      MAIN_BRIDGE_EVENTS.cancel,
+      '__AC_EXTENSION_CANCEL_AUTOMATIC_ON__'
+    ])) {
+      window.dispatchEvent(new CustomEvent(eventType));
+    }
+    sendResponse(attachContentRuntimeIdentity({ success: true, cancelled: true }));
     return false;
   }
   if (action === 'off') {
-    sendResponse({
+    sendResponse(attachContentRuntimeIdentity({
       success: false,
       error: 'OFF 操作已禁用；自动关机只允许使用 Power-off after'
-    });
+    }));
     return false;
   }
   if (action === 'on') {
-    toggleACSwitch(action, msg.notAfterAt).then(result => sendResponse(result));
+    toggleACSwitch(action, msg.notAfterAt).then(result => {
+      sendResponse(attachContentRuntimeIdentity(result));
+    });
     return true; // 异步响应
   }
   if (action === 'status') {
-    getAuthoritativeACStatus().then(result => sendResponse(result));
+    getAuthoritativeACStatus().then(result => {
+      sendResponse(attachContentRuntimeIdentity(result));
+    });
     return true;
   }
   if (action === 'setTimer') {
-    setPagePowerOffTimer(msg.minutes, msg.targetAt).then(result => sendResponse(result));
+    setPagePowerOffTimer(msg.minutes, msg.targetAt).then(result => {
+      sendResponse(attachContentRuntimeIdentity(result));
+    });
     return true;
   }
   if (action === 'getPageTimer') {
     // v0.5.10：读 picker 当前值——跨设备主同步通道（UST 服务器同步给所有会话）
-    sendResponse(getPagePowerOffTimer());
+    sendResponse(attachContentRuntimeIdentity(getPagePowerOffTimer()));
     return true;
   }
   return false;
@@ -353,8 +422,8 @@ function requestMainWorldResult({
 async function requestMainWorldToggle(targetAction, timeoutMs, notAfterAt = 0) {
   return requestMainWorldResult({
     requestIdPrefix: 'ac',
-    requestEvent: '__AC_EXTENSION_TOGGLE_AC__',
-    resultEvent: '__AC_EXTENSION_TOGGLE_AC_RESULT__',
+    requestEvent: MAIN_BRIDGE_EVENTS.toggle,
+    resultEvent: MAIN_BRIDGE_EVENTS.toggleResult,
     payload: {
       action: targetAction,
       ...(notAfterAt !== 0 ? { notAfterAt } : {})
@@ -367,8 +436,8 @@ async function requestMainWorldToggle(targetAction, timeoutMs, notAfterAt = 0) {
 async function requestMainWorldStatus(timeoutMs) {
   return requestMainWorldResult({
     requestIdPrefix: 'ac-status',
-    requestEvent: '__AC_EXTENSION_GET_STATUS__',
-    resultEvent: '__AC_EXTENSION_GET_STATUS_RESULT__',
+    requestEvent: MAIN_BRIDGE_EVENTS.status,
+    resultEvent: MAIN_BRIDGE_EVENTS.statusResult,
     timeoutMs,
     timeoutResult: { isOn: null, error: '主世界状态读取超时' }
   });
@@ -426,23 +495,41 @@ async function waitForStablePowerOffTimerControl(
 // 连续两次承载目标值时返回；持续歧义、空值或节点继续替换都会超时失败关闭。
 async function waitForConfirmedPowerOffTimerInput(
   value,
-  timeoutMs = 2000,
-  pollIntervalMs = 50
+  timeoutMs = 3000,
+  pollIntervalMs = 50,
+  stableWindowMs = 500,
+  visibleBefore = new Set(),
+  openedDropdown = null
 ) {
   const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
   const interval = Math.max(1, Number(pollIntervalMs) || 1);
-  let previousInput = null;
+  const requiredStableMs = Math.max(0, Number(stableWindowMs) || 0);
+  let stableInput = null;
+  let stableSince = 0;
 
   while (Date.now() <= deadline) {
     const input = findPowerOffTimerInput();
-    const confirmedValue = input
-      ? (input.value || input.getAttribute('title') || '').trim()
-      : '';
-    if (input && confirmedValue === value) {
-      if (input === previousInput) return input;
-      previousInput = input;
+    const rawValue = (input?.value || '').trim();
+    const rawTitle = (input?.getAttribute('title') || '').trim();
+    const confirmedValue = rawValue || rawTitle;
+    const valuesConsistent = !rawValue || !rawTitle || rawValue === rawTitle;
+    const visibleDropdowns = findVisiblePickerDropdowns();
+    const dropdownClosed = input?.getAttribute?.('aria-expanded') !== 'true'
+      && (!openedDropdown || !visibleDropdowns.includes(openedDropdown))
+      && visibleDropdowns.every(dropdown => visibleBefore.has(dropdown));
+    if (input
+        && valuesConsistent
+        && confirmedValue === value
+        && dropdownClosed) {
+      if (input !== stableInput) {
+        stableInput = input;
+        stableSince = Date.now();
+      } else if (Date.now() - stableSince >= requiredStableMs) {
+        return input;
+      }
     } else {
-      previousInput = null;
+      stableInput = null;
+      stableSince = 0;
     }
 
     if (Date.now() >= deadline) break;
@@ -490,8 +577,9 @@ async function typeTimeIntoPickerInput(input, value) {
   return false;
 }
 
-// 单次模拟手动输入。成功判定同时接受 value 与 title 命中目标 HH:MM：
-// 受控 picker 可能只把确认值写到二者之一，避免只读时序差异误报「输入框未接受时间」。
+// 单次模拟手动输入。确认后重新按 Power-off after 语义定位稳定控件：
+// 受控 picker 可能延迟提交或用新节点替换本次输入节点，不能用 300ms 后的
+// 旧 input 快照提前判失败。
 async function typeOnceIntoPickerInput(picker, input, value) {
   const control = findPowerOffTimerControl();
   if (!control || control.input !== input || control.picker !== picker) return false;
@@ -527,9 +615,14 @@ async function typeOnceIntoPickerInput(picker, input, value) {
     await sleep(300);
   }
 
-  const inputValue = (input.value || '').trim();
-  const inputTitle = (input.getAttribute('title') || '').trim();
-  return inputValue === value || inputTitle === value;
+  return !!(await waitForConfirmedPowerOffTimerInput(
+    value,
+    3000,
+    50,
+    500,
+    visibleDropdownsBefore,
+    okResult.dropdown
+  ));
 }
 
 // ----- 查找 AC 开关 DOM 元素 -----
@@ -730,17 +823,17 @@ function clickUniquePowerOffPickerOk(control, visibleBefore) {
   const { dropdown, ambiguous } = resolvePowerOffPickerDropdown(control, visibleBefore);
   if (ambiguous) {
     console.warn('[AC扩展] Power-off after 下拉层无法唯一关联，拒绝猜测 OK');
-    return { accepted: false, clicked: false };
+    return { accepted: false, clicked: false, dropdown: null };
   }
-  if (!dropdown) return { accepted: true, clicked: false };
+  if (!dropdown) return { accepted: true, clicked: false, dropdown: null };
 
   const buttons = Array.from(dropdown.querySelectorAll('.ant-picker-ok button:not([disabled])'));
   if (buttons.length > 1) {
     console.warn('[AC扩展] Power-off after 下拉层有多个 OK，拒绝猜测');
-    return { accepted: false, clicked: false };
+    return { accepted: false, clicked: false, dropdown };
   }
   if (buttons.length === 1) buttons[0].click();
-  return { accepted: true, clicked: buttons.length === 1 };
+  return { accepted: true, clicked: buttons.length === 1, dropdown };
 }
 
 // ----- v0.5.10: 读取页面已设置的 "Power-off after" 定时器值（跨设备主同步通道） -----

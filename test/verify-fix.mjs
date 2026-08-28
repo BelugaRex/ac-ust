@@ -864,7 +864,13 @@ async function runTests() {
     `dist 包含全部运行时文件${missingDistFiles.length ? `（缺少 ${missingDistFiles.join(', ')}）` : ''}`);
 
   const verbatimDistFiles = distRequiredFiles.filter(file =>
-    !['background.js', 'popup.html', 'popup.js'].includes(file));
+    ![
+      'background.js',
+      'content.js',
+      'page-confirm.js',
+      'popup.html',
+      'popup.js'
+    ].includes(file));
   const mismatchedDistFiles = verbatimDistFiles.filter(file => {
     const sourcePath = path.join(ROOT, file);
     const builtPath = path.join(ROOT, 'dist', file);
@@ -878,7 +884,11 @@ async function runTests() {
 
   const distPopupSource = fs.readFileSync(path.join(ROOT, 'dist', 'popup.js'), 'utf8');
   const distBackgroundSource = fs.readFileSync(path.join(ROOT, 'dist', 'background.js'), 'utf8');
+  const distContentSource = fs.readFileSync(path.join(ROOT, 'dist', 'content.js'), 'utf8');
+  const distPageConfirmSource = fs.readFileSync(path.join(ROOT, 'dist', 'page-confirm.js'), 'utf8');
   const sourceBackgroundForBuild = fs.readFileSync(path.join(ROOT, 'background.js'), 'utf8');
+  const sourceContentForBuild = fs.readFileSync(path.join(ROOT, 'content.js'), 'utf8');
+  const sourcePageConfirmForBuild = fs.readFileSync(path.join(ROOT, 'page-confirm.js'), 'utf8');
   const distBuildTime = distPopupSource.match(/const BUILD_TIME = '([^']+)'/)?.[1];
   const distBuildEpoch = Number(
     distPopupSource.match(/const BUILD_TIME_EPOCH_MS = (\d+);/)?.[1]
@@ -888,9 +898,25 @@ async function runTests() {
   const distBackgroundBuildEpoch = Number(
     distBackgroundSource.match(/const BUILD_TIME_EPOCH_MS = (\d+);/)?.[1]
   );
+  const distContentBuildTime = distContentSource
+    .match(/const CONTENT_BUILD_TIME = '([^']+)'/)?.[1];
+  const distContentBuildEpoch = Number(
+    distContentSource.match(/const CONTENT_BUILD_TIME_EPOCH_MS = (\d+);/)?.[1]
+  );
+  const distPageBuildTime = distPageConfirmSource
+    .match(/const PAGE_BUILD_TIME = '([^']+)'/)?.[1];
+  const distPageBuildEpoch = Number(
+    distPageConfirmSource.match(/const PAGE_BUILD_TIME_EPOCH_MS = (\d+);/)?.[1]
+  );
   const normalizedDistBackgroundSource = distBackgroundSource
     .replace(/const BUILD_TIME = '[^']*'/, "const BUILD_TIME = 'dev'")
     .replace(/const BUILD_TIME_EPOCH_MS = \d+;/, 'const BUILD_TIME_EPOCH_MS = 0;');
+  const normalizedDistContentSource = distContentSource
+    .replace(/const CONTENT_BUILD_TIME = '[^']*';/, "const CONTENT_BUILD_TIME = 'dev';")
+    .replace(/const CONTENT_BUILD_TIME_EPOCH_MS = \d+;/, 'const CONTENT_BUILD_TIME_EPOCH_MS = 0;');
+  const normalizedDistPageConfirmSource = distPageConfirmSource
+    .replace(/const PAGE_BUILD_TIME = '[^']*';/, "const PAGE_BUILD_TIME = 'dev';")
+    .replace(/const PAGE_BUILD_TIME_EPOCH_MS = \d+;/, 'const PAGE_BUILD_TIME_EPOCH_MS = 0;');
   const buildEpochDate = new Date(distBuildEpoch);
   const expectedDistBuildTime = Number.isSafeInteger(distBuildEpoch)
     ? `${buildEpochDate.getFullYear()}-${String(buildEpochDate.getMonth() + 1).padStart(2, '0')}-${String(buildEpochDate.getDate()).padStart(2, '0')}`
@@ -904,10 +930,36 @@ async function runTests() {
       && distBuildTime === expectedDistBuildTime
       && distBackgroundBuildTime === distBuildTime
       && distBackgroundBuildEpoch === distBuildEpoch
+      && distContentBuildTime === distBuildTime
+      && distContentBuildEpoch === distBuildEpoch
+      && distPageBuildTime === distBuildTime
+      && distPageBuildEpoch === distBuildEpoch
       && normalizedDistBackgroundSource === sourceBackgroundForBuild
+      && normalizedDistContentSource === sourceContentForBuild
+      && normalizedDistPageConfirmSource === sourcePageConfirmForBuild
       && popupJs.includes('const BUILD_TIME_EPOCH_MS = 0;')
-      && sourceBackgroundForBuild.includes('const BUILD_TIME_EPOCH_MS = 0;'),
-    'build: Popup/SW 注入同一构建身份；background 除两个占位外与源码逐字一致');
+      && sourceBackgroundForBuild.includes('const BUILD_TIME_EPOCH_MS = 0;')
+      && sourceContentForBuild.includes('const CONTENT_BUILD_TIME_EPOCH_MS = 0;')
+      && sourcePageConfirmForBuild.includes('const PAGE_BUILD_TIME_EPOCH_MS = 0;'),
+    'build: Popup/SW/content/main 注入同一身份；四份运行时代码除占位外与源码逐字一致');
+  const buildScriptSource = fs.readFileSync(path.join(ROOT, 'build.sh'), 'utf8');
+  assertPass(sourceContentForBuild.includes("const CONTENT_BUILD_TIME = 'dev';")
+      && sourceContentForBuild.includes('const CONTENT_BUILD_TIME_EPOCH_MS = 0;')
+      && sourcePageConfirmForBuild.includes("const PAGE_BUILD_TIME = 'dev';")
+      && sourcePageConfirmForBuild.includes('const PAGE_BUILD_TIME_EPOCH_MS = 0;')
+      && buildScriptSource.includes('"$DIST/content.js"')
+      && buildScriptSource.includes('"$DIST/page-confirm.js"')
+      && buildScriptSource.includes('Could not inject the shared runtime build identity'),
+    'build: 同一构建身份同时注入 Popup/SW/content/main，避免长寿命页面混版假绿');
+  assertPass(sourceContentForBuild.includes('function attachContentRuntimeIdentity(')
+      && sourceContentForBuild.includes('function requestMainWorldRuntimeIdentity(')
+      && sourceContentForBuild.includes('runtimeIdentity: {')
+      && sourcePageConfirmForBuild.includes('window.__AC_EXTENSION_MAIN_BRIDGE__')
+      && sourcePageConfirmForBuild.includes('legacyBridgeIsolated')
+      && sourcePageConfirmForBuild.includes('function getMainRuntimeIdentity()')
+      && sourcePageConfirmForBuild.includes('MAIN_BRIDGE_CHANNEL')
+      && sourceContentForBuild.includes('MAIN_BRIDGE_CHANNEL'),
+    'runtime: content/main 使用同 build 的版本化桥和可替换监听器；旧主世界 handler 被频道隔离');
   assertPass(fs.existsSync(path.join(ROOT, 'releases', `ac-ust-v${manifest.version}.zip`)),
     `商店 ZIP 已生成: ac-ust-v${manifest.version}.zip`);
 
@@ -1390,7 +1442,7 @@ async function runTests() {
     await Promise.resolve();
   }
   const secondPublish6 = serializedPublish6.sync();
-  await Promise.resolve();
+  await new Promise(resolve => setTimeout(resolve, 0));
   const secondQueuedBehindFirst6 = serializedPublish6.state.syncAttempts.length === 1;
   releaseFirstSync6();
   await Promise.all([firstPublish6, secondPublish6]);
@@ -1908,6 +1960,74 @@ async function runTests() {
   const intervalRecoverySource = fs.readFileSync(path.join(ROOT, 'interval-recovery.js'), 'utf8');
   const recoveryCoordinatorSource = fs.readFileSync(path.join(ROOT, 'recovery-coordinator.js'), 'utf8');
   const countOccurrences = (source, needle) => source.split(needle).length - 1;
+  assertPass(backgroundSource.includes('function assessContentRuntimeIdentity(')
+      && backgroundSource.includes('async function inspectContentRuntime(')
+      && backgroundSource.includes("'inspectContentRuntime'")
+      && backgroundSource.includes('CONTENT-RUNTIME-MISMATCH')
+      && backgroundSource.includes('runtimeIdentityAssessment.valid')
+      && backgroundSource.includes('await injectContentScriptsIntoExactHome(tabId)')
+      && backgroundSource.includes('重注入后的 content/main 构建身份仍不一致'),
+    '9A-0: SW 以自身 build 校验 content/main，旧 ping 不再假绿；不一致先原页重注入，仍失败则阻断动作');
+  const runtimeIdentityStart9A = backgroundSource.indexOf(
+    'function isMatchingRuntimeComponentBuild(component)'
+  );
+  const runtimeIdentityEnd9A = backgroundSource.indexOf(
+    '\n\nconst AC_PAGE',
+    runtimeIdentityStart9A
+  );
+  const runtimeIdentitySource9A = backgroundSource.slice(
+    runtimeIdentityStart9A,
+    runtimeIdentityEnd9A
+  );
+  const loadRuntimeIdentityAssessment9A = (buildTime, buildEpoch) => new Function(
+    `const BUILD_TIME = ${JSON.stringify(buildTime)};
+    const BUILD_TIME_EPOCH_MS = ${buildEpoch};
+    ${runtimeIdentitySource9A};
+    return assessContentRuntimeIdentity;`
+  )();
+  const assessPackagedRuntime9A = loadRuntimeIdentityAssessment9A(
+    '2026-08-29 02:00:00',
+    1787930400000
+  );
+  const matchingRuntime9A = assessPackagedRuntime9A({
+    success: true,
+    runtimeIdentity: {
+      content: {
+        buildTime: '2026-08-29 02:00:00',
+        buildTimeEpochMs: 1787930400000
+      },
+      main: {
+        buildTime: '2026-08-29 02:00:00',
+        buildTimeEpochMs: 1787930400000
+      }
+    }
+  });
+  const oldPingRuntime9A = assessPackagedRuntime9A({ success: true });
+  const mixedRuntime9A = assessPackagedRuntime9A({
+    success: true,
+    runtimeIdentity: {
+      content: {
+        buildTime: '2026-08-29 02:00:00',
+        buildTimeEpochMs: 1787930400000
+      },
+      main: {
+        buildTime: '2026-08-29 01:00:00',
+        buildTimeEpochMs: 1787926800000
+      }
+    }
+  });
+  const devRuntime9A = loadRuntimeIdentityAssessment9A('dev', 0)({ success: true });
+  assertPass(matchingRuntime9A.valid === true
+      && matchingRuntime9A.contentMatches === true
+      && matchingRuntime9A.mainMatches === true
+      && oldPingRuntime9A.valid === false
+      && oldPingRuntime9A.code === 'CONTENT-RUNTIME-MISMATCH'
+      && mixedRuntime9A.valid === false
+      && mixedRuntime9A.contentMatches === true
+      && mixedRuntime9A.mainMatches === false
+      && devRuntime9A.valid === true
+      && devRuntime9A.contentMatches === null,
+    '9A-0A: 正式 build 缺字段或 content/main 任一混版均失败关闭；dev 仅保留 unknown 兼容');
 
   const recoveryDecisionSources = [
     smartRecoverySource,
@@ -1946,7 +2066,14 @@ async function runTests() {
   const mainWorldBridgeSource = mainWorldBridgeStart >= 0 && mainWorldBridgeEnd > mainWorldBridgeStart
     ? contentSource.slice(mainWorldBridgeStart, mainWorldBridgeEnd)
     : '';
+  const testMainBridgeEvents = {
+    toggle: '__AC_EXTENSION_123_TOGGLE_AC__',
+    toggleResult: '__AC_EXTENSION_123_TOGGLE_AC_RESULT__',
+    status: '__AC_EXTENSION_123_GET_STATUS__',
+    statusResult: '__AC_EXTENSION_123_GET_STATUS_RESULT__'
+  };
   const loadMainWorldBridge = new Function(
+    'MAIN_BRIDGE_EVENTS',
     'window',
     'CustomEvent',
     'setTimeout',
@@ -1972,9 +2099,9 @@ async function runTests() {
         sentEvents.push(event);
         const response = responses[event.type];
         if (!response) return;
-        const resultEvent = event.type === '__AC_EXTENSION_TOGGLE_AC__'
-          ? '__AC_EXTENSION_TOGGLE_AC_RESULT__'
-          : '__AC_EXTENSION_GET_STATUS_RESULT__';
+        const resultEvent = event.type === testMainBridgeEvents.toggle
+          ? testMainBridgeEvents.toggleResult
+          : testMainBridgeEvents.statusResult;
         const responseDetail = typeof response === 'function'
           ? response(event.detail)
           : response;
@@ -1984,6 +2111,7 @@ async function runTests() {
       }
     };
     const bridge = loadMainWorldBridge(
+      testMainBridgeEvents,
       fakeWindow,
       TestCustomEvent,
       callback => { callback(); return 1; }
@@ -1992,7 +2120,7 @@ async function runTests() {
   }
 
   const toggleBridge = createMainWorldBridge({
-    __AC_EXTENSION_TOGGLE_AC__: { success: true, action: 'on' }
+    [testMainBridgeEvents.toggle]: { success: true, action: 'on' }
   });
   const toggleBridgeDeadline = Date.now() + 60000;
   const toggleBridgeResult = await toggleBridge.requestMainWorldToggle(
@@ -2003,7 +2131,7 @@ async function runTests() {
   assertPass(toggleBridgeResult?.success === true
       && toggleBridgeResult.action === 'on'
       && !Object.hasOwn(toggleBridgeResult, 'requestId')
-      && toggleBridge.sentEvents[0]?.type === '__AC_EXTENSION_TOGGLE_AC__'
+      && toggleBridge.sentEvents[0]?.type === testMainBridgeEvents.toggle
       && toggleBridge.sentEvents[0]?.detail?.action === 'on'
       && toggleBridge.sentEvents[0]?.detail?.notAfterAt === toggleBridgeDeadline
       && /^ac-\d+-/.test(toggleBridge.sentEvents[0]?.detail?.requestId || '')
@@ -2011,13 +2139,13 @@ async function runTests() {
     '9Bridge-1: 主世界 toggle 握手保留事件、action、requestId 前缀与完成后监听器清理');
 
   const statusBridge = createMainWorldBridge({
-    __AC_EXTENSION_GET_STATUS__: { isOn: false, source: 'main-world' }
+    [testMainBridgeEvents.status]: { isOn: false, source: 'main-world' }
   });
   const statusBridgeResult = await statusBridge.requestMainWorldStatus(3000);
   assertPass(statusBridgeResult?.isOn === false
       && statusBridgeResult.source === 'main-world'
       && !Object.hasOwn(statusBridgeResult, 'requestId')
-      && statusBridge.sentEvents[0]?.type === '__AC_EXTENSION_GET_STATUS__'
+      && statusBridge.sentEvents[0]?.type === testMainBridgeEvents.status
       && /^ac-status-\d+-/.test(statusBridge.sentEvents[0]?.detail?.requestId || '')
       && statusBridge.listeners.size === 0,
     '9Bridge-2: 主世界 status 握手保留独立事件、requestId 前缀与结果解包');
@@ -2231,7 +2359,7 @@ async function runTests() {
   // 误触发后台刷新恢复。隔离世界超时也放宽到 90s 容纳慢异步 confirm + 最多 3 次点击。
   assertPass(pageConfirmSource.includes('result = await requestACState(true, notAfterAt);')
       && pageConfirmSource.includes('主世界切换抛异常')
-      && pageConfirmSource.includes('detail: { requestId, action, ...result }'),
+      && pageConfirmSource.includes('detail: { requestId, action, ...result, ...getMainRuntimeIdentity() }'),
     '9G-1A: 主世界 toggle 握手异常时仍回显失败结果，避免隔离世界拿到 null');
   assertPass(contentSource.includes('requestMainWorldToggle(targetAction, 90000, notAfterAt)')
       && contentSource.includes('toggleACSwitch(action, msg.notAfterAt)')
@@ -2281,10 +2409,17 @@ async function runTests() {
     'getACStatusInPageWorld', 'waitForACSwitchInPageWorld', 'clickElementOnceInPageWorld',
     'clickConfirmDialogInPageWorld', 'waitForTargetACStateInPageWorld', 'sleepInPageWorld',
     'MAX_AC_SWITCH_CLICKS', 'AC_STATE_SETTLE_MS',
-    'automaticOnCancellationRevision', 'document', 'AC_ON_SUCCESS_TEXT',
-    'AC_EXECUTION_SUCCESS_TIMEOUT_MS', 'console',
+    'automaticOnCancellationRevision', 'mainBridgeLease', 'document', 'AC_ON_SUCCESS_TEXT',
+    'AC_EXECUTION_SUCCESS_TIMEOUT_MS', 'HOT_TAKEOVER_CLICK_QUIET_MS', 'console',
     `${ensureFnSource}; return { ensureACState };`
   );
+  const createEnsureLease9G = () => ({
+    ownerGeneration: 1,
+    uncertainClickOwner: '',
+    uncertainClickUntil: 0,
+    blockedUntil: 0
+  });
+  const ensureLease9G = createEnsureLease9G();
   const { ensureACState } = loadEnsure(
     () => ({ isOn: false, disabled: true, source: 'main-world-ant-switch' }),
     async () => null,
@@ -2295,12 +2430,16 @@ async function runTests() {
     3,
     10000,
     0,
+    ensureLease9G,
     { querySelectorAll: () => [] },
     'Execution succeeded',
     0,
+    60000,
     testConsole
   );
   ensureACState.cancellationRevision = 0;
+  ensureACState.ownerGeneration = 1;
+  ensureACState.requestId = 'disabled-test';
   const disabledEnsureResult = await ensureACState(true);
   let expiredWindowClickCalls = 0;
   const { ensureACState: ensureExpiredWindow } = loadEnsure(
@@ -2313,13 +2452,17 @@ async function runTests() {
     3,
     10000,
     0,
+    ensureLease9G,
     { querySelectorAll: () => [] },
     'Execution succeeded',
     0,
+    60000,
     testConsole
   );
   ensureExpiredWindow.notAfterAt = Date.now() - 1;
   ensureExpiredWindow.cancellationRevision = 0;
+  ensureExpiredWindow.ownerGeneration = 1;
+  ensureExpiredWindow.requestId = 'expired-test';
   const expiredWindowResult = await ensureExpiredWindow(true);
   const confirmFnStart = pageConfirmSource.indexOf('async function clickConfirmDialogInPageWorld(');
   const confirmFnEnd = pageConfirmSource.indexOf('\n  async function waitForACSwitchInPageWorld', confirmFnStart);
@@ -2491,12 +2634,16 @@ async function runTests() {
     3,
     10000,
     1,
+    createEnsureLease9G(),
     { querySelectorAll: () => [] },
     'Execution succeeded',
     0,
+    60000,
     testConsole
   );
   ensureCancelled.cancellationRevision = 0;
+  ensureCancelled.ownerGeneration = 1;
+  ensureCancelled.requestId = 'cancelled-test';
   const cancelledEnsureResult = await ensureCancelled(true);
   assertPass(cancelledEnsureResult.success === false
       && cancelledEnsureResult.error.includes('请求已被后台取消')
@@ -2523,6 +2670,7 @@ async function runTests() {
     3,
     10000,
     0,
+    createEnsureLease9G(),
     {
       querySelectorAll: () => (++enabledSuccessQueryCalls % 2 === 1
         ? []
@@ -2530,9 +2678,12 @@ async function runTests() {
     },
     'Execution succeeded',
     0,
+    60000,
     testConsole
   );
   ensureEnabled.cancellationRevision = 0;
+  ensureEnabled.ownerGeneration = 1;
+  ensureEnabled.requestId = 'enabled-test';
   const enabledEnsureResult = await ensureEnabled(true);
   assertPass(enabledEnsureResult.success === false
       && enabledEnsureResult.clicks === 3
@@ -2616,6 +2767,7 @@ async function runTests() {
     3,
     10000,
     0,
+    createEnsureLease9G(),
     {
       querySelectorAll: () => (++clickedSuccessQueryCalls9G === 1
         ? []
@@ -2623,9 +2775,12 @@ async function runTests() {
     },
     'Execution succeeded',
     0,
+    60000,
     testConsole
   );
   ensureClickedSuccess9G.cancellationRevision = 0;
+  ensureClickedSuccess9G.ownerGeneration = 1;
+  ensureClickedSuccess9G.requestId = 'clicked-success-test';
   const clickedSuccessResult9G = await ensureClickedSuccess9G(true);
   let missingSuccessStatusCalls9G = 0;
   const { ensureACState: ensureMissingSuccess9G } = loadEnsure(
@@ -2642,12 +2797,16 @@ async function runTests() {
     3,
     10000,
     0,
+    createEnsureLease9G(),
     { querySelectorAll: () => [] },
     'Execution succeeded',
     0,
+    60000,
     testConsole
   );
   ensureMissingSuccess9G.cancellationRevision = 0;
+  ensureMissingSuccess9G.ownerGeneration = 1;
+  ensureMissingSuccess9G.requestId = 'missing-success-test';
   const missingSuccessResult9G = await ensureMissingSuccess9G(true);
   let alreadyOnSuccessQueries9G = 0;
   const { ensureACState: ensureAlreadyOn9G } = loadEnsure(
@@ -2660,12 +2819,16 @@ async function runTests() {
     3,
     10000,
     0,
+    createEnsureLease9G(),
     { querySelectorAll: () => { alreadyOnSuccessQueries9G += 1; return []; } },
     'Execution succeeded',
     0,
+    60000,
     testConsole
   );
   ensureAlreadyOn9G.cancellationRevision = 0;
+  ensureAlreadyOn9G.ownerGeneration = 1;
+  ensureAlreadyOn9G.requestId = 'already-on-test';
   const alreadyOnResult9G = await ensureAlreadyOn9G(true);
   assertPass(successHelperBehavior9G?.staleResult9G?.success === false
       && successHelperBehavior9G?.freshResult9G?.success === true
@@ -3081,6 +3244,8 @@ async function runTests() {
     : '';
   let transientTimerRecovered9M = false;
   let persistentAmbiguityRefused9M = false;
+  let transientRollbackRefused9M = false;
+  let persistentDropdownRefused9M = false;
   if (confirmedTimerWaitSource9M) {
     const confirmedInput9M = {
       value: '00:21',
@@ -3089,30 +3254,76 @@ async function runTests() {
     const transientSequence9M = [null, confirmedInput9M, confirmedInput9M];
     let transientIndex9M = 0;
     const waitForTransientTimer9M = new Function(
-      'findPowerOffTimerInput', 'sleep',
+      'findPowerOffTimerInput', 'sleep', 'findVisiblePickerDropdowns',
       `${confirmedTimerWaitSource9M}; return waitForConfirmedPowerOffTimerInput;`
     )(
       () => transientSequence9M[Math.min(
         transientIndex9M++,
         transientSequence9M.length - 1
       )],
-      ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 1)))
+      ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 1))),
+      () => []
     );
-    transientTimerRecovered9M = await waitForTransientTimer9M('00:21', 25, 1)
+    // Windows Node through WSL interop can overshoot a nominal 1ms timer by
+    // tens of milliseconds. Keep this behavior test about transient DOM
+    // ambiguity, not host timer granularity.
+    transientTimerRecovered9M = await waitForTransientTimer9M('00:21', 250, 1, 5)
       === confirmedInput9M;
 
     const waitForAmbiguousTimer9M = new Function(
-      'findPowerOffTimerInput', 'sleep',
+      'findPowerOffTimerInput', 'sleep', 'findVisiblePickerDropdowns',
       `${confirmedTimerWaitSource9M}; return waitForConfirmedPowerOffTimerInput;`
     )(
       () => null,
-      ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 1)))
+      ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 1))),
+      () => []
     );
-    persistentAmbiguityRefused9M = await waitForAmbiguousTimer9M('00:21', 4, 1)
+    persistentAmbiguityRefused9M = await waitForAmbiguousTimer9M('00:21', 4, 1, 2)
       === null;
+
+    const rolledBackInput9M = {
+      value: '',
+      getAttribute: () => null
+    };
+    const rollbackSequence9M = [confirmedInput9M, confirmedInput9M, rolledBackInput9M];
+    let rollbackIndex9M = 0;
+    const waitForRollbackTimer9M = new Function(
+      'findPowerOffTimerInput', 'sleep', 'findVisiblePickerDropdowns',
+      `${confirmedTimerWaitSource9M}; return waitForConfirmedPowerOffTimerInput;`
+    )(
+      () => rollbackSequence9M[Math.min(
+        rollbackIndex9M++,
+        rollbackSequence9M.length - 1
+      )],
+      ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 1))),
+      () => []
+    );
+    transientRollbackRefused9M = await waitForRollbackTimer9M('00:21', 20, 1, 1000)
+      === null;
+
+    const stillOpenDropdown9M = makeVisiblePickerDropdown9M([]);
+    const waitForClosedDropdown9M = new Function(
+      'findPowerOffTimerInput', 'sleep', 'findVisiblePickerDropdowns',
+      `${confirmedTimerWaitSource9M}; return waitForConfirmedPowerOffTimerInput;`
+    )(
+      () => confirmedInput9M,
+      ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 1))),
+      () => [stillOpenDropdown9M]
+    );
+    persistentDropdownRefused9M = await waitForClosedDropdown9M(
+      '00:21',
+      8,
+      1,
+      2,
+      new Set(),
+      stillOpenDropdown9M
+    ) === null;
   }
-  assertPass(transientTimerRecovered9M && persistentAmbiguityRefused9M,
-    '9M-7: 写入后等待唯一语义 picker 与目标值连续稳定；React 短暂双树可恢复，持续歧义仍失败关闭');
+  assertPass(transientTimerRecovered9M
+      && persistentAmbiguityRefused9M
+      && transientRollbackRefused9M
+      && persistentDropdownRefused9M,
+    '9M-7: picker 必须跨稳定窗口保持目标值且 dropdown 已关闭；短暂双树可恢复，回滚/歧义/持续展开均失败关闭');
   const verificationStartForReload = backgroundSource.indexOf('async function verifyPageTimerPersistence(');
   const verificationEndForReload = backgroundSource.indexOf('\n// 关机定时器设置失败时', verificationStartForReload);
   const verifySectionForReload = verificationStartForReload >= 0 && verificationEndForReload > verificationStartForReload
@@ -3752,10 +3963,37 @@ async function runTests() {
       }
     }
   };
+  const contentWindowListeners = new Map();
   const contentWindow = {
     location: { href: 'https://w5.ab.ust.hk/njggt/app/home' },
-    addEventListener() {},
-    removeEventListener() {}
+    addEventListener(type, listener) {
+      if (!contentWindowListeners.has(type)) contentWindowListeners.set(type, new Set());
+      contentWindowListeners.get(type).add(listener);
+    },
+    removeEventListener(type, listener) {
+      contentWindowListeners.get(type)?.delete(listener);
+    },
+    dispatchEvent(event) {
+      if (event.type.endsWith('_GET_RUNTIME__')) {
+        const resultType = event.type.replace('_GET_RUNTIME__', '_GET_RUNTIME_RESULT__');
+        for (const listener of contentWindowListeners.get(resultType) || []) {
+          listener({
+            detail: {
+              requestId: event.detail.requestId,
+              success: true,
+              runtimeIdentity: {
+                main: {
+                  buildTime: 'dev',
+                  buildTimeEpochMs: 0,
+                  listenerId: 'main-test'
+                }
+              }
+            }
+          });
+        }
+      }
+      return true;
+    }
   };
   contentWindow.top = contentWindow;
   const contentWorld = {};
@@ -3766,6 +4004,7 @@ async function runTests() {
     'fetch',
     'console',
     'document',
+    'CustomEvent',
     contentSource
   );
   const runContentScript = () => executeContentScript(
@@ -3774,7 +4013,8 @@ async function runTests() {
     contentRuntimeChrome,
     async () => ({ ok: true, json: async () => ({}) }),
     quietConsole,
-    {}
+    {},
+    TestCustomEvent
   );
   runContentScript();
   const firstContentListenerCount = contentRuntimeListeners.size;
@@ -3786,6 +4026,236 @@ async function runTests() {
       && contentRuntimeListeners.size === 1
       && contentListenerRemoveCount === 1,
     '9Z-1: content.js 重注入会替换旧监听器；扩展 reload 后旧哨兵不会阻止接收端恢复');
+
+  const mainRuntimeListeners9Z = new Map();
+  let mainRuntimeListenerRemoveCount9Z = 0;
+  const mainRuntimeWindow9Z = {
+    addEventListener(type, listener) {
+      if (!mainRuntimeListeners9Z.has(type)) mainRuntimeListeners9Z.set(type, new Set());
+      mainRuntimeListeners9Z.get(type).add(listener);
+    },
+    removeEventListener(type, listener) {
+      mainRuntimeListenerRemoveCount9Z += 1;
+      mainRuntimeListeners9Z.get(type)?.delete(listener);
+    },
+    dispatchEvent(event) {
+      for (const listener of mainRuntimeListeners9Z.get(event.type) || []) {
+        listener(event);
+      }
+      return true;
+    }
+  };
+  const executePageConfirm9Z = new Function(
+    'window', 'document', 'CustomEvent', 'console',
+    pageConfirmSource
+  );
+  const runPageConfirm9Z = () => executePageConfirm9Z(
+    mainRuntimeWindow9Z,
+    { querySelectorAll: () => [] },
+    TestCustomEvent,
+    quietConsole
+  );
+  runPageConfirm9Z();
+  const firstMainBridge9Z = mainRuntimeWindow9Z.__AC_EXTENSION_MAIN_BRIDGE__;
+  runPageConfirm9Z();
+  const secondMainBridge9Z = mainRuntimeWindow9Z.__AC_EXTENSION_MAIN_BRIDGE__;
+  const activeMainBridgeListenerCount9Z = [...mainRuntimeListeners9Z.values()]
+    .reduce((total, listeners) => total + listeners.size, 0);
+  let mainRuntimeIdentityResponse9Z = null;
+  mainRuntimeWindow9Z.addEventListener(
+    `${secondMainBridge9Z.channel}_GET_RUNTIME_RESULT__`,
+    event => { mainRuntimeIdentityResponse9Z = event.detail; }
+  );
+  mainRuntimeWindow9Z.dispatchEvent(new TestCustomEvent(
+    `${secondMainBridge9Z.channel}_GET_RUNTIME__`,
+    { detail: { requestId: 'runtime-test' } }
+  ));
+  assertPass(firstMainBridge9Z !== secondMainBridge9Z
+      && mainRuntimeListenerRemoveCount9Z === 4
+      && activeMainBridgeListenerCount9Z === 6
+      && typeof firstMainBridge9Z.cancelAndDrain === 'function'
+      && pageConfirmSource.includes('await predecessorMainBridgeDrain')
+      && pageConfirmSource.includes("'__AC_EXTENSION_CANCEL_AUTOMATIC_ON__'")
+      && pageConfirmSource.includes('mainBridgeLease.ownerGeneration')
+      && pageConfirmSource.includes('mainBridgeLease.blockedUntil = Math.max(')
+      && pageConfirmSource.includes('mainBridgeLease.uncertainClickUntil')
+      && mainRuntimeIdentityResponse9Z?.requestId === 'runtime-test'
+      && mainRuntimeIdentityResponse9Z?.runtimeIdentity?.main?.listenerId
+        === secondMainBridge9Z.listenerId,
+    '9Z-1B: page-confirm 热接管先取消并排空旧 ON，再释放旧四类监听器且仅由新 registry 回包');
+
+  const createTakeoverRuntime9Z = ({
+    legacy = false,
+    switchInitiallyReady = true,
+    clickTurnsOn = false
+  } = {}) => {
+    const listeners = new Map();
+    const results = new Map();
+    let clickCount = 0;
+    let switchReady = switchInitiallyReady;
+    let isOn = false;
+    let successMessage = null;
+    const acSwitch = {
+      disabled: false,
+      className: 'ant-switch',
+      get textContent() { return isOn ? 'ON' : 'OFF'; },
+      getAttribute(name) {
+        if (name === 'aria-checked') return isOn ? 'true' : 'false';
+        return null;
+      },
+      hasAttribute: () => false,
+      matches: () => false,
+      querySelector: () => null,
+      scrollIntoView() {},
+      focus() {},
+      click() {
+        clickCount += 1;
+        if (clickTurnsOn) {
+          isOn = true;
+          successMessage = {
+            textContent: 'Execution succeeded',
+            hidden: false,
+            className: 'ant-message-custom-content ant-message-success',
+            parentElement: null,
+            getAttribute: () => null,
+            querySelector: () => null
+          };
+        }
+      }
+    };
+    const switchContainer = {
+      parentElement: null,
+      querySelectorAll(selector) {
+        return selector.includes('ant-switch') ? [acSwitch] : [];
+      }
+    };
+    const statusLabel = {
+      children: [],
+      textContent: 'Air Conditioning Status',
+      parentElement: switchContainer
+    };
+    const document = {
+      querySelectorAll(selector) {
+        if (selector === 'small, label, span, div') {
+          return switchReady ? [statusLabel] : [];
+        }
+        if (selector.includes('ant-message')) {
+          return successMessage ? [successMessage] : [];
+        }
+        return [];
+      }
+    };
+    const window = {
+      confirm: () => false,
+      alert() {},
+      prompt: (_message, defaultValue = '') => defaultValue,
+      addEventListener(type, listener) {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type).add(listener);
+      },
+      removeEventListener(type, listener) {
+        listeners.get(type)?.delete(listener);
+      },
+      dispatchEvent(event) {
+        if (event.type.endsWith('_TOGGLE_AC_RESULT__') && event.detail?.requestId) {
+          results.set(event.detail.requestId, event.detail);
+        }
+        for (const listener of [...(listeners.get(event.type) || [])]) listener(event);
+        return true;
+      }
+    };
+    if (legacy) window.__AC_EXTENSION_TOGGLE_PATCHED__ = true;
+    const inject = () => {
+      executePageConfirm9Z(window, document, TestCustomEvent, quietConsole);
+      return window.__AC_EXTENSION_MAIN_BRIDGE__;
+    };
+    const requestOn = (bridge, requestId) => window.dispatchEvent(new TestCustomEvent(
+      `${bridge.channel}_TOGGLE_AC__`,
+      { detail: { requestId, action: 'on', notAfterAt: Date.now() + 10_000 } }
+    ));
+    return {
+      window,
+      inject,
+      requestOn,
+      results,
+      releaseSwitch() { switchReady = true; },
+      getClickCount: () => clickCount
+    };
+  };
+  const waitUntil9Z = async (predicate, timeoutMs = 500) => {
+    const startedAt = Date.now();
+    while (!predicate() && Date.now() - startedAt < timeoutMs) {
+      await new Promise(resolve => setTimeout(resolve, 5));
+    }
+    return predicate();
+  };
+
+  // A 在物理 click 前等待 switch；B、C 依次接管后再释放 A。B 必须在 drain
+  // 之后被 generation 淘汰，C 才能成为唯一可点击 owner。该路径不依赖
+  // uncertainClick，专门证明 await predecessor 后的代际复核有效。
+  const preClickTakeoverRuntime9Z = createTakeoverRuntime9Z({
+    switchInitiallyReady: false,
+    clickTurnsOn: true
+  });
+  const preClickBridgeA9Z = preClickTakeoverRuntime9Z.inject();
+  preClickTakeoverRuntime9Z.requestOn(preClickBridgeA9Z, 'pre-click-a');
+  const preClickAInFlight9Z = await waitUntil9Z(
+    () => !!preClickTakeoverRuntime9Z.window.__AC_EXTENSION_MAIN_BRIDGE_LEASE__?.inFlight
+  );
+  const preClickBridgeB9Z = preClickTakeoverRuntime9Z.inject();
+  preClickTakeoverRuntime9Z.requestOn(preClickBridgeB9Z, 'pre-click-b');
+  const preClickBridgeC9Z = preClickTakeoverRuntime9Z.inject();
+  preClickTakeoverRuntime9Z.requestOn(preClickBridgeC9Z, 'pre-click-c');
+  preClickTakeoverRuntime9Z.releaseSwitch();
+  const preClickResultsSettled9Z = await waitUntil9Z(
+    () => preClickTakeoverRuntime9Z.results.has('pre-click-a')
+      && preClickTakeoverRuntime9Z.results.has('pre-click-b')
+      && preClickTakeoverRuntime9Z.results.has('pre-click-c'),
+    1500
+  );
+  const preClickResultB9Z = preClickTakeoverRuntime9Z.results.get('pre-click-b');
+  const preClickResultC9Z = preClickTakeoverRuntime9Z.results.get('pre-click-c');
+  assertPass(preClickAInFlight9Z
+      && preClickResultsSettled9Z
+      && preClickResultB9Z?.success === false
+      && preClickResultB9Z?.takeoverPending === true
+      && preClickResultC9Z?.success === true
+      && preClickResultC9Z?.verified === true
+      && preClickTakeoverRuntime9Z.getClickCount() === 1,
+    '9Z-1B-1: A click 前挂起时，B 在 drain 后被 generation 淘汰，只有最终 owner C 产生唯一 ON click');
+
+  // 行为级接管：A 已经物理 click 后，B、C 连续热注入。新实例必须等 A 收口，
+  // 且共享“点击结果未知”租约，不能因为 closure 被替换而再点第二次。
+  const takeoverRuntime9Z = createTakeoverRuntime9Z();
+  const takeoverBridgeA9Z = takeoverRuntime9Z.inject();
+  takeoverRuntime9Z.requestOn(takeoverBridgeA9Z, 'takeover-a');
+  const firstTakeoverClickObserved9Z = await waitUntil9Z(
+    () => takeoverRuntime9Z.getClickCount() === 1
+  );
+  const takeoverBridgeB9Z = takeoverRuntime9Z.inject();
+  takeoverRuntime9Z.requestOn(takeoverBridgeB9Z, 'takeover-b');
+  const takeoverBridgeC9Z = takeoverRuntime9Z.inject();
+  takeoverRuntime9Z.requestOn(takeoverBridgeC9Z, 'takeover-c');
+  await new Promise(resolve => setTimeout(resolve, 350));
+  assertPass(firstTakeoverClickObserved9Z
+      && takeoverRuntime9Z.getClickCount() === 1
+      && takeoverRuntime9Z.window.__AC_EXTENSION_MAIN_BRIDGE__ === takeoverBridgeC9Z
+      && takeoverRuntime9Z.window.__AC_EXTENSION_MAIN_BRIDGE_LEASE__?.ownerGeneration === 3
+      && takeoverRuntime9Z.window.__AC_EXTENSION_MAIN_BRIDGE_LEASE__?.uncertainClickUntil > Date.now(),
+    '9Z-1C: A→B→C 连续热接管最多产生一次物理 ON click，未知结果租约跨三次注入保留');
+
+  // 无 registry 的旧 build 无法证明是否仍有迟到 click；首次接管建立 60s 共享静默窗，
+  // 后续 B/C 注入不得因替换 closure 而把静默窗丢掉。
+  const legacyTakeoverRuntime9Z = createTakeoverRuntime9Z({ legacy: true });
+  legacyTakeoverRuntime9Z.inject();
+  legacyTakeoverRuntime9Z.inject();
+  const legacyTakeoverBridgeC9Z = legacyTakeoverRuntime9Z.inject();
+  legacyTakeoverRuntime9Z.requestOn(legacyTakeoverBridgeC9Z, 'legacy-c');
+  await new Promise(resolve => setTimeout(resolve, 20));
+  assertPass(legacyTakeoverRuntime9Z.getClickCount() === 0
+      && legacyTakeoverRuntime9Z.window.__AC_EXTENSION_MAIN_BRIDGE_LEASE__?.ownerGeneration === 3
+      && legacyTakeoverRuntime9Z.window.__AC_EXTENSION_MAIN_BRIDGE_LEASE__?.blockedUntil > Date.now(),
+    '9Z-1D: legacy→A→B→C 连续接管共享 60s 静默窗，重注入不会提前恢复物理点击');
 
   const currentContentListener = [...contentRuntimeListeners][0];
   let pingResponse = null;
@@ -3800,11 +4270,20 @@ async function runTests() {
     {},
     () => { unknownResponseCalled = true; }
   );
-  assertPass(pingListenerResult === false
+  await new Promise(resolve => setTimeout(resolve, 0));
+  verboseLog('  content ping identity:', JSON.stringify({
+    pingListenerResult,
+    pingResponse,
+    unknownListenerResult,
+    unknownResponseCalled
+  }));
+  assertPass(pingListenerResult === true
       && pingResponse?.success === true
+      && pingResponse?.runtimeIdentity?.content?.buildTime === 'dev'
+      && pingResponse?.runtimeIdentity?.main?.buildTime === 'dev'
       && unknownListenerResult === false
       && unknownResponseCalled === false,
-    '9Z-1A: content 健康探测同步应答；未知 action 不冒充异步响应并吞住消息通道');
+    '9Z-1A: content 健康探测异步回传 content/main 身份；未知 action 不吞住消息通道');
 
   const contentRecoverySource = extractSourceSection(
     backgroundSource,
@@ -3825,8 +4304,13 @@ async function runTests() {
     'appendDiagnosticLog',
     'console',
     'AC_PAGE',
+    'assessContentRuntimeIdentity',
     `${contentRecoverySource}\n${statusRecoverySource}; return { getCurrentACStatus };`
   );
+  const acceptTestRuntimeIdentity = probe => ({
+    valid: probe != null,
+    code: probe == null ? 'CONTENT-RUNTIME-MISMATCH' : ''
+  });
   let staleReceiverReady = false;
   let staleReceiverSendCount = 0;
   const staleReceiverInjections = [];
@@ -3878,7 +4362,8 @@ async function runTests() {
     async () => {},
     ignoreDiagnosticLog,
     quietConsole,
-    'https://w5.ab.ust.hk/njggt/app/home'
+    'https://w5.ab.ust.hk/njggt/app/home',
+    acceptTestRuntimeIdentity
   );
   const recoveredReadStatus = await statusRecoveryHarness.getCurrentACStatus();
   assertPass(recoveredReadStatus?.isOn === true
@@ -3941,7 +4426,8 @@ async function runTests() {
     async () => {},
     ignoreDiagnosticLog,
     quietConsole,
-    'https://w5.ab.ust.hk/njggt/app/home'
+    'https://w5.ab.ust.hk/njggt/app/home',
+    acceptTestRuntimeIdentity
   );
   const swallowedReceiverOutcome = await Promise.race([
     swallowedReceiverHarness.getCurrentACStatus().then(status => ({ settled: true, status })),
@@ -4002,7 +4488,8 @@ async function runTests() {
     async () => {},
     ignoreDiagnosticLog,
     quietConsole,
-    'https://w5.ab.ust.hk/njggt/app/home'
+    'https://w5.ab.ust.hk/njggt/app/home',
+    acceptTestRuntimeIdentity
   );
   const selectiveReceiverOutcome = await Promise.race([
     selectiveReceiverHarness.getCurrentACStatus().then(status => ({ settled: true, status })),
@@ -4054,7 +4541,8 @@ async function runTests() {
     async () => {},
     async (level, source) => { errorPageDiagnosticLogs.push({ level, source }); },
     quietConsole,
-    'https://w5.ab.ust.hk/njggt/app/home'
+    'https://w5.ab.ust.hk/njggt/app/home',
+    acceptTestRuntimeIdentity
   );
   const errorPageStatus = await errorPageHarness.getCurrentACStatus();
   assertPass(errorPageStatus?.isOn === null
@@ -5291,8 +5779,9 @@ return { reapplySmartSensitivityNow };`
   assertPass(contentSource.includes('async function typeTimeIntoPickerInput(input, value)')
       && contentSource.includes('const MAX_TYPING_ATTEMPTS = 3')
       && contentSource.includes('async function typeOnceIntoPickerInput(picker, input, value)')
-      && contentSource.includes('return inputValue === value || inputTitle === value;'),
-    '11J-1: 页面定时器写入有限重试，并同时接受 value 或 title 命中目标 HH:MM');
+      && contentSource.includes('return !!(await waitForConfirmedPowerOffTimerInput(')
+      && contentSource.includes('stableWindowMs = 500'),
+    '11J-1: 页面定时器写入有限重试，并用重新定位后的稳定 value/title 确认目标 HH:MM');
   const typeTimeStart11J = contentSource.indexOf(
     'async function typeTimeIntoPickerInput(input, value)'
   );
@@ -5340,6 +5829,93 @@ return { reapplySmartSensitivityNow };`
   }
   assertPass(pickerRetryRebound11J,
     '11J-2: picker 首次输入后 React 换节点时，下一次重试重新绑定唯一新控件而非继续操作旧节点');
+
+  const typeOnceStart11J = contentSource.indexOf(
+    'async function typeOnceIntoPickerInput(picker, input, value)'
+  );
+  const typeOnceEnd11J = contentSource.indexOf(
+    '\n\n// ----- 查找 AC 开关 DOM 元素 -----',
+    typeOnceStart11J
+  );
+  const typeOnceSource11J = typeOnceStart11J >= 0 && typeOnceEnd11J > typeOnceStart11J
+    ? contentSource.slice(typeOnceStart11J, typeOnceEnd11J)
+    : '';
+  let delayedControlledCommitAccepted11J = false;
+  let ambiguousPortalStayedFailClosed11J = false;
+  if (typeOnceSource11J) {
+    class PickerEvent11J {
+      constructor(type, init = {}) {
+        this.type = type;
+        Object.assign(this, init);
+      }
+    }
+    const oldInput11J = {
+      value: '',
+      removeAttribute() {},
+      focus() {},
+      click() {},
+      getAttribute() { return ''; },
+      dispatchEvent(event) {
+        // Simulate a controlled React input rolling every synthetic write back
+        // on the old node before its delayed commit replaces that node.
+        if (event?.type === 'input') this.value = '';
+        return true;
+      }
+    };
+    const newInput11J = {
+      value: '01:23',
+      getAttribute(attribute) {
+        return attribute === 'title' ? '01:23' : '';
+      }
+    };
+    const picker11J = {
+      dispatchEvent() {},
+      click() {}
+    };
+    const control11J = { picker: picker11J, input: oldInput11J };
+    let okClicks11J = 0;
+    let stableConfirmationCalls11J = 0;
+    const loadTypeOnce11J = (okResult) => new Function(
+      'findPowerOffTimerControl', 'findVisiblePickerDropdowns',
+      'MouseEvent', 'KeyboardEvent', 'InputEvent', 'Event', 'window',
+      'sleep', 'setNativeInputValue', 'clickUniquePowerOffPickerOk',
+      'waitForConfirmedPowerOffTimerInput',
+      `${typeOnceSource11J}; return typeOnceIntoPickerInput;`
+    )(
+      () => control11J,
+      () => [],
+      PickerEvent11J,
+      PickerEvent11J,
+      PickerEvent11J,
+      PickerEvent11J,
+      {},
+      async () => {},
+      (input, value) => { input.value = value; },
+      () => {
+        if (okResult.clicked) okClicks11J += 1;
+        return okResult;
+      },
+      async () => {
+        stableConfirmationCalls11J += 1;
+        return newInput11J;
+      }
+    );
+    delayedControlledCommitAccepted11J = await loadTypeOnce11J({
+      accepted: true,
+      clicked: true
+    })(picker11J, oldInput11J, '01:23');
+    const callsBeforeAmbiguous11J = stableConfirmationCalls11J;
+    ambiguousPortalStayedFailClosed11J = (await loadTypeOnce11J({
+      accepted: false,
+      clicked: false
+    })(picker11J, oldInput11J, '01:23')) === false
+      && stableConfirmationCalls11J === callsBeforeAmbiguous11J;
+    delayedControlledCommitAccepted11J = delayedControlledCommitAccepted11J === true
+      && okClicks11J === 1
+      && stableConfirmationCalls11J === 1;
+  }
+  assertPass(delayedControlledCommitAccepted11J && ambiguousPortalStayedFailClosed11J,
+    '11J-3: picker 接受后用重新定位的稳定新节点判定；portal 歧义仍零确认、失败关闭');
 
   const clearPageTimerProofStart = backgroundSource.indexOf('function clearPageTimerProofState()');
   const clearPageTimerProofEnd = backgroundSource.indexOf('\nasync function syncStoredTriggerFromAlarm', clearPageTimerProofStart);
@@ -6126,6 +6702,225 @@ return { reapplySmartSensitivityNow };`
       && ensureDiagnosticAlarmsBody.includes('before: beforeAlarms')
       && ensureDiagnosticAlarmsBody.includes('repairs,'),
     '13M-3: 诊断自愈返回修复前闹钟快照与逐项 repairs，不再用总布尔值掩盖根因');
+  assertPass(ensureDiagnosticAlarmsBody.indexOf('const diagnosticRequestAt = Date.now();')
+        < ensureDiagnosticAlarmsBody.indexOf('await loadScheduleFromStorage();')
+      && ensureDiagnosticAlarmsBody.includes('schemaVersion: 2')
+      && ensureDiagnosticAlarmsBody.includes('evidence: {')
+      && ensureDiagnosticAlarmsBody.includes('before: diagnosticBefore')
+      && ensureDiagnosticAlarmsBody.includes('after: diagnosticAfter')
+      && ensureDiagnosticAlarmsBody.includes('memorySchedule,')
+      && ensureDiagnosticAlarmsBody.includes('storedSchedule:')
+      && ensureDiagnosticAlarmsBody.includes('currentAttempt:')
+      && ensureDiagnosticAlarmsBody.includes('lastOutcome:'),
+    '13M-3A: ensureDiagnostics 在任何修复前冻结版本化首现场，并分别返回 repair/after');
+  assertPass(backgroundSource.includes('let currentPwmAttempt = null;')
+      && backgroundSource.includes('let activePwmAttempts = new Map();')
+      && backgroundSource.includes('let lastPwmOutcome = null;')
+      && backgroundSource.includes('function beginPwmDiagnosticAttempt(')
+      && backgroundSource.includes('function finishPwmDiagnosticAttempt(')
+      && backgroundSource.includes('currentPwmAttempt:')
+      && backgroundSource.includes('lastPwmOutcome:'),
+    '13M-3B: 共享 PWM executor 暴露当前尝试和最近结局，单份到期诊断可区分 pending/in-flight/result');
+  assertPass(backgroundSource.includes("const PWM_LAST_OUTCOME_KEY = 'ac_pwm_last_outcome';")
+      && backgroundSource.includes('function normalizePwmDiagnosticOutcome(')
+      && backgroundSource.includes('async function persistPwmDiagnosticOutcomeBestEffort(')
+      && backgroundSource.includes('async function readPersistedPwmDiagnosticOutcome(')
+      && backgroundSource.includes('selectLatestPwmDiagnosticOutcome(')
+      && backgroundSource.includes('async function waitForPwmDiagnosticOutcomePersistence(')
+      && backgroundSource.includes('Promise.race(['),
+    '13M-3B1: 最近 PWM 结果以单对象、脱敏有界的 local 记录跨 MV3 Worker 重启保留');
+  const pwmOutcomePersistenceSource13 = extractSourceSection(
+    backgroundSource,
+    'async function persistPwmDiagnosticOutcomeBestEffort(',
+    '\n\nfunction finishPwmDiagnosticAttempt(',
+    'bounded PWM diagnostic outcome persistence'
+  );
+  const loadPwmOutcomePersistence13 = storageSet => new Function(
+    'chrome', 'PWM_LAST_OUTCOME_KEY', 'normalizePwmDiagnosticOutcome',
+    'lastPwmOutcome', 'console',
+    `let pwmOutcomeWriteGeneration = 0;
+    ${pwmOutcomePersistenceSource13}
+    return waitForPwmDiagnosticOutcomePersistence;`
+  )(
+    { storage: { local: { set: storageSet } } },
+    'ac_pwm_last_outcome',
+    value => value,
+    { attemptId: 99, finishedAt: 99 },
+    quietConsole
+  );
+  const neverSettlingPwmPersistence13 = loadPwmOutcomePersistence13(
+    () => new Promise(() => {})
+  );
+  const neverSettlingPersistenceStarted13 = Date.now();
+  const neverSettlingPersistenceResult13 = await neverSettlingPwmPersistence13(
+    { attemptId: 1, finishedAt: 1 },
+    20
+  );
+  const neverSettlingPersistenceElapsed13 = Date.now()
+    - neverSettlingPersistenceStarted13;
+  const rejectingPwmPersistence13 = loadPwmOutcomePersistence13(
+    async () => { throw new Error('storage reject'); }
+  );
+  const rejectingPersistenceResult13 = await rejectingPwmPersistence13(
+    { attemptId: 2, finishedAt: 2 },
+    20
+  );
+  assertPass(neverSettlingPersistenceResult13 === false
+      && neverSettlingPersistenceElapsed13 >= 10
+      && neverSettlingPersistenceElapsed13 < 200
+      && rejectingPersistenceResult13 === false,
+    '13M-3B1A: outcome storage 永不 settle 或 reject 都在有界期限内返回 false，不阻塞业务 executor');
+  const controlledOutcomeWrites13 = [];
+  let durableOutcome13 = null;
+  const outcomeRaceHarness13 = new Function(
+    'chrome', 'PWM_LAST_OUTCOME_KEY', 'normalizePwmDiagnosticOutcome', 'console',
+    `let pwmOutcomeWriteGeneration = 0;
+    let lastPwmOutcome = null;
+    ${pwmOutcomePersistenceSource13}
+    return {
+      persist: persistPwmDiagnosticOutcomeBestEffort,
+      setLast(value) { lastPwmOutcome = value; }
+    };`
+  )(
+    {
+      storage: {
+        local: {
+          set(envelope) {
+            const value = envelope.ac_pwm_last_outcome;
+            return new Promise(resolve => {
+              controlledOutcomeWrites13.push({
+                attemptId: value.attemptId,
+                release() {
+                  durableOutcome13 = value;
+                  resolve();
+                }
+              });
+            });
+          }
+        }
+      }
+    },
+    'ac_pwm_last_outcome',
+    value => value,
+    quietConsole
+  );
+  const waitForOutcomeWrites13 = async expectedCount => {
+    const startedAt = Date.now();
+    while (controlledOutcomeWrites13.length < expectedCount
+        && Date.now() - startedAt < 200) {
+      await new Promise(resolve => setTimeout(resolve, 0));
+    }
+    return controlledOutcomeWrites13.length >= expectedCount;
+  };
+  const outcomeA13 = { attemptId: 1, finishedAt: 1 };
+  const outcomeB13 = { attemptId: 2, finishedAt: 2 };
+  const outcomeC13 = { attemptId: 3, finishedAt: 3 };
+  outcomeRaceHarness13.setLast(outcomeA13);
+  const outcomeWriteA13 = outcomeRaceHarness13.persist(outcomeA13);
+  outcomeRaceHarness13.setLast(outcomeB13);
+  const outcomeWriteB13 = outcomeRaceHarness13.persist(outcomeB13);
+  controlledOutcomeWrites13[0].release();
+  const sawCorrectionB13 = await waitForOutcomeWrites13(3);
+  outcomeRaceHarness13.setLast(outcomeC13);
+  const outcomeWriteC13 = outcomeRaceHarness13.persist(outcomeC13);
+  controlledOutcomeWrites13[3]?.release();
+  const outcomeWriteCResult13 = await outcomeWriteC13;
+  controlledOutcomeWrites13[2]?.release();
+  const sawSecondCorrectionC13 = await waitForOutcomeWrites13(5);
+  controlledOutcomeWrites13[4]?.release();
+  const outcomeWriteAResult13 = await outcomeWriteA13;
+  void outcomeWriteB13;
+  assertPass(sawCorrectionB13
+      && sawSecondCorrectionC13
+      && outcomeWriteAResult13 === true
+      && outcomeWriteCResult13 === true
+      && controlledOutcomeWrites13.map(write => write.attemptId).join(',')
+        === '1,2,2,3,3'
+      && durableOutcome13 === outcomeC13,
+    '13M-3B1B: A 补写 B 期间 C 已落盘时，A 再重检并补回 C，三代乱序不会回滚持久诊断');
+  assertPass(ensureDiagnosticAlarmsBody.includes('function readDiagnosticRuntimeState(')
+      && ensureDiagnosticAlarmsBody.includes('function diagnosticSnapshotFingerprint(')
+      && ensureDiagnosticAlarmsBody.includes('captureAttempts')
+      && ensureDiagnosticAlarmsBody.includes("'runtime-changed-during-capture'")
+      && ensureDiagnosticAlarmsBody.includes('first.coherent && first.complete')
+      && ensureDiagnosticAlarmsBody.includes("'external-read-incomplete-after-retry'"),
+    '13M-3B2: 诊断快照用 owner/attempt/runtime 指纹复检并最多重采一次，不把同 revision 混合现场标成 coherent');
+  const pwmDiagnosticAttemptSource13 = extractSourceSection(
+    backgroundSource,
+    'function beginPwmDiagnosticAttempt(',
+    '\n\nfunction claimPwmStepOwnership()',
+    'PWM diagnostic attempt instrumentation'
+  );
+  const pwmDiagnosticAttemptHarness13 = new Function(
+    `let pwmDiagnosticAttemptSequence = 0;
+    let activePwmAttempts = new Map();
+    let currentPwmAttempt = null;
+    let lastPwmOutcome = null;
+    const schedule = {
+      pwmState: 'on',
+      smartOnBoundaryAt: 1787936400000,
+      pwmRetryKind: 'smart-on-safety-timer',
+      pwmRetryBoundaryAt: 1787936400000,
+      pwmRetryScheduledAt: 1787936760000,
+      nextTriggerAt: 1787936760000,
+      pageTimerTargetAt: 1787937780000,
+      pageTimerError: ''
+    };
+    ${pwmDiagnosticAttemptSource13};
+    return {
+      schedule,
+      beginPwmDiagnosticAttempt,
+      finishPwmDiagnosticAttempt,
+      inferPwmDiagnosticOutcomeStatus,
+      getCurrent: () => currentPwmAttempt,
+      getActive: () => getActivePwmDiagnosticAttempts(),
+      getLast: () => lastPwmOutcome
+    };`
+  )();
+  const pwmAttemptId13 = pwmDiagnosticAttemptHarness13.beginPwmDiagnosticAttempt({
+    source: 'alarm-ac-pwm',
+    scheduledTime: 1787936760000,
+    automationRevision: 41
+  });
+  const currentPwmAttempt13 = pwmDiagnosticAttemptHarness13.getCurrent();
+  const duplicatePwmAttemptId13 = pwmDiagnosticAttemptHarness13.beginPwmDiagnosticAttempt({
+    source: 'watchdog-duplicate',
+    scheduledTime: 1787936760000,
+    automationRevision: 41
+  });
+  const currentAfterDuplicate13 = pwmDiagnosticAttemptHarness13.getCurrent();
+  pwmDiagnosticAttemptHarness13.schedule.pageTimerError = '输入框未接受时间 01:23';
+  pwmDiagnosticAttemptHarness13.schedule.nextTriggerAt = Date.now() + 60000;
+  const inferredPwmOutcome13 = pwmDiagnosticAttemptHarness13
+    .inferPwmDiagnosticOutcomeStatus();
+  const pwmAttemptFinished13 = pwmDiagnosticAttemptHarness13.finishPwmDiagnosticAttempt(
+    pwmAttemptId13,
+    inferredPwmOutcome13,
+    'schedule-retains-page-timer-error'
+  );
+  const lastPwmOutcome13 = pwmDiagnosticAttemptHarness13.getLast();
+  const currentAfterFirstFinish13 = pwmDiagnosticAttemptHarness13.getCurrent();
+  const duplicatePwmOutcome13 = pwmDiagnosticAttemptHarness13.finishPwmDiagnosticAttempt(
+    duplicatePwmAttemptId13,
+    'skipped',
+    'duplicate-physical-owner'
+  );
+  assertPass(currentPwmAttempt13?.attemptId === 1
+      && duplicatePwmAttemptId13 === 2
+      && currentAfterDuplicate13?.attemptId === pwmAttemptId13
+      && currentAfterDuplicate13?.source === 'alarm-ac-pwm'
+      && pwmDiagnosticAttemptHarness13.getActive().length === 0
+      && currentPwmAttempt13.action === 'on'
+      && currentPwmAttempt13.boundaryAt === 1787936400000
+      && inferredPwmOutcome13 === 'retry-scheduled'
+      && pwmAttemptFinished13?.status === 'retry-scheduled'
+      && currentAfterFirstFinish13?.attemptId === duplicatePwmAttemptId13
+      && lastPwmOutcome13?.status === 'retry-scheduled'
+      && lastPwmOutcome13?.pageTimerError.includes('01:23')
+      && lastPwmOutcome13?.retryBoundaryAt === 1787936400000
+      && duplicatePwmOutcome13?.attemptId === duplicatePwmAttemptId13
+      && pwmDiagnosticAttemptHarness13.getCurrent() === null,
+    '13M-3C: 并发 executor 各有 attempt；任一结算不清除另一项，结果字段不串线');
   const ensureScheduleClockBody13 = extractSourceSection(
     backgroundSource,
     'async function ensureScheduleClock(options = {}) {',
@@ -6239,6 +7034,137 @@ return { reapplySmartSensitivityNow };`
   beginSuite('用例 14：低干扰弹窗', '\n\n=== 用例 14: 清晰与低干扰弹窗回归 ===\n');
 
   const popupSource = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
+  const diagnosticRuntimeSelectorStart14 = popupSource.indexOf(
+    'function selectDiagnosticRuntimeValue('
+  );
+  const diagnosticRuntimeSelectorEnd14 = popupSource.indexOf(
+    '\n}\n',
+    diagnosticRuntimeSelectorStart14
+  );
+  const diagnosticRuntimeSelectorSource14 = diagnosticRuntimeSelectorStart14 >= 0
+      && diagnosticRuntimeSelectorEnd14 > diagnosticRuntimeSelectorStart14
+    ? popupSource.slice(
+        diagnosticRuntimeSelectorStart14,
+        diagnosticRuntimeSelectorEnd14 + 3
+      )
+    : '';
+  const selectDiagnosticRuntimeValue14 = diagnosticRuntimeSelectorSource14
+    ? new Function(
+        `${diagnosticRuntimeSelectorSource14}; return selectDiagnosticRuntimeValue;`
+      )()
+    : null;
+  const attemptBefore14 = { attemptId: 1, source: 'before' };
+  const attemptAfter14 = { attemptId: 2, source: 'after' };
+  assertPass(typeof selectDiagnosticRuntimeValue14 === 'function'
+      && selectDiagnosticRuntimeValue14(
+        { runtime: { currentAttempt: null } },
+        { runtime: { currentAttempt: attemptBefore14 } },
+        'currentAttempt'
+      ) === null
+      && selectDiagnosticRuntimeValue14(
+        { runtime: { currentAttempt: attemptAfter14 } },
+        { runtime: { currentAttempt: attemptBefore14 } },
+        'currentAttempt'
+      ) === attemptAfter14
+      && selectDiagnosticRuntimeValue14(
+        null,
+        { runtime: { currentAttempt: attemptBefore14 } },
+        'currentAttempt'
+      ) === attemptBefore14
+      && popupSource.includes('pwmStepRunning: after.runtime?.pwmStepRunning === true')
+      && !popupSource.includes('diagnosticAfter?.runtime?.currentAttempt\n      || diagnosticBefore'),
+    '14A-0: schema v2 的 after=null 是已结算真相，不回退 before-in-flight 或把当前安全错误降级');
+  const diagnosticEvidenceReaderSource14 = extractSourceSection(
+    popupSource,
+    'function classifyDiagnosticEvidence(',
+    '\n\nfunction formatBuildTimeShort(',
+    'Popup diagnostic evidence reader'
+  );
+  const diagnosticEvidenceReaders14 = new Function(
+    `${diagnosticRuntimeSelectorSource14}
+    ${diagnosticEvidenceReaderSource14}
+    return { classifyDiagnosticEvidence, readDiagnosticEvidence };`
+  )();
+  const evidenceBefore14 = {
+    coherent: true,
+    complete: true,
+    owner: { action: 'on' },
+    runtime: {
+      currentAttempt: attemptBefore14,
+      lastOutcome: { attemptId: 0 },
+      pwmStepRunning: true
+    }
+  };
+  const oneSidedEvidence14 = diagnosticEvidenceReaders14.readDiagnosticEvidence({
+    schemaVersion: 2,
+    evidence: { before: evidenceBefore14, after: null }
+  });
+  const settledEvidence14 = diagnosticEvidenceReaders14.readDiagnosticEvidence({
+    schemaVersion: 2,
+    evidence: {
+      before: evidenceBefore14,
+      after: {
+        coherent: true,
+        complete: true,
+        owner: { action: 'off' },
+        runtime: {
+          currentAttempt: null,
+          lastOutcome: { attemptId: 2 },
+          pwmStepRunning: false
+        }
+      }
+    }
+  });
+  const incompleteEvidence14 = diagnosticEvidenceReaders14.readDiagnosticEvidence({
+    schemaVersion: 2,
+    evidence: {
+      before: evidenceBefore14,
+      after: { coherent: true, complete: false, runtime: {} }
+    }
+  });
+  const incoherentEvidence14 = diagnosticEvidenceReaders14.readDiagnosticEvidence({
+    schemaVersion: 2,
+    evidence: {
+      before: evidenceBefore14,
+      after: { coherent: false, complete: true, runtime: {} }
+    }
+  });
+  const concurrentEvidence14 = diagnosticEvidenceReaders14.readDiagnosticEvidence({
+    schemaVersion: 2,
+    evidence: {
+      before: evidenceBefore14,
+      after: {
+        coherent: true,
+        complete: true,
+        runtime: {
+          currentAttempt: attemptBefore14,
+          currentAttempts: [attemptBefore14, attemptAfter14],
+          lastOutcome: null,
+          pwmStepRunning: true
+        }
+      }
+    }
+  });
+  assertPass(oneSidedEvidence14.status === 'incomplete'
+      && oneSidedEvidence14.usable === false
+      && oneSidedEvidence14.owner === null
+      && oneSidedEvidence14.currentAttempt === null
+      && oneSidedEvidence14.currentAttempts.length === 0
+      && oneSidedEvidence14.lastOutcome === null
+      && oneSidedEvidence14.pwmStepRunning === null
+      && settledEvidence14.status === 'usable'
+      && settledEvidence14.currentAttempt === null
+      && settledEvidence14.lastOutcome?.attemptId === 2
+      && settledEvidence14.pwmStepRunning === false
+      && incompleteEvidence14.status === 'incomplete'
+      && incompleteEvidence14.currentAttempt === null
+      && incoherentEvidence14.status === 'incoherent'
+      && concurrentEvidence14.currentAttempts.length === 2
+      && concurrentEvidence14.currentAttempts[1] === attemptAfter14
+      && concurrentEvidence14.pwmStepRunning === true
+      && popupSource.includes('diagnosticCurrentAttempts.map(attempt => (')
+      && diagnosticEvidenceReaders14.classifyDiagnosticEvidence(null) === 'absent',
+    '14A-0A: 证据缺失/不完整/不一致统一失效；完整 after 的 null 才结算，并发 attempt 全量进入复制报告');
   assertPass(popupHtml.includes('id="statusAnnouncement" role="status" aria-live="polite"')
       && popupHtml.includes('role="region" aria-labelledby="acStateText"')
       && popupHtml.includes('id="diagnoseResult" role="region"'),
@@ -6279,16 +7205,26 @@ return { reapplySmartSensitivityNow };`
     '14G: 诊断区分独立 page-timer retry 与任意当前相位的 live ac-pwm 重试，并保留 L2 真状态读取');
   const popupPwmPhaseScriptAt14G = popupHtml.indexOf('<script src="pwm-phase.js"></script>');
   const popupMainScriptAt14G = popupHtml.indexOf('<script src="popup.js?v=0.8.2"></script>');
+  const popupDiagnoseStart14G = popupSource.indexOf("btnDiagnose.addEventListener('click'");
+  const popupDiagnoseEnd14G = popupSource.indexOf(
+    "btnCopyDiag?.addEventListener('click'",
+    popupDiagnoseStart14G
+  );
+  const popupDiagnoseSource14G = popupSource.slice(
+    popupDiagnoseStart14G,
+    popupDiagnoseEnd14G
+  );
   assertPass(popupPwmPhaseScriptAt14G > 0
       && popupMainScriptAt14G > popupPwmPhaseScriptAt14G
       && popupSource.includes('classifySmartOnClock(')
       && popupSource.includes("code: 'SCHED-SMART-ON-CLOCK-SKIPPED'")
       && popupSource.includes("code: 'SCHED-SMART-ON-CLOCK-REPAIRED'")
       && popupSource.includes("code: 'SCHED-PHASE-STATUS-DESYNC'")
-      && popupSource.includes('const liveClockAssessment = classifySmartOnClock(')
-      && popupSource.indexOf('const liveClockAssessment = classifySmartOnClock(')
-        < popupSource.indexOf('await chrome.storage.local.set({ ac_schedule: repairedSchedule });'),
-    '14G-0: Popup 在 live→storage 自愈前先做智能时钟语义校验，并分别报告跳周期、已修复与实际状态/计划相位失配');
+      && popupSource.includes('const diagnosticEvidence = readDiagnosticEvidence(ensured);')
+      && popupSource.includes('const diagnosticBefore = diagnosticEvidence.before;')
+      && popupSource.includes('const diagnosticAfter = diagnosticEvidence.after;')
+      && !popupDiagnoseSource14G.includes('chrome.storage.local.set('),
+    '14G-0: Popup 继续报告智能时钟语义错误，但只消费后台 before/after，不在诊断中直接改 storage');
   const pwmRetryHelperStart14G = popupSource.indexOf(
     'function isPwmPageTimerRetryActive('
   );
@@ -6342,8 +7278,9 @@ return { reapplySmartSensitivityNow };`
       && popupSource.includes("diagnoseSmartWeatherFresh")
       && popupSource.includes("diagnoseSmartWeatherStale")
       && popupSource.includes("diagnoseSmartWeatherNoCache")
-      && popupSource.includes("ensured?.alarms?.smartWeather"),
-    '14G-2: 诊断面板新增智能模式天气闹钟与缓存新鲜度检查');
+      && popupSource.includes("const smartWeatherAlarm = alarms.find(a => a.name === 'ac-smart-weather')")
+      && !popupSource.includes("ensured?.alarms?.smartWeather"),
+    '14G-2: 诊断面板从同一份新鲜 alarm 快照检查智能天气闹钟与缓存新鲜度');
   assertPass(!popupSource.includes('const fmt2 =')
       && popupSource.includes("const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';")
       && /diagnoseTriMatch', fmt\(/.test(popupSource)
@@ -6657,7 +7594,7 @@ return { reapplySmartSensitivityNow };`
       && diagnoseHandlerSource.includes("code: 'SCHED-PWM-MISSING'")
       && diagnoseHandlerSource.includes("code: 'PAGE-HOME-MISSING'")
       && diagnoseHandlerSource.includes("code: 'SW-STATUS-FAILED'")
-      && diagnoseHandlerSource.includes("code: 'SAFETY-TIMER-FAILED'")
+      && diagnoseHandlerSource.includes("'SAFETY-TIMER-FAILED'")
       && diagnoseHandlerSource.includes("code: 'SAFETY-TIMER-MISSING'")
       && diagnoseHandlerSource.includes("code: 'SMART-CURRENT-CYCLE-RECOVERY-STARTED'")
       && diagnoseHandlerSource.includes("repairedItems.has('smart-current-cycle-started')")
@@ -11675,6 +12612,92 @@ return { reapplySmartSensitivityNow };`
       && pwmStepWithRecoveryBody16.includes("Object.hasOwn(\n      postPrepareContext || {},\n      'smartOnWindow'"),
     '16F-0B-1E: alarm/启动/看门狗共用异常执行器；入场冻结事务，throw 绑定失败 revision，typed 优先且禁止长周期跳钟');
 
+  const loadDiagnosticFinallyExecutor16 = ({ runPwmStep, recoverTyped }) => {
+    const diagnosticSchedule = {
+      enabled: true,
+      pwmState: 'on',
+      onMinutes: 20,
+      offMinutes: 10,
+      smartMode: { enabled: false },
+      smartOnBoundaryAt: 0,
+      pwmRetryKind: '',
+      pwmRetryBoundaryAt: 0,
+      pwmRetryScheduledAt: 0,
+      nextTriggerAt: Date.now() + 60_000,
+      pageTimerError: ''
+    };
+    let finishedCount = 0;
+    const execute = new Function(
+      'schedule', 'pwmRuntimeRevision', 'isAutomationOperationCurrent',
+      'isSyncPhaseAdoptionAdmissionBlocked',
+      'getSmartOnPwmRetryContext', 'planSmartModeOnWindow', 'SMART_MODE',
+      'runPwmStep', 'appendDiagnosticLog',
+      'recoverTypedSmartOnAlarmException', 'recoverGenericPwmAlarmException',
+      'beginPwmDiagnosticAttempt', 'finishPwmDiagnosticAttempt',
+      'waitForPwmDiagnosticOutcomePersistence',
+      `let pwmExecutionWithRecoveryCount = 0;
+      let deferredRepairAfterPwmOptions = null;
+      function isSyncPhaseAdoptionAdmissionBlockedFor() { return false; }
+      function drainDeferredScheduleRepair() { return false; }
+      async function repairScheduleClock() { return { success: true }; }
+      ${pwmStepWithRecoveryBody16}; return executePwmStepWithRecovery;`
+    )(
+      diagnosticSchedule,
+      51,
+      revision => revision === 51,
+      () => false,
+      () => ({ hasTypedSmartOnRetry: false, boundaryAt: 0, priorError: '' }),
+      () => null,
+      { ON_MAX: 25 },
+      runPwmStep,
+      () => {},
+      recoverTyped,
+      async () => true,
+      () => 1,
+      () => {
+        finishedCount += 1;
+        return { attemptId: 1, finishedAt: Date.now() };
+      },
+      outcome => neverSettlingPwmPersistence13(outcome, 20)
+    );
+    return { execute, getFinishedCount: () => finishedCount };
+  };
+  const persistenceReturnExecutor16 = loadDiagnosticFinallyExecutor16({
+    runPwmStep: async () => {},
+    recoverTyped: async () => false
+  });
+  const persistenceReturnStarted16 = Date.now();
+  const persistenceReturnValue16 = await persistenceReturnExecutor16.execute({
+    scheduledTime: Date.now(),
+    automationRevision: 51,
+    source: 'diagnostic-persistence-return'
+  });
+  const persistenceReturnElapsed16 = Date.now() - persistenceReturnStarted16;
+  const recoverySentinel16 = new Error('recovery sentinel');
+  const persistenceThrowExecutor16 = loadDiagnosticFinallyExecutor16({
+    runPwmStep: async () => { throw new Error('initial pwm failure'); },
+    recoverTyped: async () => { throw recoverySentinel16; }
+  });
+  let persistedThrow16 = null;
+  const persistenceThrowStarted16 = Date.now();
+  try {
+    await persistenceThrowExecutor16.execute({
+      scheduledTime: Date.now(),
+      automationRevision: 51,
+      source: 'diagnostic-persistence-throw'
+    });
+  } catch (error) {
+    persistedThrow16 = error;
+  }
+  const persistenceThrowElapsed16 = Date.now() - persistenceThrowStarted16;
+  assertPass(persistenceReturnValue16 === true
+      && persistenceReturnExecutor16.getFinishedCount() === 1
+      && persistenceReturnElapsed16 < 200
+      && persistedThrow16 === recoverySentinel16
+      && persistenceThrowExecutor16.getFinishedCount() === 1
+      && persistenceThrowElapsed16 < 200,
+    '16F-0B-1E-0: outcome storage 永不 settle 时 shared executor 仍及时返回原值，并以同一对象传播原 recovery 异常');
+
   const alarmAdmissionSource16 = extractSourceSection(
     backgroundSource,
     'function assessPwmAlarmDelivery(',
@@ -14427,6 +15450,11 @@ ${commitDurableSource16}
   const ensureDiagnosticDisabledAlarmNames16 = new Set([
     'ac-pwm', 'ac-badge-tick', 'ac-watchdog', 'ac-smart-weather'
   ]);
+  const ensureDiagnosticDisabledSchedule16 = {
+    enabled: false,
+    smartMode: { enabled: false },
+    activeHours: { enabled: true, start: '08:00', end: '23:00' }
+  };
   const ensureDiagnosticDisabled16 = new Function(
     'schedule', 'loadScheduleFromStorage', 'isAutomationAllowed', 'chrome',
     'clearAutomationRuntimeAlarmsWhileBlocked',
@@ -14434,11 +15462,7 @@ ${commitDurableSource16}
     function isCurrentPwmStepRunning() { return false; }
     ${ensureDiagnosticAlarmsBody}; return ensureDiagnosticAlarms;`
   )(
-    {
-      enabled: false,
-      smartMode: { enabled: false },
-      activeHours: { enabled: true, start: '08:00', end: '23:00' }
-    },
+    ensureDiagnosticDisabledSchedule16,
     async () => {},
     () => false,
     {
@@ -14463,6 +15487,8 @@ ${commitDurableSource16}
     }
   );
   const ensureDiagnosticDisabledResult16 = await ensureDiagnosticDisabled16();
+  ensureDiagnosticDisabledSchedule16.enabled = true;
+  ensureDiagnosticDisabledSchedule16.smartMode.enabled = true;
   assertPass(ensureDiagnosticDisabledResult16.enabled === false
       && ['ac-pwm', 'ac-badge-tick', 'ac-watchdog', 'ac-smart-weather']
         .every(name => ensureDiagnosticDisabledClears16.includes(name))
@@ -14471,7 +15497,14 @@ ${commitDurableSource16}
         .every(repair => ensureDiagnosticDisabledResult16.repairs.includes(repair))
       && ensureDiagnosticDisabledResult16.repaired === true
       && Object.values(ensureDiagnosticDisabledResult16.before).every(Boolean)
-      && Object.values(ensureDiagnosticDisabledResult16.alarms).every(value => value === null),
+      && Object.values(ensureDiagnosticDisabledResult16.alarms).every(value => value === null)
+      && ensureDiagnosticDisabledResult16.schemaVersion === 2
+      && ensureDiagnosticDisabledResult16.evidence.before.memorySchedule.enabled === false
+      && ensureDiagnosticDisabledResult16.evidence.before.memorySchedule.smartMode.enabled === false
+      && ensureDiagnosticDisabledResult16.evidence.after.memorySchedule.enabled === false
+      && ensureDiagnosticDisabledResult16.evidence.before.memorySchedule
+        !== ensureDiagnosticDisabledResult16.evidence.after.memorySchedule
+      && ensureDiagnosticDisabledResult16.evidence.repair.items.includes('pwm-alarm-cleared'),
     '16L-1: 后台诊断在用户停用时逐项记录已清理闹钟并返回前后证据，同时保留页面关机重试');
 
   const blockedRuntimeCleanupBody16 = extractSourceSection(
@@ -14532,6 +15565,21 @@ ${commitDurableSource16}
       && !diagnoseHandlerSource.includes("chrome.alarms.create('ac-badge-tick'")
       && !diagnoseHandlerSource.includes("chrome.alarms.create('ac-watchdog'"),
     '16M-1: popup 诊断只委派后台自愈，不绕过最终门禁直接创建运行闹钟');
+  const diagnosticSwProbeIndex16 = diagnoseHandlerSource.indexOf(
+    "sendDiagnosticRuntimeMessage({ type: 'getSwStatus' })"
+  );
+  const diagnosticEnsureIndex16 = diagnoseHandlerSource.indexOf(
+    "sendDiagnosticRuntimeMessage({ type: 'ensureDiagnostics' })"
+  );
+  assertPass(diagnosticSwProbeIndex16 >= 0
+      && diagnosticSwProbeIndex16 < diagnosticEnsureIndex16
+      && diagnoseHandlerSource.includes("type: 'inspectContentRuntime'")
+      && diagnoseHandlerSource.includes('runtimeBuildCompatible')
+      && diagnoseHandlerSource.includes('readDiagnosticEvidence(ensured)')
+      && popupSource.includes('envelope?.evidence?.before')
+      && popupSource.includes('envelope?.evidence?.after')
+      && !diagnoseHandlerSource.includes('chrome.storage.local.set('),
+    '16M-1A: Popup 先只读核对四方构建与首现场，再委派修复；诊断自身不直接写 storage');
 
   const serializedScheduleUpdateSourceF90 = extractSourceSection(
     backgroundSource,
@@ -15976,17 +17024,18 @@ ${commitDurableSource16}
       && ensureDiagnosticAlarmsBody.includes('? null'),
     '16R-2: ensureDiagnostics 在 phase reservation 内只返回 deferred 证据；不清建闹钟，后续 trigger reconciliation 也跳过');
 
-  const popupPhaseGuardAt16 = popupSource.indexOf(
-    '&& s._phaseAdoptionInFlight !== true'
-  );
-  const popupPhaseStorageWriteAt16 = popupSource.indexOf(
-    'await chrome.storage.local.set({ ac_schedule: repairedSchedule });',
-    popupPhaseGuardAt16
-  );
-  assertPass(popupPhaseGuardAt16 >= 0
-      && popupPhaseStorageWriteAt16 > popupPhaseGuardAt16
-      && popupPhaseStorageWriteAt16 - popupPhaseGuardAt16 < 1400,
-    '16R-3: popup 诊断自愈在 _phaseAdoptionInFlight 标志下禁止把旧 live/storage 快照写回新 phase');
+  assertPass(!diagnoseHandlerSource.includes('chrome.storage.local.set(')
+      && ensureDiagnosticAlarmsBody.includes('phaseAdoptionInFlight:')
+      && ensureDiagnosticAlarmsBody.includes('diagnosticSnapshotFingerprint(startState)')
+      && ensureDiagnosticAlarmsBody.includes('captureDiagnosticSnapshotAttempt(2, firstObservedAt)')
+      && popupSource.includes('function selectDiagnosticRuntimeValue(')
+      && popupSource.includes('function readDiagnosticEvidence(')
+      && diagnoseHandlerSource.includes('diagnosticEvidenceUsable')
+      && diagnoseHandlerSource.includes("code: 'SCHED-EVIDENCE-INCOMPLETE'")
+      && !diagnoseHandlerSource.includes('ensured?.alarms?.')
+      && popupSource.includes("'currentAttempt'")
+      && popupSource.includes('currentAttempts:'),
+    '16R-3: Popup 不再写回旧快照；后台首现场标出 phase/in-flight 与跨 await 一致性');
 
   let reconciledApplyCalls16 = 0;
   let reconciledPersistCalls16 = 0;
@@ -16360,7 +17409,8 @@ ${commitDurableSource16}
       && setupImmediateBody16.includes('await cancelAutomaticOnRequests();')
       && contentSource.includes("action === 'cancelAutomaticOn'")
       && contentSource.includes("'__AC_EXTENSION_CANCEL_AUTOMATIC_ON__'")
-      && pageConfirmSource.includes("'__AC_EXTENSION_CANCEL_AUTOMATIC_ON__'")
+      && pageConfirmSource.includes('MAIN_BRIDGE_EVENTS.cancel')
+      && pageConfirmSource.includes('handleAutomaticOnCancel')
       && pageConfirmSource.includes('automaticOnCancellationRevision')
       && pageConfirmSource.includes('请求已被后台取消'),
     '16Z: 停用、离开时段或显式 restart 会取消主世界递归自动 ON，每次后续点击与确认都可被撤销');
