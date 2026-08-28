@@ -320,7 +320,7 @@ async function runTests() {
       && popupJs.includes('automationToggle.checked = currentScheduleEnabled;')
       && popupJs.includes("'statusSmartOnOK'")
       && popupJs.includes("'statusOnOK'")
-      && popupJs.includes("add(true, t('diagnoseSmartModeOn'))")
+      && popupJs.includes("add(true, translate('diagnoseSmartModeOn'))")
       && zhCN.statusSmartOnOK?.message === '智能控制已开启'
       && zhCN.diagnoseOn?.message === '自动控制已启用'
       && zhCN.diagnoseSmartModeOn?.message.includes('循环定时按互斥规则关闭')
@@ -8092,7 +8092,7 @@ return { reapplySmartSensitivityNow };`
   const scheduleConfigDiagnosticsSource14 = extractSourceSection(
     popupSource,
     'function appendScheduleConfigurationDiagnostics(',
-    "\n\nbtnDiagnose.addEventListener('click', async () => {",
+    '\n\nfunction appendSmartWeatherDiagnostics(',
     'Popup schedule configuration diagnostics reporter'
   );
   const appendScheduleConfigurationDiagnostics14 = new Function(
@@ -8220,6 +8220,284 @@ return { reapplySmartSensitivityNow };`
       && missingFieldsConfig14.calls[2].ok === false
       && missingFieldsConfig14.calls[2].metadata.code === 'CFG-CLOCK-MISSING',
     '14Q-P10: trigger repair、严格 storage 失配与 truthy enabled 保持旧语义；缺 mode/clock 各报稳定 code');
+
+  const smartWeatherDiagnosticsSource14 = extractSourceSection(
+    popupSource,
+    'function appendSmartWeatherDiagnostics(',
+    "\n\nbtnDiagnose.addEventListener('click', async () => {",
+    'Popup smart weather diagnostics reporter'
+  );
+  const appendSmartWeatherDiagnostics14 = new Function(
+    `'use strict'; ${smartWeatherDiagnosticsSource14};`
+      + ' return appendSmartWeatherDiagnostics;'
+  )();
+  const createSmartWeatherState14 = ({
+    smartEnabled = true,
+    automationEnabled = true,
+    repairItems = []
+  } = {}) => Object.freeze({
+    schedule: Object.freeze({
+      smartMode: Object.freeze({ enabled: smartEnabled })
+    }),
+    automationEnabled,
+    repairItems: Object.freeze([...repairItems])
+  });
+  const runSmartWeatherDiagnostics14 = async ({
+    state = createSmartWeatherState14(),
+    alarms = [],
+    weatherResult = { ac_smart_weather: { fetchedAt: 123 } },
+    ageMs = 0,
+    readError = null
+  } = {}) => {
+    const trace = [];
+    const calls = [];
+    let thrown = null;
+    let pending;
+    let settledValue;
+    try {
+      pending = appendSmartWeatherDiagnostics14({
+        add(ok, message, metadata) {
+          trace.push(`add:${message.split('|')[0]}`);
+          calls.push({ ok, message, metadata });
+        },
+        translate: (key, ...args) => `${key}|${args.join('|')}`
+      }, state, Object.freeze([...alarms]), {
+        async readWeatherCache() {
+          trace.push('read-cache');
+          if (readError) throw readError;
+          return weatherResult;
+        },
+        getTimestampAgeMs(fetchedAt) {
+          trace.push(`read-age:${fetchedAt}`);
+          return ageMs;
+        }
+      });
+      if (pending) settledValue = await pending;
+    } catch (error) {
+      thrown = error;
+    }
+    return { calls, trace, thrown, pending, settledValue };
+  };
+  const validWeatherAt14 = new Date(2026, 7, 29, 0, 20, 0, 0).getTime();
+  const validWeatherAt5014 = new Date(2026, 7, 29, 0, 50, 0, 0).getTime();
+  const invalidWeatherAt14 = new Date(2026, 7, 29, 0, 21, 0, 0).getTime();
+  const invalidWeatherSecondsAt14 = new Date(2026, 7, 29, 0, 20, 1, 0).getTime();
+  const invalidWeatherMillisAt14 = new Date(2026, 7, 29, 0, 20, 0, 1).getTime();
+  const healthyWeatherDiagnostics14 = await runSmartWeatherDiagnostics14({
+    alarms: [{ name: 'ac-smart-weather', scheduledTime: validWeatherAt14 }],
+    ageMs: 60 * 60000
+  });
+  assertPass(healthyWeatherDiagnostics14.thrown === null
+      && healthyWeatherDiagnostics14.pending instanceof Promise
+      && healthyWeatherDiagnostics14.settledValue === undefined
+      && healthyWeatherDiagnostics14.calls.length === 3
+      && healthyWeatherDiagnostics14.calls.every(call => call.ok === true)
+      && healthyWeatherDiagnostics14.calls.map(call => call.message.split('|')[0]).join(',') === (
+        'diagnoseSmartModeOn,diagnoseSmartWeatherAlarm,diagnoseSmartWeatherFresh'
+      )
+      && healthyWeatherDiagnostics14.trace.join(',') === (
+        'add:diagnoseSmartModeOn,add:diagnoseSmartWeatherAlarm,read-cache,'
+          + 'read-age:123,add:diagnoseSmartWeatherFresh'
+      ),
+    '14Q-P11: 智能天气健康路径先报告模式和 alarm，再读缓存；60 分钟整仍判新鲜');
+
+  const smartOffWeatherDiagnostics14 = await runSmartWeatherDiagnostics14({
+    state: createSmartWeatherState14({ smartEnabled: false })
+  });
+  const dormantWeatherDiagnostics14 = await runSmartWeatherDiagnostics14({
+    state: createSmartWeatherState14({ automationEnabled: false })
+  });
+  const disabledSmartOffWeatherDiagnostics14 = await runSmartWeatherDiagnostics14({
+    state: createSmartWeatherState14({
+      smartEnabled: false,
+      automationEnabled: false
+    })
+  });
+  assertPass(smartOffWeatherDiagnostics14.calls.length === 1
+      && smartOffWeatherDiagnostics14.pending === undefined
+      && smartOffWeatherDiagnostics14.calls[0].metadata.code === 'WEATHER-SMART-MODE-OFF'
+      && smartOffWeatherDiagnostics14.trace.join(',') === 'add:diagnoseSmartModeOff'
+      && dormantWeatherDiagnostics14.calls.length === 1
+      && dormantWeatherDiagnostics14.pending === undefined
+      && dormantWeatherDiagnostics14.calls[0].metadata.code === 'WEATHER-SMART-MODE-DORMANT'
+      && dormantWeatherDiagnostics14.trace.join(',') === 'add:diagnoseSmartModeDormant'
+      && disabledSmartOffWeatherDiagnostics14.pending === undefined
+      && disabledSmartOffWeatherDiagnostics14.calls[0].metadata.code === 'WEATHER-SMART-MODE-OFF',
+    '14Q-P12: 智能模式关闭或总自动控制停用时只报告状态，绝不读取天气缓存');
+
+  const missingAlarmWeatherDiagnostics14 = await runSmartWeatherDiagnostics14({
+    alarms: [],
+    ageMs: 60 * 60000 + 1
+  });
+  const invalidSlotWeatherDiagnostics14 = await runSmartWeatherDiagnostics14({
+    alarms: [{ name: 'ac-smart-weather', scheduledTime: invalidWeatherAt14 }],
+    ageMs: null
+  });
+  const repairedWeatherDiagnostics14 = await runSmartWeatherDiagnostics14({
+    state: createSmartWeatherState14({ repairItems: ['smart-weather-alarm'] }),
+    alarms: [{ name: 'ac-smart-weather', scheduledTime: validWeatherAt14 }]
+  });
+  const validWeather50Diagnostics14 = await runSmartWeatherDiagnostics14({
+    alarms: [{ name: 'ac-smart-weather', scheduledTime: validWeatherAt5014 }]
+  });
+  const invalidWeatherSecondsDiagnostics14 = await runSmartWeatherDiagnostics14({
+    alarms: [{ name: 'ac-smart-weather', scheduledTime: invalidWeatherSecondsAt14 }]
+  });
+  const invalidWeatherMillisDiagnostics14 = await runSmartWeatherDiagnostics14({
+    alarms: [{ name: 'ac-smart-weather', scheduledTime: invalidWeatherMillisAt14 }]
+  });
+  assertPass(missingAlarmWeatherDiagnostics14.calls[1].metadata.code === 'WEATHER-ALARM-MISSING'
+      && missingAlarmWeatherDiagnostics14.calls[1].metadata.priority === 20
+      && missingAlarmWeatherDiagnostics14.calls[2].metadata.code === 'WEATHER-CACHE-STALE'
+      && missingAlarmWeatherDiagnostics14.calls[2].metadata.priority === 50
+      && missingAlarmWeatherDiagnostics14.calls[2].message === 'diagnoseSmartWeatherStale|60'
+      && invalidSlotWeatherDiagnostics14.calls[1].metadata.code === 'WEATHER-SLOT-MISMATCH'
+      && invalidSlotWeatherDiagnostics14.calls[1].metadata.priority === 30
+      && invalidSlotWeatherDiagnostics14.calls[2].metadata.code === 'WEATHER-CACHE-MISSING'
+      && repairedWeatherDiagnostics14.calls[1].metadata.level === 'repaired'
+      && repairedWeatherDiagnostics14.calls[1].metadata.code === 'WEATHER-ALARM-REPAIRED'
+      && validWeather50Diagnostics14.calls[1].ok === true
+      && invalidWeatherSecondsDiagnostics14.calls[1].metadata.code === 'WEATHER-SLOT-MISMATCH'
+      && invalidWeatherMillisDiagnostics14.calls[1].metadata.code === 'WEATHER-SLOT-MISMATCH',
+    '14Q-P13: 天气 alarm 缺失/错槽、缓存过期/缺失与 repaired 路径保持原 code 和优先级');
+
+  const weatherReadFailure14 = new Error('weather-storage-unavailable');
+  const failedWeatherDiagnostics14 = await runSmartWeatherDiagnostics14({
+    alarms: [{ name: 'ac-smart-weather', scheduledTime: validWeatherAt14 }],
+    readError: weatherReadFailure14
+  });
+  const syncWeatherReadFailure14 = new Error('weather-storage-sync-throw');
+  const syncWeatherFailureCalls14 = [];
+  let syncWeatherThrown14 = null;
+  let syncWeatherAgeReads14 = 0;
+  try {
+    appendSmartWeatherDiagnostics14({
+      add(ok, message, metadata) {
+        syncWeatherFailureCalls14.push({ ok, message, metadata });
+      },
+      translate: (key, ...args) => `${key}|${args.join('|')}`
+    }, createSmartWeatherState14(), Object.freeze([
+      Object.freeze({ name: 'ac-smart-weather', scheduledTime: validWeatherAt14 })
+    ]), {
+      readWeatherCache() { throw syncWeatherReadFailure14; },
+      getTimestampAgeMs() {
+        syncWeatherAgeReads14 += 1;
+        return 0;
+      }
+    });
+  } catch (error) {
+    syncWeatherThrown14 = error;
+  }
+  const alarmsReadForWeatherAt14 = diagnoseHandlerSource.indexOf('chrome.alarms.getAll()');
+  const weatherAppendAt14 = diagnoseHandlerSource.indexOf('appendSmartWeatherDiagnostics(');
+  const activeHoursAppendAt14 = diagnoseHandlerSource.indexOf('if (s.activeHours?.enabled === true)');
+  assertPass(failedWeatherDiagnostics14.thrown === weatherReadFailure14
+      && failedWeatherDiagnostics14.calls.length === 2
+      && failedWeatherDiagnostics14.trace.join(',') === (
+        'add:diagnoseSmartModeOn,add:diagnoseSmartWeatherAlarm,read-cache'
+      )
+      && syncWeatherThrown14 === syncWeatherReadFailure14
+      && syncWeatherFailureCalls14.length === 2
+      && syncWeatherAgeReads14 === 0
+      && smartWeatherDiagnosticsSource14.includes(
+        'runtime.readWeatherCache ?? (() => ('
+      )
+      && smartWeatherDiagnosticsSource14.includes(
+        "chrome.storage.local.get('ac_smart_weather')"
+      )
+      && smartWeatherDiagnosticsSource14.includes(
+        'runtime.getTimestampAgeMs ?? getTimestampAgeMs'
+      )
+      && smartWeatherDiagnosticsSource14.includes(
+        'return Promise.resolve(readWeatherCache()).then('
+      )
+      && !smartWeatherDiagnosticsSource14.includes('catch')
+      && countOccurrences(smartWeatherDiagnosticsSource14, "'ac_smart_weather'") === 1
+      && alarmsReadForWeatherAt14 >= 0
+      && weatherAppendAt14 > alarmsReadForWeatherAt14
+      && activeHoursAppendAt14 > weatherAppendAt14
+      && /const smartWeatherDiagnostics = appendSmartWeatherDiagnostics\(\s*\{ add, translate: t \},\s*diagnosticState,\s*alarms\s*\);/.test(
+        diagnoseHandlerSource
+      )
+      && diagnoseHandlerSource.includes(
+        'if (smartWeatherDiagnostics) await smartWeatherDiagnostics;'
+      )
+      && countOccurrences(diagnoseHandlerSource, 'appendSmartWeatherDiagnostics(') === 1
+      && !diagnoseHandlerSource.includes('const smartOnDiag')
+      && !diagnoseHandlerSource.includes('ac_smart_weather'),
+    '14Q-P14: 天气 storage 异常在前两行后原样冒泡；默认依赖和 alarm→weather→active-hours 接线固定');
+
+  const defaultWeatherTrace14 = [];
+  let defaultWeatherAgeError14 = null;
+  const defaultWeatherAgeFailure14 = new Error('default-weather-age-failed');
+  const appendDefaultSmartWeatherDiagnostics14 = new Function(
+    'chrome',
+    'getTimestampAgeMs',
+    `'use strict'; ${smartWeatherDiagnosticsSource14};`
+      + ' return appendSmartWeatherDiagnostics;'
+  )({
+    storage: {
+      local: {
+        get(key) {
+          defaultWeatherTrace14.push(`get:${key}`);
+          return Promise.resolve({ ac_smart_weather: { fetchedAt: '456' } });
+        }
+      }
+    }
+  }, fetchedAt => {
+    defaultWeatherTrace14.push(`age:${fetchedAt}`);
+    if (defaultWeatherAgeError14) throw defaultWeatherAgeError14;
+    return 0;
+  });
+  const defaultWeatherCalls14 = [];
+  const defaultWeatherReport14 = {
+    add(ok, message, metadata) {
+      defaultWeatherCalls14.push({ ok, message, metadata });
+    },
+    translate: (key, ...args) => `${key}|${args.join('|')}`
+  };
+  const defaultWeatherPending14 = appendDefaultSmartWeatherDiagnostics14(
+    defaultWeatherReport14,
+    createSmartWeatherState14(),
+    Object.freeze([
+      Object.freeze({ name: 'ac-smart-weather', scheduledTime: validWeatherAt14 })
+    ])
+  );
+  const defaultWeatherSettled14 = await defaultWeatherPending14;
+  const defaultWeatherActiveTrace14 = defaultWeatherTrace14.join(',');
+  defaultWeatherTrace14.length = 0;
+  const defaultDormantResult14 = appendDefaultSmartWeatherDiagnostics14(
+    { add() {}, translate: key => key },
+    createSmartWeatherState14({ automationEnabled: false }),
+    Object.freeze([])
+  );
+  const defaultOffResult14 = appendDefaultSmartWeatherDiagnostics14(
+    { add() {}, translate: key => key },
+    createSmartWeatherState14({ smartEnabled: false }),
+    Object.freeze([])
+  );
+  defaultWeatherAgeError14 = defaultWeatherAgeFailure14;
+  let defaultWeatherAgeThrown14 = null;
+  try {
+    await appendDefaultSmartWeatherDiagnostics14(
+      { add() {}, translate: key => key },
+      createSmartWeatherState14(),
+      Object.freeze([
+        Object.freeze({ name: 'ac-smart-weather', scheduledTime: validWeatherAt14 })
+      ])
+    );
+  } catch (error) {
+    defaultWeatherAgeThrown14 = error;
+  }
+  assertPass(defaultWeatherPending14 instanceof Promise
+      && defaultWeatherSettled14 === undefined
+      && defaultWeatherCalls14.length === 3
+      && defaultWeatherActiveTrace14 === 'get:ac_smart_weather,age:456'
+      && defaultDormantResult14 === undefined
+      && defaultOffResult14 === undefined
+      && defaultWeatherTrace14.join(',') === 'get:ac_smart_weather,age:456'
+      && defaultWeatherAgeThrown14 === defaultWeatherAgeFailure14,
+    '14Q-P15: 天气默认 chrome/age 依赖真实执行；inactive 零读取，age 异常保持同一 rejection reason');
 
   const diagnosticReportStart = popupSource.indexOf('const DIAGNOSTIC_LEVEL_SYMBOLS =');
   const diagnosticReportEnd = popupSource.indexOf(

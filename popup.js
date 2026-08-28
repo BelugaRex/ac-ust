@@ -1809,6 +1809,100 @@ function appendScheduleConfigurationDiagnostics(report, state, storedNextTrigger
   }
 }
 
+function appendSmartWeatherDiagnostics(report, state, alarms, runtime = {}) {
+  const { add, translate } = report;
+  const { schedule, automationEnabled, repairItems } = state;
+  const readWeatherCache = runtime.readWeatherCache ?? (() => (
+    chrome.storage.local.get('ac_smart_weather')
+  ));
+  const readTimestampAgeMs = runtime.getTimestampAgeMs ?? getTimestampAgeMs;
+
+  const smartOnDiag = !!schedule.smartMode?.enabled;
+  if (!automationEnabled && smartOnDiag) {
+    add(true, translate('diagnoseSmartModeDormant'), {
+      level: 'info',
+      code: 'WEATHER-SMART-MODE-DORMANT',
+      domain: translate('diagnoseDomainWeather')
+    });
+    return;
+  }
+  if (!smartOnDiag) {
+    add(true, translate('diagnoseSmartModeOff'), {
+      level: 'info',
+      code: 'WEATHER-SMART-MODE-OFF',
+      domain: translate('diagnoseDomainWeather')
+    });
+    return;
+  }
+
+  add(true, translate('diagnoseSmartModeOn'));
+  const smartWeatherAlarm = alarms.find(a => a.name === 'ac-smart-weather');
+  const smartWeatherWasRepaired = repairItems.includes('smart-weather-alarm');
+  const smartWeatherAt = Number(smartWeatherAlarm?.scheduledTime) || 0;
+  const smartWeatherDate = smartWeatherAt ? new Date(smartWeatherAt) : null;
+  const smartWeatherSlotValid = !!smartWeatherDate
+    && smartWeatherDate.getSeconds() === 0
+    && smartWeatherDate.getMilliseconds() === 0
+    && (smartWeatherDate.getMinutes() === 20 || smartWeatherDate.getMinutes() === 50);
+  if (!smartWeatherAlarm) {
+    add(false, translate('diagnoseSmartWeatherAlarm') + ' '
+      + translate('diagnoseSmartWeatherAlarmMissing'), {
+      code: 'WEATHER-ALARM-MISSING',
+      domain: translate('diagnoseDomainWeather'),
+      action: translate('diagnoseActionReloadExtension'),
+      priority: 20
+    });
+  } else if (!smartWeatherSlotValid) {
+    add(false, translate(
+      'diagnoseSmartWeatherSlotMismatch',
+      smartWeatherDate.toLocaleTimeString()
+    ), {
+      level: 'warning',
+      code: 'WEATHER-SLOT-MISMATCH',
+      domain: translate('diagnoseDomainWeather'),
+      action: translate('diagnoseActionReloadExtension'),
+      priority: 30
+    });
+  } else {
+    add(true, translate('diagnoseSmartWeatherAlarm')
+      + translate(smartWeatherWasRepaired ? 'diagnoseAlarmRebuilt' : 'diagnoseAlarmScheduled')
+      + smartWeatherDate.toLocaleTimeString() + ')', smartWeatherWasRepaired ? {
+      level: 'repaired',
+      code: 'WEATHER-ALARM-REPAIRED',
+      domain: translate('diagnoseDomainWeather'),
+      priority: 30
+    } : {});
+  }
+
+  return Promise.resolve(readWeatherCache()).then((weatherRes) => {
+    const weatherCache = weatherRes.ac_smart_weather;
+    const fetchedAt = Number(weatherCache?.fetchedAt) || 0;
+    const ageMs = readTimestampAgeMs(fetchedAt);
+    if (ageMs !== null) {
+      const ageMin = Math.round(ageMs / 60000);
+      if (ageMs <= 60 * 60000) {
+        add(true, translate('diagnoseSmartWeatherFresh', ageMin));
+      } else {
+        add(false, translate('diagnoseSmartWeatherStale', ageMin), {
+          level: 'warning',
+          code: 'WEATHER-CACHE-STALE',
+          domain: translate('diagnoseDomainWeather'),
+          action: translate('diagnoseActionWaitWeather'),
+          priority: 50
+        });
+      }
+    } else {
+      add(false, translate('diagnoseSmartWeatherNoCache'), {
+        level: 'warning',
+        code: 'WEATHER-CACHE-MISSING',
+        domain: translate('diagnoseDomainWeather'),
+        action: translate('diagnoseActionWaitWeather'),
+        priority: 50
+      });
+    }
+  });
+}
+
 btnDiagnose.addEventListener('click', async () => {
   diagnoseResult.style.display = 'block';
   document.getElementById('diagContent').textContent = t('diagnoseInProgress');
@@ -2071,85 +2165,13 @@ btnDiagnose.addEventListener('click', async () => {
         });
     }
 
-    // 2.0c 智能模式天气预取链路：ac-smart-weather one-shot 闹钟 + ac_smart_weather 缓存新鲜度。
-    // v0.8.0 智能模式新增，此前诊断漏检——闹钟丢失后天气冻结、等效温度/建议分钟数不再更新却无红灯。
-    // 后台 ensureDiagnostics 已在上方补建；此处仅展示状态与缓存新鲜度，不重复补建。
-    const smartOnDiag = !!s.smartMode?.enabled;
-    if (!automationEnabled && smartOnDiag) {
-      add(true, t('diagnoseSmartModeDormant'), {
-        level: 'info',
-        code: 'WEATHER-SMART-MODE-DORMANT',
-        domain: t('diagnoseDomainWeather')
-      });
-    } else if (!smartOnDiag) {
-      add(true, t('diagnoseSmartModeOff'), {
-        level: 'info',
-        code: 'WEATHER-SMART-MODE-OFF',
-        domain: t('diagnoseDomainWeather')
-      });
-    } else {
-      add(true, t('diagnoseSmartModeOn'));
-      const smartWeatherAlarm = alarms.find(a => a.name === 'ac-smart-weather');
-      const smartWeatherWasRepaired = repairItems.includes('smart-weather-alarm');
-      const smartWeatherAt = Number(smartWeatherAlarm?.scheduledTime) || 0;
-      const smartWeatherDate = smartWeatherAt ? new Date(smartWeatherAt) : null;
-      const smartWeatherSlotValid = !!smartWeatherDate
-        && smartWeatherDate.getSeconds() === 0
-        && smartWeatherDate.getMilliseconds() === 0
-        && (smartWeatherDate.getMinutes() === 20 || smartWeatherDate.getMinutes() === 50);
-      if (!smartWeatherAlarm) {
-        add(false, t('diagnoseSmartWeatherAlarm') + ' ' + t('diagnoseSmartWeatherAlarmMissing'), {
-          code: 'WEATHER-ALARM-MISSING',
-          domain: t('diagnoseDomainWeather'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 20
-        });
-      } else if (!smartWeatherSlotValid) {
-        add(false, t('diagnoseSmartWeatherSlotMismatch', smartWeatherDate.toLocaleTimeString()), {
-          level: 'warning',
-          code: 'WEATHER-SLOT-MISMATCH',
-          domain: t('diagnoseDomainWeather'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 30
-        });
-      } else {
-        add(true, t('diagnoseSmartWeatherAlarm')
-          + t(smartWeatherWasRepaired ? 'diagnoseAlarmRebuilt' : 'diagnoseAlarmScheduled')
-          + smartWeatherDate.toLocaleTimeString() + ')', smartWeatherWasRepaired ? {
-          level: 'repaired',
-          code: 'WEATHER-ALARM-REPAIRED',
-          domain: t('diagnoseDomainWeather'),
-          priority: 30
-        } : {});
-      }
-
-      const weatherRes = await chrome.storage.local.get('ac_smart_weather');
-      const weatherCache = weatherRes.ac_smart_weather;
-      const fetchedAt = Number(weatherCache?.fetchedAt) || 0;
-      const ageMs = getTimestampAgeMs(fetchedAt);
-      if (ageMs !== null) {
-        const ageMin = Math.round(ageMs / 60000);
-        if (ageMs <= 60 * 60000) {
-          add(true, t('diagnoseSmartWeatherFresh', ageMin));
-        } else {
-          add(false, t('diagnoseSmartWeatherStale', ageMin), {
-            level: 'warning',
-            code: 'WEATHER-CACHE-STALE',
-            domain: t('diagnoseDomainWeather'),
-            action: t('diagnoseActionWaitWeather'),
-            priority: 50
-          });
-        }
-      } else {
-        add(false, t('diagnoseSmartWeatherNoCache'), {
-          level: 'warning',
-          code: 'WEATHER-CACHE-MISSING',
-          domain: t('diagnoseDomainWeather'),
-          action: t('diagnoseActionWaitWeather'),
-          priority: 50
-        });
-      }
-    }
+    // 智能天气仅展示后台 alarm/cache 状态，不在 Popup 重复修复。
+    const smartWeatherDiagnostics = appendSmartWeatherDiagnostics(
+      { add, translate: t },
+      diagnosticState,
+      alarms
+    );
+    if (smartWeatherDiagnostics) await smartWeatherDiagnostics;
 
     // 2.1 全局运行时段(同日 white-list)与 ac-active-boundary 闹钟(指北固定 5 闹钟之一)。
     // activeHours.enabled=false 表示全天运行,无边界闹钟是预期,显示透明绿。
