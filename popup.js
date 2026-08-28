@@ -1468,6 +1468,172 @@ async function capturePopupDiagnosticInputs(report, runtime = {}) {
   };
 }
 
+function derivePopupDiagnosticState(inputs, runtime = {}) {
+  const isPausedByActiveHours = runtime.isPausedByActiveHours
+    || isAutomationPausedByActiveHours;
+  const { ensured, bg, storedSchedule } = inputs;
+  const bgSchedule = bg?.success === false && bg?.schedule
+    ? bg.schedule
+    : (bg || {});
+  const evidence = readDiagnosticEvidence(ensured);
+  const before = evidence.before;
+  const after = evidence.after;
+  const preRepairSchedule = (evidence.usable
+    ? before?.memorySchedule || before?.storedSchedule
+    : null)
+    || storedSchedule;
+  const schedule = {
+    ...storedSchedule,
+    ...(evidence.usable ? after?.memorySchedule || {} : {}),
+    ...(evidence.usable ? ensured?.schedule || {} : {}),
+    ...bgSchedule
+  };
+  const automationPausedByActiveHours = schedule._automationPausedByActiveHours === true
+    || isPausedByActiveHours(schedule);
+  const owner = evidence.owner;
+  const currentAttempt = evidence.currentAttempt;
+  const currentAttempts = evidence.currentAttempts;
+  const lastOutcome = evidence.lastOutcome;
+  const ownerScheduledAt = Number(owner?.scheduledAt) || 0;
+  const ownerMatchesLastOutcome = ownerScheduledAt > 0
+    && Math.abs(Number(lastOutcome?.scheduledAt) - ownerScheduledAt) < 1500
+    && lastOutcome?.action === owner?.action;
+  const pwmBoundaryDuePending = !currentAttempt
+    && !ownerMatchesLastOutcome
+    && ownerScheduledAt > 0
+    && Math.abs(Number(
+      before?.capturedAt || (runtime.nowMs ?? Date.now())
+    ) - ownerScheduledAt) <= 60000;
+  const repairItems = Object.freeze([...new Set(
+    Array.isArray(ensured?.evidence?.repair?.items)
+      ? ensured.evidence.repair.items
+      : (Array.isArray(ensured?.repairs) ? ensured.repairs : [])
+  )]);
+
+  return Object.freeze({
+    bgSchedule,
+    evidence,
+    before,
+    after,
+    preRepairSchedule,
+    schedule,
+    automationPausedByActiveHours,
+    automationEnabled: schedule.enabled === true,
+    owner,
+    currentAttempt,
+    currentAttempts,
+    lastOutcome,
+    pwmBoundaryDuePending,
+    pwmStepInFlight: evidence.usable
+      ? evidence.pwmStepRunning
+      : schedule._pwmStepRunning === true,
+    repairItems,
+    clearedAlarmCount: repairItems.filter(item => item.endsWith('-alarm-cleared')).length,
+    effectiveNextTriggerAt: schedule.nextTriggerAt || 0,
+    pwmTriggerRepaired: repairItems.includes('pwm-trigger')
+  });
+}
+
+function appendPwmDiagnosticEvidence(report, state, formatTime) {
+  const add = report.add;
+  const translate = report.translate;
+  const {
+    evidence,
+    before,
+    after,
+    owner,
+    currentAttempt,
+    currentAttempts,
+    lastOutcome,
+    pwmBoundaryDuePending,
+    repairItems
+  } = state;
+
+  if (evidence.status === 'incomplete') {
+    const readErrors = [
+      ...(before?.readErrors || []),
+      ...(after?.readErrors || [])
+    ];
+    add(false, translate(
+      'diagnosePwmEvidenceIncomplete',
+      readErrors.join('; ').slice(0, 240) || '?'
+    ), {
+      level: 'warning',
+      code: 'SCHED-EVIDENCE-INCOMPLETE',
+      domain: translate('diagnoseDomainScheduler'),
+      action: translate('diagnoseActionRecheckRecovery'),
+      priority: 15
+    });
+    return;
+  }
+  if (evidence.status === 'incoherent') {
+    add(false, translate('diagnosePwmEvidenceIncoherent'), {
+      level: 'warning',
+      code: 'SCHED-EVIDENCE-INCOHERENT',
+      domain: translate('diagnoseDomainScheduler'),
+      action: translate('diagnoseActionRecheckRecovery'),
+      priority: 15
+    });
+    return;
+  }
+  if (!evidence.usable) return;
+
+  add(true, translate(
+    'diagnosePwmEvidenceBefore',
+    owner?.action || '?',
+    owner?.kind || '?',
+    formatTime(owner?.boundaryAt),
+    formatTime(owner?.scheduledAt),
+    formatTime(owner?.liveAlarmAt)
+  ), {
+    level: 'info',
+    code: 'SCHED-EVIDENCE-BEFORE',
+    domain: translate('diagnoseDomainScheduler')
+  });
+  const currentAttemptText = currentAttempts.length
+    ? currentAttempts.map(attempt => (
+        `#${attempt.attemptId} ${attempt.source}`
+          + ` ${attempt.action}@${formatTime(attempt.scheduledAt)}`
+      )).join(' | ')
+    : (pwmBoundaryDuePending ? 'due-pending' : 'idle');
+  add(true, translate('diagnosePwmEvidenceRuntime', currentAttemptText), {
+    level: 'info',
+    code: currentAttempt
+      ? 'SCHED-PWM-IN-FLIGHT'
+      : (pwmBoundaryDuePending ? 'SCHED-PWM-DUE-PENDING' : 'SCHED-PWM-IDLE'),
+    domain: translate('diagnoseDomainScheduler')
+  });
+  const lastOutcomeText = lastOutcome
+    ? `#${lastOutcome.attemptId} ${lastOutcome.status}`
+      + ` ${lastOutcome.action}@${formatTime(lastOutcome.scheduledAt)}`
+      + `${lastOutcome.reason ? ` (${lastOutcome.reason})` : ''}`
+    : 'none';
+  add(true, translate('diagnosePwmEvidenceLastOutcome', lastOutcomeText), {
+    level: 'info',
+    code: 'SCHED-EVIDENCE-LAST-OUTCOME',
+    domain: translate('diagnoseDomainScheduler')
+  });
+  add(true, translate(
+    'diagnosePwmEvidenceRepair',
+    repairItems.length ? repairItems.join(',') : 'none'
+  ), {
+    level: repairItems.length ? 'repaired' : 'info',
+    code: repairItems.length ? 'SCHED-EVIDENCE-REPAIRED' : 'SCHED-EVIDENCE-NO-REPAIR',
+    domain: translate('diagnoseDomainScheduler')
+  });
+  add(true, translate(
+    'diagnosePwmEvidenceAfter',
+    after?.owner?.action || '?',
+    after?.owner?.kind || '?',
+    formatTime(after?.owner?.scheduledAt),
+    formatTime(after?.owner?.liveAlarmAt)
+  ), {
+    level: 'info',
+    code: 'SCHED-EVIDENCE-AFTER',
+    domain: translate('diagnoseDomainScheduler')
+  });
+}
+
 btnDiagnose.addEventListener('click', async () => {
   diagnoseResult.style.display = 'block';
   document.getElementById('diagContent').textContent = t('diagnoseInProgress');
@@ -1506,49 +1672,24 @@ btnDiagnose.addEventListener('click', async () => {
     } = captured;
 
     // 1. 检查 storage / 后台权威快照
-    const bgSchedule = bg?.success === false && bg?.schedule
-      ? bg.schedule
-      : (bg || {});
-    const diagnosticEvidence = readDiagnosticEvidence(ensured);
-    const diagnosticBefore = diagnosticEvidence.before;
-    const diagnosticAfter = diagnosticEvidence.after;
-    const diagnosticEvidenceUsable = diagnosticEvidence.usable;
-    const preRepairSchedule = (diagnosticEvidenceUsable
-      ? diagnosticBefore?.memorySchedule || diagnosticBefore?.storedSchedule
-      : null)
-      || storedSchedule;
-    let s = {
-      ...storedSchedule,
-      ...(diagnosticEvidenceUsable ? diagnosticAfter?.memorySchedule || {} : {}),
-      ...(diagnosticEvidenceUsable ? ensured?.schedule || {} : {}),
-      ...bgSchedule
-    };
-    const automationPausedByActiveHours = s._automationPausedByActiveHours === true
-      || isAutomationPausedByActiveHours(s);
-    const automationEnabled = s.enabled === true;
-    const diagnosticOwner = diagnosticEvidence.owner;
-    const diagnosticCurrentAttempt = diagnosticEvidence.currentAttempt;
-    const diagnosticCurrentAttempts = diagnosticEvidence.currentAttempts;
-    const diagnosticLastOutcome = diagnosticEvidence.lastOutcome;
-    const ownerScheduledAt = Number(diagnosticOwner?.scheduledAt) || 0;
-    const ownerMatchesLastOutcome = ownerScheduledAt > 0
-      && Math.abs(Number(diagnosticLastOutcome?.scheduledAt) - ownerScheduledAt) < 1500
-      && diagnosticLastOutcome?.action === diagnosticOwner?.action;
-    const pwmBoundaryDuePending = !diagnosticCurrentAttempt
-      && !ownerMatchesLastOutcome
-      && ownerScheduledAt > 0
-      && Math.abs(
-        Number(diagnosticBefore?.capturedAt || Date.now()) - ownerScheduledAt
-      ) <= 60000;
-    const pwmStepInFlight = diagnosticEvidenceUsable
-      ? diagnosticEvidence.pwmStepRunning
-      : s._pwmStepRunning === true;
-    const repairedItems = new Set(
-      Array.isArray(ensured?.evidence?.repair?.items)
-        ? ensured.evidence.repair.items
-        : (Array.isArray(ensured?.repairs) ? ensured.repairs : [])
-    );
-    if (repairedItems.has('smart-current-cycle-started')) {
+    const diagnosticState = derivePopupDiagnosticState({ ensured, bg, storedSchedule });
+    const {
+      bgSchedule,
+      evidence: diagnosticEvidence,
+      before: diagnosticBefore,
+      after: diagnosticAfter,
+      preRepairSchedule,
+      schedule: s,
+      automationPausedByActiveHours,
+      automationEnabled,
+      pwmBoundaryDuePending,
+      pwmStepInFlight,
+      repairItems,
+      clearedAlarmCount,
+      effectiveNextTriggerAt,
+      pwmTriggerRepaired
+    } = diagnosticState;
+    if (repairItems.includes('smart-current-cycle-started')) {
       add(false, t('diagnoseSmartCurrentCycleRecoveryStarted'), {
         level: 'warning',
         code: 'SMART-CURRENT-CYCLE-RECOVERY-STARTED',
@@ -1557,94 +1698,12 @@ btnDiagnose.addEventListener('click', async () => {
         priority: 15
       });
     }
-    const clearedAlarmCount = [...repairedItems]
-      .filter(item => item.endsWith('-alarm-cleared')).length;
     let leakedRuntimeAlarmCount = 0;
-    let effectiveNextTriggerAt = s.nextTriggerAt || 0;
 
     // 修复只允许后台执行。Popup 消费 before/repair/after，不再直接写 storage，
     // 因而复制报告能同时保留事故首现场与修复后的收敛状态。
     const nowMs = Date.now();
-    const pwmTriggerRepaired = repairedItems.has('pwm-trigger');
-    if (diagnosticEvidence.status === 'incomplete') {
-      const evidenceReadErrors = [
-        ...(diagnosticBefore?.readErrors || []),
-        ...(diagnosticAfter?.readErrors || [])
-      ];
-      add(false, t(
-        'diagnosePwmEvidenceIncomplete',
-        evidenceReadErrors.join('; ').slice(0, 240) || '?'
-      ), {
-        level: 'warning',
-        code: 'SCHED-EVIDENCE-INCOMPLETE',
-        domain: t('diagnoseDomainScheduler'),
-        action: t('diagnoseActionRecheckRecovery'),
-        priority: 15
-      });
-    } else if (diagnosticEvidence.status === 'incoherent') {
-      add(false, t('diagnosePwmEvidenceIncoherent'), {
-        level: 'warning',
-        code: 'SCHED-EVIDENCE-INCOHERENT',
-        domain: t('diagnoseDomainScheduler'),
-        action: t('diagnoseActionRecheckRecovery'),
-        priority: 15
-      });
-    } else if (diagnosticEvidenceUsable) {
-      add(true, t(
-        'diagnosePwmEvidenceBefore',
-        diagnosticOwner?.action || '?',
-        diagnosticOwner?.kind || '?',
-        fmt(diagnosticOwner?.boundaryAt),
-        fmt(diagnosticOwner?.scheduledAt),
-        fmt(diagnosticOwner?.liveAlarmAt)
-      ), {
-        level: 'info',
-        code: 'SCHED-EVIDENCE-BEFORE',
-        domain: t('diagnoseDomainScheduler')
-      });
-      const currentAttemptText = diagnosticCurrentAttempts.length
-        ? diagnosticCurrentAttempts.map(attempt => (
-            `#${attempt.attemptId} ${attempt.source}`
-              + ` ${attempt.action}@${fmt(attempt.scheduledAt)}`
-          )).join(' | ')
-        : (pwmBoundaryDuePending ? 'due-pending' : 'idle');
-      add(true, t('diagnosePwmEvidenceRuntime', currentAttemptText), {
-        level: 'info',
-        code: diagnosticCurrentAttempt
-          ? 'SCHED-PWM-IN-FLIGHT'
-          : (pwmBoundaryDuePending ? 'SCHED-PWM-DUE-PENDING' : 'SCHED-PWM-IDLE'),
-        domain: t('diagnoseDomainScheduler')
-      });
-      const lastOutcomeText = diagnosticLastOutcome
-        ? `#${diagnosticLastOutcome.attemptId} ${diagnosticLastOutcome.status}`
-          + ` ${diagnosticLastOutcome.action}@${fmt(diagnosticLastOutcome.scheduledAt)}`
-          + `${diagnosticLastOutcome.reason ? ` (${diagnosticLastOutcome.reason})` : ''}`
-        : 'none';
-      add(true, t('diagnosePwmEvidenceLastOutcome', lastOutcomeText), {
-        level: 'info',
-        code: 'SCHED-EVIDENCE-LAST-OUTCOME',
-        domain: t('diagnoseDomainScheduler')
-      });
-      add(true, t(
-        'diagnosePwmEvidenceRepair',
-        repairedItems.size ? [...repairedItems].join(',') : 'none'
-      ), {
-        level: repairedItems.size ? 'repaired' : 'info',
-        code: repairedItems.size ? 'SCHED-EVIDENCE-REPAIRED' : 'SCHED-EVIDENCE-NO-REPAIR',
-        domain: t('diagnoseDomainScheduler')
-      });
-      add(true, t(
-        'diagnosePwmEvidenceAfter',
-        diagnosticAfter?.owner?.action || '?',
-        diagnosticAfter?.owner?.kind || '?',
-        fmt(diagnosticAfter?.owner?.scheduledAt),
-        fmt(diagnosticAfter?.owner?.liveAlarmAt)
-      ), {
-        level: 'info',
-        code: 'SCHED-EVIDENCE-AFTER',
-        domain: t('diagnoseDomainScheduler')
-      });
-    }
+    appendPwmDiagnosticEvidence({ add, translate: t }, diagnosticState, fmt);
 
     // Popup 自身也属于诊断链路：报告当前文档、布局、控件投影和保活连接。
     // 只记录结构化状态与尺寸，不读取 URL、DOM 文本、账号或冷气页面内容。
@@ -1829,7 +1888,7 @@ btnDiagnose.addEventListener('click', async () => {
         });
       }
     } else {
-      const pwmWasRepaired = repairedItems.has('pwm-alarm');
+      const pwmWasRepaired = repairItems.includes('pwm-alarm');
       if (pwmAlarm) {
         add(true, t('diagnosePwmExists') + t('diagnosePwmTrigger')
           + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')', pwmWasRepaired ? {
@@ -1882,7 +1941,7 @@ btnDiagnose.addEventListener('click', async () => {
           requirePlannedAt: true
         }
       );
-      const smartClockRepairVerified = repairedItems.has('smart-on-clock')
+      const smartClockRepairVerified = repairItems.includes('smart-on-clock')
         && (!currentSmartClockAssessment.applicable
           || currentSmartClockAssessment.valid);
       if (smartClockRepairVerified) {
@@ -1931,7 +1990,7 @@ btnDiagnose.addEventListener('click', async () => {
       }
 
       const badgeAlarm = alarms.find(a => a.name === 'ac-badge-tick');
-      const badgeWasRepaired = repairedItems.has('badge-alarm');
+      const badgeWasRepaired = repairItems.includes('badge-alarm');
       add(!!badgeAlarm, t('diagnoseBadgeAlarm') + (badgeAlarm
         ? t(badgeWasRepaired ? 'diagnoseAlarmRebuilt' : 'diagnoseAlarmScheduled')
           + new Date(badgeAlarm.scheduledTime).toLocaleTimeString() + ')'
@@ -1949,7 +2008,7 @@ btnDiagnose.addEventListener('click', async () => {
         });
 
       const watchdogAlarm = alarms.find(a => a.name === 'ac-watchdog');
-      const watchdogWasRepaired = repairedItems.has('watchdog-alarm');
+      const watchdogWasRepaired = repairItems.includes('watchdog-alarm');
       add(!!watchdogAlarm, t('diagnoseWatchdog') + (watchdogAlarm
         ? t(watchdogWasRepaired ? 'diagnoseAlarmRebuilt' : 'diagnoseAlarmScheduled')
           + new Date(watchdogAlarm.scheduledTime).toLocaleTimeString() + ')'
@@ -1986,7 +2045,7 @@ btnDiagnose.addEventListener('click', async () => {
     } else {
       add(true, t('diagnoseSmartModeOn'));
       const smartWeatherAlarm = alarms.find(a => a.name === 'ac-smart-weather');
-      const smartWeatherWasRepaired = repairedItems.has('smart-weather-alarm');
+      const smartWeatherWasRepaired = repairItems.includes('smart-weather-alarm');
       const smartWeatherAt = Number(smartWeatherAlarm?.scheduledTime) || 0;
       const smartWeatherDate = smartWeatherAt ? new Date(smartWeatherAt) : null;
       const smartWeatherSlotValid = !!smartWeatherDate

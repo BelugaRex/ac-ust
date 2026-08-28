@@ -433,7 +433,7 @@ async function runTests() {
     'diagnoseSelfHealFail',
     'popupSelfHealFail'
   ];
-  assertPass(popupJs.includes("const pwmTriggerRepaired = repairedItems.has('pwm-trigger');")
+  assertPass(popupJs.includes("pwmTriggerRepaired: repairItems.includes('pwm-trigger')")
       && popupJs.includes("t('diagnoseBgWriteback')")
       && popupJs.includes("t('diagnoseBgRepairedSw')")
       && !popupJs.includes('selfHealed')
@@ -7198,7 +7198,7 @@ return { reapplySmartSensitivityNow };`
       && concurrentEvidence14.currentAttempts.length === 2
       && concurrentEvidence14.currentAttempts[1] === attemptAfter14
       && concurrentEvidence14.pwmStepRunning === true
-      && popupSource.includes('diagnosticCurrentAttempts.map(attempt => (')
+      && popupSource.includes('currentAttempts.map(attempt => (')
       && diagnosticEvidenceReaders14.classifyDiagnosticEvidence(null) === 'absent',
     '14A-0A: 证据缺失/不完整/不一致统一失效；完整 after 的 null 才结算，并发 attempt 全量进入复制报告');
   assertPass(popupHtml.includes('id="statusAnnouncement" role="status" aria-live="polite"')
@@ -7259,9 +7259,9 @@ return { reapplySmartSensitivityNow };`
       && popupSource.includes("code: 'SCHED-SMART-ON-CLOCK-SKIPPED'")
       && popupSource.includes("code: 'SCHED-SMART-ON-CLOCK-REPAIRED'")
       && popupSource.includes("code: 'SCHED-PHASE-STATUS-DESYNC'")
-      && popupSource.includes('const diagnosticEvidence = readDiagnosticEvidence(ensured);')
-      && popupSource.includes('const diagnosticBefore = diagnosticEvidence.before;')
-      && popupSource.includes('const diagnosticAfter = diagnosticEvidence.after;')
+      && popupSource.includes('const evidence = readDiagnosticEvidence(ensured);')
+      && popupSource.includes('const before = evidence.before;')
+      && popupSource.includes('const after = evidence.after;')
       && !popupSource.includes('function projectPersistentSchedule(')
       && !popupDiagnosticFlowSource14G.includes("chrome.alarms.get('ac-pwm')")
       && !popupDiagnoseSource14G.includes('chrome.storage.local.set('),
@@ -7308,7 +7308,7 @@ return { reapplySmartSensitivityNow };`
     '14G-1A: 权威 AC=OFF 否决陈旧 ON 相位的缺 timer 报警；状态未知才回退 PWM 相位');
   assertPass(backgroundSource.includes('_pwmStepRunning: isCurrentPwmStepRunning()')
       && backgroundSource.includes('pwmStepRunning: isCurrentPwmStepRunning()')
-      && popupSource.includes('const pwmStepInFlight =')
+      && popupSource.includes('pwmStepInFlight: evidence.usable')
       && popupSource.includes("code: 'SCHED-PWM-IN-FLIGHT'")
       && popupSource.includes('if (pwmStepInFlight && !memLive)')
       && /if \(s\.clockMode === false && s\.enabled[\s\S]{0,160}!pwmStepInFlight[\s\S]{0,80}!effectiveNextTriggerAt/.test(popupSource)
@@ -7431,6 +7431,363 @@ return { reapplySmartSensitivityNow };`
       && mismatchedCapture14.ensured === null
       && mismatchedCapture14.contentRuntimeAfter === null,
     '14M-2: Popup/SW build 不一致时跳过 content inspect 与 ensureDiagnostics，首现场不被混版修复');
+
+  const deriveDiagnosticStateSource14 = extractSourceSection(
+    popupSource,
+    'function derivePopupDiagnosticState(inputs, runtime = {}) {',
+    '\nfunction appendPwmDiagnosticEvidence(',
+    'popup diagnostic state derivation'
+  );
+  const appendDiagnosticEvidenceSource14 = extractSourceSection(
+    popupSource,
+    'function appendPwmDiagnosticEvidence(report, state, formatTime) {',
+    "\nbtnDiagnose.addEventListener('click', async () => {",
+    'popup diagnostic evidence rendering'
+  );
+  const derivePopupDiagnosticState14 = new Function(
+    'readDiagnosticEvidence',
+    `${deriveDiagnosticStateSource14}; return derivePopupDiagnosticState;`
+  )(diagnosticEvidenceReaders14.readDiagnosticEvidence);
+  const appendPwmDiagnosticEvidence14 = new Function(
+    `${appendDiagnosticEvidenceSource14}; return appendPwmDiagnosticEvidence;`
+  )();
+  const freezeDeep14 = value => {
+    if (!value || typeof value !== 'object' || Object.isFrozen(value)) return value;
+    Object.values(value).forEach(freezeDeep14);
+    return Object.freeze(value);
+  };
+  const evidenceClock14 = 1_700_000_000_000;
+  const usableEnvelope14 = freezeDeep14({
+    success: true,
+    schemaVersion: 2,
+    schedule: {
+      enabled: true,
+      fromEnsured: 'ensured',
+      collisionAll: 'ensured',
+      ensuredWins: 'ensured',
+      bgWins: 'ensured'
+    },
+    evidence: {
+      before: {
+        ...completeSnapshotShape14,
+        coherent: true,
+        complete: true,
+        capturedAt: evidenceClock14,
+        memorySchedule: {
+          enabled: true,
+          fromBefore: 'before',
+          preRepairCollision: 'before'
+        },
+        storedSchedule: { enabled: false },
+        owner: {
+          action: 'before-on',
+          kind: 'typed-retry',
+          boundaryAt: evidenceClock14 - 1_000,
+          scheduledAt: evidenceClock14,
+          liveAlarmAt: evidenceClock14 + 1_000
+        },
+        runtime: {
+          currentAttempt: { attemptId: 1, source: 'before-runtime' },
+          currentAttempts: [],
+          lastOutcome: null,
+          pwmStepRunning: true
+        }
+      },
+      repair: { items: ['pwm-trigger', 'badge-alarm', 'pwm-trigger'] },
+      after: {
+        ...completeSnapshotShape14,
+        coherent: true,
+        complete: true,
+        memorySchedule: {
+          enabled: true,
+          fromAfter: 'after',
+          collisionAll: 'after',
+          afterWins: 'after',
+          ensuredWins: 'after'
+        },
+        storedSchedule: { enabled: true },
+        owner: {
+          action: 'after-off',
+          kind: 'next-phase',
+          scheduledAt: evidenceClock14 + 20_000,
+          liveAlarmAt: evidenceClock14 + 20_000
+        },
+        runtime: {
+          currentAttempt: {
+            attemptId: 2,
+            source: 'after-runtime',
+            action: 'on',
+            scheduledAt: evidenceClock14
+          },
+          currentAttempts: [{
+            attemptId: 2,
+            source: 'after-runtime',
+            action: 'on',
+            scheduledAt: evidenceClock14
+          }],
+          lastOutcome: {
+            attemptId: 3,
+            status: 'failed',
+            action: 'off',
+            scheduledAt: evidenceClock14 + 5_000,
+            reason: 'after-outcome'
+          },
+          pwmStepRunning: true
+        }
+      }
+    }
+  });
+  let unusedNowReadCount14 = 0;
+  const derivedEvidenceState14 = derivePopupDiagnosticState14({
+    ensured: usableEnvelope14,
+    bg: freezeDeep14({
+      enabled: true,
+      clockMode: false,
+      fromBg: 'bg',
+      collisionAll: 'bg',
+      bgWins: 'bg'
+    }),
+    storedSchedule: freezeDeep14({
+      enabled: false,
+      fromStored: 'stored',
+      collisionAll: 'stored',
+      afterWins: 'stored'
+    })
+  }, {
+    isPausedByActiveHours: () => false,
+    get nowMs() {
+      unusedNowReadCount14 += 1;
+      return evidenceClock14;
+    }
+  });
+  const evidenceReportCalls14 = [];
+  appendPwmDiagnosticEvidence14({
+    add(ok, message, metadata) {
+      evidenceReportCalls14.push({ ok, message, metadata });
+    },
+    translate: (key, ...args) => `${key}|${args.join('|')}`
+  }, derivedEvidenceState14, value => `T${value || 0}`);
+  assertPass(evidenceReportCalls14.map(call => call.message.split('|')[0]).join(',') === (
+    'diagnosePwmEvidenceBefore,diagnosePwmEvidenceRuntime,'
+      + 'diagnosePwmEvidenceLastOutcome,diagnosePwmEvidenceRepair,diagnosePwmEvidenceAfter'
+    )
+      && evidenceReportCalls14[0].message.includes('before-on')
+      && evidenceReportCalls14[1].message.includes('after-runtime')
+      && evidenceReportCalls14[2].message.includes('after-outcome')
+      && evidenceReportCalls14[3].message.includes('pwm-trigger,badge-alarm')
+      && evidenceReportCalls14[4].message.includes('after-off')
+      && evidenceReportCalls14.map(call => (
+        `${call.ok}:${call.metadata.level}:${call.metadata.code}`
+      )).join(',') === (
+        'true:info:SCHED-EVIDENCE-BEFORE,true:info:SCHED-PWM-IN-FLIGHT,'
+          + 'true:info:SCHED-EVIDENCE-LAST-OUTCOME,true:repaired:SCHED-EVIDENCE-REPAIRED,'
+          + 'true:info:SCHED-EVIDENCE-AFTER'
+      )
+      && derivedEvidenceState14.schedule.fromStored === 'stored'
+      && derivedEvidenceState14.schedule.fromAfter === 'after'
+      && derivedEvidenceState14.schedule.fromEnsured === 'ensured'
+      && derivedEvidenceState14.schedule.fromBg === 'bg'
+      && derivedEvidenceState14.schedule.collisionAll === 'bg'
+      && derivedEvidenceState14.schedule.afterWins === 'after'
+      && derivedEvidenceState14.schedule.ensuredWins === 'ensured'
+      && derivedEvidenceState14.schedule.bgWins === 'bg'
+      && derivedEvidenceState14.preRepairSchedule.fromBefore === 'before'
+      && derivedEvidenceState14.preRepairSchedule.preRepairCollision === 'before'
+      && derivedEvidenceState14.repairItems.length === 2
+      && unusedNowReadCount14 === 0
+      && Object.isFrozen(derivedEvidenceState14)
+      && Object.isFrozen(derivedEvidenceState14.repairItems),
+    '14M-3: 冻结证据按 before→runtime→outcome→repair→after 唯一顺序输出，来源与 merge 优先级不串线');
+
+  const incompleteEnvelope14 = freezeDeep14({
+    schemaVersion: 2,
+    schedule: { poisonedEnsuredSchedule: true },
+    evidence: {
+      before: {},
+      repair: { items: ['smart-current-cycle-started'] },
+      after: {}
+    }
+  });
+  const incompleteStateForReport14 = derivePopupDiagnosticState14({
+    ensured: incompleteEnvelope14,
+    bg: freezeDeep14({ enabled: true, safeBgSchedule: true }),
+    storedSchedule: freezeDeep14({ enabled: false })
+  }, {
+    isPausedByActiveHours: () => false,
+    nowMs: evidenceClock14
+  });
+  const incompleteReportCalls14 = [];
+  appendPwmDiagnosticEvidence14({
+    add(ok, message, metadata) {
+      incompleteReportCalls14.push({ ok, message, metadata });
+    },
+    translate: (key, ...args) => `${key}|${args.join('|')}`
+  }, incompleteStateForReport14, value => `T${value || 0}`);
+  assertPass(incompleteStateForReport14.evidence.status === 'incomplete'
+      && incompleteStateForReport14.repairItems.includes('smart-current-cycle-started')
+      && incompleteStateForReport14.schedule.safeBgSchedule === true
+      && incompleteStateForReport14.schedule.poisonedEnsuredSchedule !== true
+      && incompleteReportCalls14.length === 1
+      && incompleteReportCalls14[0].message.startsWith('diagnosePwmEvidenceIncomplete|')
+      && incompleteReportCalls14[0].metadata.code === 'SCHED-EVIDENCE-INCOMPLETE',
+    '14M-4: invalid v2 不消费伪 schedule/owner/runtime，但独立保留后台 repair items 并只输出 incomplete 警告');
+  const renderEvidenceStatus14 = status => {
+    const calls = [];
+    appendPwmDiagnosticEvidence14({
+      add(ok, message, metadata) { calls.push({ ok, message, metadata }); },
+      translate: key => key
+    }, Object.freeze({
+      ...incompleteStateForReport14,
+      evidence: Object.freeze({ status, usable: false })
+    }), value => `T${value || 0}`);
+    return calls;
+  };
+  const incoherentReportCalls14 = renderEvidenceStatus14('incoherent');
+  const absentReportCalls14 = renderEvidenceStatus14('absent');
+  assertPass(incoherentReportCalls14.length === 1
+      && incoherentReportCalls14[0].message === 'diagnosePwmEvidenceIncoherent'
+      && incoherentReportCalls14[0].metadata.code === 'SCHED-EVIDENCE-INCOHERENT'
+      && absentReportCalls14.length === 0,
+    '14M-5: report-level incoherent 只输出一条警告，absent 不伪造任何绿色 evidence 行');
+
+  const legacyAbsentState14 = derivePopupDiagnosticState14({
+    ensured: freezeDeep14({
+      schemaVersion: 1,
+      schedule: { poisonedLegacySchedule: true },
+      repairs: ['legacy-pwm-repair']
+    }),
+    bg: freezeDeep14({ enabled: true, legacyBg: true }),
+    storedSchedule: freezeDeep14({ enabled: false, legacyStored: true })
+  }, {
+    isPausedByActiveHours: () => false,
+    nowMs: evidenceClock14
+  });
+  const legacyAbsentCalls14 = [];
+  appendPwmDiagnosticEvidence14({
+    add(ok, message, metadata) { legacyAbsentCalls14.push({ ok, message, metadata }); },
+    translate: key => key
+  }, legacyAbsentState14, value => `T${value || 0}`);
+  const incoherentEnvelopeForReport14 = freezeDeep14({
+    schemaVersion: 2,
+    schedule: { poisonedIncoherentSchedule: true },
+    evidence: {
+      before: {
+        ...completeSnapshotShape14,
+        coherent: false,
+        complete: true,
+        owner: { action: 'poison-before' },
+        runtime: { currentAttempt: { attemptId: 91 }, pwmStepRunning: true }
+      },
+      repair: { items: ['incoherent-repair'] },
+      after: {
+        ...completeSnapshotShape14,
+        coherent: false,
+        complete: true,
+        owner: { action: 'poison-after' },
+        runtime: { currentAttempt: { attemptId: 92 }, pwmStepRunning: true }
+      }
+    }
+  });
+  const incoherentStateForReport14 = derivePopupDiagnosticState14({
+    ensured: incoherentEnvelopeForReport14,
+    bg: freezeDeep14({ enabled: true, incoherentBg: true }),
+    storedSchedule: freezeDeep14({ enabled: false })
+  }, {
+    isPausedByActiveHours: () => false,
+    nowMs: evidenceClock14
+  });
+  const incoherentDerivedCalls14 = [];
+  appendPwmDiagnosticEvidence14({
+    add(ok, message, metadata) { incoherentDerivedCalls14.push({ ok, message, metadata }); },
+    translate: key => key
+  }, incoherentStateForReport14, value => `T${value || 0}`);
+  assertPass(legacyAbsentState14.evidence.status === 'absent'
+      && legacyAbsentState14.schedule.legacyStored === true
+      && legacyAbsentState14.schedule.legacyBg === true
+      && legacyAbsentState14.schedule.poisonedLegacySchedule !== true
+      && legacyAbsentState14.repairItems.includes('legacy-pwm-repair')
+      && legacyAbsentCalls14.length === 0
+      && incoherentStateForReport14.evidence.status === 'incoherent'
+      && incoherentStateForReport14.owner === null
+      && incoherentStateForReport14.currentAttempt === null
+      && incoherentStateForReport14.schedule.incoherentBg === true
+      && incoherentStateForReport14.schedule.poisonedIncoherentSchedule !== true
+      && incoherentStateForReport14.repairItems.includes('incoherent-repair')
+      && incoherentDerivedCalls14.length === 1
+      && incoherentDerivedCalls14[0].metadata.code === 'SCHED-EVIDENCE-INCOHERENT',
+    '14M-6: absent/incoherent 经真实 derive+append 仍拒绝伪快照，保留 split-trust repair 且不制造绿色行');
+
+  const createBoundaryEnvelope14 = ({ currentAttempt = null, lastOutcome = null, capturedAt }) => (
+    freezeDeep14({
+      schemaVersion: 2,
+      evidence: {
+        before: {
+          ...completeSnapshotShape14,
+          coherent: true,
+          complete: true,
+          ...(capturedAt === undefined ? {} : { capturedAt }),
+          owner: {
+            action: 'on',
+            kind: 'boundary',
+            scheduledAt: evidenceClock14
+          },
+          runtime: { currentAttempt: null, currentAttempts: [], lastOutcome: null }
+        },
+        repair: { items: [] },
+        after: {
+          ...completeSnapshotShape14,
+          coherent: true,
+          complete: true,
+          owner: { action: 'off', kind: 'next-phase' },
+          runtime: {
+            currentAttempt,
+            currentAttempts: currentAttempt ? [currentAttempt] : [],
+            lastOutcome,
+            pwmStepRunning: !!currentAttempt
+          }
+        }
+      }
+    })
+  );
+  const deriveBoundaryState14 = (options, schedulePatch = {}, pauseFallback = false) => (
+    derivePopupDiagnosticState14({
+      ensured: createBoundaryEnvelope14(options),
+      bg: freezeDeep14({ enabled: true, ...schedulePatch }),
+      storedSchedule: freezeDeep14({ enabled: true })
+    }, {
+      isPausedByActiveHours: () => pauseFallback,
+      nowMs: evidenceClock14
+    })
+  );
+  const dueBoundaryState14 = deriveBoundaryState14({ capturedAt: evidenceClock14 });
+  const matchedBoundaryState14 = deriveBoundaryState14({
+    capturedAt: evidenceClock14,
+    lastOutcome: { action: 'on', scheduledAt: evidenceClock14 }
+  });
+  const activeBoundaryState14 = deriveBoundaryState14({
+    capturedAt: evidenceClock14,
+    currentAttempt: { attemptId: 7, action: 'on', scheduledAt: evidenceClock14 }
+  });
+  const expiredBoundaryState14 = deriveBoundaryState14({
+    capturedAt: evidenceClock14 + 60_001
+  });
+  const transientPausedState14 = deriveBoundaryState14(
+    { capturedAt: evidenceClock14 },
+    { _automationPausedByActiveHours: true },
+    false
+  );
+  const fallbackPausedState14 = deriveBoundaryState14(
+    { capturedAt: evidenceClock14 },
+    {},
+    true
+  );
+  assertPass(dueBoundaryState14.pwmBoundaryDuePending === true
+      && matchedBoundaryState14.pwmBoundaryDuePending === false
+      && activeBoundaryState14.pwmBoundaryDuePending === false
+      && expiredBoundaryState14.pwmBoundaryDuePending === false
+      && transientPausedState14.automationPausedByActiveHours === true
+      && fallbackPausedState14.automationPausedByActiveHours === true,
+    '14M-7: due-pending 仅覆盖未执行且未结算的一分钟窗口；瞬态或持久运行时段均能判暂停');
   assertPass(popupSource.includes('const DIAGNOSTIC_MESSAGE_TIMEOUT_MS = 10000;')
       && popupSource.includes('async function sendDiagnosticRuntimeMessage(message)')
       && captureDiagnosticInputsSource.includes(
@@ -7719,7 +8076,7 @@ return { reapplySmartSensitivityNow };`
       && diagnosticOrchestrationSource.includes("'SAFETY-TIMER-FAILED'")
       && diagnosticOrchestrationSource.includes("code: 'SAFETY-TIMER-MISSING'")
       && diagnosticOrchestrationSource.includes("code: 'SMART-CURRENT-CYCLE-RECOVERY-STARTED'")
-      && diagnosticOrchestrationSource.includes("repairedItems.has('smart-current-cycle-started')")
+      && diagnosticOrchestrationSource.includes("repairItems.includes('smart-current-cycle-started')")
       && diagnosticOrchestrationSource.includes("action: t('diagnoseActionRecheckRecovery')")
       && diagnosticOrchestrationSource.includes("code: 'SCHED-RUNTIME-ALARMS-LEAKED'")
       && diagnosticOrchestrationSource.includes("code: 'POPUP-CONTROLS-DESYNC'")
@@ -15673,15 +16030,17 @@ ${commitDurableSource16}
       && disabledUpdateBranch16.includes('if (wasEnabled)')
       && disabledUpdateBranch16.includes('shutdownAfterScheduleDisable()'),
     '16L-2: setup/看门狗在暂停时清泄漏运行闹钟，遇到恢复立即交还恢复链；停用编辑不误关机');
-  assertPass(diagnoseHandlerSource.includes('const automationPausedByActiveHours = s._automationPausedByActiveHours === true')
+  assertPass(diagnosticOrchestrationSource.includes(
+      'const automationPausedByActiveHours = schedule._automationPausedByActiveHours === true'
+    )
       && diagnoseHandlerSource.includes('&& !automationPausedByActiveHours')
       && diagnoseHandlerSource.includes('if (automationPausedByActiveHours)')
       && diagnoseHandlerSource.includes("t('diagnoseAutomationPaused')")
       && zhCN.diagnoseAutomationPaused?.message
       && en.diagnoseAutomationPaused?.message,
     '16M: popup 诊断把时段外识别为预期暂停，不回填时钟或补建运行闹钟');
-  assertPass(diagnoseHandlerSource.includes(
-      '|| isAutomationPausedByActiveHours(s);'
+  assertPass(diagnosticOrchestrationSource.includes(
+      '|| isPausedByActiveHours(schedule);'
     ),
     '16M-0: popup 诊断在旧或降级后台缺少瞬态字段时，也从持久化运行时段重建暂停态');
   assertPass(captureDiagnosticInputsSource.includes("sendMessage({ type: 'ensureDiagnostics' })")
@@ -15698,7 +16057,7 @@ ${commitDurableSource16}
       && diagnosticSwProbeIndex16 < diagnosticEnsureIndex16
       && captureDiagnosticInputsSource.includes("type: 'inspectContentRuntime'")
       && diagnosticOrchestrationSource.includes('runtimeBuildCompatible')
-      && diagnoseHandlerSource.includes('readDiagnosticEvidence(ensured)')
+      && diagnosticOrchestrationSource.includes('readDiagnosticEvidence(ensured)')
       && popupSource.includes('envelope?.evidence?.before')
       && popupSource.includes('envelope?.evidence?.after')
       && !diagnosticOrchestrationSource.includes('chrome.storage.local.set('),
@@ -17135,9 +17494,9 @@ ${commitDurableSource16}
       && ensureDiagnosticAlarmsBody.includes('captureDiagnosticSnapshotAttempt(2, firstObservedAt)')
       && popupSource.includes('function selectDiagnosticRuntimeValue(')
       && popupSource.includes('function readDiagnosticEvidence(')
-      && diagnoseHandlerSource.includes('diagnosticEvidenceUsable')
-      && diagnoseHandlerSource.includes("code: 'SCHED-EVIDENCE-INCOMPLETE'")
-      && !diagnoseHandlerSource.includes('ensured?.alarms?.')
+      && diagnosticOrchestrationSource.includes('evidence.usable')
+      && diagnosticOrchestrationSource.includes("code: 'SCHED-EVIDENCE-INCOMPLETE'")
+      && !diagnosticOrchestrationSource.includes('ensured?.alarms?.')
       && popupSource.includes("'currentAttempt'")
       && popupSource.includes('currentAttempts:'),
     '16R-3: Popup 不再写回旧快照；后台首现场标出 phase/in-flight 与跨 await 一致性');
