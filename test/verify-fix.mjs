@@ -5114,7 +5114,7 @@ async function runTests() {
   );
   const diagnosticWeatherRecoveryBody = extractSourceSection(
     backgroundSource,
-    'async function ensureDiagnosticAlarms() {',
+    'function cloneDiagnosticValue(value) {',
     '\nchrome.runtime.onMessage.addListener',
     'ensureDiagnosticAlarms weather recovery'
   );
@@ -6276,7 +6276,7 @@ return { reapplySmartSensitivityNow };`
     ['init', 'async function init()', '\n// ----- 设置/更新 PWM 循环闹钟'],
     ['badge-tick', "if (alarm.name === 'ac-badge-tick')", "\n  if (alarm.name === 'ac-pwm')"],
     ['getScheduleSnapshot', 'async function getScheduleSnapshot(', '\nasync function toggleNowAndSync'],
-    ['ensureDiagnosticAlarms', 'async function ensureDiagnosticAlarms()', '\nchrome.runtime.onMessage.addListener']
+    ['ensureDiagnosticAlarms', 'function cloneDiagnosticValue(value)', '\nchrome.runtime.onMessage.addListener']
   ].map(([name, startMarker, endMarker]) => {
     const start = backgroundSource.indexOf(startMarker);
     const end = backgroundSource.indexOf(endMarker, start);
@@ -7005,7 +7005,8 @@ return { reapplySmartSensitivityNow };`
     '13M: strict wrapper 与四条副作用校准路径统一委派持久化 helper，并显式保留各自 profile');
   assertPass(ensureDiagnosticAlarmsBody.includes('schedule.smartMode?.enabled && !smartWeatherAlarm')
       && ensureDiagnosticAlarmsBody.includes('await rescheduleSmartWeatherAlarm();')
-      && ensureDiagnosticAlarmsBody.includes('smartWeather: smartWeatherAlarm ? { scheduledTime: smartWeatherAlarm.scheduledTime } : null'),
+      && ensureDiagnosticAlarmsBody.includes('smartWeather: smartWeatherAlarm')
+      && ensureDiagnosticAlarmsBody.includes('{ scheduledTime: smartWeatherAlarm.scheduledTime }'),
     '13M-2: 诊断自愈补建 ac-smart-weather（智能模式天气闹钟）并回传 alarm 状态');
   assertPass(ensureDiagnosticAlarmsBody.includes('const repairs = [];')
       && ensureDiagnosticAlarmsBody.includes("repairs.push('badge-alarm')")
@@ -7245,6 +7246,12 @@ return { reapplySmartSensitivityNow };`
     '\n\nasync function repairScheduleClock(options = {})',
     'diagnostic lifecycle clock delegation'
   );
+  const diagnosticLifecycleRepairSource13 = extractSourceSection(
+    backgroundSource,
+    'function recordDiagnosticLifecycleRepairs(',
+    '\n\nasync function repairEnabledDiagnosticRuntime(',
+    'diagnostic lifecycle repair classification'
+  );
   const diagnosticSmartGateStart13 = ensureDiagnosticAlarmsBody.indexOf(
     'const comfortStartInFlight = isComfortStartActive() && !pwmAlarm;'
   );
@@ -7256,7 +7263,12 @@ return { reapplySmartSensitivityNow };`
       && diagnosticSmartGateEnd13 > diagnosticSmartGateStart13
     ? ensureDiagnosticAlarmsBody.slice(diagnosticSmartGateStart13, diagnosticSmartGateEnd13)
     : '';
-  const runDiagnosticSmartCycleCase13 = async ({ recoveryKind, mutateState, started = false }) => {
+  const runDiagnosticSmartCycleCase13 = async ({
+    recoveryKind,
+    mutateState,
+    started = false,
+    alarmMissing = false
+  }) => {
     const now = new Date(2026, 7, 27, 22, 31, 0, 0).getTime();
     const oldAlarmAt = new Date(2026, 7, 27, 23, 0, 0, 0).getTime();
     const newAlarmAt = new Date(2026, 7, 27, 22, 52, 0, 0).getTime();
@@ -7272,12 +7284,13 @@ return { reapplySmartSensitivityNow };`
     const run = new Function(
       'schedule', 'chrome', 'isComfortStartActive', 'ensureScheduleClock', 'Date',
       `return (async () => {
-      let pwmAlarm = { scheduledTime: ${oldAlarmAt} };
+      let pwmAlarm = ${alarmMissing ? 'undefined' : `{ scheduledTime: ${oldAlarmAt} }`};
       let smartWeatherAlarm = { scheduledTime: ${oldAlarmAt} };
       let badgeAlarm = { scheduledTime: ${oldAlarmAt} };
       let watchdogAlarm = { scheduledTime: ${oldAlarmAt} };
       let pwmRuntimeRevision = 4;
       const repairs = [];
+      ${diagnosticLifecycleRepairSource13}
       ${diagnosticSmartGateSource13}
       return { repairs, pwmAlarm, schedule };
       })();`
@@ -7287,11 +7300,13 @@ return { reapplySmartSensitivityNow };`
       {
         alarms: {
           async get(name) {
-            if (name === 'ac-pwm') return {
-              scheduledTime: recoveryKind === 'recover-smart-current-cycle' && !started
-                ? newAlarmAt
-                : oldAlarmAt
-            };
+            if (name === 'ac-pwm') return alarmMissing
+              ? undefined
+              : {
+                  scheduledTime: recoveryKind === 'recover-smart-current-cycle' && !started
+                    ? newAlarmAt
+                    : oldAlarmAt
+                };
             return { scheduledTime: oldAlarmAt };
           }
         }
@@ -7320,6 +7335,11 @@ return { reapplySmartSensitivityNow };`
     mutateState: null,
     started: true
   });
+  const missingAlarmDiagnosticSmartCycle13 = await runDiagnosticSmartCycleCase13({
+    recoveryKind: 'recover-smart-current-cycle',
+    mutateState: null,
+    alarmMissing: true
+  });
   assertPass(ensureScheduleClockBody13.includes('return recoverPwmLifecycle({')
       && ensureScheduleClockBody13.includes('deferSmartCurrentCycleExecution: options.deferSmartCurrentCycleExecution === true')
       && recoveredDiagnosticSmartCycle13.ensureCalls === 1
@@ -7330,6 +7350,8 @@ return { reapplySmartSensitivityNow };`
       && zeroOnDiagnosticSmartCycle13.repairs.length === 0
       && startedDiagnosticSmartCycle13.repairs.includes('smart-current-cycle-started')
       && !startedDiagnosticSmartCycle13.repairs.includes('smart-current-cycle')
+      && missingAlarmDiagnosticSmartCycle13.repairs.includes('smart-current-cycle')
+      && missingAlarmDiagnosticSmartCycle13.repairs.includes('pwm-alarm')
       && ensureDiagnosticAlarmsBody.includes('const triggerPlan = smartCurrentCycleStarted')
       && ensureDiagnosticAlarmsBody.includes('? null')
       && ensureDiagnosticAlarmsBody.indexOf('const triggerPlan = smartCurrentCycleStarted')
@@ -15892,7 +15914,8 @@ ${commitDurableSource16}
       && cleanupEvents16.join(',') === 'ac-pwm'
       && setupAlarmsBody16.includes('await clearAutomationRuntimeAlarmsWhileBlocked();')
       && watchdogBody13.includes('await clearAutomationRuntimeAlarmsWhileBlocked();')
-      && ensureDiagnosticAlarmsBody.includes('if (isAutomationAllowed()) return ensureDiagnosticAlarms();')
+      && ensureDiagnosticAlarmsBody.includes('if (isAutomationAllowed()) return { restart: true };')
+      && ensureDiagnosticAlarmsBody.includes('if (repair.restart) return ensureDiagnosticAlarms();')
       && disabledUpdateBranch16.includes('if (wasEnabled)')
       && disabledUpdateBranch16.includes('shutdownAfterScheduleDisable()'),
     '16L-2: setup/看门狗在暂停时清泄漏运行闹钟，遇到恢复立即交还恢复链；停用编辑不误关机');
@@ -17364,7 +17387,7 @@ ${commitDurableSource16}
       && !diagnosticPhaseCalls16.some(call =>
         call.startsWith('clear:') || call.startsWith('create:'))
       && ensureDiagnosticAlarmsBody.includes(
-        'return snapshotDeferredPhaseAdoption();')
+        'return createDeferredPhaseAdoptionDiagnosticRepair();')
       && ensureDiagnosticAlarmsBody.includes(
         '|| isSyncPhaseAdoptionAdmissionBlocked()')
       && ensureDiagnosticAlarmsBody.includes('? null'),

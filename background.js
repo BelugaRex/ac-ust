@@ -8433,25 +8433,22 @@ function buildDiagnosticResultEnvelope({
   };
 }
 
-async function ensureDiagnosticAlarms() {
-  const diagnosticRequestAt = Date.now();
-  const repairs = [];
-  const diagnosticBefore = await captureDiagnosticSnapshot();
-  await loadScheduleFromStorage();
-  const finalizeDiagnosticResult = async (result, lifecycle = null) => {
-    const diagnosticAfter = await captureDiagnosticSnapshot();
-    return buildDiagnosticResultEnvelope({
-      result,
-      requestAt: diagnosticRequestAt,
-      before: diagnosticBefore,
-      repairs,
-      lifecycle,
-      after: diagnosticAfter
-    });
+function recordClearedAlarmRepairs(repairs, before, after) {
+  const names = {
+    badge: 'badge-alarm-cleared',
+    watchdog: 'watchdog-alarm-cleared',
+    pwm: 'pwm-alarm-cleared',
+    smartWeather: 'smart-weather-alarm-cleared'
   };
-  const snapshotDeferredPhaseAdoption = async () => {
-    const alarms = await snapshotNamedAlarms();
-    return finalizeDiagnosticResult({
+  Object.entries(names).forEach(([key, repair]) => {
+    if (before?.[key] && !after?.[key]) repairs.push(repair);
+  });
+}
+
+async function createDeferredPhaseAdoptionDiagnosticRepair() {
+  const alarms = await snapshotNamedAlarms();
+  return {
+    result: {
       success: false,
       deferred: true,
       reason: 'phase adoption in progress',
@@ -8462,36 +8459,24 @@ async function ensureDiagnosticAlarms() {
       schedule: { ...schedule, _phaseAdoptionInFlight: true },
       pwmStepRunning: isCurrentPwmStepRunning(),
       alarms
-    });
+    },
+    lifecycle: null
   };
-  const recordClearedAlarmRepairs = (before, after) => {
-    const names = {
-      badge: 'badge-alarm-cleared',
-      watchdog: 'watchdog-alarm-cleared',
-      pwm: 'pwm-alarm-cleared',
-      smartWeather: 'smart-weather-alarm-cleared'
-    };
-    Object.entries(names).forEach(([key, repair]) => {
-      if (before?.[key] && !after?.[key]) repairs.push(repair);
-    });
-  };
+}
 
+async function repairDisabledDiagnosticRuntime(repairs) {
+  const beforeAlarms = await snapshotNamedAlarms();
   if (isSyncPhaseAdoptionAdmissionBlocked()) {
-    return snapshotDeferredPhaseAdoption();
+    return createDeferredPhaseAdoptionDiagnosticRepair();
   }
-
-  if (!schedule.enabled) {
-    const beforeAlarms = await snapshotNamedAlarms();
-    if (isSyncPhaseAdoptionAdmissionBlocked()) {
-      return snapshotDeferredPhaseAdoption();
-    }
-    await clearAutomationRuntimeAlarmsWhileBlocked();
-    if (isAutomationAllowed()) return ensureDiagnosticAlarms();
-    await chrome.alarms.clear('ac-smart-weather');
-    if (schedule.enabled) return ensureDiagnosticAlarms();
-    const afterAlarms = await snapshotNamedAlarms();
-    recordClearedAlarmRepairs(beforeAlarms, afterAlarms);
-    return finalizeDiagnosticResult({
+  await clearAutomationRuntimeAlarmsWhileBlocked();
+  if (isAutomationAllowed()) return { restart: true };
+  await chrome.alarms.clear('ac-smart-weather');
+  if (schedule.enabled) return { restart: true };
+  const afterAlarms = await snapshotNamedAlarms();
+  recordClearedAlarmRepairs(repairs, beforeAlarms, afterAlarms);
+  return {
+    result: {
       success: Object.values(afterAlarms).every(alarm => !alarm),
       enabled: false,
       repaired: repairs.length > 0,
@@ -8500,26 +8485,29 @@ async function ensureDiagnosticAlarms() {
       schedule: { ...schedule },
       pwmStepRunning: false,
       alarms: afterAlarms
-    });
-  }
+    },
+    lifecycle: null
+  };
+}
 
-  if (!isAutomationAllowed()) {
-    const beforeAlarms = await snapshotNamedAlarms();
-    if (isSyncPhaseAdoptionAdmissionBlocked()) {
-      return snapshotDeferredPhaseAdoption();
-    }
-    await clearAutomationRuntimeAlarmsWhileBlocked();
-    if (isAutomationAllowed()) return ensureDiagnosticAlarms();
-    let smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
-    if (schedule.smartMode?.enabled && !smartWeatherAlarm) {
-      await rescheduleSmartWeatherAlarm();
-      smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
-      if (smartWeatherAlarm) repairs.push('smart-weather-alarm');
-    }
-    if (isAutomationAllowed()) return ensureDiagnosticAlarms();
-    const afterAlarms = await snapshotNamedAlarms();
-    recordClearedAlarmRepairs(beforeAlarms, afterAlarms);
-    return finalizeDiagnosticResult({
+async function repairPausedDiagnosticRuntime(repairs) {
+  const beforeAlarms = await snapshotNamedAlarms();
+  if (isSyncPhaseAdoptionAdmissionBlocked()) {
+    return createDeferredPhaseAdoptionDiagnosticRepair();
+  }
+  await clearAutomationRuntimeAlarmsWhileBlocked();
+  if (isAutomationAllowed()) return { restart: true };
+  let smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
+  if (schedule.smartMode?.enabled && !smartWeatherAlarm) {
+    await rescheduleSmartWeatherAlarm();
+    smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
+    if (smartWeatherAlarm) repairs.push('smart-weather-alarm');
+  }
+  if (isAutomationAllowed()) return { restart: true };
+  const afterAlarms = await snapshotNamedAlarms();
+  recordClearedAlarmRepairs(repairs, beforeAlarms, afterAlarms);
+  return {
+    result: {
       success: !afterAlarms.badge
         && !afterAlarms.watchdog
         && !afterAlarms.pwm
@@ -8536,9 +8524,39 @@ async function ensureDiagnosticAlarms() {
       },
       pwmStepRunning: false,
       alarms: afterAlarms
-    });
-  }
+    },
+    lifecycle: null
+  };
+}
 
+function recordDiagnosticLifecycleRepairs(repairs, {
+  lifecycle,
+  previousPwmState,
+  previousPwmAlarmAt,
+  currentPwmAlarmAt
+}) {
+  const smartCurrentCycleRecovered = lifecycle?.handled === true
+    && lifecycle?.plan?.kind === 'recover-smart-current-cycle'
+    && (schedule.pwmState !== previousPwmState
+      || currentPwmAlarmAt !== previousPwmAlarmAt);
+  if (smartCurrentCycleRecovered) {
+    repairs.push('smart-current-cycle');
+    if (!repairs.includes('pwm-alarm')) repairs.push('pwm-alarm');
+  }
+  const smartCurrentCycleStarted = lifecycle?.started === true
+    && lifecycle?.plan?.kind === 'recover-smart-current-cycle';
+  if (smartCurrentCycleStarted) repairs.push('smart-current-cycle-started');
+  const smartOnClockRepaired = lifecycle?.handled === true
+    && lifecycle?.plan?.kind === 'repair-clock'
+    && lifecycle?.plan?.reason === 'skipped-nearest-smart-on-boundary';
+  if (smartOnClockRepaired) {
+    repairs.push('smart-on-clock');
+    if (!repairs.includes('pwm-alarm')) repairs.push('pwm-alarm');
+  }
+  return { smartCurrentCycleStarted };
+}
+
+async function repairEnabledDiagnosticRuntime(repairs) {
   let badgeAlarm = await chrome.alarms.get('ac-badge-tick');
   let watchdogAlarm = await chrome.alarms.get('ac-watchdog');
   let pwmAlarm = await chrome.alarms.get('ac-pwm');
@@ -8550,7 +8568,7 @@ async function ensureDiagnosticAlarms() {
     smartWeather: snapshotAlarm(smartWeatherAlarm)
   };
   if (isSyncPhaseAdoptionAdmissionBlocked()) {
-    return snapshotDeferredPhaseAdoption();
+    return createDeferredPhaseAdoptionDiagnosticRepair();
   }
 
   if (!badgeAlarm || badgeAlarm.scheduledTime <= Date.now()) {
@@ -8593,26 +8611,12 @@ async function ensureDiagnosticAlarms() {
   const diagnosticRevision = pwmRuntimeRevision;
   pwmAlarm = await chrome.alarms.get('ac-pwm');
   if (pwmNeededRepair && pwmAlarm) repairs.push('pwm-alarm');
-  const smartCurrentCycleRecovered = diagnosticLifecycleRecovery?.handled === true
-    && diagnosticLifecycleRecovery?.plan?.kind === 'recover-smart-current-cycle'
-    && (schedule.pwmState !== diagnosticPwmStateBefore
-      || Number(pwmAlarm?.scheduledTime) !== diagnosticPwmAlarmAtBefore);
-  if (smartCurrentCycleRecovered) {
-    repairs.push('smart-current-cycle');
-    if (!repairs.includes('pwm-alarm')) repairs.push('pwm-alarm');
-  }
-  const smartCurrentCycleStarted = diagnosticLifecycleRecovery?.started === true
-    && diagnosticLifecycleRecovery?.plan?.kind === 'recover-smart-current-cycle';
-  if (smartCurrentCycleStarted) {
-    repairs.push('smart-current-cycle-started');
-  }
-  const smartOnClockRepaired = diagnosticLifecycleRecovery?.handled === true
-    && diagnosticLifecycleRecovery?.plan?.kind === 'repair-clock'
-    && diagnosticLifecycleRecovery?.plan?.reason === 'skipped-nearest-smart-on-boundary';
-  if (smartOnClockRepaired) {
-    repairs.push('smart-on-clock');
-    if (!repairs.includes('pwm-alarm')) repairs.push('pwm-alarm');
-  }
+  const { smartCurrentCycleStarted } = recordDiagnosticLifecycleRepairs(repairs, {
+    lifecycle: diagnosticLifecycleRecovery,
+    previousPwmState: diagnosticPwmStateBefore,
+    previousPwmAlarmAt: diagnosticPwmAlarmAtBefore,
+    currentPwmAlarmAt: Number(pwmAlarm?.scheduledTime)
+  });
 
   // 活闹钟存在但 storage 可能缺失 nextTriggerAt → 直接回写（不依赖 syncStoredTriggerFromAlarm 的边界判断）
   // 当前周期恢复已启动时，pwmAlarm 仍可能是恢复前的 23:00 旧快照；此处回写会
@@ -8633,24 +8637,59 @@ async function ensureDiagnosticAlarms() {
 
   const pwmStepInFlight = isCurrentPwmStepRunning() || comfortStartInFlight;
 
-  return finalizeDiagnosticResult({
-    success: !!badgeAlarm
-      && !!watchdogAlarm
-      && (!!pwmAlarm || pwmStepInFlight)
-      && (!schedule.smartMode?.enabled || !!smartWeatherAlarm),
-    enabled: true,
-    repaired: repairs.length > 0,
-    before: beforeAlarms,
+  return {
+    result: {
+      success: !!badgeAlarm
+        && !!watchdogAlarm
+        && (!!pwmAlarm || pwmStepInFlight)
+        && (!schedule.smartMode?.enabled || !!smartWeatherAlarm),
+      enabled: true,
+      repaired: repairs.length > 0,
+      before: beforeAlarms,
+      repairs,
+      schedule: { ...schedule },
+      pwmStepRunning: pwmStepInFlight,
+      alarms: {
+        badge: badgeAlarm ? { scheduledTime: badgeAlarm.scheduledTime } : null,
+        watchdog: watchdogAlarm ? {
+          scheduledTime: watchdogAlarm.scheduledTime,
+          periodInMinutes: watchdogAlarm.periodInMinutes
+        } : null,
+        pwm: pwmAlarm ? { scheduledTime: pwmAlarm.scheduledTime } : null,
+        smartWeather: smartWeatherAlarm
+          ? { scheduledTime: smartWeatherAlarm.scheduledTime }
+          : null
+      }
+    },
+    lifecycle: diagnosticLifecycleRecovery
+  };
+}
+
+async function repairDiagnosticRuntime(repairs) {
+  if (isSyncPhaseAdoptionAdmissionBlocked()) {
+    return createDeferredPhaseAdoptionDiagnosticRepair();
+  }
+  if (!schedule.enabled) return repairDisabledDiagnosticRuntime(repairs);
+  if (!isAutomationAllowed()) return repairPausedDiagnosticRuntime(repairs);
+  return repairEnabledDiagnosticRuntime(repairs);
+}
+
+async function ensureDiagnosticAlarms() {
+  const diagnosticRequestAt = Date.now();
+  const repairs = [];
+  const diagnosticBefore = await captureDiagnosticSnapshot();
+  await loadScheduleFromStorage();
+  const repair = await repairDiagnosticRuntime(repairs);
+  if (repair.restart) return ensureDiagnosticAlarms();
+  const diagnosticAfter = await captureDiagnosticSnapshot();
+  return buildDiagnosticResultEnvelope({
+    result: repair.result,
+    requestAt: diagnosticRequestAt,
+    before: diagnosticBefore,
     repairs,
-    schedule: { ...schedule },
-    pwmStepRunning: pwmStepInFlight,
-    alarms: {
-      badge: badgeAlarm ? { scheduledTime: badgeAlarm.scheduledTime } : null,
-      watchdog: watchdogAlarm ? { scheduledTime: watchdogAlarm.scheduledTime, periodInMinutes: watchdogAlarm.periodInMinutes } : null,
-      pwm: pwmAlarm ? { scheduledTime: pwmAlarm.scheduledTime } : null,
-      smartWeather: smartWeatherAlarm ? { scheduledTime: smartWeatherAlarm.scheduledTime } : null
-    }
-  }, diagnosticLifecycleRecovery);
+    lifecycle: repair.lifecycle,
+    after: diagnosticAfter
+  });
 }
 
 const BACKGROUND_MESSAGE_TYPES = new Set([
