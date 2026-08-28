@@ -3502,7 +3502,7 @@ async function runTests() {
       && ambiguousPickerOkClicks9M === 0,
     '9M-6: picker portal 仅点击显式关联或唯一新 dropdown；既有无关层与多个新层均零点击');
   const confirmedTimerWaitStart9M = contentSource.indexOf(
-    'async function waitForConfirmedPowerOffTimerInput('
+    'function isPowerOffTimerConfirmationAccepted('
   );
   const confirmedTimerWaitEnd9M = contentSource.indexOf(
     '\n\nfunction setNativeInputValue(',
@@ -3516,11 +3516,44 @@ async function runTests() {
   let persistentAmbiguityRefused9M = false;
   let transientRollbackRefused9M = false;
   let persistentDropdownRefused9M = false;
+  let confirmationPredicatePreserved9M = false;
   if (confirmedTimerWaitSource9M) {
     const confirmedInput9M = {
       value: '00:21',
       getAttribute: () => null
     };
+    const { isPowerOffTimerConfirmationAccepted } = new Function(
+      `${confirmedTimerWaitSource9M}; return { isPowerOffTimerConfirmationAccepted };`
+    )();
+    const existingDropdown9M = {};
+    const openedDropdown9M = {};
+    const acceptedConfirmation9M = {
+      input: confirmedInput9M,
+      rawValue: '',
+      rawTitle: '00:21',
+      expectedValue: '00:21',
+      ariaExpanded: 'false',
+      visibleDropdowns: [existingDropdown9M],
+      visibleBefore: new Set([existingDropdown9M]),
+      openedDropdown: null
+    };
+    confirmationPredicatePreserved9M = isPowerOffTimerConfirmationAccepted(
+      acceptedConfirmation9M
+    ) === true
+      && isPowerOffTimerConfirmationAccepted({
+        ...acceptedConfirmation9M,
+        rawValue: '00:20'
+      }) === false
+      && isPowerOffTimerConfirmationAccepted({
+        ...acceptedConfirmation9M,
+        ariaExpanded: 'true'
+      }) === false
+      && isPowerOffTimerConfirmationAccepted({
+        ...acceptedConfirmation9M,
+        visibleDropdowns: [openedDropdown9M],
+        visibleBefore: new Set(),
+        openedDropdown: openedDropdown9M
+      }) === false;
     const transientSequence9M = [null, confirmedInput9M, confirmedInput9M];
     let transientIndex9M = 0;
     const waitForTransientTimer9M = new Function(
@@ -3537,7 +3570,11 @@ async function runTests() {
     // Windows Node through WSL interop can overshoot a nominal 1ms timer by
     // tens of milliseconds. Keep this behavior test about transient DOM
     // ambiguity, not host timer granularity.
-    transientTimerRecovered9M = await waitForTransientTimer9M('00:21', 250, 1, 5)
+    transientTimerRecovered9M = await waitForTransientTimer9M('00:21', {
+      timeoutMs: 250,
+      pollIntervalMs: 1,
+      stableWindowMs: 5
+    })
       === confirmedInput9M;
 
     const waitForAmbiguousTimer9M = new Function(
@@ -3548,7 +3585,11 @@ async function runTests() {
       ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 1))),
       () => []
     );
-    persistentAmbiguityRefused9M = await waitForAmbiguousTimer9M('00:21', 4, 1, 2)
+    persistentAmbiguityRefused9M = await waitForAmbiguousTimer9M('00:21', {
+      timeoutMs: 4,
+      pollIntervalMs: 1,
+      stableWindowMs: 2
+    })
       === null;
 
     const rolledBackInput9M = {
@@ -3568,7 +3609,11 @@ async function runTests() {
       ms => new Promise(resolve => setTimeout(resolve, Math.min(ms, 1))),
       () => []
     );
-    transientRollbackRefused9M = await waitForRollbackTimer9M('00:21', 20, 1, 1000)
+    transientRollbackRefused9M = await waitForRollbackTimer9M('00:21', {
+      timeoutMs: 20,
+      pollIntervalMs: 1,
+      stableWindowMs: 1000
+    })
       === null;
 
     const stillOpenDropdown9M = makeVisiblePickerDropdown9M([]);
@@ -3582,17 +3627,20 @@ async function runTests() {
     );
     persistentDropdownRefused9M = await waitForClosedDropdown9M(
       '00:21',
-      8,
-      1,
-      2,
-      new Set(),
-      stillOpenDropdown9M
+      {
+        timeoutMs: 8,
+        pollIntervalMs: 1,
+        stableWindowMs: 2,
+        visibleBefore: new Set(),
+        openedDropdown: stillOpenDropdown9M
+      }
     ) === null;
   }
   assertPass(transientTimerRecovered9M
       && persistentAmbiguityRefused9M
       && transientRollbackRefused9M
-      && persistentDropdownRefused9M,
+      && persistentDropdownRefused9M
+      && confirmationPredicatePreserved9M,
     '9M-7: picker 必须跨稳定窗口保持目标值且 dropdown 已关闭；短暂双树可恢复，回滚/歧义/持续展开均失败关闭');
   const verificationStartForReload = backgroundSource.indexOf('async function verifyPageTimerPersistence(');
   const verificationEndForReload = backgroundSource.indexOf('\n// 关机定时器设置失败时', verificationStartForReload);

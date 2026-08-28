@@ -493,13 +493,36 @@ async function waitForStablePowerOffTimerControl(
 
 // AntD 确认后 React 可能短暂同时保留旧树与新树。只在同一个唯一语义控件
 // 连续两次承载目标值时返回；持续歧义、空值或节点继续替换都会超时失败关闭。
+function isPowerOffTimerConfirmationAccepted({
+  input,
+  rawValue,
+  rawTitle,
+  expectedValue,
+  ariaExpanded,
+  visibleDropdowns,
+  visibleBefore,
+  openedDropdown
+}) {
+  const confirmedValue = rawValue || rawTitle;
+  const valuesConsistent = !rawValue || !rawTitle || rawValue === rawTitle;
+  const dropdownClosed = ariaExpanded !== 'true'
+    && (!openedDropdown || !visibleDropdowns.includes(openedDropdown))
+    && visibleDropdowns.every(dropdown => visibleBefore.has(dropdown));
+  return !!input
+    && valuesConsistent
+    && confirmedValue === expectedValue
+    && dropdownClosed;
+}
+
 async function waitForConfirmedPowerOffTimerInput(
   value,
-  timeoutMs = 3000,
-  pollIntervalMs = 50,
-  stableWindowMs = 500,
-  visibleBefore = new Set(),
-  openedDropdown = null
+  {
+    timeoutMs = 3000,
+    pollIntervalMs = 50,
+    stableWindowMs = 500,
+    visibleBefore = new Set(),
+    openedDropdown = null
+  } = {}
 ) {
   const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
   const interval = Math.max(1, Number(pollIntervalMs) || 1);
@@ -511,16 +534,17 @@ async function waitForConfirmedPowerOffTimerInput(
     const input = findPowerOffTimerInput();
     const rawValue = (input?.value || '').trim();
     const rawTitle = (input?.getAttribute('title') || '').trim();
-    const confirmedValue = rawValue || rawTitle;
-    const valuesConsistent = !rawValue || !rawTitle || rawValue === rawTitle;
     const visibleDropdowns = findVisiblePickerDropdowns();
-    const dropdownClosed = input?.getAttribute?.('aria-expanded') !== 'true'
-      && (!openedDropdown || !visibleDropdowns.includes(openedDropdown))
-      && visibleDropdowns.every(dropdown => visibleBefore.has(dropdown));
-    if (input
-        && valuesConsistent
-        && confirmedValue === value
-        && dropdownClosed) {
+    if (isPowerOffTimerConfirmationAccepted({
+      input,
+      rawValue,
+      rawTitle,
+      expectedValue: value,
+      ariaExpanded: input?.getAttribute?.('aria-expanded'),
+      visibleDropdowns,
+      visibleBefore,
+      openedDropdown
+    })) {
       if (input !== stableInput) {
         stableInput = input;
         stableSince = Date.now();
@@ -617,11 +641,13 @@ async function typeOnceIntoPickerInput(picker, input, value) {
 
   return !!(await waitForConfirmedPowerOffTimerInput(
     value,
-    3000,
-    50,
-    500,
-    visibleDropdownsBefore,
-    okResult.dropdown
+    {
+      timeoutMs: 3000,
+      pollIntervalMs: 50,
+      stableWindowMs: 500,
+      visibleBefore: visibleDropdownsBefore,
+      openedDropdown: okResult.dropdown
+    }
   ));
 }
 
