@@ -7932,6 +7932,150 @@ return { reapplySmartSensitivityNow };`
         && desyncedPopupState.controlMismatches.includes('timerPressed(expected=true, actual=false)')
         && pendingPopupState.controlSync === null,
       '14Q-P2: 横向溢出与控件失步分别定位到 expected/actual 字段；设置提交中跳过同步判定，避免瞬态误报');
+
+    const popupSelfDiagnosticsSource14 = extractSourceSection(
+      popupSource,
+      'function appendPopupSelfDiagnostics(',
+      "\n\nbtnDiagnose.addEventListener('click', async () => {",
+      'Popup self diagnostics reporter'
+    );
+    const appendPopupSelfDiagnostics14 = new Function(
+      `${popupSelfDiagnosticsSource14}; return appendPopupSelfDiagnostics;`
+    )();
+    const runPopupSelfDiagnostics14 = ({ snapshot, errors = [] }) => {
+      const trace = [];
+      const calls = [];
+      appendPopupSelfDiagnostics14({
+        add(ok, message, metadata) {
+          trace.push(`add:${message.split('|')[0]}`);
+          calls.push({ ok, message, metadata });
+        },
+        translate: (key, ...args) => `${key}|${args.join('|')}`
+      }, healthyPopupSchedule, {
+        readPageSnapshot() {
+          trace.push('read-page');
+          return snapshot;
+        },
+        evaluatePageState(page, schedule) {
+          trace.push('evaluate-page');
+          return evaluatePopupPageState(page, schedule);
+        },
+        readCapturedErrors() {
+          trace.push('read-errors');
+          return errors;
+        }
+      });
+      return { calls, trace };
+    };
+
+    const healthyPopupDiagnostics14 = runPopupSelfDiagnostics14({
+      snapshot: { ...healthyPopupSnapshot, keepaliveConnected: true }
+    });
+    assertPass(healthyPopupDiagnostics14.calls.length === 5
+        && healthyPopupDiagnostics14.calls.every(call => call.ok === true)
+        && healthyPopupDiagnostics14.calls.map(call => call.message.split('|')[0]).join(',') === (
+          'diagnosePopupDocumentReady,diagnosePopupLayoutOK,diagnosePopupControlsSync,'
+            + 'diagnosePopupKeepaliveOK,diagnosePopupRuntimeErrorsEmpty'
+        )
+        && healthyPopupDiagnostics14.calls[2].message === (
+          'diagnosePopupControlsSync|true|true|true|false'
+        )
+        && healthyPopupDiagnostics14.trace.join(',') === (
+          'read-page,evaluate-page,add:diagnosePopupDocumentReady,'
+            + 'add:diagnosePopupLayoutOK,add:diagnosePopupControlsSync,'
+            + 'add:diagnosePopupKeepaliveOK,read-errors,add:diagnosePopupRuntimeErrorsEmpty'
+        ),
+      '14Q-P3: Popup 自检健康路径固定按文档→布局→控件→保活→运行期错误输出，错误缓冲最后读取');
+
+    const failingPopupDiagnostics14 = runPopupSelfDiagnostics14({
+      snapshot: {
+        ...healthyPopupSnapshot,
+        readyState: 'loading',
+        visibilityState: 'hidden',
+        viewportWidth: 0,
+        viewportHeight: 0,
+        contentWidth: 0,
+        contentHeight: 0,
+        keepaliveConnected: false,
+        controls: { ...healthyPopupSnapshot.controls, timerPressed: false }
+      },
+      errors: [{ message: 'first' }, { message: 'latest-popup-error' }]
+    });
+    assertPass(failingPopupDiagnostics14.calls.every(call => call.ok === false)
+        && failingPopupDiagnostics14.calls.every(call => call.metadata?.level === 'warning')
+        && failingPopupDiagnostics14.calls.map(call => call.metadata?.code).join(',') === (
+          'POPUP-DOCUMENT-NOT-READY,POPUP-LAYOUT-UNMEASURABLE,POPUP-CONTROLS-DESYNC,'
+            + 'POPUP-KEEPALIVE-DISCONNECTED,POPUP-RUNTIME-ERROR'
+        )
+        && failingPopupDiagnostics14.calls.map(call => call.metadata?.priority).join(',') === (
+          '60,65,55,50,45'
+        )
+        && failingPopupDiagnostics14.calls.every(call => (
+          call.metadata?.action === 'diagnoseActionReopenPopup|'
+        ))
+        && failingPopupDiagnostics14.calls.every(call => (
+          call.metadata?.domain === 'diagnoseDomainPopup|'
+        ))
+        && failingPopupDiagnostics14.calls[4].message === (
+          'diagnosePopupRuntimeErrors|2|latest-popup-error'
+        ),
+      '14Q-P4: Popup 自检失败路径保持稳定 code、布局优先级、控件差异与最新错误正文');
+
+    const transientPopupDiagnostics14 = runPopupSelfDiagnostics14({
+      snapshot: {
+        ...healthyPopupSnapshot,
+        visibilityState: 'hidden',
+        contentWidth: 252,
+        updatePending: true,
+        keepaliveConnected: true,
+        controls: { ...healthyPopupSnapshot.controls, timerPressed: false }
+      }
+    });
+    assertPass(transientPopupDiagnostics14.calls.map(call => (
+      `${call.ok}:${call.metadata?.level || ''}:${call.metadata?.code || ''}`
+    )).join(',') === (
+      'false:warning:POPUP-DOCUMENT-HIDDEN,false:warning:POPUP-HORIZONTAL-OVERFLOW,'
+        + 'true:info:POPUP-UPDATE-IN-FLIGHT,true::,true::'
+    ),
+      '14Q-P5: Popup 隐藏、横向溢出与提交中分支保持原严重度；提交中不误报控件失步');
+
+    const popupErrorsFailure14 = new Error('captured-errors-unavailable');
+    const partialPopupCalls14 = [];
+    let popupErrorsThrown14 = null;
+    try {
+      appendPopupSelfDiagnostics14({
+        add(ok, message, metadata) {
+          partialPopupCalls14.push({ ok, message, metadata });
+        },
+        translate: (key, ...args) => `${key}|${args.join('|')}`
+      }, Object.freeze(healthyPopupSchedule), {
+        readPageSnapshot: () => Object.freeze({
+          ...healthyPopupSnapshot,
+          keepaliveConnected: true,
+          controls: Object.freeze({ ...healthyPopupSnapshot.controls })
+        }),
+        evaluatePageState: evaluatePopupPageState,
+        readCapturedErrors() { throw popupErrorsFailure14; }
+      });
+    } catch (error) {
+      popupErrorsThrown14 = error;
+    }
+    assertPass(popupErrorsThrown14 === popupErrorsFailure14
+        && partialPopupCalls14.length === 4
+        && partialPopupCalls14.map(call => call.message.split('|')[0]).join(',') === (
+          'diagnosePopupDocumentReady,diagnosePopupLayoutOK,diagnosePopupControlsSync,'
+            + 'diagnosePopupKeepaliveOK'
+        ),
+      '14Q-P6: 错误缓冲读取仍在前四组报告之后；异常原样冒泡给总诊断 catch');
+
+    const evidenceAppendAt14 = diagnoseHandlerSource.indexOf('appendPwmDiagnosticEvidence(');
+    const popupSelfAppendAt14 = diagnoseHandlerSource.indexOf('appendPopupSelfDiagnostics(');
+    const configAppendAt14 = diagnoseHandlerSource.indexOf("t('diagnoseEnabledPrefix')");
+    assertPass(evidenceAppendAt14 >= 0
+        && popupSelfAppendAt14 > evidenceAppendAt14
+        && configAppendAt14 > popupSelfAppendAt14
+        && countOccurrences(diagnoseHandlerSource, 'appendPopupSelfDiagnostics(') === 1,
+      '14Q-P7: 总报告继续按 PWM 证据→Popup 自检→配置状态编排，且自检只追加一次');
   }
 
   const diagnosticReportStart = popupSource.indexOf('const DIAGNOSTIC_LEVEL_SYMBOLS =');
@@ -8082,8 +8226,18 @@ return { reapplySmartSensitivityNow };`
       && diagnosticOrchestrationSource.includes("code: 'POPUP-CONTROLS-DESYNC'")
       && diagnosticOrchestrationSource.includes("code: 'POPUP-HORIZONTAL-OVERFLOW'")
       && diagnosticOrchestrationSource.includes("code: 'POPUP-KEEPALIVE-DISCONNECTED'")
-      && diagnosticOrchestrationSource.includes('readPopupPageSnapshot()')
-      && diagnosticOrchestrationSource.includes('ACPopupDiagnosticFallback?.getCapturedErrors?.()')
+      && diagnosticOrchestrationSource.includes(
+        'runtime.readPageSnapshot ?? readPopupPageSnapshot'
+      )
+      && diagnosticOrchestrationSource.includes(
+        'runtime.evaluatePageState ?? evaluatePopupPageState'
+      )
+      && diagnosticOrchestrationSource.includes(
+        'runtime.readCapturedErrors ?? (() => ('
+      )
+      && diagnosticOrchestrationSource.includes(
+        'globalThis.ACPopupDiagnosticFallback?.getCapturedErrors?.() || []'
+      )
       && popupSource.includes('globalThis.__AC_POPUP_DIAGNOSTICS_READY__ = true;')
       && diagnosticOrchestrationSource.includes('isDiagnosticPageTimerRequired(')
       && diagnosticOrchestrationSource.includes("code: 'WEATHER-SLOT-MISMATCH'")

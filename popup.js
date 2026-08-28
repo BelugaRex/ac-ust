@@ -1634,6 +1634,122 @@ function appendPwmDiagnosticEvidence(report, state, formatTime) {
   });
 }
 
+function appendPopupSelfDiagnostics(report, schedule, runtime = {}) {
+  const { add, translate } = report;
+  const readPageSnapshot = runtime.readPageSnapshot ?? readPopupPageSnapshot;
+  const evaluatePageState = runtime.evaluatePageState ?? evaluatePopupPageState;
+  const readCapturedErrors = runtime.readCapturedErrors ?? (() => (
+    globalThis.ACPopupDiagnosticFallback?.getCapturedErrors?.() || []
+  ));
+
+  // Popup 自身也属于诊断链路：报告当前文档、布局、控件投影和保活连接。
+  // 只记录结构化状态与尺寸，不读取 URL、DOM 文本、账号或冷气页面内容。
+  const popupPage = readPageSnapshot();
+  const popupState = evaluatePageState(popupPage, schedule);
+  const popupDocumentMessage = popupState.documentReady && popupState.documentVisible
+    ? translate(
+        'diagnosePopupDocumentReady',
+        popupPage.readyState,
+        popupPage.visibilityState,
+        popupPage.language
+      )
+    : translate(
+        'diagnosePopupDocumentState',
+        popupPage.readyState,
+        popupPage.visibilityState,
+        popupPage.language
+      );
+  add(popupState.documentReady && popupState.documentVisible, popupDocumentMessage,
+    popupState.documentReady && popupState.documentVisible ? {} : {
+      level: 'warning',
+      code: popupState.documentReady ? 'POPUP-DOCUMENT-HIDDEN' : 'POPUP-DOCUMENT-NOT-READY',
+      domain: translate('diagnoseDomainPopup'),
+      action: translate('diagnoseActionReopenPopup'),
+      priority: 60
+    });
+
+  const popupSizeArgs = [
+    popupPage.viewportWidth,
+    popupPage.viewportHeight,
+    popupPage.contentWidth,
+    popupPage.contentHeight
+  ];
+  if (!popupState.dimensionsValid) {
+    add(false, translate('diagnosePopupLayoutUnmeasurable', ...popupSizeArgs), {
+      level: 'warning',
+      code: 'POPUP-LAYOUT-UNMEASURABLE',
+      domain: translate('diagnoseDomainPopup'),
+      action: translate('diagnoseActionReopenPopup'),
+      priority: 65
+    });
+  } else if (popupState.horizontalOverflow) {
+    add(false, translate('diagnosePopupLayoutOverflow', ...popupSizeArgs), {
+      level: 'warning',
+      code: 'POPUP-HORIZONTAL-OVERFLOW',
+      domain: translate('diagnoseDomainPopup'),
+      action: translate('diagnoseActionReopenPopup'),
+      priority: 65
+    });
+  } else {
+    add(true, translate('diagnosePopupLayoutOK', ...popupSizeArgs));
+  }
+
+  if (popupState.controlSync === null) {
+    add(true, translate('diagnosePopupControlsPending'), {
+      level: 'info',
+      code: 'POPUP-UPDATE-IN-FLIGHT',
+      domain: translate('diagnoseDomainPopup')
+    });
+  } else if (popupState.controlSync) {
+    add(true, translate(
+      'diagnosePopupControlsSync',
+      popupState.expected.automation,
+      popupState.expected.activeHours,
+      popupState.expected.timer,
+      popupState.expected.smart
+    ));
+  } else {
+    add(false, translate(
+      'diagnosePopupControlsDesync',
+      popupState.controlMismatches.join(' | ')
+    ), {
+      level: 'warning',
+      code: 'POPUP-CONTROLS-DESYNC',
+      domain: translate('diagnoseDomainPopup'),
+      action: translate('diagnoseActionReopenPopup'),
+      priority: 55
+    });
+  }
+
+  add(popupPage.keepaliveConnected, popupPage.keepaliveConnected
+    ? translate('diagnosePopupKeepaliveOK')
+    : translate('diagnosePopupKeepaliveDisconnected'), popupPage.keepaliveConnected ? {} : {
+    level: 'warning',
+    code: 'POPUP-KEEPALIVE-DISCONNECTED',
+    domain: translate('diagnoseDomainPopup'),
+    action: translate('diagnoseActionReopenPopup'),
+    priority: 50
+  });
+
+  const capturedPopupErrors = readCapturedErrors();
+  if (capturedPopupErrors.length) {
+    const latestPopupError = capturedPopupErrors[capturedPopupErrors.length - 1];
+    add(false, translate(
+      'diagnosePopupRuntimeErrors',
+      capturedPopupErrors.length,
+      latestPopupError.message
+    ), {
+      level: 'warning',
+      code: 'POPUP-RUNTIME-ERROR',
+      domain: translate('diagnoseDomainPopup'),
+      action: translate('diagnoseActionReopenPopup'),
+      priority: 45
+    });
+  } else {
+    add(true, translate('diagnosePopupRuntimeErrorsEmpty'));
+  }
+}
+
 btnDiagnose.addEventListener('click', async () => {
   diagnoseResult.style.display = 'block';
   document.getElementById('diagContent').textContent = t('diagnoseInProgress');
@@ -1705,98 +1821,7 @@ btnDiagnose.addEventListener('click', async () => {
     const nowMs = Date.now();
     appendPwmDiagnosticEvidence({ add, translate: t }, diagnosticState, fmt);
 
-    // Popup 自身也属于诊断链路：报告当前文档、布局、控件投影和保活连接。
-    // 只记录结构化状态与尺寸，不读取 URL、DOM 文本、账号或冷气页面内容。
-    const popupPage = readPopupPageSnapshot();
-    const popupState = evaluatePopupPageState(popupPage, s);
-    const popupDocumentMessage = popupState.documentReady && popupState.documentVisible
-      ? t('diagnosePopupDocumentReady', popupPage.readyState, popupPage.visibilityState, popupPage.language)
-      : t('diagnosePopupDocumentState', popupPage.readyState, popupPage.visibilityState, popupPage.language);
-    add(popupState.documentReady && popupState.documentVisible, popupDocumentMessage,
-      popupState.documentReady && popupState.documentVisible ? {} : {
-        level: 'warning',
-        code: popupState.documentReady ? 'POPUP-DOCUMENT-HIDDEN' : 'POPUP-DOCUMENT-NOT-READY',
-        domain: t('diagnoseDomainPopup'),
-        action: t('diagnoseActionReopenPopup'),
-        priority: 60
-      });
-
-    const popupSizeArgs = [
-      popupPage.viewportWidth,
-      popupPage.viewportHeight,
-      popupPage.contentWidth,
-      popupPage.contentHeight
-    ];
-    if (!popupState.dimensionsValid) {
-      add(false, t('diagnosePopupLayoutUnmeasurable', ...popupSizeArgs), {
-        level: 'warning',
-        code: 'POPUP-LAYOUT-UNMEASURABLE',
-        domain: t('diagnoseDomainPopup'),
-        action: t('diagnoseActionReopenPopup'),
-        priority: 65
-      });
-    } else if (popupState.horizontalOverflow) {
-      add(false, t('diagnosePopupLayoutOverflow', ...popupSizeArgs), {
-        level: 'warning',
-        code: 'POPUP-HORIZONTAL-OVERFLOW',
-        domain: t('diagnoseDomainPopup'),
-        action: t('diagnoseActionReopenPopup'),
-        priority: 65
-      });
-    } else {
-      add(true, t('diagnosePopupLayoutOK', ...popupSizeArgs));
-    }
-
-    if (popupState.controlSync === null) {
-      add(true, t('diagnosePopupControlsPending'), {
-        level: 'info',
-        code: 'POPUP-UPDATE-IN-FLIGHT',
-        domain: t('diagnoseDomainPopup')
-      });
-    } else if (popupState.controlSync) {
-      add(true, t(
-        'diagnosePopupControlsSync',
-        popupState.expected.automation,
-        popupState.expected.activeHours,
-        popupState.expected.timer,
-        popupState.expected.smart
-      ));
-    } else {
-      add(false, t(
-        'diagnosePopupControlsDesync',
-        popupState.controlMismatches.join(' | ')
-      ), {
-        level: 'warning',
-        code: 'POPUP-CONTROLS-DESYNC',
-        domain: t('diagnoseDomainPopup'),
-        action: t('diagnoseActionReopenPopup'),
-        priority: 55
-      });
-    }
-
-    add(popupPage.keepaliveConnected, popupPage.keepaliveConnected
-      ? t('diagnosePopupKeepaliveOK')
-      : t('diagnosePopupKeepaliveDisconnected'), popupPage.keepaliveConnected ? {} : {
-      level: 'warning',
-      code: 'POPUP-KEEPALIVE-DISCONNECTED',
-      domain: t('diagnoseDomainPopup'),
-      action: t('diagnoseActionReopenPopup'),
-      priority: 50
-    });
-
-    const capturedPopupErrors = globalThis.ACPopupDiagnosticFallback?.getCapturedErrors?.() || [];
-    if (capturedPopupErrors.length) {
-      const latestPopupError = capturedPopupErrors[capturedPopupErrors.length - 1];
-      add(false, t('diagnosePopupRuntimeErrors', capturedPopupErrors.length, latestPopupError.message), {
-        level: 'warning',
-        code: 'POPUP-RUNTIME-ERROR',
-        domain: t('diagnoseDomainPopup'),
-        action: t('diagnoseActionReopenPopup'),
-        priority: 45
-      });
-    } else {
-      add(true, t('diagnosePopupRuntimeErrorsEmpty'));
-    }
+    appendPopupSelfDiagnostics({ add, translate: t }, s);
 
     add(true, t('diagnoseEnabledPrefix') + s.enabled + ' (' + (s.enabled ? t('diagnoseOn') : t('diagnoseOff')) + ')',
       automationEnabled ? {} : {
