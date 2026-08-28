@@ -7311,7 +7311,7 @@ return { reapplySmartSensitivityNow };`
       && popupSource.includes('pwmStepInFlight: evidence.usable')
       && popupSource.includes("code: 'SCHED-PWM-IN-FLIGHT'")
       && popupSource.includes('if (pwmStepInFlight && !memLive)')
-      && /if \(s\.clockMode === false && s\.enabled[\s\S]{0,160}!pwmStepInFlight[\s\S]{0,80}!effectiveNextTriggerAt/.test(popupSource)
+      && /if \(schedule\.clockMode === false && schedule\.enabled[\s\S]{0,180}!pwmStepInFlight[\s\S]{0,100}!effectiveNextTriggerAt/.test(popupSource)
       && countOccurrences(popupSource, "t('diagnosePwmInFlight')") === 1,
     '14G-1B: ac-pwm 已触发且步骤仍在执行时，只标记一次处理中，不误报触发时间／闹钟缺失或三方失步');
   assertPass(popupSource.includes("diagnoseSmartWeatherAlarm")
@@ -7936,7 +7936,7 @@ return { reapplySmartSensitivityNow };`
     const popupSelfDiagnosticsSource14 = extractSourceSection(
       popupSource,
       'function appendPopupSelfDiagnostics(',
-      "\n\nbtnDiagnose.addEventListener('click', async () => {",
+      '\n\nfunction appendScheduleConfigurationDiagnostics(',
       'Popup self diagnostics reporter'
     );
     const appendPopupSelfDiagnostics14 = new Function(
@@ -8070,13 +8070,156 @@ return { reapplySmartSensitivityNow };`
 
     const evidenceAppendAt14 = diagnoseHandlerSource.indexOf('appendPwmDiagnosticEvidence(');
     const popupSelfAppendAt14 = diagnoseHandlerSource.indexOf('appendPopupSelfDiagnostics(');
-    const configAppendAt14 = diagnoseHandlerSource.indexOf("t('diagnoseEnabledPrefix')");
+    const configAppendAt14 = diagnoseHandlerSource.indexOf(
+      'appendScheduleConfigurationDiagnostics('
+    );
+    const alarmsReadAt14 = diagnoseHandlerSource.indexOf('chrome.alarms.getAll()');
     assertPass(evidenceAppendAt14 >= 0
         && popupSelfAppendAt14 > evidenceAppendAt14
         && configAppendAt14 > popupSelfAppendAt14
-        && countOccurrences(diagnoseHandlerSource, 'appendPopupSelfDiagnostics(') === 1,
-      '14Q-P7: 总报告继续按 PWM 证据→Popup 自检→配置状态编排，且自检只追加一次');
+        && alarmsReadAt14 > configAppendAt14
+        && countOccurrences(diagnoseHandlerSource, 'appendPopupSelfDiagnostics(') === 1
+        && countOccurrences(
+          diagnoseHandlerSource,
+          'appendScheduleConfigurationDiagnostics('
+        ) === 1
+        && /appendScheduleConfigurationDiagnostics\(\s*\{ add, translate: t \},\s*diagnosticState,\s*storedSchedule\.nextTriggerAt\s*\);/.test(
+          diagnoseHandlerSource
+        ),
+      '14Q-P7: 总报告继续按 PWM 证据→Popup 自检→配置状态→alarm 读取编排，两个 helper 均只追加一次');
   }
+
+  const scheduleConfigDiagnosticsSource14 = extractSourceSection(
+    popupSource,
+    'function appendScheduleConfigurationDiagnostics(',
+    "\n\nbtnDiagnose.addEventListener('click', async () => {",
+    'Popup schedule configuration diagnostics reporter'
+  );
+  const appendScheduleConfigurationDiagnostics14 = new Function(
+    `'use strict'; ${scheduleConfigDiagnosticsSource14};`
+      + ' return appendScheduleConfigurationDiagnostics;'
+  )();
+  const runScheduleConfigurationDiagnostics14 = (state, storedNextTriggerAt) => {
+    const calls = [];
+    const result = appendScheduleConfigurationDiagnostics14({
+      add(ok, message, metadata) { calls.push({ ok, message, metadata }); },
+      translate: (key, ...args) => `${key}|${args.join('|')}`
+    }, state, storedNextTriggerAt);
+    return { calls, result };
+  };
+  const triggerAt14 = 1_700_000_000_000;
+  const healthyScheduleConfigState14 = Object.freeze({
+    schedule: Object.freeze({ enabled: true, mode: 'pwm', clockMode: false }),
+    automationEnabled: true,
+    automationPausedByActiveHours: false,
+    pwmStepInFlight: false,
+    effectiveNextTriggerAt: triggerAt14,
+    pwmTriggerRepaired: false
+  });
+  const healthyScheduleConfig14 = runScheduleConfigurationDiagnostics14(
+    healthyScheduleConfigState14,
+    triggerAt14
+  );
+  assertPass(healthyScheduleConfig14.result === undefined
+      && healthyScheduleConfig14.calls.length === 4
+      && healthyScheduleConfig14.calls.every(call => call.ok === true)
+      && healthyScheduleConfig14.calls.map(call => call.message.split('|')[0]).join(',') === (
+        'diagnoseEnabledPrefix,diagnoseMode,diagnoseClockMode,diagnoseTriggerTime'
+      )
+      && !healthyScheduleConfig14.calls[3].message.includes('diagnoseBgWriteback')
+      && Object.keys(healthyScheduleConfig14.calls[3].metadata).length === 0
+      && !/\bawait\b|\bchrome\b/.test(scheduleConfigDiagnosticsSource14),
+    '14Q-P8: 配置健康路径固定 enabled→mode→clock→trigger 顺序，helper 同步且不接触 chrome');
+
+  const missingTriggerConfig14 = runScheduleConfigurationDiagnostics14(Object.freeze({
+    ...healthyScheduleConfigState14,
+    effectiveNextTriggerAt: 0
+  }), 0);
+  const pausedTriggerConfig14 = runScheduleConfigurationDiagnostics14(Object.freeze({
+    ...healthyScheduleConfigState14,
+    automationPausedByActiveHours: true
+  }), triggerAt14);
+  const inFlightTriggerConfig14 = runScheduleConfigurationDiagnostics14(Object.freeze({
+    ...healthyScheduleConfigState14,
+    pwmStepInFlight: true
+  }), triggerAt14);
+  const repairedMissingTriggerConfig14 = runScheduleConfigurationDiagnostics14(Object.freeze({
+    ...healthyScheduleConfigState14,
+    effectiveNextTriggerAt: 0,
+    pwmTriggerRepaired: true
+  }), 0);
+  const suppressMissingTrigger14 = patch => runScheduleConfigurationDiagnostics14(
+    Object.freeze({
+      ...healthyScheduleConfigState14,
+      effectiveNextTriggerAt: 0,
+      ...patch,
+      schedule: Object.freeze({
+        ...healthyScheduleConfigState14.schedule,
+        ...(patch.schedule || {})
+      })
+    }),
+    0
+  ).calls;
+  assertPass(missingTriggerConfig14.calls.length === 4
+      && missingTriggerConfig14.calls[3].ok === false
+      && missingTriggerConfig14.calls[3].metadata.code === 'SCHED-TRIGGER-MISSING'
+      && missingTriggerConfig14.calls[3].metadata.domain === 'diagnoseDomainScheduler|'
+      && missingTriggerConfig14.calls[3].metadata.action === 'diagnoseActionReloadExtension|'
+      && missingTriggerConfig14.calls[3].metadata.priority === 10
+      && pausedTriggerConfig14.calls.length === 4
+      && pausedTriggerConfig14.calls[3].ok === true
+      && pausedTriggerConfig14.calls[3].message.startsWith('diagnoseTriggerTime|')
+      && inFlightTriggerConfig14.calls.length === 4
+      && inFlightTriggerConfig14.calls[3].ok === true
+      && inFlightTriggerConfig14.calls[3].message.startsWith('diagnoseTriggerTime|')
+      && repairedMissingTriggerConfig14.calls[3].ok === false
+      && repairedMissingTriggerConfig14.calls[3].metadata.code === 'SCHED-TRIGGER-MISSING'
+      && suppressMissingTrigger14({ automationPausedByActiveHours: true }).length === 3
+      && suppressMissingTrigger14({ pwmStepInFlight: true }).length === 3
+      && suppressMissingTrigger14({ schedule: { enabled: false } }).length === 3
+      && suppressMissingTrigger14({ schedule: { clockMode: true } }).length === 3,
+    '14Q-P9: missing-trigger 只在已启用 interval、非暂停且无 in-flight 时出现，其余门禁均抑制');
+
+  const repairedTriggerConfig14 = runScheduleConfigurationDiagnostics14(Object.freeze({
+    ...healthyScheduleConfigState14,
+    pwmTriggerRepaired: true
+  }), triggerAt14);
+  const mismatchedStoredTriggerConfig14 = runScheduleConfigurationDiagnostics14(
+    healthyScheduleConfigState14,
+    triggerAt14 - 1
+  );
+  const differentlyTypedStoredTriggerConfig14 = runScheduleConfigurationDiagnostics14(
+    healthyScheduleConfigState14,
+    String(triggerAt14)
+  );
+  const truthyEnabledConfig14 = runScheduleConfigurationDiagnostics14(Object.freeze({
+    ...healthyScheduleConfigState14,
+    schedule: Object.freeze({ enabled: 'true', mode: 'pwm', clockMode: false }),
+    automationEnabled: false,
+    effectiveNextTriggerAt: 0
+  }), 0);
+  const missingFieldsConfig14 = runScheduleConfigurationDiagnostics14(Object.freeze({
+    ...healthyScheduleConfigState14,
+    schedule: Object.freeze({ enabled: true, mode: '', clockMode: undefined }),
+    effectiveNextTriggerAt: 0
+  }), 0);
+  assertPass(repairedTriggerConfig14.calls[3].message.includes('diagnoseBgWriteback')
+      && repairedTriggerConfig14.calls[3].metadata.level === 'repaired'
+      && repairedTriggerConfig14.calls[3].metadata.code === 'SCHED-TRIGGER-REPAIRED'
+      && mismatchedStoredTriggerConfig14.calls[3].message.includes('diagnoseBgWriteback')
+      && Object.keys(mismatchedStoredTriggerConfig14.calls[3].metadata).length === 0
+      && differentlyTypedStoredTriggerConfig14.calls[3].message.includes('diagnoseBgWriteback')
+      && Object.keys(differentlyTypedStoredTriggerConfig14.calls[3].metadata).length === 0
+      && truthyEnabledConfig14.calls.length === 4
+      && truthyEnabledConfig14.calls[0].message.includes('diagnoseOn')
+      && truthyEnabledConfig14.calls[0].metadata.code === 'CFG-AUTOMATION-OFF'
+      && truthyEnabledConfig14.calls[3].metadata.code === 'SCHED-TRIGGER-MISSING'
+      && missingFieldsConfig14.calls.length === 3
+      && missingFieldsConfig14.calls[1].ok === false
+      && missingFieldsConfig14.calls[1].metadata.code === 'CFG-MODE-MISSING'
+      && missingFieldsConfig14.calls[2].ok === false
+      && missingFieldsConfig14.calls[2].metadata.code === 'CFG-CLOCK-MISSING',
+    '14Q-P10: trigger repair、严格 storage 失配与 truthy enabled 保持旧语义；缺 mode/clock 各报稳定 code');
 
   const diagnosticReportStart = popupSource.indexOf('const DIAGNOSTIC_LEVEL_SYMBOLS =');
   const diagnosticReportEnd = popupSource.indexOf(
@@ -16187,7 +16330,7 @@ ${commitDurableSource16}
   assertPass(diagnosticOrchestrationSource.includes(
       'const automationPausedByActiveHours = schedule._automationPausedByActiveHours === true'
     )
-      && diagnoseHandlerSource.includes('&& !automationPausedByActiveHours')
+      && diagnosticOrchestrationSource.includes('&& !automationPausedByActiveHours')
       && diagnoseHandlerSource.includes('if (automationPausedByActiveHours)')
       && diagnoseHandlerSource.includes("t('diagnoseAutomationPaused')")
       && zhCN.diagnoseAutomationPaused?.message

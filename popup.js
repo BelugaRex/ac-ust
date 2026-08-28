@@ -1750,6 +1750,65 @@ function appendPopupSelfDiagnostics(report, schedule, runtime = {}) {
   }
 }
 
+function appendScheduleConfigurationDiagnostics(report, state, storedNextTriggerAt) {
+  const { add, translate } = report;
+  const {
+    schedule,
+    automationPausedByActiveHours,
+    automationEnabled,
+    pwmStepInFlight,
+    effectiveNextTriggerAt,
+    pwmTriggerRepaired
+  } = state;
+
+  add(true, translate('diagnoseEnabledPrefix') + schedule.enabled + ' ('
+    + (schedule.enabled ? translate('diagnoseOn') : translate('diagnoseOff')) + ')',
+    automationEnabled ? {} : {
+      level: 'info',
+      code: 'CFG-AUTOMATION-OFF',
+      domain: translate('diagnoseDomainConfig')
+    });
+  add(!!schedule.mode, translate('diagnoseMode') + (schedule.mode || '?'), {
+    code: 'CFG-MODE-MISSING',
+    domain: translate('diagnoseDomainConfig'),
+    action: translate('diagnoseActionReloadExtension'),
+    priority: 15
+  });
+  add(schedule.clockMode !== undefined, translate('diagnoseClockMode')
+    + (schedule.clockMode === undefined
+      ? '?'
+      : (schedule.clockMode ? translate('diagnoseClock') : translate('diagnoseInterval'))), {
+    code: 'CFG-CLOCK-MISSING',
+    domain: translate('diagnoseDomainConfig'),
+    action: translate('diagnoseActionReloadExtension'),
+    priority: 15
+  });
+  if (schedule.clockMode === false && schedule.enabled
+      && !automationPausedByActiveHours
+      && !pwmStepInFlight
+      && !effectiveNextTriggerAt) {
+    add(false, translate('diagnoseMissingTrigger'), {
+      code: 'SCHED-TRIGGER-MISSING',
+      domain: translate('diagnoseDomainScheduler'),
+      action: translate('diagnoseActionReloadExtension'),
+      priority: 10
+    });
+  } else if (effectiveNextTriggerAt) {
+    const repairedLabel = pwmTriggerRepaired
+      || storedNextTriggerAt !== effectiveNextTriggerAt
+      ? translate('diagnoseBgWriteback')
+      : '';
+    add(true, translate('diagnoseTriggerTime')
+      + new Date(effectiveNextTriggerAt).toLocaleTimeString()
+      + repairedLabel, pwmTriggerRepaired ? {
+      level: 'repaired',
+      code: 'SCHED-TRIGGER-REPAIRED',
+      domain: translate('diagnoseDomainScheduler'),
+      priority: 20
+    } : {});
+  }
+}
+
 btnDiagnose.addEventListener('click', async () => {
   diagnoseResult.style.display = 'block';
   document.getElementById('diagContent').textContent = t('diagnoseInProgress');
@@ -1822,50 +1881,11 @@ btnDiagnose.addEventListener('click', async () => {
     appendPwmDiagnosticEvidence({ add, translate: t }, diagnosticState, fmt);
 
     appendPopupSelfDiagnostics({ add, translate: t }, s);
-
-    add(true, t('diagnoseEnabledPrefix') + s.enabled + ' (' + (s.enabled ? t('diagnoseOn') : t('diagnoseOff')) + ')',
-      automationEnabled ? {} : {
-        level: 'info',
-        code: 'CFG-AUTOMATION-OFF',
-        domain: t('diagnoseDomainConfig')
-      });
-    add(!!s.mode, t('diagnoseMode') + (s.mode || '?'), {
-      code: 'CFG-MODE-MISSING',
-      domain: t('diagnoseDomainConfig'),
-      action: t('diagnoseActionReloadExtension'),
-      priority: 15
-    });
-    add(s.clockMode !== undefined, t('diagnoseClockMode') + (s.clockMode === undefined
-      ? '?'
-      : (s.clockMode ? t('diagnoseClock') : t('diagnoseInterval'))), {
-      code: 'CFG-CLOCK-MISSING',
-      domain: t('diagnoseDomainConfig'),
-      action: t('diagnoseActionReloadExtension'),
-      priority: 15
-    });
-    if (s.clockMode === false && s.enabled
-      && !automationPausedByActiveHours
-      && !pwmStepInFlight
-      && !effectiveNextTriggerAt) {
-      add(false, t('diagnoseMissingTrigger'), {
-        code: 'SCHED-TRIGGER-MISSING',
-        domain: t('diagnoseDomainScheduler'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 10
-      });
-    } else if (effectiveNextTriggerAt) {
-      const repairedLabel = pwmTriggerRepaired
-        || storedSchedule.nextTriggerAt !== effectiveNextTriggerAt
-        ? t('diagnoseBgWriteback')
-        : '';
-      add(true, t('diagnoseTriggerTime') + new Date(effectiveNextTriggerAt).toLocaleTimeString() + repairedLabel,
-        pwmTriggerRepaired ? {
-          level: 'repaired',
-          code: 'SCHED-TRIGGER-REPAIRED',
-          domain: t('diagnoseDomainScheduler'),
-          priority: 20
-        } : {});
-    }
+    appendScheduleConfigurationDiagnostics(
+      { add, translate: t },
+      diagnosticState,
+      storedSchedule.nextTriggerAt
+    );
 
     // 2. 检查闹钟 — 运行闹钟只允许后台自愈，确保创建前后都复核运行时段门禁。
     let alarms = await chrome.alarms.getAll();
