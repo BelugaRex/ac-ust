@@ -23,6 +23,14 @@ const COMFORT_START_RETRY_MS = 60_000;
 const COMFORT_START_END_ALARM = 'ac-comfort-end';
 const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
 const STORAGE_KEY = 'ac_schedule';
+const ACTIVE_BOUNDARY_RETRY_KEY = 'ac_active_boundary_retry_at';
+const ACTIVE_BOUNDARY_RETRY_MODE_KEY = 'ac_active_boundary_retry_mode';
+const ACTIVE_BOUNDARY_RETRY_BOUNDARY_KEY = 'ac_active_boundary_retry_boundary_at';
+const ACTIVE_BOUNDARY_RETRY_MODE_ACTION = 'action';
+const ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE = 'schedule';
+const ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM = 'ac-active-boundary-schedule-retry';
+const ACTIVE_BOUNDARY_OWNER_READ_RETRY_ALARM = 'ac-active-boundary-owner-read-retry';
+const ACTIVE_BOUNDARY_RETRY_MS = 60_000;
 const INSTALL_BOOTSTRAP_KEY = 'ac_install_bootstrap_complete';
 const DIAGNOSTIC_LOG_KEY = 'ac_diagnostic_log';
 const DIAGNOSTIC_LOG_MAX_ENTRIES = 50;
@@ -77,9 +85,17 @@ self.addEventListener('unhandledrejection', (event) => {
 // 跨设备同步：瘦化版 schedule 写到 chrome.storage.sync。详见 sync-helpers.js 注释。
 // 同步对象在 sync 区存储键名，由 background.js 独立维护（与 local.ac_schedule 解耦）。
 // lastSyncedAt 用于自回环抑制——Chrome 会把"自己写的 sync"也回灌回本地 onChanged，
-// 通过 syncedAt 对比即可识别并静默跳过；同时承担 last-writer-wins 的本地参照。
+// 通过 syncedAt 对比即可识别并静默跳过；本机 watermark 令该边界跨 SW/浏览器
+// 重启保持，避免自己的旧安全哨兵回滚后来已提交的正常 phase。
 const SYNC_KEY = 'ac_schedule_sync';
+const SYNC_WATERMARK_KEY = 'ac_schedule_sync_watermark';
+const SYNC_PENDING_PUBLISH_KEY = 'ac_schedule_sync_publish_pending';
 let lastSyncedAt = 0;
+let syncWatermarkLoaded = false;
+let syncWriteChain = Promise.resolve();
+let syncWatermarkWriteChain = Promise.resolve();
+let syncPublishGeneration = 0;
+let syncWriteOperationsInFlight = 0;
 
 let schedule = {
   enabled: false,
@@ -89,6 +105,7 @@ let schedule = {
   offMinutes: 60,   // 间隔模式下默认关分钟数
   pwmState: 'off',  // 下一次闹钟触发后要切换到的目标状态
   nextTriggerAt: 0,       // 当前阶段的绝对触发时间戳 (ms) — 传统间隔模式唯一真相源
+  smartClockPlannedAt: 0, // 当前绝对时钟最初生成时刻；重建 live alarm 时保持不变
   alarmCreatedAt: 0,      // 闹钟创建时的时间戳 (ms) — 时钟模式不使用
   alarmDelayMinutes: 0,   // 闹钟设定的延迟 (分钟) — 时钟模式不使用
   pageTimerMinutes: null,
@@ -111,6 +128,15 @@ let pwmStepRunningRevision = null;
 let pwmRuntimeRevision = 0;
 let automaticDisableAdmissionEpoch = 0;
 let automaticOnAdmissionBlocked = false;
+let syncPhaseAdoptionAdmissionEpoch = 0;
+let syncPhaseAdoptionAdmissionOwner = 0;
+let activeBoundaryDeferredForPhaseAdoption = false;
+let activeBoundaryOwnerReadDeferred = false;
+let activeBoundaryMutationChain = Promise.resolve();
+let activeBoundaryCompletionGeneration = 0;
+let pwmExecutionWithRecoveryCount = 0;
+let deferredRepairAfterPwmOptions = null;
+let scheduleRepairEpoch = 0;
 let scheduleLoadBlockedRevision = null;
 let lastPwmStepAt = 0;  // A4: 看门狗 cooldown 追踪
 let acToggleInFlight = null;
@@ -146,6 +172,135 @@ function claimPwmStepOwnership() {
   pwmStepRunning = true;
   pwmStepRunningRevision = automationRevision;
   return automationRevision;
+}
+
+function claimSyncPhaseAdoptionAdmission() {
+  if (syncPhaseAdoptionAdmissionOwner > 0) return 0;
+  const admissionEpoch = ++syncPhaseAdoptionAdmissionEpoch;
+  syncPhaseAdoptionAdmissionOwner = admissionEpoch;
+  return admissionEpoch;
+}
+
+function releaseSyncPhaseAdoptionAdmission(admissionEpoch) {
+  if (syncPhaseAdoptionAdmissionOwner !== admissionEpoch) return false;
+  syncPhaseAdoptionAdmissionOwner = 0;
+  return true;
+}
+
+function isSyncPhaseAdoptionAdmissionBlocked() {
+  return syncPhaseAdoptionAdmissionOwner > 0;
+}
+
+function isSyncPhaseAdoptionAdmissionBlockedFor(admissionEpoch = 0) {
+  return syncPhaseAdoptionAdmissionOwner > 0
+    && syncPhaseAdoptionAdmissionOwner !== Number(admissionEpoch);
+}
+
+function mergeScheduleRepairOptions(previous = {}, options = {}) {
+  const previousOptions = previous && typeof previous === 'object'
+    ? previous
+    : {};
+  const incomingOptions = options && typeof options === 'object'
+    ? options
+    : {};
+  const previousBoundaryAt = Number(previousOptions.smartOnExpectedBoundaryAt) || 0;
+  const incomingBoundaryAt = Number(incomingOptions.smartOnExpectedBoundaryAt) || 0;
+  const incomingRevoke = incomingOptions.revokeInvalidSmartOnClock === true;
+  const previousRevoke = previousOptions.revokeInvalidSmartOnClock === true;
+  return {
+    ...previousOptions,
+    ...incomingOptions,
+    // 后到的普通 repair 不得擦掉已从错误智能钟提取出的可信半点。
+    smartOnExpectedBoundaryAt: incomingBoundaryAt || previousBoundaryAt,
+    revokeInvalidSmartOnClock: incomingRevoke || previousRevoke,
+    revokeOwnerRevision: incomingRevoke
+        && Number.isSafeInteger(incomingOptions.revokeOwnerRevision)
+      ? incomingOptions.revokeOwnerRevision
+      : previousOptions.revokeOwnerRevision,
+    preserveRevokeAcrossSupersededRepair:
+      incomingOptions.preserveRevokeAcrossSupersededRepair === true
+      || previousOptions.preserveRevokeAcrossSupersededRepair === true,
+    discardStaleRevoke: incomingOptions.discardStaleRevoke === true
+      || previousOptions.discardStaleRevoke === true
+  };
+}
+
+function queueDeferredScheduleRepair(options = {}) {
+  deferredRepairAfterPwmOptions = {
+    ...mergeScheduleRepairOptions(deferredRepairAfterPwmOptions, options),
+    queuedAutomationRevision: pwmRuntimeRevision
+  };
+  return deferredRepairAfterPwmOptions;
+}
+
+function normalizeDeferredScheduleRepairOptions(queued = {}) {
+  const options = { ...queued };
+  delete options.queuedAutomationRevision;
+  if (options.revokeInvalidSmartOnClock === true) {
+    const revokeOwnerRevision = Number(options.revokeOwnerRevision);
+    if (!Number.isSafeInteger(revokeOwnerRevision)
+        || revokeOwnerRevision !== pwmRuntimeRevision) {
+      // invalid-clock 的判断只能撤销同一 automation revision 的钟。若队列
+      // 等待期间 sync/page timer 已接管新 phase，旧判断随 owner 一起失效。
+      options.revokeInvalidSmartOnClock = false;
+      options.smartOnExpectedBoundaryAt = 0;
+      options.discardStaleRevoke = true;
+      return options;
+    }
+  }
+  const expectedBoundaryAt = Number(options.smartOnExpectedBoundaryAt) || 0;
+  if (expectedBoundaryAt <= 0) return options;
+
+  const retryContext = getActiveSmartOnPwmRetryContext(
+    schedule,
+    Number(schedule.nextTriggerAt) || 0
+  );
+  const currentClockAssessment = classifySmartOnClock(
+    schedule,
+    Number(schedule.nextTriggerAt) || 0,
+    {
+      now: Date.now(),
+      plannedAt: Number(schedule.smartClockPlannedAt)
+        || Number(schedule.alarmCreatedAt)
+        || 0,
+      nextAction: schedule.pwmState,
+      toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+      requirePlannedAt: true
+    }
+  );
+  const stillOwned = Number(schedule.smartOnBoundaryAt) === expectedBoundaryAt
+    || Number(retryContext.boundaryAt) === expectedBoundaryAt
+    || Number(currentClockAssessment?.expectedAt) === expectedBoundaryAt;
+  if (options.revokeInvalidSmartOnClock === true
+      && (!currentClockAssessment.applicable
+        || currentClockAssessment.valid)
+      && options.preserveRevokeAcrossSupersededRepair !== true) {
+    // 同一 revision 的 PWM executor 可能在 repair 排队期间已经提交合法新钟，
+    // 或已推进成下一步 OFF（不再属于“非法智能 ON 钟”）；只有明确抢占了
+    // 旧 generic repair 的 revoke 才可跨过该中间提交。
+    options.revokeInvalidSmartOnClock = false;
+    options.smartOnExpectedBoundaryAt = 0;
+    options.discardStaleRevoke = true;
+    return options;
+  }
+  if (!stillOwned && options.revokeInvalidSmartOnClock !== true) {
+    options.smartOnExpectedBoundaryAt = 0;
+  }
+  return options;
+}
+
+function drainDeferredScheduleRepair(reason = '') {
+  if (pwmExecutionWithRecoveryCount > 0
+      || isSyncPhaseAdoptionAdmissionBlocked()
+      || !deferredRepairAfterPwmOptions) return false;
+  const queued = deferredRepairAfterPwmOptions;
+  deferredRepairAfterPwmOptions = null;
+  const options = normalizeDeferredScheduleRepairOptions(queued);
+  void waitUntil(repairScheduleClock(options)).catch((error) => {
+    console.warn(`[AC扩展] 延迟时钟修复失败${reason ? ` (${reason})` : ''}:`, error?.message);
+    void appendDiagnosticLog('warn', 'deferred-schedule-repair', error);
+  });
+  return true;
 }
 
 function releasePwmStepOwnership(automationRevision) {
@@ -308,18 +463,27 @@ async function deferComfortFinish(
 }
 
 async function finishComfortStart(reason = '') {
+  let automationRevision = pwmRuntimeRevision;
   const until = Number(schedule.comfortStartUntil) || 0;
   if (!until) {
     await chrome.alarms.clear('ac-comfort-end');
-    return { handled: false, automationAllowed: isAutomationAllowed() };
+    return {
+      handled: false,
+      automationAllowed: isAutomationOperationCurrent(automationRevision),
+      automationRevision
+    };
   }
 
   if (Date.now() + 1000 < until) {
     await scheduleComfortStartEndAlarm();
-    return { handled: true, active: true, automationAllowed: true };
+    return {
+      handled: true,
+      active: true,
+      automationAllowed: isAutomationOperationCurrent(automationRevision),
+      automationRevision
+    };
   }
 
-  let automationRevision = pwmRuntimeRevision;
   const priorConfirmedAt = Number(schedule.comfortStartOnConfirmedAt) || 0;
   try {
     schedule.comfortStartUntil = 0;
@@ -358,7 +522,15 @@ async function finishComfortStart(reason = '') {
     await persistSchedule(`comfort-start-ended-${reason || 'inside-hours'}`, {
       syncFromLiveAlarm: false
     });
-    return { handled: true, automationAllowed: true };
+    if (!isAutomationOperationCurrent(automationRevision)) {
+      return {
+        handled: false,
+        automationAllowed: false,
+        cancelled: true,
+        automationRevision
+      };
+    }
+    return { handled: true, automationAllowed: true, automationRevision };
   } catch (error) {
     console.warn('[AC扩展] 五分钟舒适启动结束事务失败，安排一分钟恢复:', error?.message);
     void appendDiagnosticLog('warn', 'comfort-finish-transition', error);
@@ -397,7 +569,11 @@ async function retryComfortStartAndFinishIfExpired(reason = 'retry') {
       crossedDeadline: true,
       continuePwm: finishResult?.handled === true
         && finishResult?.automationAllowed === true
-        && finishResult?.deferred !== true
+        && finishResult?.deferred !== true,
+      continuationAutomationRevision:
+        Number.isSafeInteger(finishResult?.automationRevision)
+          ? finishResult.automationRevision
+          : null
     };
   }
   if (retryError) throw retryError;
@@ -624,13 +800,20 @@ async function runComfortStart(reason = 'user-enable') {
   };
 }
 
-async function preemptAutomaticOnForExplicitDisable() {
+function preemptAutomaticOnForExplicitDisable() {
   const admissionEpoch = ++automaticDisableAdmissionEpoch;
+  // 让任何已捕获旧 enabled payload 的 outbound 失去清理 marker/alarm
+  // 的资格；否则旧写完成可擦掉刚落地的 disable publish intent。
+  syncPublishGeneration += 1;
   automaticOnAdmissionBlocked = true;
   pwmRuntimeRevision += 1;
   schedule.comfortStartUntil = 0;
   schedule.comfortStartOnConfirmedAt = 0;
   invalidateTimerBasedShutdown();
+  return admissionEpoch;
+}
+
+async function finishExplicitDisablePreemption() {
   const preemptSteps = [
     ['clear-comfort-end', () => chrome.alarms.clear('ac-comfort-end')],
     ['cancel-automatic-on', () => cancelAutomaticOnRequests()]
@@ -643,7 +826,6 @@ async function preemptAutomaticOnForExplicitDisable() {
       void appendDiagnosticLog('warn', `explicit-disable-${step}`, error);
     }
   }));
-  return admissionEpoch;
 }
 
 function releaseExplicitDisableAdmission(admissionEpoch) {
@@ -748,14 +930,443 @@ function getAutomaticOnDeadline(requestedDeadline = 0, now = new Date()) {
   return deadline;
 }
 
-// 调度下一次 active hours 边界闹钟
-async function rescheduleActiveBoundary() {
+function normalizeActiveBoundaryRetryMode(mode, retryAt = 0) {
+  if (mode === ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE) {
+    return ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE;
+  }
+  return retryAt > 0 ? ACTIVE_BOUNDARY_RETRY_MODE_ACTION : '';
+}
+
+async function readDurableActiveBoundaryRetry() {
   try {
-    await chrome.alarms.clear('ac-active-boundary');
+    const stored = await chrome.storage.local.get([
+      ACTIVE_BOUNDARY_RETRY_KEY,
+      ACTIVE_BOUNDARY_RETRY_MODE_KEY,
+      ACTIVE_BOUNDARY_RETRY_BOUNDARY_KEY
+    ]);
+    const retryAt = Number(stored?.[ACTIVE_BOUNDARY_RETRY_KEY]) || 0;
+    return {
+      retryAt,
+      mode: normalizeActiveBoundaryRetryMode(
+        stored?.[ACTIVE_BOUNDARY_RETRY_MODE_KEY],
+        retryAt
+      ),
+      boundaryAt: Number(stored?.[ACTIVE_BOUNDARY_RETRY_BOUNDARY_KEY]) || 0,
+      readOk: true
+    };
+  } catch (error) {
+    console.warn('[AC扩展] 读取 active-boundary 重试标记失败:', error?.message);
+    return { retryAt: 0, mode: '', boundaryAt: 0, readOk: false };
+  }
+}
+
+async function readDurableActiveBoundaryRetryAt() {
+  return (await readDurableActiveBoundaryRetry()).retryAt;
+}
+
+async function createActiveBoundaryAlarmWithRetry(when, options = {}) {
+  const alarmName = options.alarmName
+    || (options.mode === ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+      ? ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM
+      : 'ac-active-boundary');
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (await createAlarm(alarmName, { when })) {
+      try {
+        const verified = await chrome.alarms.get(alarmName);
+        if (Math.abs(Number(verified?.scheduledTime) - Number(when))
+            <= PWM_RETRY_ALARM_TOLERANCE_MS) return true;
+      } catch (_) { /* retry below */ }
+    }
+    if (attempt === 0) {
+      // 第一次 create 成功但紧接着 get 未见的 API 瞬断，给同一
+      // event promise 一次短重试；不依赖会被 SW 回收的裸 setTimeout。
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+  return false;
+}
+
+function runSerializedActiveBoundaryMutation(operation) {
+  const queued = activeBoundaryMutationChain
+    .catch(() => {})
+    .then(operation);
+  activeBoundaryMutationChain = queued.catch(() => {});
+  return queued;
+}
+
+async function armActiveBoundaryOwnerReadRetryUnsafe(reason = 'owner-read') {
+  const retryAt = Date.now() + ACTIVE_BOUNDARY_RETRY_MS;
+  activeBoundaryOwnerReadDeferred = true;
+  if (!await createActiveBoundaryAlarmWithRetry(retryAt, {
+    alarmName: ACTIVE_BOUNDARY_OWNER_READ_RETRY_ALARM
+  })) {
+    throw new Error('ac-active-boundary owner-read 重试钟创建后验证失败');
+  }
+  console.warn(`[AC扩展] ${reason}，1 分钟后只重读 active-boundary owner`);
+  return retryAt;
+}
+
+async function armActiveBoundaryRetryUnsafe(
+  reason = 'phase-adoption',
+  options = {}
+) {
+  const retryAt = Date.now() + ACTIVE_BOUNDARY_RETRY_MS;
+  const retryMode = options.mode === ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+    ? ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+    : ACTIVE_BOUNDARY_RETRY_MODE_ACTION;
+  const retryBoundaryAt = retryMode === ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+    ? Number(options.boundaryAt) || 0
+    : 0;
+  activeBoundaryDeferredForPhaseAdoption = true;
+  try {
+    // 独立 key 避免在 phase reservation 中用整个 schedule 覆盖新 owner。
+    // mode 与 at 同批落盘：动作已经成功时，下一次只能补自然钟，绝不能
+    // 重新执行 setupAlarms(true) 后移已建立的 PWM owner。
+    await chrome.storage.local.set({
+      [ACTIVE_BOUNDARY_RETRY_KEY]: retryAt,
+      [ACTIVE_BOUNDARY_RETRY_MODE_KEY]: retryMode,
+      [ACTIVE_BOUNDARY_RETRY_BOUNDARY_KEY]: retryBoundaryAt
+    });
+  } catch (error) {
+    // live alarm 仍是跨 SW 的第二道证据；本次不因 marker 瞬断放弃建钟。
+    console.warn('[AC扩展] 写入 active-boundary 重试标记失败:', error?.message);
+  }
+  // alarm 名自身也编码 retry kind：即使 storage mode 本次写/读失败，
+  // schedule-only delivery 仍无法降级成 action 并重跑边界动作。
+  try {
+    await Promise.all([
+      chrome.alarms.clear(
+        retryMode === ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+          ? 'ac-active-boundary'
+          : ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM
+      ),
+      chrome.alarms.clear(ACTIVE_BOUNDARY_OWNER_READ_RETRY_ALARM)
+    ]);
+  } catch (_) { /* the typed alarm remains authoritative */ }
+  if (!await createActiveBoundaryAlarmWithRetry(retryAt, { mode: retryMode })) {
+    // marker 故意保留，下次 init/任意扩展事件会再尝试恢复；
+    // 当前 handler 必须报失败，不能把“有 marker 无唤醒钟”当成已收口。
+    throw new Error('ac-active-boundary 重试闹钟创建后验证失败');
+  }
+  activeBoundaryOwnerReadDeferred = false;
+  console.warn(`[AC扩展] ${reason} 尚未收口，1 分钟后重试 ac-active-boundary`);
+  return retryAt;
+}
+
+async function clearActiveBoundaryRetryMarkerUnsafe() {
+  try {
+    await chrome.storage.local.set({
+      [ACTIVE_BOUNDARY_RETRY_KEY]: 0,
+      [ACTIVE_BOUNDARY_RETRY_MODE_KEY]: '',
+      [ACTIVE_BOUNDARY_RETRY_BOUNDARY_KEY]: 0
+    });
+    activeBoundaryDeferredForPhaseAdoption = false;
+    return true;
+  } catch (error) {
+    // 保留内存 flag 与 1 分钟钟，不让未清理的 durable marker
+    // 在下次 init 把已排好的自然边界反复覆盖。
+    activeBoundaryDeferredForPhaseAdoption = true;
+    console.warn('[AC扩展] 清理 active-boundary 重试标记失败:', error?.message);
+    return false;
+  }
+}
+
+// 调度下一次 active hours 边界闹钟。pending retry 同时以独立
+// storage marker 和 live alarm 表示；init 不得把它覆盖成下一个自然边界。
+async function rescheduleActiveBoundaryUnsafe(options = {}) {
+  const consumePending = options.consumePending === true;
+  let existingActionAlarm = null;
+  let existingScheduleAlarm = null;
+  let existingOwnerReadAlarm = null;
+  [existingActionAlarm, existingScheduleAlarm, existingOwnerReadAlarm] =
+    await Promise.all([
+    chrome.alarms.get('ac-active-boundary').catch(() => null),
+    chrome.alarms.get(ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM).catch(() => null),
+    chrome.alarms.get(ACTIVE_BOUNDARY_OWNER_READ_RETRY_ALARM).catch(() => null)
+    ]);
+  const now = Date.now();
+  const naturalBoundaryAt = getNextActiveBoundary(new Date(now));
+  const durableRetry = consumePending
+    ? { retryAt: 0, mode: '', boundaryAt: 0 }
+    : await readDurableActiveBoundaryRetry();
+  const durableRetryAt = durableRetry.retryAt;
+  const durableRetryBoundaryAt = durableRetry.boundaryAt;
+  const scheduleAlarmAt = Number(existingScheduleAlarm?.scheduledTime) || 0;
+  const actionAlarmAt = Number(existingActionAlarm?.scheduledTime) || 0;
+
+  // active hours 已关闭时，同名遗留钟绝不是新的进入时段请求。清掉本地
+  // retry 基础设施并保留当前 PWM owner；handler 也有同一硬门禁，抵御
+  // clear 失败后迟到的 delivery。
+  if (!schedule.activeHours?.enabled) {
+    try {
+      await Promise.all([
+        chrome.alarms.clear('ac-active-boundary'),
+        chrome.alarms.clear(ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM),
+        chrome.alarms.clear(ACTIVE_BOUNDARY_OWNER_READ_RETRY_ALARM)
+      ]);
+    } catch (_) { /* late delivery is guarded by onActiveBoundaryCrossed */ }
+    if (!consumePending && !await clearActiveBoundaryRetryMarkerUnsafe()) {
+      throw new Error('active hours 已关闭但边界重试标记未清理');
+    }
+    activeBoundaryOwnerReadDeferred = false;
+    return true;
+  }
+
+  if (!consumePending && durableRetry.readOk === false) {
+    // init/storage 瞬断时绝不能猜 action/schedule，更不能覆盖尚未读出的
+    // 三枚 durable marker。neutral alarm 只负责稍后重读，不执行边界动作。
+    return armActiveBoundaryOwnerReadRetryUnsafe(
+      'active-boundary durable owner 暂不可读'
+    );
+  }
+  if (existingOwnerReadAlarm) {
+    try {
+      await chrome.alarms.clear(ACTIVE_BOUNDARY_OWNER_READ_RETRY_ALARM);
+    } catch (_) { /* stale neutral delivery is action-free */ }
+  }
+  activeBoundaryOwnerReadDeferred = false;
+  let durableRetryMode = durableRetry.mode;
+  if (!consumePending) {
+    if (durableRetry.mode === ACTIVE_BOUNDARY_RETRY_MODE_ACTION
+        && scheduleAlarmAt
+          > durableRetryAt + PWM_RETRY_ALARM_TOLERANCE_MS) {
+      durableRetryMode = ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE;
+    } else if (durableRetry.mode === ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+        && actionAlarmAt > durableRetryAt + PWM_RETRY_ALARM_TOLERANCE_MS
+        && actionAlarmAt <= now + ACTIVE_BOUNDARY_RETRY_MS
+          + PWM_RETRY_ALARM_TOLERANCE_MS) {
+      durableRetryMode = ACTIVE_BOUNDARY_RETRY_MODE_ACTION;
+    } else if (!durableRetry.mode && scheduleAlarmAt > 0) {
+      durableRetryMode = ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE;
+    }
+  }
+  const existingAlarm = durableRetryMode === ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+    ? existingScheduleAlarm
+    : existingActionAlarm;
+  const existingAt = Number(existingAlarm?.scheduledTime) || 0;
+  let effectiveRetryAt = durableRetryAt;
+  let effectiveRetryBoundaryAt = durableRetryBoundaryAt;
+  if (!consumePending && durableRetryMode !== durableRetry.mode
+      && existingAt > 0) {
+    effectiveRetryAt = existingAt;
+    effectiveRetryBoundaryAt =
+      durableRetryMode === ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+        ? durableRetryBoundaryAt || getNextActiveBoundary(new Date(
+          existingAt - ACTIVE_BOUNDARY_RETRY_MS
+            - PWM_RETRY_ALARM_TOLERANCE_MS
+        ))
+        : 0;
+    try {
+      // typed alarm 比旧 durable owner 更新时，先把 durable timestamp/mode
+      // 收到同一身份；listener 仍只接受精确 scheduledTime。
+      await chrome.storage.local.set({
+        [ACTIVE_BOUNDARY_RETRY_KEY]: effectiveRetryAt,
+        [ACTIVE_BOUNDARY_RETRY_MODE_KEY]: durableRetryMode,
+        [ACTIVE_BOUNDARY_RETRY_BOUNDARY_KEY]: effectiveRetryBoundaryAt
+      });
+    } catch (_) { /* typed alarm + delivery ownership仍可完成接管 */ }
+  }
+
+  const liveRetryPending = !consumePending
+    && existingAt > now
+    && existingAt <= now + ACTIVE_BOUNDARY_RETRY_MS
+      + PWM_RETRY_ALARM_TOLERANCE_MS
+    && (naturalBoundaryAt <= 0
+      || Math.abs(existingAt - naturalBoundaryAt)
+        > PWM_RETRY_ALARM_TOLERANCE_MS);
+  const overdueBoundaryPending = !consumePending
+    && existingAt > 0
+    && existingAt <= now;
+  const retryPending = !consumePending
+    && (activeBoundaryDeferredForPhaseAdoption
+      || effectiveRetryAt > 0
+      || liveRetryPending
+      || overdueBoundaryPending);
+
+  if (retryPending) {
+    activeBoundaryDeferredForPhaseAdoption = true;
+    if (effectiveRetryAt <= now) {
+      if (effectiveRetryAt <= 0 && existingAt > now) {
+        try {
+          await chrome.storage.local.set({
+            [ACTIVE_BOUNDARY_RETRY_KEY]: existingAt,
+            [ACTIVE_BOUNDARY_RETRY_MODE_KEY]: durableRetryMode,
+            [ACTIVE_BOUNDARY_RETRY_BOUNDARY_KEY]: effectiveRetryBoundaryAt
+          });
+        } catch (_) { /* typed alarm name still preserves retry semantics */ }
+        return existingAt;
+      }
+      return armActiveBoundaryRetryUnsafe(
+        'active-boundary durable retry',
+        { mode: durableRetryMode, boundaryAt: effectiveRetryBoundaryAt }
+      );
+    }
+    if (existingAt > now
+        && Math.abs(existingAt - effectiveRetryAt)
+          <= PWM_RETRY_ALARM_TOLERANCE_MS) return existingAt;
+    try {
+      await Promise.all([
+        chrome.alarms.clear('ac-active-boundary'),
+        chrome.alarms.clear(ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM),
+        chrome.alarms.clear(ACTIVE_BOUNDARY_OWNER_READ_RETRY_ALARM)
+      ]);
+    } catch (_) { /* ignore */ }
+    if (!await createActiveBoundaryAlarmWithRetry(
+      effectiveRetryAt,
+      { mode: durableRetryMode }
+    )) {
+      return armActiveBoundaryRetryUnsafe(
+        'durable active-boundary 恢复失败',
+        { mode: durableRetryMode, boundaryAt: effectiveRetryBoundaryAt }
+      );
+    }
+    return effectiveRetryAt;
+  }
+
+  if (naturalBoundaryAt > now
+      && existingAt > now
+      && scheduleAlarmAt <= 0
+      && Math.abs(existingAt - naturalBoundaryAt)
+        <= PWM_RETRY_ALARM_TOLERANCE_MS) {
+    return existingAt;
+  }
+  try {
+    await Promise.all([
+      chrome.alarms.clear('ac-active-boundary'),
+      chrome.alarms.clear(ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM),
+      chrome.alarms.clear(ACTIVE_BOUNDARY_OWNER_READ_RETRY_ALARM)
+    ]);
   } catch (_) { /* ignore */ }
-  const next = getNextActiveBoundary();
-  if (!next) return;
-  await createAlarm('ac-active-boundary', { when: next });
+  if (!naturalBoundaryAt) return true;
+  // clear await 若恰好跨过边界，不能用新时刻重算到下一个
+  // start/end。保留 captured boundary 的待处理身份，1 分钟后幂等重放。
+  if (naturalBoundaryAt <= Date.now() + PWM_RETRY_ALARM_TOLERANCE_MS) {
+    return armActiveBoundaryRetryUnsafe(
+      'active-boundary 调度跨过边界',
+      { mode: ACTIVE_BOUNDARY_RETRY_MODE_ACTION }
+    );
+  }
+  if (!await createActiveBoundaryAlarmWithRetry(naturalBoundaryAt)) {
+    return armActiveBoundaryRetryUnsafe(
+      'active-boundary 自然钟创建失败',
+      {
+        mode: ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE,
+        boundaryAt: naturalBoundaryAt
+      }
+    );
+  }
+  return naturalBoundaryAt;
+}
+
+function armActiveBoundaryRetry(reason = 'phase-adoption', options = {}) {
+  return runSerializedActiveBoundaryMutation(
+    () => armActiveBoundaryRetryUnsafe(reason, options)
+  );
+}
+
+function armActiveBoundaryOwnerReadRetry(reason = 'owner-read') {
+  return runSerializedActiveBoundaryMutation(
+    () => armActiveBoundaryOwnerReadRetryUnsafe(reason)
+  );
+}
+
+function rescheduleActiveBoundary(options = {}) {
+  return runSerializedActiveBoundaryMutation(
+    () => rescheduleActiveBoundaryUnsafe(options)
+  );
+}
+
+function completeActiveBoundaryProcessing(options = {}) {
+  const expectedRetryAt = Number(options.expectedRetryAt) || 0;
+  const expectedRetryMode = options.expectedRetryMode || '';
+  const expectedRetryBoundaryAt =
+    Number(options.expectedRetryBoundaryAt) || 0;
+  const expectedDeliveryAt = Number(options.expectedDeliveryAt)
+    || expectedRetryAt;
+  const expectedAlarmName = options.expectedAlarmName || '';
+  const allowMarkerlessTypedOwner =
+    options.allowMarkerlessTypedOwner === true;
+  const requireExpectedOwner = options.requireExpectedOwner === true;
+  return runSerializedActiveBoundaryMutation(async () => {
+    let completionStarted = false;
+    try {
+      if (requireExpectedOwner) {
+        const currentRetry = await readDurableActiveBoundaryRetry();
+        if (!currentRetry.readOk) {
+          throw new Error('active-boundary owner 复检失败');
+        }
+        let expectedOwnerMatches =
+          Math.abs(currentRetry.retryAt - expectedRetryAt)
+            <= PWM_RETRY_ALARM_TOLERANCE_MS
+          && currentRetry.mode === expectedRetryMode
+          && Math.abs(currentRetry.boundaryAt - expectedRetryBoundaryAt)
+            <= PWM_RETRY_ALARM_TOLERANCE_MS;
+        if (!expectedOwnerMatches && allowMarkerlessTypedOwner
+            && expectedAlarmName
+            && (currentRetry.retryAt <= 0
+              || expectedDeliveryAt
+                > currentRetry.retryAt + PWM_RETRY_ALARM_TOLERANCE_MS)) {
+          const liveExpected = await chrome.alarms.get(expectedAlarmName)
+            .catch(() => null);
+          expectedOwnerMatches = Math.abs(
+            Number(liveExpected?.scheduledTime) - expectedDeliveryAt
+          ) <= PWM_RETRY_ALARM_TOLERANCE_MS;
+        }
+        if (!expectedOwnerMatches) {
+          return false;
+        }
+        if (expectedAlarmName) {
+          const newerSameAlarm = await chrome.alarms.get(expectedAlarmName)
+            .catch(() => null);
+          const newerSameAt = Number(newerSameAlarm?.scheduledTime) || 0;
+          if (newerSameAt
+                > expectedDeliveryAt + PWM_RETRY_ALARM_TOLERANCE_MS
+              && newerSameAt <= Date.now() + ACTIVE_BOUNDARY_RETRY_MS
+                + PWM_RETRY_ALARM_TOLERANCE_MS) {
+            return false;
+          }
+          const oppositeAlarmName = expectedAlarmName
+              === ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM
+            ? 'ac-active-boundary'
+            : ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM;
+          const oppositeAlarm = await chrome.alarms.get(oppositeAlarmName)
+            .catch(() => null);
+          const oppositeAt = Number(oppositeAlarm?.scheduledTime) || 0;
+          if (oppositeAt
+                > expectedDeliveryAt + PWM_RETRY_ALARM_TOLERANCE_MS
+              && oppositeAt <= Date.now() + ACTIVE_BOUNDARY_RETRY_MS
+                + PWM_RETRY_ALARM_TOLERANCE_MS) {
+            return false;
+          }
+        }
+      }
+      completionStarted = true;
+      if (!await clearActiveBoundaryRetryMarkerUnsafe()) {
+        throw new Error('active-boundary 重试标记未清理');
+      }
+      return await rescheduleActiveBoundaryUnsafe({ consumePending: true });
+    } finally {
+      // 必须在 clear + natural/schedule-only rearm 的全部 await 结束后再提交。
+      // complete 期间任何时点观察到旧 phase owner 的 defer 都捕获旧代次，
+      // 排到本事务之后时只能 no-op。
+      if (completionStarted) activeBoundaryCompletionGeneration += 1;
+    }
+  });
+}
+
+function deferActiveBoundaryForPhaseAdoption() {
+  const observedCompletionGeneration = activeBoundaryCompletionGeneration;
+  return runSerializedActiveBoundaryMutation(() => {
+    // delivery 在 successful complete 占用 mutation chain 时看到旧 phase
+    // owner 并排队，轮到它执行时不得重新污染已经清理的 marker/自然钟。
+    if (activeBoundaryCompletionGeneration !== observedCompletionGeneration) {
+      return false;
+    }
+    return armActiveBoundaryRetryUnsafe(
+      'sync 相位接管',
+      { mode: ACTIVE_BOUNDARY_RETRY_MODE_ACTION }
+    );
+  });
 }
 
 // 调度下一次 :20/:50 天气预取（智能模式启用时；否则清除闹钟）。
@@ -770,14 +1381,22 @@ async function rescheduleSmartWeatherAlarm() {
 
 // 边界闹钟触发：进入/退出运行时段，恢复/暂停已启用的自动控制
 async function onActiveBoundaryCrossed() {
-  // 重新调度下一次边界（先调度，避免后续 await 抛出时漏掉）
-  await rescheduleActiveBoundary();
-
-  // 舒适启动是用户刚刚显式开启自动控制后的短暂优先阶段。边界到达只记录并
-  // 调度下一次；独立 ac-comfort-end 会在满五分钟后恢复正常时段策略。
-  if (isComfortStartActive()) {
-    console.log('[ac-ust] active hours boundary: comfort start still active');
-    return;
+  // 关闭运行时段后迟到/遗留的同名 alarm 只能被消费，不能把当前 smart
+  // owner 当作“进入时段”重新 fresh start。
+  if (!schedule.activeHours?.enabled) {
+    await completeActiveBoundaryProcessing();
+    return true;
+  }
+  if (isSyncPhaseAdoptionAdmissionBlocked()) {
+    await deferActiveBoundaryForPhaseAdoption();
+    return false;
+  }
+  // 检查到 claim 之间无 await；active-boundary 和 sync/page adoption
+  // 从此共用同一把排他锁，直到页面动作、storage 和 live alarm 收口。
+  const phaseAdmissionEpoch = claimSyncPhaseAdoptionAdmission();
+  if (phaseAdmissionEpoch <= 0) {
+    await deferActiveBoundaryForPhaseAdoption();
+    return false;
   }
 
   // 提取（Fowler Extract Function）：退出运行时段暂停路径——B1 顺序：先 persist 已重置运行态再执行长流程关机。
@@ -790,24 +1409,107 @@ async function onActiveBoundaryCrossed() {
     const shutdownResult = await requestTimerBasedShutdown('active-hours-leave');
     if (!shutdownResult?.success) {
       schedule.pageTimerError = `退出运行时段后页面关机定时器未确认：${shutdownResult?.error || '未知错误'}`;
+      return false;
     }
+    return true;
   }
 
-  const inside = isWithinActiveHours();
-  if (inside && schedule.enabled) {
-    // 进入运行时段 → 恢复用户已启用的自动控制
-    console.log('[ac-ust] active hours: entering, resume automation');
-    schedule.pwmState = 'on';
-    await persistSchedule('active-hours-enter-pre-setup', { syncFromLiveAlarm: false });
-    await setupAlarms(true);
-    if (isAutomationAllowed()) {
-      await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+  let boundaryActionCompleted = false;
+  let boundaryRetryAt = 0;
+  try {
+    // 先把“本次边界尚未完成”持久化。任意 await 中 SW 退出时，
+    // init 都会恢复这枚 1 分钟钟；只有动作真正收口后才消费。
+    boundaryRetryAt = await armActiveBoundaryRetry('active-boundary 处理');
+    if (!schedule.activeHours?.enabled) {
+      boundaryActionCompleted = true;
+      if (await completeActiveBoundaryProcessing({
+        requireExpectedOwner: true,
+        expectedRetryAt: boundaryRetryAt,
+        expectedRetryMode: ACTIVE_BOUNDARY_RETRY_MODE_ACTION,
+        expectedDeliveryAt: boundaryRetryAt,
+        expectedAlarmName: 'ac-active-boundary',
+        allowMarkerlessTypedOwner: true
+      }) === false) {
+        return false;
+      }
+      return true;
     }
-  } else if (!inside && schedule.enabled) {
-    // 退出运行时段 → 暂停自动控制并停机，但保留用户启用意图
-    console.log('[ac-ust] active hours: leaving, pause automation');
-    await shutdownAfterActiveHoursLeave();
-    await rescheduleSmartWeatherAlarm();
+
+    // 舒适启动是用户刚刚显式开启自动控制后的短暂优先阶段。边界到达只记录并
+    // 调度下一次；独立 ac-comfort-end 会在满五分钟后恢复正常时段策略。
+    if (isComfortStartActive()) {
+      console.log('[ac-ust] active hours boundary: comfort start still active');
+    } else {
+      const inside = isWithinActiveHours();
+      if (inside && schedule.enabled) {
+        // 进入运行时段 → 恢复用户已启用的自动控制
+        console.log('[ac-ust] active hours: entering, resume automation');
+        schedule.pwmState = 'on';
+        await persistSchedule('active-hours-enter-pre-setup', { syncFromLiveAlarm: false });
+        if (!schedule.activeHours?.enabled) {
+          boundaryActionCompleted = true;
+          if (await completeActiveBoundaryProcessing({
+            requireExpectedOwner: true,
+            expectedRetryAt: boundaryRetryAt,
+            expectedRetryMode: ACTIVE_BOUNDARY_RETRY_MODE_ACTION,
+            expectedDeliveryAt: boundaryRetryAt,
+            expectedAlarmName: 'ac-active-boundary',
+            allowMarkerlessTypedOwner: true
+          }) === false) {
+            return false;
+          }
+          return true;
+        }
+        const setupSucceeded = await setupAlarms(true, { phaseAdmissionEpoch });
+        if (!setupSucceeded) {
+          throw new Error('进入运行时段后 PWM 主钟未收口');
+        }
+        if (isAutomationAllowed()) {
+          await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+        }
+      } else if (!inside && schedule.enabled) {
+        // 退出运行时段 → 暂停自动控制并停机，但保留用户启用意图
+        console.log('[ac-ust] active hours: leaving, pause automation');
+        if (!await shutdownAfterActiveHoursLeave()) {
+          throw new Error(schedule.pageTimerError || '退出运行时段关机未收口');
+        }
+        await rescheduleSmartWeatherAlarm();
+      }
+    }
+    boundaryActionCompleted = true;
+    if (await completeActiveBoundaryProcessing({
+      requireExpectedOwner: true,
+      expectedRetryAt: boundaryRetryAt,
+      expectedRetryMode: ACTIVE_BOUNDARY_RETRY_MODE_ACTION,
+      expectedDeliveryAt: boundaryRetryAt,
+      expectedAlarmName: 'ac-active-boundary',
+      allowMarkerlessTypedOwner: true
+    }) === false) {
+      return false;
+    }
+    return true;
+  } catch (error) {
+    try {
+      await armActiveBoundaryRetry(
+        boundaryActionCompleted
+          ? 'active-boundary 动作已完成但自然钟未收口'
+          : 'active-boundary 失败',
+        {
+          mode: boundaryActionCompleted
+            ? ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+            : ACTIVE_BOUNDARY_RETRY_MODE_ACTION,
+          boundaryAt: boundaryActionCompleted
+            ? getNextActiveBoundary()
+            : 0
+        }
+      );
+    } catch (retryError) {
+      console.warn('[AC扩展] active-boundary 失败且重试钟创建失败:', retryError?.message);
+    }
+    throw error;
+  } finally {
+    releaseSyncPhaseAdoptionAdmission(phaseAdmissionEpoch);
+    drainDeferredScheduleRepair('active-boundary-complete');
   }
 }
 
@@ -821,14 +1523,32 @@ function getStoredAlarmEndMs() {
   return getLegacyAlarmEndMs();
 }
 
-function setNextTriggerAt(nextTriggerAt) {
-  schedule.nextTriggerAt = nextTriggerAt > 0 ? nextTriggerAt : 0;
+function setNextTriggerAt(nextTriggerAt, options = {}) {
+  const previousAt = Number(schedule.nextTriggerAt) || 0;
+  const normalizedAt = Number(nextTriggerAt) > 0 ? Number(nextTriggerAt) : 0;
+  const requestedPlannedAt = Number(options?.plannedAt);
+  const existingPlannedAt = Number(schedule.smartClockPlannedAt) || 0;
+  const legacyPlannedAt = Number(schedule.alarmCreatedAt) || 0;
+  const sameClock = previousAt > 0
+    && normalizedAt > 0
+    && Math.abs(previousAt - normalizedAt) <= PWM_RETRY_ALARM_TOLERANCE_MS;
+  schedule.nextTriggerAt = normalizedAt;
+  if (normalizedAt <= 0) {
+    schedule.smartClockPlannedAt = 0;
+  } else if (Number.isFinite(requestedPlannedAt) && requestedPlannedAt > 0) {
+    schedule.smartClockPlannedAt = requestedPlannedAt;
+  } else if (!sameClock || existingPlannedAt <= 0) {
+    schedule.smartClockPlannedAt = sameClock && legacyPlannedAt > 0
+      ? legacyPlannedAt
+      : Date.now();
+  }
 }
 
 async function executePwmLifecycleRecoveryFallback(action, context) {
   if (action === 'execute-current') {
     const handled = await executePwmStepWithRecovery({
       automationRevision: context.automationRevision,
+      phaseAdmissionEpoch: context.phaseAdmissionEpoch,
       source: `${context.source || 'lifecycle'}-fallback-current`
     });
     return { handled, fallbackAction: action };
@@ -841,6 +1561,12 @@ async function executePwmLifecycleRecoveryFallback(action, context) {
 }
 
 async function recoverPwmLifecycle(context = {}) {
+  if (isSyncPhaseAdoptionAdmissionBlockedFor(context.phaseAdmissionEpoch)) {
+    return {
+      handled: false,
+      plan: { kind: 'noop', reason: 'sync-phase-adoption-in-progress' }
+    };
+  }
   const automationRevision = Number.isSafeInteger(context.automationRevision)
     ? context.automationRevision
     : pwmRuntimeRevision;
@@ -849,15 +1575,41 @@ async function recoverPwmLifecycle(context = {}) {
   }
 
   const now = Number.isFinite(context.now) ? context.now : Date.now();
+  const smartClockPlannedAt = Number(context.smartClockPlannedAt)
+    || Number(schedule.smartClockPlannedAt)
+    || Number(schedule.alarmCreatedAt)
+    || 0;
   const rawLiveAlarmAt = Number(context.existingAlarm?.scheduledTime);
   // typed retry 的事务所有权先于新半点天气：否则跨到 :00/:30 恢复时，新的
   // onMinutes=0 计划会先清 marker/改相位，再把旧 retry 错交给 interval。
   const retryAlarmAt = Number.isFinite(rawLiveAlarmAt) && rawLiveAlarmAt > 0
     ? rawLiveAlarmAt
     : Number(schedule.nextTriggerAt);
+  const futureLifecycleClockAt = Number.isFinite(rawLiveAlarmAt)
+      && rawLiveAlarmAt > now
+    ? rawLiveAlarmAt
+    : (Number(schedule.nextTriggerAt) > now
+      ? Number(schedule.nextTriggerAt)
+      : 0);
+  const lifecycleClockAssessment = classifySmartOnClock(
+    schedule,
+    futureLifecycleClockAt,
+    {
+      now,
+      plannedAt: smartClockPlannedAt,
+      nextAction: schedule.pwmState,
+      toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+      requirePlannedAt: true
+    }
+  );
+  const hasOwnedSmartBoundaryWait = futureLifecycleClockAt > now
+    && lifecycleClockAssessment.valid
+    && (lifecycleClockAssessment.kind === 'safety-skip'
+      || lifecycleClockAssessment.kind === 'safety-timer-retry');
   const lifecycleRetryContext = getActiveSmartOnPwmRetryContext(
     schedule,
-    rawLiveAlarmAt
+    rawLiveAlarmAt,
+    { now }
   );
   if (lifecycleRetryContext.hasTypedSmartOnRetry
       && Number.isFinite(retryAlarmAt)
@@ -873,13 +1625,31 @@ async function recoverPwmLifecycle(context = {}) {
     const handled = await executePwmStepWithRecovery({
       scheduledTime: retryAlarmAt,
       automationRevision,
+      phaseAdmissionEpoch: context.phaseAdmissionEpoch,
       source: `${context.source || 'lifecycle'}-typed-retry`
     });
     return { handled, plan: retryPlan };
   }
+  if (lifecycleRetryContext.hasSafetyTimerRetry
+      && Number.isFinite(retryAlarmAt)
+      && retryAlarmAt > 0
+      && retryAlarmAt <= now) {
+    const retryPlan = {
+      kind: 'repair-smart-on-safety-timer',
+      strategy: 'smart',
+      reason: 'typed-smart-on-safety-timer-due',
+      scheduledTime: retryAlarmAt,
+      boundaryAt: lifecycleRetryContext.boundaryAt
+    };
+    const repair = await repairScheduleClock({
+      smartOnExpectedBoundaryAt: lifecycleRetryContext.boundaryAt
+    });
+    return { handled: repair?.success === true, plan: retryPlan, repair };
+  }
 
   let preparedRuntimeSnapshot = null;
-  if (!lifecycleRetryContext.hasTypedSmartOnRetry) {
+  if (!lifecycleRetryContext.hasTypedSmartOnRetry
+      && !hasOwnedSmartBoundaryWait) {
     preparedRuntimeSnapshot = snapshotPreparedSmartRuntime();
     const boundaryAt = halfHourBoundaryAtOrBefore(now);
     await applyPreparedSmartModeDurations({
@@ -912,12 +1682,14 @@ async function recoverPwmLifecycle(context = {}) {
     // 天气读取可把 on=0 暂时投影为 pwmState='off'。时钟信任必须沿用读取前
     // 的 next-action ownership，否则 22:50 残留钟会冒充合法 OFF 截止并跳过 22:30。
     smartNextAction: preparedRuntimeSnapshot?.pwmState || schedule.pwmState,
+    smartClockPlannedAt,
     plannedActionAt,
     liveAlarmAt,
     storedAlarmAt,
     expiredAlarmAt: Number(context.expiredAlarmAt) || 0,
     allowNonBoundarySmartClock: lifecycleRetryContext.hasTypedSmartOnRetry,
     smartBoundaryToleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+    requireSmartClockPlannedAt: true,
     missingClockAction: context.missingClockAction,
     maxOnMinutes: SMART_MODE.ON_MAX
   });
@@ -938,6 +1710,7 @@ async function recoverPwmLifecycle(context = {}) {
       scheduledTime: plan.scheduledTime,
       recoveryPlan: plan,
       automationRevision,
+      phaseAdmissionEpoch: context.phaseAdmissionEpoch,
       source: `${context.source || 'lifecycle'}-smart-current-cycle`
     });
     if (context.deferSmartCurrentCycleExecution === true) {
@@ -1003,6 +1776,7 @@ async function recoverPwmLifecycle(context = {}) {
     const handled = await executePwmStepWithRecovery({
       scheduledTime: plan.scheduledTime,
       automationRevision,
+      phaseAdmissionEpoch: context.phaseAdmissionEpoch,
       source: `${context.source || 'lifecycle'}-due-action`
     });
     return { handled, plan };
@@ -1011,14 +1785,25 @@ async function recoverPwmLifecycle(context = {}) {
   if (plan.kind === 'execute-current-action') {
     const handled = await executePwmStepWithRecovery({
       automationRevision,
+      phaseAdmissionEpoch: context.phaseAdmissionEpoch,
       source: `${context.source || 'lifecycle'}-current-action`
     });
     return { handled, plan };
   }
 
   if (plan.kind === 'repair-clock') {
-    await repairScheduleClock();
-    return { handled: true, plan };
+    const expectedBoundaryAt = Number(plan.expectedAt) || 0;
+    const invalidSmartOnClock = plan.strategy === 'smart'
+      && (plan.reason === 'skipped-nearest-smart-on-boundary'
+        || plan.reason === 'untrusted-smart-on-clock');
+    const repair = await repairScheduleClock({
+      smartOnExpectedBoundaryAt: expectedBoundaryAt,
+      revokeInvalidSmartOnClock: invalidSmartOnClock,
+      ...(invalidSmartOnClock
+        ? { revokeOwnerRevision: automationRevision }
+        : {})
+    });
+    return { handled: repair?.success === true, plan, repair };
   }
 
   return { handled: false, plan };
@@ -1196,6 +1981,7 @@ function snapshotSmartPreparationOwner() {
     activeHoursEnd: schedule.activeHours?.end,
     // 天气准备本身不会改写 clock ownership；sync/另一相位事务会。
     nextTriggerAt: Number(schedule.nextTriggerAt) || 0,
+    smartClockPlannedAt: Number(schedule.smartClockPlannedAt) || 0,
     alarmCreatedAt: Number(schedule.alarmCreatedAt) || 0,
     alarmDelayMinutes: Number(schedule.alarmDelayMinutes) || 0
   };
@@ -1497,27 +2283,36 @@ function clearPwmRetryState() {
   schedule.pwmRetryScheduledAt = 0;
 }
 
-function setSmartOnPwmRetryState(targetAction, retryScheduledAt) {
+function setSmartOnPwmRetryState(targetAction, retryScheduledAt, options = {}) {
   clearPwmRetryState();
-  const boundaryAt = Number(schedule.smartOnBoundaryAt);
+  const requestedKind = String(options?.kind || '');
+  const retryKind = requestedKind === 'smart-on-safe-delay'
+      || requestedKind === 'smart-on-safety-skip'
+      || requestedKind === 'smart-on-safety-timer'
+    ? requestedKind
+    : 'smart-on';
+  const boundaryAt = Number.isFinite(Number(options?.boundaryAt))
+    ? Number(options.boundaryAt)
+    : Number(schedule.smartOnBoundaryAt);
   const scheduledAt = Number(retryScheduledAt);
   const boundaryDate = new Date(boundaryAt);
   const exactHalfHour = Number.isSafeInteger(boundaryAt)
     && (boundaryDate.getMinutes() === 0 || boundaryDate.getMinutes() === 30)
     && boundaryDate.getSeconds() === 0
     && boundaryDate.getMilliseconds() === 0;
+  const boundaryOptionalRetry = retryKind === 'smart-on-safety-timer';
   if (!schedule.smartMode?.enabled
       || targetAction !== 'on'
-      || !exactHalfHour
-      || boundaryAt <= 0
+      || (!boundaryOptionalRetry && (!exactHalfHour || boundaryAt <= 0))
+      || (boundaryOptionalRetry && boundaryAt !== 0 && !exactHalfHour)
       || !Number.isFinite(scheduledAt)
       || scheduledAt <= 0) return;
-  schedule.pwmRetryKind = 'smart-on';
-  schedule.pwmRetryBoundaryAt = boundaryAt;
+  schedule.pwmRetryKind = retryKind;
+  schedule.pwmRetryBoundaryAt = exactHalfHour ? boundaryAt : 0;
   schedule.pwmRetryScheduledAt = scheduledAt;
 }
 
-function getSmartOnPwmRetryContext(scheduleSnapshot, scheduledTime) {
+function getSmartOnPwmRetryContext(scheduleSnapshot, scheduledTime, options = {}) {
   const boundaryAt = Number(scheduleSnapshot?.pwmRetryBoundaryAt);
   const retryScheduledAt = Number(scheduleSnapshot?.pwmRetryScheduledAt);
   const triggerAt = Number(scheduledTime);
@@ -1526,7 +2321,24 @@ function getSmartOnPwmRetryContext(scheduleSnapshot, scheduledTime) {
     && (boundaryDate.getMinutes() === 0 || boundaryDate.getMinutes() === 30)
     && boundaryDate.getSeconds() === 0
     && boundaryDate.getMilliseconds() === 0;
-  const hasStoredSmartOnRetry = scheduleSnapshot?.pwmRetryKind === 'smart-on';
+  const retryKind = String(scheduleSnapshot?.pwmRetryKind || '');
+  const hasStoredSmartOnRetry = retryKind === 'smart-on'
+    || retryKind === 'smart-on-safe-delay'
+    || retryKind === 'smart-on-safety-timer';
+  const semanticAssessment = typeof classifySmartOnClock === 'function'
+    ? classifySmartOnClock(scheduleSnapshot, triggerAt, {
+        now: Number.isFinite(Number(options?.now))
+          ? Number(options.now)
+          : triggerAt,
+        plannedAt: Number(scheduleSnapshot?.smartClockPlannedAt)
+          || Number(scheduleSnapshot?.alarmCreatedAt)
+          || 0,
+        nextAction: 'on',
+        toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+        allowDue: true,
+        requirePlannedAt: true
+      })
+    : null;
   const hasTypedSmartOnRetry = hasStoredSmartOnRetry
     && scheduleSnapshot?.smartMode?.enabled === true
     && scheduleSnapshot?.pwmState === 'on'
@@ -1537,25 +2349,269 @@ function getSmartOnPwmRetryContext(scheduleSnapshot, scheduledTime) {
     && Number.isFinite(triggerAt)
     && triggerAt > 0
     && Math.abs(triggerAt - retryScheduledAt)
-      <= PWM_RETRY_ALARM_TOLERANCE_MS;
+      <= PWM_RETRY_ALARM_TOLERANCE_MS
+    && (!semanticAssessment || semanticAssessment.kind === 'typed-retry');
+  const hasSafetyTimerRetry = retryKind === 'smart-on-safety-timer'
+    && scheduleSnapshot?.smartMode?.enabled === true
+    && scheduleSnapshot?.pwmState === 'on'
+    && Number.isFinite(retryScheduledAt)
+    && retryScheduledAt > 0
+    && Number.isFinite(triggerAt)
+    && triggerAt > 0
+    && Math.abs(triggerAt - retryScheduledAt)
+      <= PWM_RETRY_ALARM_TOLERANCE_MS
+    && (!semanticAssessment
+      || semanticAssessment.kind === 'safety-timer-retry');
   return {
     hasStoredSmartOnRetry,
     hasTypedSmartOnRetry,
-    boundaryAt: hasTypedSmartOnRetry ? boundaryAt : 0,
-    priorError: hasTypedSmartOnRetry
+    hasSafetyTimerRetry,
+    kind: hasTypedSmartOnRetry || hasSafetyTimerRetry ? retryKind : '',
+    boundaryAt: hasTypedSmartOnRetry || hasSafetyTimerRetry ? boundaryAt : 0,
+    priorError: hasTypedSmartOnRetry || hasSafetyTimerRetry
       ? String(scheduleSnapshot?.pageTimerError || '')
       : ''
   };
 }
 
-function getActiveSmartOnPwmRetryContext(scheduleSnapshot, liveAlarmScheduledTime = 0) {
+function getActiveSmartOnPwmRetryContext(
+  scheduleSnapshot,
+  liveAlarmScheduledTime = 0,
+  options = {}
+) {
   const liveAt = Number(liveAlarmScheduledTime);
   const storedAt = Number(scheduleSnapshot?.nextTriggerAt);
   // live alarm 是浏览器当前所有权；存在时不得退回匹配可能已经过期的 storage。
   const authoritativeTriggerAt = Number.isFinite(liveAt) && liveAt > 0
     ? liveAt
     : storedAt;
-  return getSmartOnPwmRetryContext(scheduleSnapshot, authoritativeTriggerAt);
+  return getSmartOnPwmRetryContext(
+    scheduleSnapshot,
+    authoritativeTriggerAt,
+    options
+  );
+}
+
+function getOwnedSmartOnClockException(
+  scheduleSnapshot,
+  scheduledTime,
+  now = Date.now()
+) {
+  const liveAt = Number(scheduledTime);
+  const storedAt = Number(scheduleSnapshot?.nextTriggerAt);
+  // 与 typed retry 的 ownership 规则一致：live alarm 存在时它是权威；若
+  // Chrome 丢钟，则 durable storage 仍须保护 safe-delay / safety-skip 意图，
+  // 直到 lifecycle 明确恢复或撤销，不能让 sync/page picker 趁空覆盖。
+  const candidateAt = Number.isFinite(liveAt) && liveAt > 0
+    ? liveAt
+    : storedAt;
+  const assessment = classifySmartOnClock(scheduleSnapshot, candidateAt, {
+    now,
+    plannedAt: Number(scheduleSnapshot?.smartClockPlannedAt)
+      || Number(scheduleSnapshot?.alarmCreatedAt)
+      || 0,
+    nextAction: scheduleSnapshot?.pwmState,
+    toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+    allowDue: true,
+    requirePlannedAt: true
+  });
+  const hasOwnedException = candidateAt > 0
+    && assessment.valid
+    && (assessment.kind === 'typed-retry'
+      || assessment.kind === 'safety-skip'
+      || assessment.kind === 'safety-timer-retry');
+  return { ...assessment, hasOwnedException };
+}
+
+function assessPwmAlarmDelivery(
+  scheduleSnapshot,
+  scheduledTime,
+  now = Date.now()
+) {
+  const eventAt = Number(scheduledTime);
+  const storedNextAt = Number(scheduleSnapshot?.nextTriggerAt);
+  const legacyAt = Number(scheduleSnapshot?.alarmCreatedAt)
+    + Number(scheduleSnapshot?.alarmDelayMinutes) * 60000;
+  const durableAt = Number.isFinite(storedNextAt) && storedNextAt > 0
+    ? storedNextAt
+    : (Number.isFinite(legacyAt) && legacyAt > 0 ? legacyAt : 0);
+  if (!Number.isFinite(eventAt) || eventAt <= 0 || durableAt <= 0) {
+    return { accepted: false, reason: 'missing-durable-clock', eventAt, durableAt };
+  }
+  // 即使送达事件本身已失配，也先审计 durable clock 的智能语义。这样
+  // 19:00 旧事件撞上“计划于 18:56 的非法 19:30 ON”时，repair 仍能拿到
+  // expectedAt=19:00，而不是退化成无边界普通修复并再次跳到 19:30。
+  const smartClockAssessment = classifySmartOnClock(
+    scheduleSnapshot,
+    durableAt,
+    {
+      now,
+      plannedAt: Number(scheduleSnapshot?.smartClockPlannedAt)
+        || Number(scheduleSnapshot?.alarmCreatedAt)
+        || 0,
+      nextAction: scheduleSnapshot?.pwmState,
+      toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+      allowDue: true,
+      requirePlannedAt: true
+    }
+  );
+  if (Math.abs(eventAt - durableAt) > PWM_RETRY_ALARM_TOLERANCE_MS) {
+    return {
+      accepted: false,
+      reason: 'alarm-owner-mismatch',
+      eventAt,
+      durableAt,
+      ...(smartClockAssessment.applicable && !smartClockAssessment.valid
+        ? { smartClockAssessment }
+        : {})
+    };
+  }
+  const comfortStartUntil = Number(scheduleSnapshot?.comfortStartUntil);
+  if (Number.isFinite(comfortStartUntil)
+      && comfortStartUntil > 0
+      && eventAt <= comfortStartUntil + PWM_RETRY_ALARM_TOLERANCE_MS) {
+    return {
+      accepted: true,
+      reason: 'comfort-start-durable-clock',
+      eventAt,
+      durableAt
+    };
+  }
+  if (smartClockAssessment.applicable && !smartClockAssessment.valid) {
+    return {
+      accepted: false,
+      reason: smartClockAssessment.kind,
+      eventAt,
+      durableAt,
+      smartClockAssessment
+    };
+  }
+  return { accepted: true, reason: 'durable-clock-match', eventAt, durableAt };
+}
+
+async function hasDurableLivePwmOwner(automationRevision, options = {}) {
+  if (!isAutomationOperationCurrent(automationRevision)) return false;
+  const [saved, liveAlarm] = await Promise.all([
+    chrome.storage.local.get(STORAGE_KEY),
+    chrome.alarms.get('ac-pwm')
+  ]);
+  if (!isAutomationOperationCurrent(automationRevision)) return false;
+  const durableSchedule = saved?.[STORAGE_KEY];
+  if (!durableSchedule || typeof durableSchedule !== 'object') return false;
+
+  const now = Date.now();
+  const memoryAt = Number(schedule.nextTriggerAt) || 0;
+  const durableAt = Number(durableSchedule.nextTriggerAt) || 0;
+  const liveAt = Number(liveAlarm?.scheduledTime) || 0;
+  if (memoryAt <= now || durableAt <= now || liveAt <= now
+      || durableSchedule.pwmState !== schedule.pwmState
+      || Math.abs(memoryAt - durableAt) > PWM_RETRY_ALARM_TOLERANCE_MS
+      || Math.abs(liveAt - durableAt) > PWM_RETRY_ALARM_TOLERANCE_MS) {
+    return false;
+  }
+  const delivery = assessPwmAlarmDelivery(
+    durableSchedule,
+    liveAt,
+    now
+  );
+  if (delivery.accepted !== true) return false;
+
+  const expectedBoundaryAt = Number(options.expectedSmartOnBoundaryAt) || 0;
+  if (expectedBoundaryAt > 0) {
+    // preserve-revoke 只能保护仍拥有原始半点的完整 replacement。
+    // 这防止旧 generic repair 用新 plannedAt 把 19:30 “洗成” nearest
+    // boundary，同时允许 19:05 typed retry 或已 ON 后的 19:23 OFF 钟被保护。
+    const durableBoundaryAt = Number(durableSchedule.smartOnBoundaryAt) || 0;
+    const durableRetryBoundaryAt = Number(durableSchedule.pwmRetryBoundaryAt) || 0;
+    const durableRetryKind = String(durableSchedule.pwmRetryKind || '');
+    const retryOwnsBoundary = [
+      'smart-on',
+      'smart-on-safe-delay',
+      'smart-on-safety-skip',
+      'smart-on-safety-timer'
+    ].includes(durableRetryKind)
+      && durableRetryBoundaryAt === expectedBoundaryAt;
+    const exactBoundaryOwner = durableSchedule.pwmState === 'on'
+      && Math.abs(durableAt - expectedBoundaryAt)
+        <= PWM_RETRY_ALARM_TOLERANCE_MS;
+    const expectedOffAt = smartModePageTimerTargetAt(
+      Number(durableSchedule.onMinutes),
+      now,
+      expectedBoundaryAt
+    );
+    const completedOnOwner = durableSchedule.pwmState === 'off'
+      && durableBoundaryAt === expectedBoundaryAt
+      && expectedOffAt > now
+      && Math.abs(durableAt - expectedOffAt)
+        <= PWM_RETRY_ALARM_TOLERANCE_MS;
+    if (!retryOwnsBoundary && !exactBoundaryOwner && !completedOnOwner) {
+      return false;
+    }
+  }
+  return true;
+}
+
+// replacement owner 的证明本身含 storage/alarm await。等待期间 revision
+// 可能再次换主；只能保护一个在证明结束时仍是 current 的 owner。
+async function proveStableDurableLivePwmOwner(
+  initialRevision,
+  reason = 'phase replacement owner'
+) {
+  let candidateRevision = Number.isSafeInteger(initialRevision)
+    ? initialRevision
+    : pwmRuntimeRevision;
+  let lastProofError = null;
+
+  // phase reservation 会拦截自动 phase 入口；少数已经在途的显式设置
+  // 仍可换主。有界重证避免在持续用户操作下占住 SW；未稳定则由调用方
+  // 按最新 revision 排队 repair，绝不把一次 stale proof 当成成功。
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    if (!isAutomationAllowed()) {
+      return {
+        automationAllowed: false,
+        committed: false,
+        stable: true,
+        automationRevision: pwmRuntimeRevision,
+        proofError: lastProofError
+      };
+    }
+
+    let committed = false;
+    try {
+      committed = await hasDurableLivePwmOwner(candidateRevision);
+    } catch (error) {
+      lastProofError = error;
+      console.warn(`[AC扩展] ${reason} 收口证明读取失败:`, error?.message);
+    }
+
+    if (!isAutomationAllowed()) {
+      return {
+        automationAllowed: false,
+        committed: false,
+        stable: true,
+        automationRevision: pwmRuntimeRevision,
+        proofError: lastProofError
+      };
+    }
+    if (isAutomationOperationCurrent(candidateRevision)) {
+      return {
+        automationAllowed: true,
+        committed,
+        stable: true,
+        automationRevision: candidateRevision,
+        proofError: lastProofError
+      };
+    }
+    candidateRevision = pwmRuntimeRevision;
+  }
+
+  return {
+    automationAllowed: isAutomationAllowed(),
+    committed: false,
+    stable: false,
+    automationRevision: pwmRuntimeRevision,
+    proofError: lastProofError
+  };
 }
 
 function prepareFreshPwmStartState() {
@@ -1568,7 +2624,21 @@ function prepareFreshPwmStartState() {
 
 function applyPwmPlanState(plan) {
   if (plan?.proofAction === 'clear') clearPageTimerProofState();
-  if (plan?.phasePatch) Object.assign(schedule, plan.phasePatch);
+  if (plan?.phasePatch) {
+    const phasePatch = { ...plan.phasePatch };
+    const hasNextTrigger = Object.prototype.hasOwnProperty.call(
+      phasePatch,
+      'nextTriggerAt'
+    );
+    const nextTriggerAt = phasePatch.nextTriggerAt;
+    delete phasePatch.nextTriggerAt;
+    Object.assign(schedule, phasePatch);
+    if (hasNextTrigger) {
+      setNextTriggerAt(nextTriggerAt, {
+        plannedAt: Number(plan?.smartClockPlannedAt) || 0
+      });
+    }
+  }
 }
 
 async function resetDisabledPwmRuntime() {
@@ -1609,6 +2679,23 @@ async function persistReconciledPwmTrigger(
   }
   const plan = reconcilePwmTrigger(schedule, alarm, options);
   if (plan.kind !== 'sync-live') return null;
+  const smartClockAssessment = typeof classifySmartOnClock === 'function'
+    ? classifySmartOnClock(schedule, plan.liveScheduledTime, {
+        now: Date.now(),
+        plannedAt: Number(schedule.smartClockPlannedAt)
+          || Number(schedule.alarmCreatedAt)
+          || 0,
+        nextAction: schedule.pwmState,
+        toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+        requirePlannedAt: true
+      })
+    : null;
+  if (smartClockAssessment?.applicable && !smartClockAssessment.valid) {
+    console.warn(
+      `[AC扩展] 拒绝把语义无效智能 ON 闹钟写回 storage (${smartClockAssessment.kind})`
+    );
+    return null;
+  }
   if ((typeof isAutomationAllowed === 'function' && !isAutomationAllowed())
       || (automationRevision !== null
         && typeof isAutomationOperationCurrent === 'function'
@@ -1651,11 +2738,25 @@ async function backfillNextTriggerAt(persist = false) {
   // 第一层：用已保存的阶段时间重算
   const legacyEnd = getLegacyAlarmEndMs();
   if (legacyEnd) {
-    schedule.nextTriggerAt = legacyEnd;
-    if (persist) {
-      await persistSchedule('backfillNextTriggerAt', { syncFromLiveAlarm: false });
+    const legacyClockAssessment = classifySmartOnClock(schedule, legacyEnd, {
+      now: Date.now(),
+      plannedAt: Number(schedule.smartClockPlannedAt)
+        || Number(schedule.alarmCreatedAt)
+        || 0,
+      nextAction: schedule.pwmState,
+      toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+      requirePlannedAt: true
+    });
+    if (!legacyClockAssessment.applicable || legacyClockAssessment.valid) {
+      setNextTriggerAt(legacyEnd);
+      if (persist) {
+        await persistSchedule('backfillNextTriggerAt', { syncFromLiveAlarm: false });
+      }
+      return legacyEnd;
     }
-    return legacyEnd;
+    console.warn(
+      `[AC扩展] backfillNextTriggerAt: 拒绝语义无效智能 ON legacy clock (${legacyClockAssessment.kind})`
+    );
   }
 
   // 第二层：legacy 字段也丢了，但 live alarm 还在 → 从 alarm 恢复
@@ -1665,6 +2766,25 @@ async function backfillNextTriggerAt(persist = false) {
     if (!isAutomationOperationCurrent(automationRevision)) return 0;
     const plan = reconcilePwmTrigger(schedule, liveAlarm, PWM_TRIGGER_NEXT_ONLY_OPTIONS);
     if (plan.kind === 'sync-live') {
+      const smartClockAssessment = classifySmartOnClock(
+        schedule,
+        plan.liveScheduledTime,
+        {
+          now: Date.now(),
+          plannedAt: Number(schedule.smartClockPlannedAt)
+            || Number(schedule.alarmCreatedAt)
+            || 0,
+          nextAction: schedule.pwmState,
+          toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+          requirePlannedAt: true
+        }
+      );
+      if (smartClockAssessment.applicable && !smartClockAssessment.valid) {
+        console.warn(
+          `[AC扩展] backfillNextTriggerAt: 拒绝语义无效智能 ON live alarm (${smartClockAssessment.kind})`
+        );
+        return 0;
+      }
       applyPwmPlanState(plan);
       if (persist) {
         await persistSchedule('backfillNextTriggerAt-fromLiveAlarm', { syncFromLiveAlarm: false });
@@ -1682,11 +2802,13 @@ async function backfillNextTriggerAt(persist = false) {
 // 通过新鲜页面确认 Power-off after，不能直接造出无关机证明的 OFF 相位。
 async function advanceExpiredAlarmToNextBoundary(
   expiredScheduledTime,
-  automationRevision = pwmRuntimeRevision
+  automationRevision = pwmRuntimeRevision,
+  phaseAdmissionEpoch = 0
 ) {
   const recovery = await recoverPwmLifecycle({
     source: 'expired-alarm',
     automationRevision,
+    phaseAdmissionEpoch,
     expiredAlarmAt: expiredScheduledTime,
     liveAlarmAt: 0,
     storedAlarmAt: 0,
@@ -1694,7 +2816,17 @@ async function advanceExpiredAlarmToNextBoundary(
     missingClockAction: 'noop',
     failureAction: 'none'
   });
-  return recovery.handled;
+  if (recovery.handled !== true) return false;
+
+  // shared executor 的 cooldown/early-return 过去会被包装成 handled=true。
+  // adoption 已清旧钟时，只有 durable future owner 与 live ac-pwm 同时存在
+  // 且对齐，才算真的推进成功；否则由 adoption catch 走 fresh-status repair。
+  const now = Date.now();
+  const durableAt = Number(schedule.nextTriggerAt) || 0;
+  const liveAt = Number((await chrome.alarms.get('ac-pwm'))?.scheduledTime) || 0;
+  return durableAt > now
+    && liveAt > now
+    && Math.abs(durableAt - liveAt) <= PWM_RETRY_ALARM_TOLERANCE_MS;
 }
 
 // 普通循环模式的过期相位执行器。策略选择由 recoverPwmLifecycle 统一完成；
@@ -1831,15 +2963,23 @@ async function restoreIntervalAlarmFromStorage(reason = '按 storage 剩余时�
   const targetDueAt = liveDueAt || (storedDueAt > now ? storedDueAt : 0);
 
   if (!targetDueAt || targetDueAt <= now) return false;
-  const retryContext = getActiveSmartOnPwmRetryContext(
+  const smartClockAssessment = classifySmartOnClock(
     schedule,
-    liveAlarm?.scheduledTime
+    targetDueAt,
+    {
+      now,
+      plannedAt: Number(schedule.smartClockPlannedAt)
+        || Number(schedule.alarmCreatedAt)
+        || 0,
+      nextAction: schedule.pwmState,
+      toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+      requirePlannedAt: true
+    }
   );
-  if (schedule.smartMode?.enabled
-      && schedule.pwmState === 'on'
-      && !retryContext.hasTypedSmartOnRetry
-      && !isTrustedHalfHourAlarmBoundary(targetDueAt)) {
-    console.warn('[AC扩展] 拒绝恢复非半点智能 ON 时钟，改由 lifecycle 对齐下一半点');
+  if (smartClockAssessment.applicable && !smartClockAssessment.valid) {
+    console.warn(
+      `[AC扩展] 拒绝恢复不可信智能 ON 时钟 (${smartClockAssessment.kind})，改由 lifecycle 重建`
+    );
     return false;
   }
 
@@ -2032,19 +3172,31 @@ async function createPwmAlarmFromPlan(
 }
 
 async function loadScheduleFromStorage() {
+  // Phase adoption 在 reservation 内先换 revision、再提交 durable intent。
+  // Popup/诊断的普通 reload 不能在这段窗口把旧 storage 合并回新内存相位。
+  if (isSyncPhaseAdoptionAdmissionBlocked()) return schedule;
   const automationRevision = pwmRuntimeRevision;
   if (scheduleLoadBlockedRevision === automationRevision) return schedule;
   const saved = await chrome.storage.local.get(STORAGE_KEY);
-  if (automationRevision !== pwmRuntimeRevision
+  if (isSyncPhaseAdoptionAdmissionBlocked()
+      || automationRevision !== pwmRuntimeRevision
       || scheduleLoadBlockedRevision === automationRevision) return schedule;
   if (saved[STORAGE_KEY]) {
     schedule = { ...schedule, ...saved[STORAGE_KEY] };
+    if (!(Number(schedule.smartClockPlannedAt) > 0)
+        && Number(schedule.nextTriggerAt) > 0
+        && Number(schedule.alarmCreatedAt) > 0) {
+      schedule.smartClockPlannedAt = Number(schedule.alarmCreatedAt);
+    }
   }
   return schedule;
 }
 
 async function persistSchedule(reason = '', options = {}) {
-  const { syncFromLiveAlarm = true } = options;
+  const {
+    syncFromLiveAlarm = true,
+    markSyncPublishPending = false
+  } = options;
   if (!schedule.smartMode?.enabled) {
     schedule.smartOnBoundaryAt = 0;
     schedule.pwmRetryKind = '';
@@ -2058,15 +3210,37 @@ async function persistSchedule(reason = '', options = {}) {
     if (isAutomationOperationCurrent(automationRevision)) {
       const plan = reconcilePwmTrigger(schedule, liveAlarm, PWM_TRIGGER_NEXT_ONLY_OPTIONS);
       if (plan.kind === 'sync-live') {
-        applyPwmPlanState(plan);
-        if (reason) {
-          console.log(`[AC扩展] ${reason}: 写入前按 live alarm 修正 nextTriggerAt`);
+        const smartClockAssessment = typeof classifySmartOnClock === 'function'
+          ? classifySmartOnClock(schedule, plan.liveScheduledTime, {
+              now: Date.now(),
+              plannedAt: Number(schedule.smartClockPlannedAt)
+                || Number(schedule.alarmCreatedAt)
+                || 0,
+              nextAction: schedule.pwmState,
+              toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+              requirePlannedAt: true
+            })
+          : null;
+        if (!smartClockAssessment?.applicable || smartClockAssessment.valid) {
+          applyPwmPlanState(plan);
+          if (reason) {
+            console.log(`[AC扩展] ${reason}: 写入前按 live alarm 修正 nextTriggerAt`);
+          }
+        } else {
+          console.warn(
+            `[AC扩展] ${reason}: 拒绝语义无效智能 ON live alarm (${smartClockAssessment.kind})`
+          );
         }
       }
     }
   }
 
-  await chrome.storage.local.set({ [STORAGE_KEY]: { ...schedule } });
+  await chrome.storage.local.set({
+    [STORAGE_KEY]: { ...schedule },
+    ...(markSyncPublishPending
+      ? { [SYNC_PENDING_PUBLISH_KEY]: true }
+      : {})
+  });
   if (scheduleLoadBlockedRevision === pwmRuntimeRevision) {
     scheduleLoadBlockedRevision = null;
   }
@@ -2097,24 +3271,192 @@ const _syncOpLock = {
   busy: false,
   pending: false,
   pendingReason: '',
-  pendingRemote: null
+  pendingRemote: null,
+  pendingOutbound: false,
+  pendingOutboundReason: ''
 };
+
+async function setSyncPublishPending(pending) {
+  try {
+    if (pending) {
+      await chrome.storage.local.set({ [SYNC_PENDING_PUBLISH_KEY]: true });
+    } else {
+      await chrome.storage.local.remove(SYNC_PENDING_PUBLISH_KEY);
+    }
+    return true;
+  } catch (error) {
+    console.warn('[AC扩展] sync pending marker 写入失败:', error?.message);
+    return false;
+  }
+}
+
+async function getSyncPublishPending() {
+  try {
+    const stored = await chrome.storage.local.get(SYNC_PENDING_PUBLISH_KEY);
+    return stored?.[SYNC_PENDING_PUBLISH_KEY] === true;
+  } catch (error) {
+    console.warn('[AC扩展] sync pending marker 读取失败:', error?.message);
+    return null;
+  }
+}
+
+async function scheduleSyncRetry(kind = 'publish') {
+  const alarmName = kind === 'adopt'
+    ? 'ac-sync-adopt-retry'
+    : 'ac-sync-publish-retry';
+  return createAlarm(alarmName, { delayInMinutes: 1 });
+}
+
+async function loadSyncWatermark() {
+  if (syncWatermarkLoaded) return lastSyncedAt;
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      const stored = await chrome.storage.local.get(SYNC_WATERMARK_KEY);
+      lastSyncedAt = Math.max(
+        lastSyncedAt,
+        Number(stored?.[SYNC_WATERMARK_KEY]) || 0
+      );
+      syncWatermarkLoaded = true;
+      return lastSyncedAt;
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  console.warn('[AC扩展] sync watermark 读取失败:', lastError?.message);
+  // 一次有界重读仍失败时，不得把 0 当成已加载。入站采纳
+  // 必须 fail closed，否则本机旧安全哨兵可能在 SW 重启后回滚新相位。
+  // 返回 null 只停止本次 sync，不中断 init 后续的本地闹钟恢复。
+  return null;
+}
+
+async function persistSyncWatermark(value) {
+  const requestedAt = Number(value) || 0;
+  if (!(requestedAt > 0)) return false;
+  const write = syncWatermarkWriteChain.then(async () => {
+    const watermarkAt = Math.max(lastSyncedAt, requestedAt);
+    // 内存水位先单调前进，即使 local 暂时写失败，本 SW 生命周期内
+    // 也不会重放已确认的快照；重启后仍会从上次 durable 水位重试。
+    lastSyncedAt = watermarkAt;
+    syncWatermarkLoaded = true;
+    try {
+      await chrome.storage.local.set({ [SYNC_WATERMARK_KEY]: watermarkAt });
+      return true;
+    } catch (error) {
+      console.warn('[AC扩展] sync watermark 写入失败:', error?.message);
+      return false;
+    }
+  });
+  syncWatermarkWriteChain = write.catch(() => {});
+  return write;
+}
 
 // 把当前内存 schedule 瘦化后写入 chrome.storage.sync。
 // reason 用于日志。失败静默降级。
 async function syncScheduleToSync(reason = '') {
   if (!chrome.storage?.sync) return;  // 受限上下文（incognito / 策略禁用）
+  syncPublishGeneration += 1;
+  syncWriteOperationsInFlight += 1;
+  // 同一 SW 内的外发写串行，避免 T2 先完成、T1 后完成导致
+  // sync store 与 durable watermark 倒退。
+  const previousWrite = syncWriteChain;
+  let releaseWrite;
+  syncWriteChain = new Promise(resolve => { releaseWrite = resolve; });
+  // 在第一次 await 前先安装共享 barrier；随后到达的 inbound 必须等本次
+  // publish 完成。durable marker + alarm 让连续 storage 读取失败或 SW 重启
+  // 也不会永久吞掉最后一次本机停用／相位提交。
+  const pendingMark = setSyncPublishPending(true);
+  const retryAlarm = scheduleSyncRetry('publish');
   try {
-    const now = Date.now();
-    const slim = composeSyncPayload(schedule, now);
+    await Promise.allSettled([pendingMark, retryAlarm]);
+    await previousWrite.catch(() => {});
+    if (_syncOpLock.busy) {
+      _syncOpLock.pendingOutbound = true;
+      _syncOpLock.pendingOutboundReason = reason;
+      return false;
+    }
+    const loadedWatermark = await loadSyncWatermark();
+    if (loadedWatermark === null) {
+      throw new Error('sync watermark 暂时不可读，已取消本次 sync 写入');
+    }
+    // 本次实际写入前读取最新 generation。若后续又有 publish 请求到达，
+    // 本次成功也不能清掉由后续请求持有的 durable pending marker。
+    const writeGeneration = syncPublishGeneration;
+    const wallNow = Date.now();
+    // Lamport 式时戳：本机已见过快时钟对端后，后续显式停用等
+    // 本地写入仍必须比已知版本新。wallNow 仍用于相位过期判定。
+    const writeAt = Math.max(wallNow, lastSyncedAt + 1);
+    const retryKind = String(schedule.pwmRetryKind || '');
+    // timer-only repair 表示 AC 可能已 ON、但关机保险尚未确认。同步一个
+    // 明确的近期 OFF 动作：新版对端会保留任何更早 OFF，而旧版／新设备
+    // 也会建 OFF alarm，不会把 enabled=true + 无 phase 误解为立即新开一轮。
+    const projectSafetyTimerOff = schedule.smartMode?.enabled === true
+      && retryKind === 'smart-on-safety-timer';
+    // 其余 smart ON retry/safety-wait 发生在 AC 尚未确认 ON 时。它们投影成
+    // “下一半点执行 OFF”的安全哨兵，以替换对端旧 ON actuator；源端提交正常
+    // OFF phase 后再同步真实截止。源端中断时，对端也只会幂等确认 OFF。
+    const projectSafetySentinel = schedule.smartMode?.enabled === true
+      && ['smart-on', 'smart-on-safe-delay', 'smart-on-safety-skip']
+        .includes(retryKind);
+    const safetySentinelAt = projectSafetySentinel
+      ? nextHalfHourBoundary(Math.max(wallNow, Number(schedule.nextTriggerAt) || wallNow))
+      : 0;
+    const safetyTimerOffAt = projectSafetyTimerOff
+      ? Math.max(Number(schedule.nextTriggerAt) || 0, wallNow + 60000)
+      : 0;
+    const syncSchedule = projectSafetyTimerOff
+        ? {
+            ...schedule,
+            pwmState: 'off',
+            nextTriggerAt: safetyTimerOffAt
+          }
+        : projectSafetySentinel
+          ? {
+            ...schedule,
+            pwmState: 'off',
+            nextTriggerAt: safetySentinelAt
+            }
+          : schedule;
+    const slim = {
+      ...composeSyncPayload(syncSchedule, wallNow),
+      syncedAt: writeAt
+    };
     await chrome.storage.sync.set({ [SYNC_KEY]: slim });
-    lastSyncedAt = now;  // 标记本次写入的时间，避免 onChanged 自回环误采纳
+    // 只有 sync.set 成功后才能声称该版本已发布。失败写不推进
+    // durable watermark，否则重启后会错误屏蔽 sync store 里仍然合法的旧版本。
+    const watermarkPersisted = await persistSyncWatermark(writeAt);
+    if (!watermarkPersisted) {
+      void appendDiagnosticLog(
+        'warn',
+        'sync-watermark',
+        new Error(`sync 已写入但 watermark 未持久化: ${writeAt}`)
+      );
+      return false;
+    }
     if (reason) {
       console.log(`[AC扩展] sync ↑ ${reason}: nextTriggerAt=${slim.nextTriggerAt ? new Date(slim.nextTriggerAt).toLocaleString() : '无'}, enabled=${slim.enabled}`);
     }
+    if (syncPublishGeneration === writeGeneration) {
+      const markerCleared = await setSyncPublishPending(false);
+      if (markerCleared && syncPublishGeneration === writeGeneration) {
+        await chrome.alarms.clear('ac-sync-publish-retry');
+      }
+      // remove/clear 都是异步的；若其间出现新请求，恢复 marker + alarm，
+      // 不能让旧成功清理覆盖新请求的持久重试凭证。
+      if (syncPublishGeneration !== writeGeneration) {
+        await setSyncPublishPending(true);
+        await scheduleSyncRetry('publish');
+      }
+    }
+    return true;
   } catch (e) {
     console.warn('[AC扩展] sync 写入失败（未登录浏览器同步 / 配额超限？）:', e?.message);
     void appendDiagnosticLog('warn', 'sync-write', e);
+    await scheduleSyncRetry('publish');
+    return false;
+  } finally {
+    syncWriteOperationsInFlight = Math.max(0, syncWriteOperationsInFlight - 1);
+    releaseWrite();
   }
 }
 
@@ -2122,8 +3464,29 @@ async function syncScheduleToSync(reason = '') {
 // 注意：调用方需要保证不并发（_syncOpLock 守卫）。
 async function applySyncedPhase(remote, reason = '') {
   if (!remote || typeof remote !== 'object') return false;
+  const syncAdmissionEpoch = typeof automaticDisableAdmissionEpoch === 'number'
+    ? automaticDisableAdmissionEpoch
+    : 0;
+  const syncAdoptionPreempted = () => (
+    (typeof automaticOnAdmissionBlocked === 'boolean'
+      && automaticOnAdmissionBlocked)
+    || (typeof automaticDisableAdmissionEpoch === 'number'
+      && automaticDisableAdmissionEpoch !== syncAdmissionEpoch)
+  );
+  const loadedWatermark = await loadSyncWatermark();
+  if (loadedWatermark === null) {
+    await scheduleSyncRetry('adopt');
+    return false;
+  }
   const remoteSyncedAt = Number(remote.syncedAt) || 0;
-  if (remoteSyncedAt > 0 && remoteSyncedAt <= lastSyncedAt) {
+  // 显式停用是跨时钟的安全优先级。旧版／离线设备可能用较慢墙钟
+  // 写出一份在 sync store 中更晚到达、但 syncedAt 数值更小的 disable。
+  // 不能因全局 watermark 继续自动控制。
+  const lowerClockSafetyDisable = remote?.enabled === false
+    && schedule.enabled === true;
+  if (remoteSyncedAt > 0
+      && remoteSyncedAt <= lastSyncedAt
+      && !lowerClockSafetyDisable) {
     console.log(`[AC扩展] sync ↓ ${reason}: 忽略陈旧或自回环快照 syncedAt=${remoteSyncedAt}`);
     return false;
   }
@@ -2156,15 +3519,25 @@ async function applySyncedPhase(remote, reason = '') {
   const localPwmAlarmBeforeConfig = wasAutomationAllowed
     ? await chrome.alarms.get('ac-pwm')
     : null;
+  if (syncAdoptionPreempted()) {
+    console.log(`[AC扩展] sync ↓ ${reason}: 已被更晚的本机明确停用抢占`);
+    return false;
+  }
   const localRetryBeforeConfig = getActiveSmartOnPwmRetryContext(
     schedule,
     localPwmAlarmBeforeConfig?.scheduledTime
+  );
+  const localExceptionBeforeConfig = getOwnedSmartOnClockException(
+    schedule,
+    localPwmAlarmBeforeConfig?.scheduledTime,
+    Date.now()
   );
   // 1) config 字段无相位守卫——直接 last-writer-wins 采纳
   const rawCfg = computeConfigDiff(schedule, remote);
   const prospectiveSchedule = { ...schedule, ...rawCfg.fields };
   const retryRemainsOwned = wasAutomationAllowed
-    && localRetryBeforeConfig.hasTypedSmartOnRetry
+    && (localRetryBeforeConfig.hasTypedSmartOnRetry
+      || localExceptionBeforeConfig.hasOwnedException)
     && prospectiveSchedule.smartMode?.enabled === true
     && isAutomationAllowedForSchedule(prospectiveSchedule);
   const cfg = protectSmartOnRetryConfigDiff(
@@ -2173,6 +3546,7 @@ async function applySyncedPhase(remote, reason = '') {
   );
   let configChanged = false;
   let activeHoursChanged = false;
+  let remotePhaseRejected = false;
   if (cfg.changed) {
     for (const [k, v] of Object.entries(cfg.fields)) {
       schedule[k] = v;
@@ -2181,65 +3555,211 @@ async function applySyncedPhase(remote, reason = '') {
     configChanged = true;
   }
   const enabledChanged = cfg.fields.enabled !== undefined;
-  const nowEnabled = schedule.enabled;
+  let nowEnabled = schedule.enabled;
   const automationAllowed = isAutomationAllowed();
+  let phaseMetadataChanged = false;
 
   // 2) 相位字段需通过严格守卫（陈旧/容忍/自回环），computePhaseAdoption 决策
   // 提取（Fowler Extract Function）：相位采纳 + ac-pwm 重排；远端时戳过期则推进到下一未来边界。
   async function adoptPhaseAndRearm(remote, automationAllowed) {
-    const automationRevision = pwmRuntimeRevision;
+    let automationRevision = pwmRuntimeRevision;
+    let phaseAdmissionEpoch = 0;
     const adopt = computePhaseAdoption(schedule, remote, { lastSyncedAt });
     if (!adopt) return false;
     if (isComfortStartActive()) return false;
     if (!automationAllowed || !isAutomationOperationCurrent(automationRevision)) return false;
+    // sync payload 不携带本机 retry marker；远端 future clock 只能按 phase
+    // 原始生成时刻证明“最近半点”。syncedAt 只是本次配置 push 时间，不能
+    // 给旧坏钟重新锚定；旧版本缺失 origin 时 fail closed，只采纳配置。
+    const remoteClockAssessment = classifySmartOnClock(
+      { ...schedule, pwmState: adopt.pwmState },
+      adopt.nextTriggerAt,
+      {
+        now: Date.now(),
+        plannedAt: Number(remote?.smartClockPlannedAt) || 0,
+        nextAction: adopt.pwmState,
+        toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+        allowDue: true,
+        requirePlannedAt: true
+      }
+    );
+    if (remoteClockAssessment.applicable && !remoteClockAssessment.valid) {
+      remotePhaseRejected = true;
+      console.warn(
+        `[AC扩展] sync ↓ ${reason}: 拒绝语义无效智能 ON 时钟 (${remoteClockAssessment.kind})`
+      );
+      return false;
+    }
 
-    const oldPwmState = schedule.pwmState;
-    const oldTrigger = schedule.nextTriggerAt;
-    schedule.pwmState = adopt.pwmState;
-    setNextTriggerAt(adopt.nextTriggerAt);
-    schedule.alarmCreatedAt = Date.now();
-    schedule.alarmDelayMinutes = Math.max(1, (adopt.nextTriggerAt - Date.now()) / 60000);
-    const phaseChanged = (oldPwmState !== schedule.pwmState || oldTrigger !== schedule.nextTriggerAt);
-    if (phaseChanged) clearPwmRetryState();
+    const phaseNeedsOwnership = schedule.pwmState !== adopt.pwmState
+      || Number(schedule.nextTriggerAt) !== Number(adopt.nextTriggerAt);
+    try {
+      if (phaseNeedsOwnership) {
+        // revision 抢占与旧 live alarm 清除之间存在 await 窗口。先保留一把独立
+        // admission reservation，使已送达的旧 alarm/watchdog 也无法趁取消请求
+        // 等待期间 claim 新 revision；reservation 直到 durable intent + rearm 收口。
+        phaseAdmissionEpoch = claimSyncPhaseAdoptionAdmission();
+        if (phaseAdmissionEpoch <= 0) {
+          await scheduleSyncRetry('adopt');
+          return false;
+        }
+        automationRevision = pwmRuntimeRevision += 1;
+        invalidateTimerBasedShutdown();
+        try {
+          await cancelAutomaticOnRequests();
+        } catch (error) {
+          console.warn('[AC扩展] sync 相位抢占：取消旧自动 ON 失败，继续以新 revision 收口:', error?.message);
+          void appendDiagnosticLog('warn', 'sync-phase-preempt', error);
+        }
+        if (syncAdoptionPreempted()) return false;
+        if (!isAutomationOperationCurrent(automationRevision)) {
+          // 非明确停用的 owner 抢占意味着这份已通过语义门禁的 remote phase
+          // 尚未 durable；必须留下重试入口，不能静默丢失。
+          await scheduleSyncRetry('adopt');
+          return false;
+        }
+      }
 
-    if (phaseChanged && automationAllowed) {
-      try {
-        // 先把远端 phase/绝对边界写成 durable intent，再清旧 live alarm。
-        // create=false 时诊断/看门狗才能看见新所有权，而非重载旧 storage 假绿。
-        await persistSchedule('sync-phase-adopt-intent', { syncFromLiveAlarm: false });
-        await clearPwmAlarm(automationRevision);
-        const delayMs = adopt.nextTriggerAt - Date.now();
-        if (delayMs > 0) {
-          // 用绝对时间调度，让多设备对齐到同一时刻（非 delayInMinutes 各自倒计时）
-          const alarmCreated = await createPwmAlarmFromPlan(
-            { nextTriggerAt: adopt.nextTriggerAt },
-            'sync-phase-adopt',
-            automationRevision
-          );
-          if (alarmCreated === false) {
-            schedule.pageTimerError = '同步相位已采纳，但 PWM 闹钟创建失败；等待看门狗按 durable intent 恢复';
-            await createAlarm('ac-watchdog', { periodInMinutes: 5 });
-            await persistSchedule('sync-phase-adopt-alarm-failed', {
-              syncFromLiveAlarm: false
+      const oldPwmState = schedule.pwmState;
+      const oldTrigger = schedule.nextTriggerAt;
+      const oldSmartClockPlannedAt = Number(schedule.smartClockPlannedAt) || 0;
+      schedule.pwmState = adopt.pwmState;
+      setNextTriggerAt(adopt.nextTriggerAt, {
+        plannedAt: Number(remote?.smartClockPlannedAt) || 0
+      });
+      const phaseChanged = phaseNeedsOwnership
+        || oldPwmState !== schedule.pwmState
+        || oldTrigger !== schedule.nextTriggerAt;
+      const originChanged = oldSmartClockPlannedAt
+        !== Number(schedule.smartClockPlannedAt || 0);
+      if (!phaseChanged && originChanged) {
+        phaseMetadataChanged = true;
+        return false;
+      }
+      schedule.alarmCreatedAt = Date.now();
+      schedule.alarmDelayMinutes = Math.max(1, (adopt.nextTriggerAt - Date.now()) / 60000);
+      if (phaseChanged) clearPwmRetryState();
+
+      if (phaseChanged && automationAllowed) {
+        try {
+          // 先把远端 phase/绝对边界写成 durable intent，再清旧 live alarm。
+          // create=false 时诊断/看门狗才能看见新所有权，而非重载旧 storage 假绿。
+          await persistSchedule('sync-phase-adopt-intent', { syncFromLiveAlarm: false });
+          await clearPwmAlarm(automationRevision);
+          const delayMs = adopt.nextTriggerAt - Date.now();
+          if (delayMs > 0) {
+            // 用绝对时间调度，让多设备对齐到同一时刻（非 delayInMinutes 各自倒计时）
+            const alarmCreated = await createPwmAlarmFromPlan(
+              { nextTriggerAt: adopt.nextTriggerAt },
+              'sync-phase-adopt',
+              automationRevision
+            );
+            if (alarmCreated === false) {
+              schedule.pageTimerError = '同步相位已采纳，但 PWM 闹钟创建失败；等待看门狗按 durable intent 恢复';
+              await persistSchedule('sync-phase-adopt-alarm-failed', {
+                syncFromLiveAlarm: false
+              });
+              throw new Error('同步相位已采纳，但 PWM 闹钟创建失败');
+            }
+          } else {
+            // 远端时戳已过期（在 staleMs 60s 窗口内）——推进到下一未来周期边界
+            const advanced = await advanceExpiredAlarmToNextBoundary(
+              adopt.nextTriggerAt,
+              automationRevision,
+              phaseAdmissionEpoch
+            );
+            if (!advanced) {
+              throw new Error('同步过期相位未建立未来恢复时钟');
+            }
+          }
+        } catch (e) {
+          console.warn('[AC扩展] sync 合并：重排 ac-pwm 闹钟失败:', e?.message);
+          if (!isAutomationOperationCurrent(automationRevision)) {
+            // owner-authorized expired recovery 可能已换 revision。只有 storage、
+            // 内存和 live alarm 三方收口且语义有效才保护它；仅 claim 未提交的
+            // 新 revision 仍须沿原半点立即 fresh-status repair。
+            const replacementProof = await proveStableDurableLivePwmOwner(
+              pwmRuntimeRevision,
+              'sync 新 phase owner'
+            );
+            if (!replacementProof.automationAllowed) return true;
+            const replacementRevision = replacementProof.automationRevision;
+            if (replacementProof.stable && replacementProof.committed) {
+              void appendDiagnosticLog('warn', 'sync-phase-adopt-post-owner', e);
+              return true;
+            }
+            const recoveryBoundaryAt = remoteClockAssessment.applicable
+              ? Number(remoteClockAssessment.boundaryAt)
+                || Number(remoteClockAssessment.expectedAt)
+                || 0
+              : 0;
+            schedule.pageTimerError = `同步相位的新 owner 未完成稳定 durable/live 收口：${e?.message || String(e)}；立即修复主钟`;
+            queueDeferredScheduleRepair({
+              smartOnExpectedBoundaryAt: recoveryBoundaryAt,
+              revokeInvalidSmartOnClock: recoveryBoundaryAt > 0,
+              revokeOwnerRevision: replacementRevision,
+              preserveRevokeAcrossSupersededRepair: recoveryBoundaryAt > 0
             });
+            try {
+              await createAlarm('ac-watchdog', {
+                delayInMinutes: 1,
+                periodInMinutes: 5
+              });
+            } catch (watchdogError) {
+              console.warn('[AC扩展] sync 新 owner 未收口后备看门狗创建失败:', watchdogError?.message);
+            }
             return true;
           }
-        } else {
-          // 远端时戳已过期（在 staleMs 60s 窗口内）——推进到下一未来周期边界
-          await advanceExpiredAlarmToNextBoundary(
-            adopt.nextTriggerAt,
-            automationRevision
-          );
+          const failedExpectedBoundaryAt = remoteClockAssessment.applicable
+            ? Number(remoteClockAssessment.boundaryAt)
+              || Number(remoteClockAssessment.expectedAt)
+              || 0
+            : 0;
+          clearPwmRetryState();
+          setNextTriggerAt(0);
+          schedule.alarmCreatedAt = 0;
+          schedule.alarmDelayMinutes = 0;
+          schedule.pageTimerError = `同步相位重排失败：${e?.message || String(e)}；立即修复主钟`;
+          try {
+            await persistSchedule('sync-phase-adopt-error', {
+              syncFromLiveAlarm: false
+            });
+          } catch (persistError) {
+            console.warn('[AC扩展] sync 相位失败状态持久化失败:', persistError?.message);
+          }
+          try {
+            await clearPwmAlarm(automationRevision);
+          } catch (clearError) {
+            console.warn('[AC扩展] sync 相位失败清理旧闹钟失败:', clearError?.message);
+          }
+          queueDeferredScheduleRepair({
+            smartOnExpectedBoundaryAt: failedExpectedBoundaryAt,
+            revokeInvalidSmartOnClock: failedExpectedBoundaryAt > 0,
+            revokeOwnerRevision: automationRevision,
+            preserveRevokeAcrossSupersededRepair: failedExpectedBoundaryAt > 0
+          });
+          try {
+            await createAlarm('ac-watchdog', {
+              delayInMinutes: 1,
+              periodInMinutes: 5
+            });
+          } catch (watchdogError) {
+            console.warn('[AC扩展] sync 相位失败后备看门狗创建失败:', watchdogError?.message);
+          }
+          try {
+            await scheduleSyncRetry('adopt');
+          } catch (retryError) {
+            console.warn('[AC扩展] sync 相位采纳重试创建失败:', retryError?.message);
+          }
+          return true;
         }
-      } catch (e) {
-        console.warn('[AC扩展] sync 合并：重排 ac-pwm 闹钟失败:', e?.message);
-        schedule.pageTimerError = `同步相位重排失败：${e?.message || String(e)}；等待看门狗恢复`;
-        await createAlarm('ac-watchdog', { periodInMinutes: 5 });
-        await persistSchedule('sync-phase-adopt-error', { syncFromLiveAlarm: false });
-        return true;
+      }
+      return phaseChanged;
+    } finally {
+      if (phaseAdmissionEpoch > 0) {
+        releaseSyncPhaseAdoptionAdmission(phaseAdmissionEpoch);
       }
     }
-    return phaseChanged;
   }
 
   const localPwmAlarm = automationAllowed ? localPwmAlarmBeforeConfig : null;
@@ -2247,14 +3767,21 @@ async function applySyncedPhase(remote, reason = '') {
     schedule,
     localPwmAlarm?.scheduledTime
   );
+  const localClockException = getOwnedSmartOnClockException(
+    schedule,
+    localPwmAlarm?.scheduledTime,
+    Date.now()
+  );
   const protectLocalSmartOnRetry = automationAllowed
-    && localRetryContext.hasTypedSmartOnRetry;
+    && (localRetryContext.hasTypedSmartOnRetry
+      || localClockException.hasOwnedException);
   if (protectLocalSmartOnRetry) {
-    console.log(`[AC扩展] sync ↓ ${reason}: 本地 smart-on 重试事务进行中，暂不采纳远端 on/off 时长与相位`);
+    console.log(`[AC扩展] sync ↓ ${reason}: 本地 smart-on 安全事务进行中，暂不采纳远端 on/off 时长与相位`);
   }
   const phaseChanged = protectLocalSmartOnRetry
     ? false
     : await adoptPhaseAndRearm(remote, automationAllowed);
+  if (syncAdoptionPreempted()) return false;
 
   // 3) 闹钟基础设施重建——只由 config 变更驱动（相位路径只管 ac-pwm）
   //    关键修复：若 enabled 在 sync 中翻为 true 但无相位（远端刚 enable 还没跑完第一步），
@@ -2262,7 +3789,15 @@ async function applySyncedPhase(remote, reason = '') {
   //    反之 enabled 翻为 false 也必须主动清理闹钟 + 停机，否则设备 B 继续跑本地 PWM。
   let didAlarmInfra = false;
   if (enabledChanged || activeHoursChanged) {
-    if (!nowEnabled) {
+    if (remotePhaseRejected && (enabledChanged || !wasAutomationAllowed)) {
+      // 旧版 sync 可能没有 smartClockPlannedAt；不得让“相位拒绝”退化成
+      // false→true 无相位立即开机。保持 fail-closed disabled，等下一份带可信
+      // phase 的快照再恢复。
+      schedule.enabled = false;
+      nowEnabled = false;
+      await shutdownAfterSyncDisable();
+      didAlarmInfra = true;
+    } else if (!nowEnabled) {
       if (enabledChanged) {
         // true → false：清所有 PWM 相关闹钟 + 停机（B1 顺序：先 persist 再关）
         await shutdownAfterSyncDisable();
@@ -2286,6 +3821,7 @@ async function applySyncedPhase(remote, reason = '') {
         // → runPwmStep() 顶部 loadScheduleFromStorage() 用 storage 旧值（enabled=false）
         // 覆盖内存导致 runPwmStep 提前返回、闹钟基础设施丢失。
         await persistSchedule('sync-enabled-pre-setup', { syncFromLiveAlarm: false });
+        if (syncAdoptionPreempted()) return false;
         await setupAlarms(true);  // startImmediately → runPwmStep，内部建 ac-pwm + badge-tick
         await createAlarm('ac-watchdog', { periodInMinutes: 5 });
       }
@@ -2298,14 +3834,24 @@ async function applySyncedPhase(remote, reason = '') {
     rescheduleActiveBoundary();
   }
 
-  // 标记最新已知的 remote.syncedAt——即便没采纳相位，也防止稍后 onChanged 自回环再次触发
-  if (remote.syncedAt) lastSyncedAt = Math.max(lastSyncedAt, remote.syncedAt);
+  if (syncAdoptionPreempted()) return false;
 
-  const changed = configChanged || phaseChanged;
+  const changed = configChanged || phaseChanged || phaseMetadataChanged;
+  // 先把采纳后的 schedule 落盘，再推进“已处理 remote”水位。
+  // 即便本次 diff 为空也会重落一次：若上次 persist 失败后内存已
+  // 变更，重试不能因 diff 变空就跳过 durable commit。
+  if (changed || remoteSyncedAt > 0) {
+    await persistSchedule(
+      changed ? (reason || 'sync-采纳') : 'sync-已处理快照',
+      { syncFromLiveAlarm: false }
+    );
+  }
   if (changed) {
-    await persistSchedule(reason || 'sync-采纳', { syncFromLiveAlarm: false });
     if (phaseChanged) {
       console.log(`[AC扩展] sync ↓ ${reason}: 已采纳远端相位 pwmState=${schedule.pwmState}, nextTriggerAt=${new Date(schedule.nextTriggerAt).toLocaleString()}`);
+    }
+    if (phaseMetadataChanged) {
+      console.log(`[AC扩展] sync ↓ ${reason}: 已补全远端智能时钟来源`);
     }
     if (configChanged) {
       console.log(`[AC扩展] sync ↓ ${reason}: 已采纳远端 config:`, cfg.fields);
@@ -2314,31 +3860,68 @@ async function applySyncedPhase(remote, reason = '') {
       console.log(`[AC扩展] sync ↓ ${reason}: enabled=${wasEnabled}→${nowEnabled}，已重建闹钟基础设施`);
     }
   }
+  // schedule durable commit 成功后才标记已见；写水位失败时保留当前
+  // 内存抑制，重启后安全重放同一快照。
+  if (remoteSyncedAt > 0) {
+    await persistSyncWatermark(remoteSyncedAt);
+  }
   return changed;
 }
 
 // 从 chrome.storage.sync 拉取并尝试合并。reason 用于日志。
 // 传 explicitRemote 可跳过读取（onChanged 已传入 newValue）；否则从 sync store 读。
 async function tryAdoptSyncedState(reason = '', explicitRemote = null) {
-  if (_syncOpLock.busy) {
+  const queuePendingAdoption = () => {
     _syncOpLock.pending = true;
     _syncOpLock.pendingReason = reason;
     if (explicitRemote && typeof explicitRemote === 'object') {
       const pendingAt = Number(_syncOpLock.pendingRemote?.syncedAt) || 0;
       const incomingAt = Number(explicitRemote.syncedAt) || 0;
-      if (!_syncOpLock.pendingRemote || !pendingAt || !incomingAt || incomingAt >= pendingAt) {
+      // 数值时钟正常时保留较新快照；但显式 disable 是跨时钟的安全
+      // 例外，慢时钟旧端后发也必须有机会停止本机自动控制。
+      if (!_syncOpLock.pendingRemote
+          || explicitRemote.enabled === false
+          || incomingAt >= pendingAt) {
         _syncOpLock.pendingRemote = explicitRemote;
       }
     }
     console.log(`[AC扩展] sync 合并排队（上次仍在处理）: ${reason}`);
     return false;
+  };
+  if (_syncOpLock.busy) {
+    return queuePendingAdoption();
+  }
+
+  // 先排空在本次入站之前已经登记的 outbound barrier，再取得入站锁。
+  // 循环复核 identity，覆盖 await 已解析 promise 的微任务窗口内新登记的写。
+  let overlappedOutbound = false;
+  while (true) {
+    const observedWriteChain = syncWriteChain;
+    if (syncWriteOperationsInFlight > 0) overlappedOutbound = true;
+    await observedWriteChain.catch(() => {});
+    if (observedWriteChain === syncWriteChain) break;
+    overlappedOutbound = true;
+  }
+  if (_syncOpLock.busy) {
+    return queuePendingAdoption();
   }
   _syncOpLock.busy = true;
   let applied = false;
   let requestReason = reason;
-  let remote = explicitRemote;
+  // event snapshot 与 outbound 发生重叠时，其到达次序不能代表 physical
+  // sync store 的最终写入次序。barrier 排空后丢弃副本并重读当前 store：
+  // 若远端最后写则采用远端；若本机最后写则读回自写并由 watermark 忽略。
+  let remote = overlappedOutbound ? null : explicitRemote;
   let readAttempts = 0;
   try {
+    const pendingPublish = await getSyncPublishPending();
+    const publishRetryAlarm = await chrome.alarms.get('ac-sync-publish-retry');
+    if (pendingPublish !== false || publishRetryAlarm) {
+      _syncOpLock.pendingOutbound = true;
+      _syncOpLock.pendingOutboundReason = 'sync-durable-publish-preempts-inbound';
+      await scheduleSyncRetry('publish');
+      return false;
+    }
     while (true) {
       if (!remote && chrome.storage?.sync) {
         try {
@@ -2352,28 +3935,47 @@ async function tryAdoptSyncedState(reason = '', explicitRemote = null) {
             readAttempts += 1;
             continue;
           }
+          await scheduleSyncRetry('adopt');
         }
       }
       if (remote) {
         const candidate = remote;
         const candidateReason = requestReason;
+        // 等待共享 schedule 队列时，显式 disable 总能淘汰旧 candidate；
+        // 其余快照仍按 syncedAt 选新，避免乱序旧事件掩盖较新失败。
         const pendingSupersedesCandidate = () => {
-          const candidateAt = Number(candidate.syncedAt) || 0;
-          const pendingAt = Number(_syncOpLock.pendingRemote?.syncedAt) || 0;
-          return _syncOpLock.pending
-            && (!candidateAt || !pendingAt || pendingAt >= candidateAt);
+          if (!_syncOpLock.pending) return false;
+          const pendingRemote = _syncOpLock.pendingRemote;
+          if (!pendingRemote) return true;
+          if (pendingRemote.enabled === false) return true;
+          const pendingAt = Number(pendingRemote.syncedAt) || 0;
+          const candidateAt = Number(candidate?.syncedAt) || 0;
+          return pendingAt >= candidateAt;
         };
         try {
-          const changed = await runSerializedScheduleUpdate(() => {
+          const changed = await runSerializedScheduleUpdate(async () => {
             // 等待共享队列期间若已有更新到达，旧快照尚未产生副作用，直接淘汰。
             if (pendingSupersedesCandidate()) return false;
+            // 本地 mutation 可能早已持有 schedule queue，并在本次 inbound
+            // 排队后才 atomic persist schedule + publish marker。再次检查可
+            // 防止远端旧 enabled 覆盖本机刚确认的明确停用。
+            const localPublishPending = await getSyncPublishPending();
+            if (_syncOpLock.pendingOutbound || localPublishPending !== false) {
+              _syncOpLock.pendingOutbound = true;
+              _syncOpLock.pendingOutboundReason = 'sync-local-publish-preempts-inbound';
+              await scheduleSyncRetry('publish');
+              return false;
+            }
             return applySyncedPhase(candidate, candidateReason);
           });
           applied = changed || applied;
         } catch (e) {
           console.warn('[AC扩展] sync 合并失败:', e?.message);
           void appendDiagnosticLog('warn', 'sync-adopt', e);
-          if (!pendingSupersedesCandidate()) throw e;
+          if (!pendingSupersedesCandidate()) {
+            await scheduleSyncRetry('adopt');
+            throw e;
+          }
         }
       }
       if (!_syncOpLock.pending) return applied;
@@ -2388,10 +3990,20 @@ async function tryAdoptSyncedState(reason = '', explicitRemote = null) {
       readAttempts = 0;
     }
   } finally {
+    const pendingOutbound = _syncOpLock.pendingOutbound;
+    const pendingOutboundReason = _syncOpLock.pendingOutboundReason;
     _syncOpLock.busy = false;
     _syncOpLock.pending = false;
     _syncOpLock.pendingReason = '';
     _syncOpLock.pendingRemote = null;
+    _syncOpLock.pendingOutbound = false;
+    _syncOpLock.pendingOutboundReason = '';
+    if (pendingOutbound) {
+      await syncScheduleToSync(
+        pendingOutboundReason || 'sync-after-inbound'
+      );
+    }
+    drainDeferredScheduleRepair('sync-adopt-complete');
   }
 }
 
@@ -2414,16 +4026,27 @@ async function tryAdoptSyncedState(reason = '', explicitRemote = null) {
 async function tryAdoptPageTimer(reason = '') {
   if (!isAutomationAllowed()
       || isComfortStartActive()
-      || isCurrentPwmStepRunning()) return false;
-  const automationRevision = pwmRuntimeRevision;
+      || isCurrentPwmStepRunning()
+      || pwmExecutionWithRecoveryCount > 0
+      || repairScheduleClock.inFlight
+      || isSyncPhaseAdoptionAdmissionBlocked()) return false;
+  let automationRevision = pwmRuntimeRevision;
+  let phaseAdmissionEpoch = 0;
+  let pageAdoptionExpectedBoundaryAt = 0;
   try {
     const livePwmAlarm = await chrome.alarms.get('ac-pwm');
     const retryContext = getActiveSmartOnPwmRetryContext(
       schedule,
       livePwmAlarm?.scheduledTime
     );
-    if (retryContext.hasTypedSmartOnRetry) {
-      console.log(`[AC扩展] page timer ↓ ${reason}: smart-on 重试事务进行中，暂不采纳预置关机时间`);
+    const localClockException = getOwnedSmartOnClockException(
+      schedule,
+      livePwmAlarm?.scheduledTime,
+      Date.now()
+    );
+    if (retryContext.hasTypedSmartOnRetry
+        || localClockException.hasOwnedException) {
+      console.log(`[AC扩展] page timer ↓ ${reason}: smart-on 安全事务进行中，暂不采纳预置关机时间`);
       return false;
     }
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
@@ -2435,9 +4058,45 @@ async function tryAdoptPageTimer(reason = '') {
 
     const adopt = computePageTimerAdoption(schedule, result, { now: Date.now() });
     if (!adopt) return false;
+    const pageClockAssessment = classifySmartOnClock(
+      schedule,
+      adopt.nextTriggerAt,
+      {
+        now: Date.now(),
+        plannedAt: Number(schedule.smartClockPlannedAt)
+          || Number(schedule.alarmCreatedAt)
+          || 0,
+        nextAction: schedule.pwmState,
+        toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+        allowDue: true,
+        requirePlannedAt: true
+      }
+    );
+    pageAdoptionExpectedBoundaryAt = pageClockAssessment.applicable
+      ? Number(pageClockAssessment.boundaryAt)
+        || Number(pageClockAssessment.expectedAt)
+        || 0
+      : 0;
+    if (pageClockAssessment.applicable && !pageClockAssessment.valid) {
+      console.warn(
+        `[AC扩展] page timer ↓ ${reason}: 拒绝语义无效智能 ON 时钟 (${pageClockAssessment.kind})`
+      );
+      return false;
+    }
     if (isComfortStartActive()
         || isCurrentPwmStepRunning()
+        || pwmExecutionWithRecoveryCount > 0
+        || repairScheduleClock.inFlight
+        || isSyncPhaseAdoptionAdmissionBlocked()
         || !isAutomationOperationCurrent(automationRevision)) return false;
+
+    // Page timer 与 chrome.sync 都会改写同一 phase clock。两者共用排他
+    // reservation；claim 后再换 revision，使已验权但尚未入 executor 的旧事件
+    // fail closed，直到 durable intent + alarm rearm 完整收口。
+    phaseAdmissionEpoch = claimSyncPhaseAdoptionAdmission();
+    if (phaseAdmissionEpoch <= 0) return false;
+    automationRevision = pwmRuntimeRevision += 1;
+    invalidateTimerBasedShutdown();
 
     // 采纳 page timer 值作为权威"关"时刻
     const oldTrigger = schedule.nextTriggerAt;
@@ -2460,17 +4119,20 @@ async function tryAdoptPageTimer(reason = '') {
       );
       if (alarmCreated === false) {
         schedule.pageTimerError = '页面关机时间已采纳，但 PWM 闹钟创建失败；等待看门狗按 durable intent 恢复';
-        await createAlarm('ac-watchdog', { periodInMinutes: 5 });
         await persistSchedule(`page-timer-adopt-alarm-failed (${reason})`, {
           syncFromLiveAlarm: false
         });
-        return true;
+        throw new Error('页面关机时间已采纳，但 PWM 闹钟创建失败');
       }
     } else {
-      await advanceExpiredAlarmToNextBoundary(
+      const advanced = await advanceExpiredAlarmToNextBoundary(
         adopt.nextTriggerAt,
-        automationRevision
+        automationRevision,
+        phaseAdmissionEpoch
       );
+      if (!advanced) {
+        throw new Error('页面过期相位未建立未来恢复时钟');
+      }
     }
 
     await rescheduleActiveBoundary();
@@ -2490,10 +4152,84 @@ async function tryAdoptPageTimer(reason = '') {
     console.log(`[AC扩展] page-timer ↓ ${reason}: 采纳 picker=${result.value} → nextTriggerAt=${new Date(adopt.nextTriggerAt).toLocaleTimeString()} (旧 ${oldStr}), 因=${adopt.reason}, pwmState=${schedule.pwmState}`);
     return true;
   } catch (e) {
-    // AC 页面可能尚未完全加载 / content script 未就绪——静默降级
-    console.warn(`[AC扩展] page-timer ${reason} 读取失败（可能页面未就绪）:`, e?.message);
+    if (phaseAdmissionEpoch > 0) {
+      if (!isAutomationOperationCurrent(automationRevision)) {
+        const replacementProof = await proveStableDurableLivePwmOwner(
+          pwmRuntimeRevision,
+          'page timer 新 phase owner'
+        );
+        if (!replacementProof.automationAllowed) return false;
+        const replacementRevision = replacementProof.automationRevision;
+        if (replacementProof.stable && replacementProof.committed) {
+          console.warn(`[AC扩展] page-timer ${reason} 后处理失败，但 phase 已由新 owner 接管:`, e?.message);
+          void appendDiagnosticLog('warn', 'page-timer-adopt-post-owner', e);
+          return false;
+        }
+        schedule.pageTimerError = `页面定时器相位的新 owner 未完成稳定 durable/live 收口：${e?.message || String(e)}；立即修复主钟`;
+        queueDeferredScheduleRepair({
+          smartOnExpectedBoundaryAt: pageAdoptionExpectedBoundaryAt,
+          revokeInvalidSmartOnClock: pageAdoptionExpectedBoundaryAt > 0,
+          revokeOwnerRevision: replacementRevision,
+          preserveRevokeAcrossSupersededRepair:
+            pageAdoptionExpectedBoundaryAt > 0
+        });
+        try {
+          await createAlarm('ac-watchdog', {
+            delayInMinutes: 1,
+            periodInMinutes: 5
+          });
+        } catch (watchdogError) {
+          console.warn('[AC扩展] page timer 新 owner 未收口后备看门狗创建失败:', watchdogError?.message);
+        }
+        return false;
+      }
+      // claim 后旧 alarm 可能已被浏览器送达或清除。此时不能再按普通页面
+      // 读取失败静默返回：先持久化“无可信主钟”，释放 reservation 后立即
+      // 走只读 repair；一分钟 watchdog 是 SW 在两步间退出时的 durable 后备。
+      clearPwmRetryState();
+      setNextTriggerAt(0);
+      schedule.alarmCreatedAt = 0;
+      schedule.alarmDelayMinutes = 0;
+      schedule.pageTimerError = `页面定时器相位采纳未收口：${e?.message || String(e)}；立即修复主钟`;
+      try {
+        await persistSchedule(`page-timer-adopt-error (${reason})`, {
+          syncFromLiveAlarm: false
+        });
+      } catch (persistError) {
+        console.warn('[AC扩展] page timer 采纳失败状态持久化失败:', persistError?.message);
+      }
+      try {
+        await clearPwmAlarm(automationRevision);
+      } catch (clearError) {
+        console.warn('[AC扩展] page timer 采纳失败清理旧闹钟失败:', clearError?.message);
+      }
+      queueDeferredScheduleRepair({
+        smartOnExpectedBoundaryAt: pageAdoptionExpectedBoundaryAt,
+        revokeInvalidSmartOnClock: pageAdoptionExpectedBoundaryAt > 0,
+        revokeOwnerRevision: automationRevision,
+        preserveRevokeAcrossSupersededRepair:
+          pageAdoptionExpectedBoundaryAt > 0
+      });
+      try {
+        await createAlarm('ac-watchdog', {
+          delayInMinutes: 1,
+          periodInMinutes: 5
+        });
+      } catch (watchdogError) {
+        console.warn('[AC扩展] page timer 采纳失败后备看门狗创建失败:', watchdogError?.message);
+      }
+      console.warn(`[AC扩展] page-timer ${reason} 采纳失败，已排队即时修复:`, e?.message);
+    } else {
+      // claim 前只是 AC 页面尚未完全加载 / content script 未就绪，可静默降级。
+      console.warn(`[AC扩展] page-timer ${reason} 读取失败（可能页面未就绪）:`, e?.message);
+    }
     void appendDiagnosticLog('warn', 'page-timer-adopt', e);
     return false;
+  } finally {
+    if (phaseAdmissionEpoch > 0) {
+      releaseSyncPhaseAdoptionAdmission(phaseAdmissionEpoch);
+      drainDeferredScheduleRepair('page-timer-adopt-complete');
+    }
   }
 }
 
@@ -2507,6 +4243,31 @@ async function runHeartbeat() {
   try {
     await chrome.storage.local.set({ '__heartbeat': Date.now() });
   } catch (_) { /* ignore */ }
+  if (activeBoundaryOwnerReadDeferred) {
+    try {
+      await rescheduleActiveBoundary();
+    } catch (error) {
+      console.warn('[AC扩展] heartbeat 重读 active-boundary owner 失败:', error?.message);
+    }
+    return;
+  }
+  if (activeBoundaryDeferredForPhaseAdoption) {
+    try {
+      const [liveBoundary, durableRetryAt] = await Promise.all([
+        chrome.alarms.get('ac-active-boundary'),
+        readDurableActiveBoundaryRetryAt()
+      ]);
+      const liveAt = Number(liveBoundary?.scheduledTime) || 0;
+      if (durableRetryAt <= 0
+          || Math.abs(liveAt - durableRetryAt)
+            > PWM_RETRY_ALARM_TOLERANCE_MS) {
+        await rescheduleActiveBoundary();
+      }
+    } catch (error) {
+      // durable marker 仍保留；20s heartbeat 与下次 init 会继续尝试建钟。
+      console.warn('[AC扩展] heartbeat 恢复 active-boundary 重试钟失败:', error?.message);
+    }
+  }
 }
 
 function startHeartbeat() {
@@ -2541,7 +4302,9 @@ async function ensureOffscreen() {
 
 // ----- 看门狗：定期检查 PWM 闹钟完整性 -----
 async function watchdogCheck() {
+  if (isSyncPhaseAdoptionAdmissionBlocked()) return;
   await loadScheduleFromStorage();
+  if (isSyncPhaseAdoptionAdmissionBlocked()) return;
   if (!isAutomationAllowed()) {
     await clearAutomationRuntimeAlarmsWhileBlocked();
     if (!isAutomationAllowed()) return;
@@ -2652,6 +4415,18 @@ async function init() {
     if (schedule.enabled && !isAutomationAllowed()) {
       await onActiveBoundaryCrossed();
     }
+    // 上次本机 publish 若在 watermark/storage 瞬时失败中断，必须先重放
+    // durable local intent，再考虑采纳 sync store；否则一次明确停用可被旧
+    // enabled 快照覆盖且因为停用后无 PWM 活动而永久不再触发同步。
+    const pendingSyncPublish = await getSyncPublishPending();
+    const pendingSyncPublishAlarm = await chrome.alarms.get(
+      'ac-sync-publish-retry'
+    );
+    if (pendingSyncPublish === true || pendingSyncPublishAlarm) {
+      await syncScheduleToSync('init-pending-publish');
+    } else if (pendingSyncPublish === null) {
+      await scheduleSyncRetry('publish');
+    }
     // [v0.5.6] 跨设备同步：在 setupAlarms 之前尝试从 chrome.storage.sync 采用远端相位。
     // 如有 sync 数据则合并到本地 schedule，再 setupAlarms，保证本机闹钟从对齐相位出发。
     // 新装在另一台设备的扩展启动时会先采用主机的 nextTriggerAt，避免本地从默认值跑偏。
@@ -2689,14 +4464,15 @@ async function init() {
 }
 
 // ----- 设置/更新 PWM 循环闹钟 -----
-async function setupAlarms(startImmediately = false) {
+async function setupAlarms(startImmediately = false, options = {}) {
+  const phaseAdmissionEpoch = Number(options.phaseAdmissionEpoch) || 0;
   await rescheduleSmartWeatherAlarm();
   if (!isAutomationAllowed()) {
     await clearAutomationRuntimeAlarmsWhileBlocked();
     if (!isAutomationAllowed()) {
       await updateBadge();
       console.log(`[AC扩展] 自动控制${schedule.enabled ? '在运行时段外暂停' : '未启用'}`);
-      return;
+      return false;
     }
   }
   schedule.onMinutes = sanitizeMinutes(schedule.onMinutes, 30);
@@ -2709,17 +4485,19 @@ async function setupAlarms(startImmediately = false) {
     invalidateTimerBasedShutdown();
     const setupRevision = pwmRuntimeRevision;
     await clearPwmAlarm(setupRevision);
-    if (!isAutomationOperationCurrent(setupRevision)) return;
+    if (!isAutomationOperationCurrent(setupRevision)) return false;
     prepareFreshPwmStartState();
     // runPwmStep() 会先从 storage 重载；先持久化新的周期所有权，避免旧的
     // smart-on retry marker/pwmState 被重新灌回并误消费。
     await persistSchedule('setupAlarms-start-intent', { syncFromLiveAlarm: false });
-    if (!isAutomationOperationCurrent(setupRevision)) return;
-    await executePwmStepWithRecovery({
+    if (!isAutomationOperationCurrent(setupRevision)) return false;
+    const executed = await executePwmStepWithRecovery({
       automationRevision: setupRevision,
+      phaseAdmissionEpoch,
       source: 'setupAlarms-startImmediately'
     });
-    return;
+    if (!executed || !isAutomationAllowed()) return false;
+    return hasDurableLivePwmOwner(pwmRuntimeRevision);
   }
 
   // 恢复入口只提供事实与来源策略；智能/循环选择由纯协调器完成。
@@ -2753,6 +4531,7 @@ async function setupAlarms(startImmediately = false) {
   } else if (recovery.plan.kind === 'repair-clock') {
     console.log('[AC扩展] PWM 闹钟缺失，已按当前状态重建');
   }
+  return recovery.handled === true;
 }
 
 function sanitizeMinutes(value, fallback) {
@@ -2827,8 +4606,22 @@ function tagPwmAutomationError(error, automationRevision, recoveryContext = null
   }
 }
 
-async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
+async function runPwmStep({
+  scheduledTime = 0,
+  recoveryPlan = null,
+  expectedAutomationRevision = null,
+  phaseAdmissionEpoch = 0
+} = {}) {
   if (!isAutomationAllowed()) return;
+  if (isSyncPhaseAdoptionAdmissionBlockedFor(phaseAdmissionEpoch)) {
+    console.warn('[AC扩展] sync 相位接管尚未收口，拒绝旧 PWM 步骤入场');
+    return;
+  }
+  if (Number.isSafeInteger(expectedAutomationRevision)
+      && !isAutomationOperationCurrent(expectedAutomationRevision)) {
+    console.warn('[AC扩展] PWM 步骤入场 revision 已换主，零动作退出');
+    return;
+  }
   if (isCurrentPwmStepRunning()) {
     console.warn('[AC扩展] PWM 步骤已在执行，跳过重复触发');
     return;
@@ -2838,6 +4631,8 @@ async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
     console.warn('[AC扩展] PWM 步骤距上次执行不足 5s，跳过（看门狗 cooldown）');
     return;
   }
+  // expected revision 复检到 claim 之间没有 await；phase adoption 无法在
+  // 两者之间释放 reservation 后让旧事件按新 schedule 重新 claim。
   const automationRevision = claimPwmStepOwnership();
   invalidateTimerBasedShutdown();
   const requestedScheduledTime = Number(scheduledTime);
@@ -2971,6 +4766,14 @@ async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
     const failureDetail = plan.reason === 'page-timer-failed'
       ? observations.pageTimerError
       : observations.toggleError;
+    const timerRepairOnly = plan.reason === 'page-timer-failed'
+      && targetAction === 'on';
+    const retryMarkerOptions = timerRepairOnly
+      ? {
+          kind: 'smart-on-safety-timer',
+          boundaryAt: Number(schedule.smartOnBoundaryAt) || 0
+        }
+      : {};
     applyPwmPlanState(plan);
     if (plan.reason === 'page-timer-failed' && targetAction === 'on') {
       schedule.pageTimerError = `开机已成功，但页面关机定时器未确认：${failureDetail || '未知错误'}；保持 on 相位，1 分钟后重试 setPageTimer`;
@@ -2981,7 +4784,11 @@ async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
     // 两阶段持久化：先把原半点 + 请求重试时刻写入 storage，再创建 alarm。
     // SW 若在两步之间退出，init/watchdog 可从 durable intent 恢复；创建成功后
     // 再用 chrome.alarms 验证得到的 canonical scheduledTime 覆写。
-    setSmartOnPwmRetryState(targetAction, plan.nextTriggerAt);
+    setSmartOnPwmRetryState(
+      targetAction,
+      plan.nextTriggerAt,
+      retryMarkerOptions
+    );
     await persistSchedule('runPwmStep-retry-intent', { syncFromLiveAlarm: false });
     const alarmCreated = await createPwmAlarmFromPlan(
       plan,
@@ -2994,7 +4801,11 @@ async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
       await persistSchedule('runPwmStep-retry-alarm-failed', { syncFromLiveAlarm: false });
       return;
     }
-    setSmartOnPwmRetryState(targetAction, schedule.nextTriggerAt);
+    setSmartOnPwmRetryState(
+      targetAction,
+      schedule.nextTriggerAt,
+      retryMarkerOptions
+    );
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
     if (await abortStaleAutomation(
       automationRevision,
@@ -3006,6 +4817,9 @@ async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
         : 'runPwmStep-interval'
     );
     await updateBadge();
+    if (schedule.pwmRetryKind) {
+      await syncScheduleToSync('runPwmStep-smart-on-retry-hold');
+    }
     console.warn(`[AC扩展] PWM 未提交，保持 pwmState=${schedule.pwmState}，1分钟后重试`);
   }
 
@@ -3140,8 +4954,14 @@ async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
 
     if (plan.kind === 'defer') {
       applyPwmPlanState(plan);
+      const deferredBoundaryAt = halfHourBoundaryAtOrBefore(
+        Number(plan.nextTriggerAt) - 1
+      );
+      setSmartOnPwmRetryState('on', plan.nextTriggerAt, {
+        kind: 'smart-on-safety-skip',
+        boundaryAt: deferredBoundaryAt
+      });
       if (hasTypedSmartOnRetry) {
-        clearPwmRetryState();
         schedule.pageTimerError = `本周期智能开机重试已超过安全关机余量：${priorPwmRetryError || '自动开启未确认'}；等待下一个半点`;
       } else if (rejectedSmartOnRetryError) {
         schedule.pageTimerError = rejectedSmartOnRetryError;
@@ -3161,6 +4981,10 @@ async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
         await persistSchedule('runPwmStep-smart-on-deferred-alarm-failed', { syncFromLiveAlarm: false });
         return;
       }
+      setSmartOnPwmRetryState('on', schedule.nextTriggerAt, {
+        kind: 'smart-on-safety-skip',
+        boundaryAt: deferredBoundaryAt
+      });
       await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
       if (await abortStaleAutomation(
         automationRevision,
@@ -3218,18 +5042,69 @@ async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
       throw new Error(`未处理的 PWM plan: ${plan.kind}/${plan.reason}`);
     }
 
+    let smartLocalExceptionBoundaryAt = 0;
+    let smartLocalExceptionKind = '';
     clearPwmRetryState();
     schedule.pageTimerError = '';
 
     // 智能模式：把下一 ON 触发对齐到半点，30 分钟周期锚定半点。
     if (schedule.smartMode?.enabled) {
       const recordedOffAt = Number(schedule.pageTimerTargetAt);
+      const observedCommitAt = Date.now();
       const smartAlignNow = targetAction === 'off'
-          && Number.isFinite(recordedOffAt) && recordedOffAt > 0
-        ? recordedOffAt
-        : Date.now();
+        ? Math.max(
+            observedCommitAt,
+            Number.isFinite(recordedOffAt) && recordedOffAt > 0
+              ? recordedOffAt
+              : 0
+          )
+        : observedCommitAt;
       const notBeforeAt = smartAlignNow + SMART_MODE.MIN_OFF_MINUTES * 60000;
-      alignSmartModeNextTrigger(plan, smartAlignNow, { notBeforeAt });
+      const activeSmartBoundaryAt = Number(schedule.smartOnBoundaryAt);
+      const expectedSmartOffAt = smartModePageTimerTargetAt(
+        Number(schedule.onMinutes),
+        smartAlignNow,
+        activeSmartBoundaryAt
+      );
+      const retainedSmartBoundaryAt = expectedSmartOffAt
+          >= nextSafePageTimerTargetAt(smartAlignNow)
+        ? activeSmartBoundaryAt
+        : 0;
+      const safeDelayPlan = targetAction === 'off'
+        ? planSmartOnAfterConfirmedOff(schedule, {
+            now: smartAlignNow,
+            confirmedOffAt: smartAlignNow,
+            minOffMinutes: SMART_MODE.MIN_OFF_MINUTES,
+            ...(retainedSmartBoundaryAt > 0
+              ? { boundaryAt: retainedSmartBoundaryAt }
+              : {})
+          })
+        : null;
+      if (safeDelayPlan?.kind === 'smart-on-safe-delay'
+          || safeDelayPlan?.kind === 'smart-on-safety-skip') {
+        // 保留原 commit/proofAction，只改下一时钟；否则会丢掉 OFF proof clear。
+        plan.nextTriggerAt = safeDelayPlan.nextTriggerAt;
+        plan.delayMinutes = safeDelayPlan.delayMinutes;
+        if (plan.phasePatch) {
+          plan.phasePatch.nextTriggerAt = safeDelayPlan.nextTriggerAt;
+        }
+        smartLocalExceptionBoundaryAt = safeDelayPlan.boundaryAt;
+        smartLocalExceptionKind = safeDelayPlan.kind;
+        schedule.smartOnBoundaryAt = smartLocalExceptionBoundaryAt;
+        setSmartOnPwmRetryState('on', safeDelayPlan.nextTriggerAt, {
+          kind: smartLocalExceptionKind,
+          boundaryAt: smartLocalExceptionBoundaryAt
+        });
+        const actionLabel = smartLocalExceptionKind === 'smart-on-safe-delay'
+          ? '压缩机保护后补开'
+          : '本周期窗口不足，跳到下一半点重新评估';
+        console.warn(
+          `[AC扩展] 恢复关机晚于原截止：保留 ${new Date(smartLocalExceptionBoundaryAt).toLocaleTimeString()}`
+          + ` 所有权，${actionLabel} ${new Date(safeDelayPlan.nextTriggerAt).toLocaleTimeString()}`
+        );
+      } else {
+        alignSmartModeNextTrigger(plan, smartAlignNow, { notBeforeAt });
+      }
     }
 
     applyPwmPlanState(plan);
@@ -3247,6 +5122,12 @@ async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
     await persistSchedule('runPwmStep-commit-alarm-failed', { syncFromLiveAlarm: false });
     return;
   }
+    if (smartLocalExceptionBoundaryAt > 0) {
+      setSmartOnPwmRetryState('on', schedule.nextTriggerAt, {
+        kind: smartLocalExceptionKind,
+        boundaryAt: smartLocalExceptionBoundaryAt
+      });
+    }
     console.log(`[AC扩展] PWM 下一阶段:${schedule.pwmState}，${currentDuration}分钟后触发`);
 
     await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
@@ -3261,6 +5142,8 @@ async function runPwmStep({ scheduledTime = 0, recoveryPlan = null } = {}) {
       automationRevision,
       'runPwmStep-sync-active-hours-paused'
     )) return;
+    // exception marker 由 sync 投影成下一半点 OFF 哨兵，先取消其他设备旧 ON
+    // actuator；本机补开成功并提交正常 OFF phase 后会同步真实截止。
     await syncScheduleToSync('runPwmStep');
   } catch (error) {
     throw tagPwmAutomationError(
@@ -3427,12 +5310,56 @@ async function executePwmStepWithRecovery({
   scheduledTime = 0,
   recoveryPlan = null,
   automationRevision = pwmRuntimeRevision,
+  phaseAdmissionEpoch = 0,
   source = 'pwm',
   beforeRun = null
 } = {}) {
-  if (!isAutomationOperationCurrent(automationRevision)) return false;
+  if (isSyncPhaseAdoptionAdmissionBlockedFor(phaseAdmissionEpoch)
+      || deferredRepairAfterPwmOptions
+      || !isAutomationOperationCurrent(automationRevision)) return false;
 
+  let continuationAutomationRevision = automationRevision;
+  // repair 先入场时，不能让已送达 alarm 在其长页面 I/O 中途冻结旧 action。
+  // 等全部 in-flight/trailing repair 收口，再以 durable + live clock 重新入场；
+  // 等待结束到计数 claim 之间没有 await，新 repair 会看到计数并转为 trailing。
+  let waitedForRepair = false;
+  while (repairScheduleClock.inFlight) {
+    const activeRepair = repairScheduleClock.inFlight;
+    await activeRepair.catch(() => {});
+    waitedForRepair = true;
+    if (isSyncPhaseAdoptionAdmissionBlockedFor(phaseAdmissionEpoch)
+        || deferredRepairAfterPwmOptions
+        || !isAutomationOperationCurrent(automationRevision)) return false;
+  }
+
+  pwmExecutionWithRecoveryCount += 1;
+  try {
   const triggerAt = Number(scheduledTime) || 0;
+  if (waitedForRepair) {
+    if (triggerAt <= 0) {
+      console.warn('[AC扩展] repair 已收口，无绝对时钟的旧执行请求不再盲目补动作');
+      return false;
+    }
+    await loadScheduleFromStorage();
+    const liveAlarm = await chrome.alarms.get('ac-pwm');
+    if (isSyncPhaseAdoptionAdmissionBlockedFor(phaseAdmissionEpoch)
+        || deferredRepairAfterPwmOptions
+        || !isAutomationOperationCurrent(automationRevision)) return false;
+    const postRepairDelivery = assessPwmAlarmDelivery(
+      schedule,
+      triggerAt,
+      Date.now()
+    );
+    const liveAt = Number(liveAlarm?.scheduledTime) || 0;
+    const liveStillOwned = liveAt <= 0
+      || Math.abs(liveAt - triggerAt) <= PWM_RETRY_ALARM_TOLERANCE_MS;
+    if (!postRepairDelivery.accepted || !liveStillOwned) {
+      console.warn(
+        `[AC扩展] repair 后旧 PWM 事件已失去所有权 (${postRepairDelivery.reason})，零动作退出`
+      );
+      return false;
+    }
+  }
   const alarm = { name: 'ac-pwm', scheduledTime: triggerAt };
   const incomingSmartOnRetryContext = getSmartOnPwmRetryContext(
     schedule,
@@ -3460,15 +5387,29 @@ async function executePwmStepWithRecovery({
     if (typeof beforeRun === 'function') {
       const proceed = await beforeRun();
       if (proceed === false) return true;
+      if (Number.isSafeInteger(proceed?.automationRevision)) {
+        continuationAutomationRevision = proceed.automationRevision;
+      }
+      if (isSyncPhaseAdoptionAdmissionBlockedFor(phaseAdmissionEpoch)
+          || deferredRepairAfterPwmOptions
+          || !isAutomationOperationCurrent(continuationAutomationRevision)) {
+        console.warn('[AC扩展] PWM 前置恢复后 phase owner 已改变，零动作退出');
+        return false;
+      }
     }
-    await runPwmStep({ scheduledTime: triggerAt, recoveryPlan });
+    await runPwmStep({
+      scheduledTime: triggerAt,
+      recoveryPlan,
+      expectedAutomationRevision: continuationAutomationRevision,
+      phaseAdmissionEpoch
+    });
     return true;
   } catch (error) {
     console.error(`[AC扩展] PWM 步骤执行失败 (${source}):`, error);
     void appendDiagnosticLog('error', source, error);
     const failedRevision = Number.isSafeInteger(error?.pwmAutomationRevision)
       ? error.pwmAutomationRevision
-      : automationRevision;
+      : continuationAutomationRevision;
     if (!isAutomationOperationCurrent(failedRevision)) return false;
     const postPrepareContext = error?.pwmRecoveryContext;
     const recoveryRetryContext = postPrepareContext?.retryContext
@@ -3495,6 +5436,15 @@ async function executePwmStepWithRecovery({
       recoverySnapshot,
       recoverySmartOnWindow
     );
+  }
+  } finally {
+    pwmExecutionWithRecoveryCount = Math.max(
+      0,
+      pwmExecutionWithRecoveryCount - 1
+    );
+    // shared executor 的异常恢复也已经结束后，才允许 repair 观察/改写 phase。
+    // phase adoption 若仍持有 reservation，队列会保留到完整 sync 收口后。
+    drainDeferredScheduleRepair('pwm-executor-complete');
   }
 }
 
@@ -3885,9 +5835,244 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   // Edge/Chrome 可能因为 alarm 唤醒 Service Worker。
   // 必须等 storage 恢复完成，否则 schedule.enabled 还是默认 false，会跳过自动关机。
   await initReady;
+  if (alarm.name === ACTIVE_BOUNDARY_OWNER_READ_RETRY_ALARM) {
+    try {
+      await rescheduleActiveBoundary();
+    } catch (error) {
+      try {
+        await armActiveBoundaryOwnerReadRetry(
+          'active-boundary owner 重读仍失败'
+        );
+      } catch (retryError) {
+        console.warn('[AC扩展] active-boundary owner 重读与重试钟均失败:', retryError?.message);
+      }
+      void appendDiagnosticLog('warn', 'alarm-active-boundary-owner-read', error);
+    }
+    return;
+  }
+  const activeBoundaryAlarm = alarm.name === 'ac-active-boundary'
+    || alarm.name === ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM;
+  const typedScheduleBoundaryAlarm =
+    alarm.name === ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM;
+  let activeBoundaryRetry = {
+    retryAt: 0,
+    mode: '',
+    boundaryAt: 0,
+    readOk: true
+  };
+  if (activeBoundaryAlarm) {
+    activeBoundaryRetry = await readDurableActiveBoundaryRetry();
+  }
+  const activeBoundaryAlarmAt = Number(alarm.scheduledTime) || 0;
+  let oppositeActiveBoundaryAlarmAt = 0;
+  let sameActiveBoundaryAlarmAt = 0;
+  if (activeBoundaryAlarm) {
+    const oppositeAlarmName = typedScheduleBoundaryAlarm
+      ? 'ac-active-boundary'
+      : ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM;
+    const [sameAlarm, oppositeAlarm] = await Promise.all([
+      chrome.alarms.get(alarm.name).catch(() => null),
+      chrome.alarms.get(oppositeAlarmName).catch(() => null)
+    ]);
+    sameActiveBoundaryAlarmAt = Number(sameAlarm?.scheduledTime) || 0;
+    oppositeActiveBoundaryAlarmAt = Number(oppositeAlarm?.scheduledTime) || 0;
+  }
+  const configuredNaturalBoundaryAt = alarm.name === 'ac-active-boundary'
+    ? getNextActiveBoundary(new Date(
+      activeBoundaryAlarmAt - PWM_RETRY_ALARM_TOLERANCE_MS - 1
+    ))
+    : 0;
+  const deliveryIsConfiguredNaturalBoundary = configuredNaturalBoundaryAt > 0
+    && Math.abs(configuredNaturalBoundaryAt - activeBoundaryAlarmAt)
+      <= PWM_RETRY_ALARM_TOLERANCE_MS;
+  if (sameActiveBoundaryAlarmAt
+      > activeBoundaryAlarmAt + PWM_RETRY_ALARM_TOLERANCE_MS
+      && !deliveryIsConfiguredNaturalBoundary) {
+    console.warn(`[AC扩展] 忽略已有较新同名 owner 的旧 ${alarm.name}`);
+    return;
+  }
+  const newerOppositeRetryOwner = oppositeActiveBoundaryAlarmAt
+      > activeBoundaryAlarmAt + PWM_RETRY_ALARM_TOLERANCE_MS
+    && oppositeActiveBoundaryAlarmAt
+      <= Date.now() + ACTIVE_BOUNDARY_RETRY_MS
+        + PWM_RETRY_ALARM_TOLERANCE_MS;
+  if (newerOppositeRetryOwner) {
+    console.warn(`[AC扩展] 忽略已有较新 opposite owner 的旧 ${alarm.name}`);
+    return;
+  }
+
+  // storage 瞬断时不猜 owner，也不消费另一个较新的 retry。schedule-only
+  // 若下一次重读前将跨 captured boundary，就升级成 typed action，避免每次
+  // +1min 漂移 provenance 后把已经到期的进入/退出动作遗忘。
+  if (activeBoundaryAlarm && activeBoundaryRetry.readOk === false) {
+    const inferredUnreadBoundaryAt = typedScheduleBoundaryAlarm
+      ? getNextActiveBoundary(new Date(
+        activeBoundaryAlarmAt - ACTIVE_BOUNDARY_RETRY_MS
+          - PWM_RETRY_ALARM_TOLERANCE_MS
+      ))
+      : 0;
+    const unreadRetryAt = Date.now() + ACTIVE_BOUNDARY_RETRY_MS;
+    const unreadRetryMode = typedScheduleBoundaryAlarm
+        && (inferredUnreadBoundaryAt <= 0
+          || inferredUnreadBoundaryAt
+            > unreadRetryAt + PWM_RETRY_ALARM_TOLERANCE_MS)
+      ? ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+      : ACTIVE_BOUNDARY_RETRY_MODE_ACTION;
+    const requeued = await createActiveBoundaryAlarmWithRetry(
+      unreadRetryAt,
+      { mode: unreadRetryMode }
+    );
+    if (!requeued) {
+      const retryError = new Error('active-boundary owner 读取失败且 typed retry 未建立');
+      void appendDiagnosticLog('error', 'alarm-active-boundary-owner-read', retryError);
+      throw retryError;
+    }
+    console.warn(`[AC扩展] active-boundary owner 暂不可读，延后 ${alarm.name}`);
+    return;
+  }
+
+  const inferredScheduleBoundaryAt = typedScheduleBoundaryAlarm
+    ? getNextActiveBoundary(new Date(
+      activeBoundaryAlarmAt - ACTIVE_BOUNDARY_RETRY_MS
+        - PWM_RETRY_ALARM_TOLERANCE_MS
+    ))
+    : 0;
+  const scheduleRetryBoundaryAt = Number(activeBoundaryRetry.boundaryAt)
+    || inferredScheduleBoundaryAt;
+  const deliveryMatchesRetryOwner = activeBoundaryRetry.retryAt > 0
+    && Math.abs(activeBoundaryAlarmAt - activeBoundaryRetry.retryAt)
+      <= PWM_RETRY_ALARM_TOLERANCE_MS;
+  const laterSameTypeDelivery = activeBoundaryRetry.retryAt > 0
+    && activeBoundaryAlarmAt
+      > activeBoundaryRetry.retryAt + PWM_RETRY_ALARM_TOLERANCE_MS
+    && ((typedScheduleBoundaryAlarm
+        && activeBoundaryRetry.mode === ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE)
+      || (alarm.name === 'ac-active-boundary'
+        && activeBoundaryRetry.mode === ACTIVE_BOUNDARY_RETRY_MODE_ACTION));
+  if (laterSameTypeDelivery) {
+    // 读失败后的 typed wake-up 只负责唤醒 owner repair；先把 durable/live
+    // timestamp 重新收成精确一致，下一次 delivery 才能执行语义动作。
+    await rescheduleActiveBoundary();
+    return;
+  }
+  const deliveryMatchesCapturedBoundary = scheduleRetryBoundaryAt > 0
+    && Math.abs(activeBoundaryAlarmAt - scheduleRetryBoundaryAt)
+      <= PWM_RETRY_ALARM_TOLERANCE_MS;
+  const typedScheduleSupersedesOlderAction = typedScheduleBoundaryAlarm
+    && activeBoundaryRetry.mode === ACTIVE_BOUNDARY_RETRY_MODE_ACTION
+    && activeBoundaryAlarmAt
+      > activeBoundaryRetry.retryAt + PWM_RETRY_ALARM_TOLERANCE_MS;
+  const typedActionSupersedesOlderSchedule =
+    alarm.name === 'ac-active-boundary'
+    && activeBoundaryRetry.mode === ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+    && activeBoundaryAlarmAt
+      > activeBoundaryRetry.retryAt + PWM_RETRY_ALARM_TOLERANCE_MS;
+  const scheduleRetryOwner = typedScheduleBoundaryAlarm
+    && ((activeBoundaryRetry.mode === ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+        && deliveryMatchesRetryOwner)
+      || activeBoundaryRetry.retryAt <= 0
+      || typedScheduleSupersedesOlderAction);
+  const actionRetryOwner = alarm.name === 'ac-active-boundary'
+    && ((activeBoundaryRetry.mode === ACTIVE_BOUNDARY_RETRY_MODE_ACTION
+        && deliveryMatchesRetryOwner)
+      || typedActionSupersedesOlderSchedule);
+  const markerlessActionOrNaturalOwner = alarm.name === 'ac-active-boundary'
+    && activeBoundaryRetry.retryAt <= 0;
+  const capturedNaturalBoundaryOwner = alarm.name === 'ac-active-boundary'
+    && activeBoundaryRetry.mode === ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE
+    && deliveryMatchesCapturedBoundary;
+  const activeBoundaryDeliveryOwned = scheduleRetryOwner
+    || actionRetryOwner
+    || markerlessActionOrNaturalOwner
+    || capturedNaturalBoundaryOwner;
+
+  // opposite kind 的 clear 即使失败，迟到 delivery 也无权改写较新的
+  // durable (mode,retryAt) owner。
+  if (activeBoundaryAlarm && !activeBoundaryDeliveryOwned) {
+    console.warn(`[AC扩展] 忽略失去 owner 的旧 ${alarm.name}`);
+    return;
+  }
+
+  const scheduleRetryCrossedBoundary =
+    scheduleRetryOwner
+    && scheduleRetryBoundaryAt > 0
+    && scheduleRetryBoundaryAt <= Date.now() + PWM_RETRY_ALARM_TOLERANCE_MS;
+  const scheduleOnlyActiveBoundaryDelivery =
+    scheduleRetryOwner
+    && !scheduleRetryCrossedBoundary;
+  const activeBoundaryActionDelivery = actionRetryOwner
+    || markerlessActionOrNaturalOwner
+    || capturedNaturalBoundaryOwner
+    || scheduleRetryCrossedBoundary;
+
+  // 自然钟创建失败后的 +1min 只补基础设施；边界动作（尤其
+  // setupAlarms(true)）已经成功，绝不能再次执行而后移当前 PWM 相位。
+  if (scheduleOnlyActiveBoundaryDelivery) {
+    try {
+      const completed = await completeActiveBoundaryProcessing({
+        requireExpectedOwner: true,
+        expectedRetryAt: activeBoundaryRetry.retryAt,
+        expectedRetryMode: activeBoundaryRetry.mode,
+        expectedRetryBoundaryAt: activeBoundaryRetry.boundaryAt,
+        expectedDeliveryAt: activeBoundaryAlarmAt,
+        expectedAlarmName: alarm.name
+      });
+      if (completed === false) {
+        console.warn('[AC扩展] schedule-only delivery 已失去 owner，零动作退出');
+      }
+    } catch (error) {
+      try {
+        await armActiveBoundaryRetry(
+          'active-boundary 仅补钟失败',
+          {
+            mode: ACTIVE_BOUNDARY_RETRY_MODE_SCHEDULE,
+            boundaryAt: scheduleRetryBoundaryAt
+          }
+        );
+      } catch (retryError) {
+        console.warn('[AC扩展] active-boundary 仅补钟失败且重试钟创建失败:', retryError?.message);
+      }
+      void appendDiagnosticLog('warn', 'alarm-active-boundary-schedule', error);
+    }
+    return;
+  }
+  const phaseSensitiveAlarm = alarm.name === 'ac-pwm'
+    || alarm.name === 'ac-watchdog'
+    || alarm.name === 'ac-badge-tick'
+    || (activeBoundaryActionDelivery
+      && schedule.activeHours?.enabled === true);
+  const deferPhaseSensitiveAlarm = async () => {
+    if (alarm.name === 'ac-badge-tick') {
+      await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
+    } else if (activeBoundaryActionDelivery) {
+      await deferActiveBoundaryForPhaseAdoption();
+      return;
+    }
+    console.warn(`[AC扩展] sync 相位接管尚未收口，延后 ${alarm.name}`);
+  };
+  // 先于 storage reload 守门：若 reservation 已持有，按其新 revision
+  // load 旧 storage 会反向覆盖尚未 durable 的 remote phase。
+  if (phaseSensitiveAlarm && isSyncPhaseAdoptionAdmissionBlocked()) {
+    await deferPhaseSensitiveAlarm();
+    return;
+  }
   await loadScheduleFromStorage();
+  if (phaseSensitiveAlarm && isSyncPhaseAdoptionAdmissionBlocked()) {
+    await deferPhaseSensitiveAlarm();
+    return;
+  }
 
   console.log(`[AC扩展] 闹钟触发: ${alarm.name}`);
+
+  if (alarm.name === 'ac-sync-publish-retry') {
+    await syncScheduleToSync('alarm-sync-publish-retry');
+    return;
+  }
+
+  if (alarm.name === 'ac-sync-adopt-retry') {
+    await tryAdoptSyncedState('alarm-sync-adopt-retry');
+    return;
+  }
 
   if (alarm.name === 'ac-badge-tick') {
     // 每分钟刷新角标
@@ -3921,15 +6106,51 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
   }
   
   if (alarm.name === 'ac-pwm') {
+    const deliveryNow = Date.now();
+    const deliveryAssessment = assessPwmAlarmDelivery(
+      schedule,
+      alarm.scheduledTime,
+      deliveryNow
+    );
+    if (!deliveryAssessment.accepted) {
+      console.warn(
+        `[AC扩展] 拒绝失配 ac-pwm 事件 (${deliveryAssessment.reason})；改走只读状态的 repair 路径`
+      );
+      const invalidSmartOnClock = deliveryAssessment.smartClockAssessment
+        ?.applicable === true
+        && deliveryAssessment.smartClockAssessment?.valid === false;
+      await repairScheduleClock({
+        smartOnExpectedBoundaryAt: Number(
+          deliveryAssessment.smartClockAssessment?.expectedAt
+        ) || 0,
+        revokeInvalidSmartOnClock: invalidSmartOnClock,
+        ...(invalidSmartOnClock
+          ? { revokeOwnerRevision: pwmRuntimeRevision }
+          : {})
+      });
+      return;
+    }
+    const deliveryRetryContext = getSmartOnPwmRetryContext(
+      schedule,
+      alarm.scheduledTime,
+      { now: deliveryNow }
+    );
+    if (deliveryRetryContext.hasSafetyTimerRetry) {
+      await repairScheduleClock({
+        smartOnExpectedBoundaryAt: deliveryRetryContext.boundaryAt
+      });
+      return;
+    }
     // pwmStepRunning 已在 runPwmStep 内部防重入，此处无需再做去重；
     // 原先基于 alarmCreatedAt 的去重会在 SW 被闹钟唤醒后误杀合法闹钟
     // （init()→setupAlarms()→syncStoredTriggerFromAlarm() 会覆写 alarmCreatedAt 为 Date.now()，
     //   导致 alarm.scheduledTime ≈ Date.now() ≤ alarmCreatedAt+1000 成立，闹钟被丢弃）。
     // 舒适启动的前置恢复与正式 PWM 共用异常边界；任何一步抛错都会保留
     // 本次闹钟的 revision/action，并只建立安全的一分钟恢复时钟。
+    const alarmAutomationRevision = pwmRuntimeRevision;
     await executePwmStepWithRecovery({
       scheduledTime: alarm.scheduledTime,
-      automationRevision: pwmRuntimeRevision,
+      automationRevision: alarmAutomationRevision,
       source: 'alarm-ac-pwm',
       beforeRun: async () => {
       const comfortUntil = Number(schedule.comfortStartUntil) || 0;
@@ -3959,14 +6180,20 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
               );
             }
           }
-          return comfortRetryResult?.continuePwm === true;
+          return comfortRetryResult?.continuePwm === true
+            ? {
+                automationRevision:
+                  comfortRetryResult.continuationAutomationRevision
+              }
+            : false;
         }
         const comfortEnd = await runSerializedScheduleUpdate(
           () => finishComfortStart('pwm-boundary')
         );
         if (!comfortEnd?.automationAllowed || comfortEnd?.deferred) return false;
+        return { automationRevision: comfortEnd.automationRevision };
       }
-        return true;
+        return { automationRevision: alarmAutomationRevision };
       }
     });
     return;
@@ -3987,7 +6214,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
     }
   }
 
-  if (alarm.name === 'ac-active-boundary') {
+  if (activeBoundaryActionDelivery) {
     try {
       await onActiveBoundaryCrossed();
     } catch (e) {
@@ -4020,12 +6247,17 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
           continuePwm: shouldResumePwmAfterComfortFinish(
             finishResult,
             futureMainClockAt
-          )
+          ),
+          continuationAutomationRevision: finishResult?.automationRevision
         };
       });
-      if (comfortResult?.continuePwm) {
+      const comfortContinuationRevision = Number(
+        comfortResult?.continuationAutomationRevision
+      );
+      if (comfortResult?.continuePwm
+          && Number.isSafeInteger(comfortContinuationRevision)) {
         await executePwmStepWithRecovery({
-          automationRevision: pwmRuntimeRevision,
+          automationRevision: comfortContinuationRevision,
           source: 'alarm-comfort-end-resume'
         });
       }
@@ -4735,7 +6967,9 @@ async function getCurrentPageTimer() {
 }
 
 async function ensureScheduleClock(options = {}) {
+  if (isSyncPhaseAdoptionAdmissionBlocked()) return;
   await loadScheduleFromStorage();
+  if (isSyncPhaseAdoptionAdmissionBlocked()) return;
   if (isComfortStartActive()) return;
   if (!isAutomationAllowed()) return;
   await backfillNextTriggerAt(false);
@@ -4761,11 +6995,132 @@ async function ensureScheduleClock(options = {}) {
   });
 }
 
-async function repairScheduleClock() {
+async function repairScheduleClock(options = {}) {
+  if (options.discardStaleRevoke === true) {
+    return {
+      success: false,
+      stale: true,
+      reason: 'invalid-clock revoke owner is stale',
+      schedule
+    };
+  }
+  if (options.revokeInvalidSmartOnClock === true) {
+    const revokeOwnerRevision = Number(options.revokeOwnerRevision);
+    if (!Number.isSafeInteger(revokeOwnerRevision)
+        || revokeOwnerRevision !== pwmRuntimeRevision) {
+      return {
+        success: false,
+        stale: true,
+        reason: 'invalid-clock revoke owner changed',
+        schedule
+      };
+    }
+    if (repairScheduleClock.inFlight) {
+      options = {
+        ...options,
+        preserveRevokeAcrossSupersededRepair: true
+      };
+    }
+    // 高优先级非法钟撤销先同步换 epoch；已有 generic repair 在任何长 await
+    // 返回后都会失权，不能先提交一份“新鲜”19:30 洗白 trailing 判断。
+    scheduleRepairEpoch += 1;
+  }
+  const requestedRepairEpoch = scheduleRepairEpoch;
+  if (isSyncPhaseAdoptionAdmissionBlocked()) {
+    queueDeferredScheduleRepair(options);
+    return {
+      success: false,
+      deferred: true,
+      reason: 'sync phase adoption in progress',
+      schedule
+    };
+  }
+  if (pwmExecutionWithRecoveryCount > 0 || isCurrentPwmStepRunning()) {
+    queueDeferredScheduleRepair(options);
+    return {
+      success: false,
+      deferred: true,
+      reason: 'PWM execution in progress',
+      schedule
+    };
+  }
+  // alarm / watchdog / 诊断 / Popup 都可能同时要求修复。同一时刻只运行
+  // 一条长页面 timer 事务；其余调用共享结果，避免早启动的失败结果
+  // 在晚启动的成功结果之后回写旧 safety marker / 一分钟 alarm。
+  const repairContext = {
+    automationRevision: pwmRuntimeRevision,
+    smartOnExpectedBoundaryAt: Number(options.smartOnExpectedBoundaryAt) || 0,
+    revokeInvalidSmartOnClock: options.revokeInvalidSmartOnClock === true,
+    revokeOwnerRevision: Number.isSafeInteger(options.revokeOwnerRevision)
+      ? options.revokeOwnerRevision
+      : null,
+    preserveRevokeAcrossSupersededRepair:
+      options.preserveRevokeAcrossSupersededRepair === true,
+    repairEpoch: requestedRepairEpoch
+  };
+  if (repairScheduleClock.inFlight) {
+    const activeContext = repairScheduleClock.inFlightContext || {};
+    if (activeContext.revokeInvalidSmartOnClock === true
+        && repairContext.revokeInvalidSmartOnClock !== true) {
+      return repairScheduleClock.inFlight;
+    }
+    const sameContext = activeContext.automationRevision
+        === repairContext.automationRevision
+      && activeContext.smartOnExpectedBoundaryAt
+        === repairContext.smartOnExpectedBoundaryAt
+      && activeContext.revokeInvalidSmartOnClock
+        === repairContext.revokeInvalidSmartOnClock
+      && activeContext.repairEpoch === repairContext.repairEpoch;
+    if (sameContext) return repairScheduleClock.inFlight;
+
+    // 旧 repair 的长页面 I/O 期间若 revision／智能边界换主，新 alarm
+    // 已被浏览器消费，不能只复用注定 stale 的旧 promise。合并成一次
+    // trailing repair，并保留最后到达的完整 options。
+    const trailingWithActiveOwner = mergeScheduleRepairOptions(
+      {
+        smartOnExpectedBoundaryAt: Number(
+          activeContext.smartOnExpectedBoundaryAt
+        ) || 0,
+        revokeInvalidSmartOnClock:
+          activeContext.revokeInvalidSmartOnClock === true,
+        revokeOwnerRevision: activeContext.revokeOwnerRevision,
+        preserveRevokeAcrossSupersededRepair:
+          activeContext.preserveRevokeAcrossSupersededRepair === true
+      },
+      repairScheduleClock.trailingOptions || {}
+    );
+    repairScheduleClock.trailingOptions = mergeScheduleRepairOptions(
+      trailingWithActiveOwner,
+      options
+    );
+    if (!repairScheduleClock.trailingPromise) {
+      const activeRepair = repairScheduleClock.inFlight;
+      repairScheduleClock.trailingPromise = activeRepair
+        .catch(() => {})
+        .then(() => {
+          const trailingOptions = normalizeDeferredScheduleRepairOptions(
+            repairScheduleClock.trailingOptions || {}
+          );
+          repairScheduleClock.trailingOptions = null;
+          repairScheduleClock.trailingPromise = null;
+          return repairScheduleClock(trailingOptions);
+        });
+    }
+    return repairScheduleClock.trailingPromise;
+  }
+  const repairOperation = (async () => {
   if (isComfortStartActive()) {
     return { success: false, reason: '五分钟舒适启动进行中', schedule };
   }
   const automationRevision = pwmRuntimeRevision;
+  const repairEpoch = repairContext.repairEpoch;
+  const abortStaleRepair = async (reason) => {
+    if (repairEpoch !== scheduleRepairEpoch) {
+      console.warn(`[AC扩展] ${reason}: repair epoch 已被更高优先级撤销请求抢占`);
+      return true;
+    }
+    return abortStaleAutomation(automationRevision, reason);
+  };
   // 提取（Fowler Extract Function）：当前为 ON 时的关机过渡——先保留 ON 安全检查点，新鲜页确认定时器后才恢复 OFF。
   async function tryArmOffTransition(status) {
     // 先保留“下一步 ON”的安全检查点；只有新鲜页面确认关机定时器后，
@@ -4797,45 +7152,67 @@ async function repairScheduleClock() {
       automationRevision,
       ...(smartTargetAt > 0 ? { targetAt: smartTargetAt } : {})
     });
-    if (await abortStaleAutomation(
-      automationRevision,
-      'repair-page-timer-active-hours-paused'
-    )) {
+    if (await abortStaleRepair('repair-page-timer-active-hours-paused')) {
       return { success: false, reason: '运行时段外暂停', schedule };
     }
     if (!timerResult?.success) {
       schedule.pageTimerError = `时钟修复时页面关机定时器未确认：${timerResult?.error || '未知错误'}；保持 on 相位，1 分钟后重试`;
-      const retryAt = Date.now() + 60000;
+      const retryPlannedAt = Date.now();
+      const retryAt = retryPlannedAt + 60000;
       setNextTriggerAt(retryAt);
       schedule.alarmCreatedAt = 0;
       schedule.alarmDelayMinutes = 0;
+      const retryBoundaryAt = Number(schedule.smartOnBoundaryAt) || 0;
+      const repairRetryKind = 'smart-on-safety-timer';
+      setSmartOnPwmRetryState('on', retryAt, {
+        kind: repairRetryKind,
+        boundaryAt: retryBoundaryAt
+      });
       await persistSchedule('repairScheduleClock-pageTimer-retry-intent', {
         syncFromLiveAlarm: false
       });
+      if (await abortStaleRepair('repair-page-timer-retry-intent-stale')) {
+        return { success: false, reason: '修复事务已失效', schedule };
+      }
+      await syncScheduleToSync('repairScheduleClock-pageTimer-retry-hold');
+      if (await abortStaleRepair('repair-page-timer-retry-sync-stale')) {
+        return { success: false, reason: '修复事务已失效', schedule };
+      }
       const alarmCreated = await createPwmAlarmWithVerify(
         1,
         'repair-pageTimer-failed',
         automationRevision
       );
       if (alarmCreated === false) {
+        if (await abortStaleRepair(
+          'repair-page-timer-alarm-failed-active-hours-paused'
+        )) {
+          return { success: false, reason: '修复事务已失效', schedule };
+        }
         schedule.pageTimerError += '；PWM 恢复闹钟创建失败，等待看门狗按 durable intent 恢复';
         await createAlarm('ac-watchdog', { periodInMinutes: 5 });
         await persistSchedule('repairScheduleClock-pageTimer-retry-alarm-failed', {
           syncFromLiveAlarm: false
         });
+        await syncScheduleToSync('repairScheduleClock-pageTimer-retry-alarm-failed');
         return { success: false, reason: schedule.pageTimerError, schedule };
       }
+      setSmartOnPwmRetryState('on', schedule.nextTriggerAt, {
+        kind: repairRetryKind,
+        boundaryAt: retryBoundaryAt
+      });
       await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-      if (await abortStaleAutomation(
-        automationRevision,
-        'repair-retry-active-hours-paused'
-      )) {
+      if (await abortStaleRepair('repair-retry-active-hours-paused')) {
         return { success: false, reason: '运行时段外暂停', schedule };
       }
       await persistSchedule('repairScheduleClock-pageTimer-failed');
       await updateBadge();
+      await syncScheduleToSync('repairScheduleClock-pageTimer-failed');
       return { success: false, reason: schedule.pageTimerError, schedule: { ...schedule, actualStatus: status } };
     }
+    schedule.pageTimerError = '';
+    schedule.pageTimerRetryAt = 0;
+    schedule.pageTimerRetryMinutes = 0;
     return null;
   }
 
@@ -4848,12 +7225,61 @@ async function repairScheduleClock() {
     };
   }
 
+  if (options.revokeInvalidSmartOnClock === true
+      && options.preserveRevokeAcrossSupersededRepair === true) {
+    let replacementCommitted = false;
+    try {
+      replacementCommitted = await hasDurableLivePwmOwner(
+        automationRevision,
+        {
+          expectedSmartOnBoundaryAt:
+            Number(options.smartOnExpectedBoundaryAt) || 0
+        }
+      );
+    } catch (proofError) {
+      console.warn('[AC扩展] invalid-clock revoke 前 replacement owner 证明读取失败:', proofError?.message);
+    }
+    // proof await 期间的换主/更高优先级 repair 先于本次结论。
+    // 该复检到下方撤钟之间无 await，不给 stale proof 破坏新 owner。
+    if (repairEpoch !== scheduleRepairEpoch
+        || !isAutomationOperationCurrent(automationRevision)) {
+      return { success: false, stale: true, reason: 'replacement owner changed during proof', schedule };
+    }
+    if (replacementCommitted) {
+      console.warn('[AC扩展] replacement owner 已完成 durable/live 收口，丢弃 stale invalid-clock revoke');
+      return {
+        success: true,
+        preservedReplacementOwner: true,
+        reason: 'replacement owner committed',
+        schedule
+      };
+    }
+  }
+
+  if (options.revokeInvalidSmartOnClock === true) {
+    const expectedBoundaryAt = Number(options.smartOnExpectedBoundaryAt) || 0;
+    // 撤销非法 future clock 必须与随后的权威状态观察/重排属于同一 repair
+    // single-flight。否则已有 generic repair 可在“清钟”和“带 boundary 重排”
+    // 之间提交另一份 fresh 但仍跳周期的 19:30，并被尾随 restore 当成健康钟。
+    schedule.smartOnBoundaryAt = expectedBoundaryAt;
+    clearPwmRetryState();
+    setNextTriggerAt(0);
+    schedule.alarmCreatedAt = 0;
+    schedule.alarmDelayMinutes = 0;
+    await persistSchedule('smart-on-clock-repair-ownership', {
+      syncFromLiveAlarm: false
+    });
+    await clearPwmAlarm(automationRevision);
+    if (await abortStaleRepair(
+      'repair-invalid-clock-revoke-active-hours-paused'
+    )) {
+      return { success: false, reason: '修复事务已失效', schedule };
+    }
+  }
+
   // 间隔模式
   const restored = await restoreIntervalAlarmFromStorage('repair: 按已记录绝对触发时间恢复 PWM 闹钟');
-  if (await abortStaleAutomation(
-    automationRevision,
-    'repair-restore-active-hours-paused'
-  )) {
+  if (await abortStaleRepair('repair-restore-active-hours-paused')) {
     return { success: false, reason: '运行时段外暂停', schedule };
   }
   if (restored) {
@@ -4863,24 +7289,28 @@ async function repairScheduleClock() {
   }
 
   const status = await getCurrentACStatus();
-  if (await abortStaleAutomation(
-    automationRevision,
-    'repair-status-active-hours-paused'
-  )) {
+  if (await abortStaleRepair('repair-status-active-hours-paused')) {
     return { success: false, reason: '运行时段外暂停', schedule };
   }
-  const currentOn = typeof status?.isOn === 'boolean'
-    ? status.isOn
-    : schedule.pwmState !== 'on';
+  if (typeof status?.isOn !== 'boolean') {
+    schedule.pageTimerError = `时钟修复无法确认冷气状态：${status?.error || '状态未知'}；未改相位且未点击开关`;
+    await persistSchedule('repairScheduleClock-status-unknown', {
+      syncFromLiveAlarm: false
+    });
+    return { success: false, reason: schedule.pageTimerError, schedule };
+  }
+  const currentOn = status.isOn;
+  if (!currentOn) {
+    // 新鲜页面已经证明物理 OFF；此前 ON/page-timer 失败属于上一事务，不能
+    // 在新的安全 ON 计划提交后继续把诊断染红。
+    clearPageTimerProofState();
+  }
   if (currentOn && schedule.smartMode?.enabled) {
     await applyPreparedSmartModeDurations({
       allowActiveOnPhase: true,
       boundaryAt: schedule.smartOnBoundaryAt
     });
-    if (await abortStaleAutomation(
-      automationRevision,
-      'repair-smart-duration-active-hours-paused'
-    )) {
+    if (await abortStaleRepair('repair-smart-duration-active-hours-paused')) {
       return { success: false, reason: '运行时段外暂停', schedule };
     }
   }
@@ -4892,6 +7322,39 @@ async function repairScheduleClock() {
   }
 
   schedule.pwmState = currentOn ? 'off' : 'on';
+  let repairLocalExceptionBoundaryAt = 0;
+  let repairLocalExceptionKind = '';
+  const repairNow = Date.now();
+  const confirmedOffPlan = !currentOn && schedule.smartMode?.enabled
+    ? planSmartOnAfterConfirmedOff(schedule, {
+        now: repairNow,
+        // 缺钟／错误未来钟没有可信的更早 OFF 证明；从本次权威 OFF 观察起算
+        // 五分钟，宁可稍晚补开，也不能因语义修复缩短压缩机保护。
+        confirmedOffAt: repairNow,
+        minOffMinutes: SMART_MODE.MIN_OFF_MINUTES,
+        ...(Number(options.smartOnExpectedBoundaryAt) > 0
+          ? { boundaryAt: Number(options.smartOnExpectedBoundaryAt) }
+          : {})
+      })
+    : null;
+  const minOffNotBeforeAt = repairNow
+    + SMART_MODE.MIN_OFF_MINUTES * 60000;
+  const firstFutureBoundaryAt = nextHalfHourBoundary(repairNow);
+  const invalidDurationFallbackAt = firstFutureBoundaryAt >= minOffNotBeforeAt
+    ? firstFutureBoundaryAt
+    : nextHalfHourBoundary(firstFutureBoundaryAt);
+  const safeConfirmedOffPlan = !currentOn
+      && schedule.smartMode?.enabled
+      && confirmedOffPlan?.kind === 'refuse'
+    ? {
+        kind: 'smart-on-safety-skip',
+        nextTriggerAt: invalidDurationFallbackAt,
+        boundaryAt: firstFutureBoundaryAt === invalidDurationFallbackAt
+          ? halfHourBoundaryAtOrBefore(repairNow)
+          : firstFutureBoundaryAt
+      }
+    : confirmedOffPlan;
+  clearPwmRetryState();
   const repairPlan = currentOn
     ? { nextTriggerAt: schedule.pageTimerTargetAt }
     : {
@@ -4899,39 +7362,86 @@ async function repairScheduleClock() {
         // offMinutes（例如 22:20 读到 22:00 的 on=0/off=30），会错误排到
         // 22:50 并跳过 22:30 的新天气。普通循环仍按相对 offMinutes 修复。
         nextTriggerAt: schedule.smartMode?.enabled
-          ? nextHalfHourBoundary(Date.now())
-          : Date.now() + delay * 60000
+          && Number(safeConfirmedOffPlan?.nextTriggerAt) > repairNow
+          ? safeConfirmedOffPlan.nextTriggerAt
+          : schedule.smartMode?.enabled
+            ? invalidDurationFallbackAt
+            : repairNow + delay * 60000
       };
+  if (safeConfirmedOffPlan?.kind === 'smart-on-safe-delay'
+      || safeConfirmedOffPlan?.kind === 'smart-on-safety-skip') {
+    repairLocalExceptionBoundaryAt = safeConfirmedOffPlan.boundaryAt;
+    repairLocalExceptionKind = safeConfirmedOffPlan.kind;
+    schedule.smartOnBoundaryAt = repairLocalExceptionBoundaryAt;
+    setSmartOnPwmRetryState('on', repairPlan.nextTriggerAt, {
+      kind: repairLocalExceptionKind,
+      boundaryAt: repairLocalExceptionBoundaryAt
+    });
+  }
   setNextTriggerAt(repairPlan.nextTriggerAt);
   schedule.alarmCreatedAt = 0;
   schedule.alarmDelayMinutes = 0;
   await persistSchedule('repairScheduleClock-commit-intent', {
     syncFromLiveAlarm: false
   });
+  if (await abortStaleRepair('repair-commit-intent-stale')) {
+    return { success: false, reason: '修复事务已失效', schedule };
+  }
+  if (repairLocalExceptionBoundaryAt > 0) {
+    await syncScheduleToSync('repairScheduleClock-smart-on-hold');
+    if (await abortStaleRepair('repair-smart-on-hold-sync-stale')) {
+      return { success: false, reason: '修复事务已失效', schedule };
+    }
+  }
   const alarmCreated = await createPwmAlarmFromPlan(
     repairPlan,
     'repair',
     automationRevision
   );
+  if (await abortStaleRepair('repair-alarm-commit-stale')) {
+    return { success: false, reason: '修复事务已失效', schedule };
+  }
   if (alarmCreated === false) {
+    if (await abortStaleRepair(
+      'repair-commit-alarm-failed-active-hours-paused'
+    )) {
+      return { success: false, reason: '修复事务已失效', schedule };
+    }
     schedule.pageTimerError = '时钟修复已确定下一阶段，但 PWM 闹钟创建失败；等待看门狗按 durable intent 恢复';
     await createAlarm('ac-watchdog', { periodInMinutes: 5 });
     await persistSchedule('repairScheduleClock-commit-alarm-failed', {
       syncFromLiveAlarm: false
     });
+    if (repairLocalExceptionBoundaryAt > 0) {
+      await syncScheduleToSync('repairScheduleClock-smart-on-hold-alarm-failed');
+    }
     return { success: false, reason: schedule.pageTimerError, schedule };
   }
+  if (repairLocalExceptionBoundaryAt > 0) {
+    setSmartOnPwmRetryState('on', schedule.nextTriggerAt, {
+      kind: repairLocalExceptionKind,
+      boundaryAt: repairLocalExceptionBoundaryAt
+    });
+  }
   await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-  if (await abortStaleAutomation(
-    automationRevision,
-    'repair-commit-active-hours-paused'
-  )) {
+  if (await abortStaleRepair('repair-commit-active-hours-paused')) {
     return { success: false, reason: '运行时段外暂停', schedule };
   }
   await persistSchedule('repairScheduleClock-interval');
   await updateBadge();
+  await syncScheduleToSync('repairScheduleClock');
 
   return { success: true, schedule: { ...schedule, actualStatus: status } };
+  })();
+  const trackedRepair = repairOperation.finally(() => {
+    if (repairScheduleClock.inFlight === trackedRepair) {
+      repairScheduleClock.inFlight = null;
+      repairScheduleClock.inFlightContext = null;
+    }
+  });
+  repairScheduleClock.inFlight = trackedRepair;
+  repairScheduleClock.inFlightContext = repairContext;
+  return trackedRepair;
 }
 
 // 弹窗 est（Est. until）依赖 full 轮询带回的页面余额。页面重渲染、home
@@ -5105,9 +7615,15 @@ async function getScheduleSnapshot(lite = false) {
       if (legacyEnd) snapshot.nextTriggerAt = legacyEnd;
     }
 
-    const triggerPlan = reconcilePwmTrigger(snapshot, alarm, PWM_TRIGGER_SNAPSHOT_OPTIONS);
-    if (triggerPlan.kind === 'sync-live') {
-      Object.assign(snapshot, triggerPlan.phasePatch);
+    if (!snapshot._phaseAdoptionInFlight) {
+      const triggerPlan = reconcilePwmTrigger(
+        snapshot,
+        alarm,
+        PWM_TRIGGER_SNAPSHOT_OPTIONS
+      );
+      if (triggerPlan.kind === 'sync-live') {
+        Object.assign(snapshot, triggerPlan.phasePatch);
+      }
     }
 
     const storedAlarmEnd = snapshot.nextTriggerAt || (
@@ -5115,7 +7631,8 @@ async function getScheduleSnapshot(lite = false) {
         ? snapshot.alarmCreatedAt + snapshot.alarmDelayMinutes * 60000
         : 0
     );
-    const nextBoundary = liveAlarmEnd || (storedAlarmEnd > Date.now() ? storedAlarmEnd : 0);
+    const nextBoundary = (!snapshot._phaseAdoptionInFlight && liveAlarmEnd)
+      || (storedAlarmEnd > Date.now() ? storedAlarmEnd : 0);
 
     if (snapshot.enabled && !snapshot._automationPausedByActiveHours && nextBoundary) {
       const remainingMs = nextBoundary - Date.now();
@@ -5129,9 +7646,16 @@ async function getScheduleSnapshot(lite = false) {
 
   const alarm = await chrome.alarms.get('ac-pwm');
   const liveAlarmEnd = getLiveAlarmEndMs(alarm);
+  const phaseAdoptionInFlight = isSyncPhaseAdoptionAdmissionBlocked();
   const snapshot = {
     ...schedule,
-    _pwmStepRunning: isCurrentPwmStepRunning()
+    // enrich 会为 UI 剩余分钟改写 alarmCreatedAt；另存 durable 生成时刻供
+    // Popup 做“是否跳过最近智能半点”的语义校验。
+    _clockPlannedAt: Number(schedule.smartClockPlannedAt)
+      || Number(schedule.alarmCreatedAt)
+      || 0,
+    _pwmStepRunning: isCurrentPwmStepRunning(),
+    _phaseAdoptionInFlight: phaseAdoptionInFlight
   };
   const insideActiveHours = typeof isWithinActiveHours === 'function'
     ? isWithinActiveHours()
@@ -5185,9 +7709,20 @@ async function toggleNowAndSync(action) {
       setNextTriggerAt(retryAt);
       schedule.alarmCreatedAt = 0;
       schedule.alarmDelayMinutes = 0;
+      const retryBoundaryAt = Number(schedule.smartOnBoundaryAt) || 0;
+      const safetyTimerRetry = schedule.smartMode?.enabled === true;
+      if (safetyTimerRetry) {
+        setSmartOnPwmRetryState('on', retryAt, {
+          kind: 'smart-on-safety-timer',
+          boundaryAt: retryBoundaryAt
+        });
+      }
       await persistSchedule('toggleNowAndSync-pageTimer-retry-intent', {
         syncFromLiveAlarm: false
       });
+      if (safetyTimerRetry) {
+        await syncScheduleToSync('toggleNowAndSync-pageTimer-retry-hold');
+      }
       const alarmCreated = await createPwmAlarmWithVerify(
         1,
         'toggle-pageTimer-failed',
@@ -5199,6 +7734,9 @@ async function toggleNowAndSync(action) {
         await persistSchedule('toggleNowAndSync-pageTimer-retry-alarm-failed', {
           syncFromLiveAlarm: false
         });
+        if (safetyTimerRetry) {
+          await syncScheduleToSync('toggleNowAndSync-pageTimer-retry-alarm-failed');
+        }
         await updateBadge();
         const status = await getCurrentACStatus();
         return {
@@ -5207,6 +7745,12 @@ async function toggleNowAndSync(action) {
           result: timerResult,
           schedule: { ...schedule, actualStatus: status }
         };
+      }
+      if (safetyTimerRetry) {
+        setSmartOnPwmRetryState('on', schedule.nextTriggerAt, {
+          kind: 'smart-on-safety-timer',
+          boundaryAt: retryBoundaryAt
+        });
       }
       await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
       if (await abortStaleAutomation(
@@ -5217,6 +7761,9 @@ async function toggleNowAndSync(action) {
         return { success: true, schedule: { ...schedule, actualStatus: status } };
       }
       await persistSchedule('toggleNowAndSync-pageTimer-failed');
+      if (safetyTimerRetry) {
+        await syncScheduleToSync('toggleNowAndSync-pageTimer-failed');
+      }
       await updateBadge();
       const status = await getCurrentACStatus();
       return {
@@ -5336,6 +7883,21 @@ async function ensureDiagnosticAlarms() {
     pwm: snapshotAlarm(await chrome.alarms.get('ac-pwm')),
     smartWeather: snapshotAlarm(await chrome.alarms.get('ac-smart-weather'))
   });
+  const snapshotDeferredPhaseAdoption = async () => {
+    const alarms = await snapshotNamedAlarms();
+    return {
+      success: false,
+      deferred: true,
+      reason: 'phase adoption in progress',
+      enabled: schedule.enabled === true,
+      repaired: false,
+      before: alarms,
+      repairs: [],
+      schedule: { ...schedule, _phaseAdoptionInFlight: true },
+      pwmStepRunning: isCurrentPwmStepRunning(),
+      alarms
+    };
+  };
   const recordClearedAlarmRepairs = (before, after) => {
     const names = {
       badge: 'badge-alarm-cleared',
@@ -5348,8 +7910,15 @@ async function ensureDiagnosticAlarms() {
     });
   };
 
+  if (isSyncPhaseAdoptionAdmissionBlocked()) {
+    return snapshotDeferredPhaseAdoption();
+  }
+
   if (!schedule.enabled) {
     const beforeAlarms = await snapshotNamedAlarms();
+    if (isSyncPhaseAdoptionAdmissionBlocked()) {
+      return snapshotDeferredPhaseAdoption();
+    }
     await clearAutomationRuntimeAlarmsWhileBlocked();
     if (isAutomationAllowed()) return ensureDiagnosticAlarms();
     await chrome.alarms.clear('ac-smart-weather');
@@ -5370,6 +7939,9 @@ async function ensureDiagnosticAlarms() {
 
   if (!isAutomationAllowed()) {
     const beforeAlarms = await snapshotNamedAlarms();
+    if (isSyncPhaseAdoptionAdmissionBlocked()) {
+      return snapshotDeferredPhaseAdoption();
+    }
     await clearAutomationRuntimeAlarmsWhileBlocked();
     if (isAutomationAllowed()) return ensureDiagnosticAlarms();
     let smartWeatherAlarm = await chrome.alarms.get('ac-smart-weather');
@@ -5411,6 +7983,9 @@ async function ensureDiagnosticAlarms() {
     pwm: snapshotAlarm(pwmAlarm),
     smartWeather: snapshotAlarm(smartWeatherAlarm)
   };
+  if (isSyncPhaseAdoptionAdmissionBlocked()) {
+    return snapshotDeferredPhaseAdoption();
+  }
 
   if (!badgeAlarm || badgeAlarm.scheduledTime <= Date.now()) {
     if (await createAlarm('ac-badge-tick', { delayInMinutes: 1 })) {
@@ -5465,12 +8040,20 @@ async function ensureDiagnosticAlarms() {
   if (smartCurrentCycleStarted) {
     repairs.push('smart-current-cycle-started');
   }
+  const smartOnClockRepaired = diagnosticLifecycleRecovery?.handled === true
+    && diagnosticLifecycleRecovery?.plan?.kind === 'repair-clock'
+    && diagnosticLifecycleRecovery?.plan?.reason === 'skipped-nearest-smart-on-boundary';
+  if (smartOnClockRepaired) {
+    repairs.push('smart-on-clock');
+    if (!repairs.includes('pwm-alarm')) repairs.push('pwm-alarm');
+  }
 
   // 活闹钟存在但 storage 可能缺失 nextTriggerAt → 直接回写（不依赖 syncStoredTriggerFromAlarm 的边界判断）
   // 当前周期恢复已启动时，pwmAlarm 仍可能是恢复前的 23:00 旧快照；此处回写会
   // 在同一 revision 内把旧钟重新认领为真相。等 executor 预置 timer/开机并写入
   // 新绝对截止后再由下一轮诊断校准，in-flight 阶段禁止触碰 trigger storage。
   const triggerPlan = smartCurrentCycleStarted
+      || isSyncPhaseAdoptionAdmissionBlocked()
     ? null
     : await persistReconciledPwmTrigger(
       pwmAlarm,
@@ -5570,13 +8153,45 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // 明确停用不排在长达数十秒的页面确认之后：先失效 revision 并向主世界
       // 发送取消，再进入串行事务完成 storage/闹钟/关机定时器收口。
       const updateAdmissionEpoch = automaticDisableAdmissionEpoch;
+      const explicitDisablePreviousEnabled = msg.data?.enabled === false
+        ? schedule.enabled === true
+        : null;
       let explicitDisableAdmissionEpoch = 0;
       let explicitDisableDurablyPersisted = false;
+      let explicitDisableIntentPromise = null;
       try {
         if (msg.data?.enabled === false) {
-          explicitDisableAdmissionEpoch = await preemptAutomaticOnForExplicitDisable();
+          // 先同步 claim revision/admission，再把 enabled=false 与 publish
+          // marker 作为第一个异步 I/O 原子落盘。清 alarm／content request
+          // 可能很慢，绝不能排在 durable disable intent 前面。
+          explicitDisableAdmissionEpoch = preemptAutomaticOnForExplicitDisable();
+          schedule.enabled = false;
+          explicitDisableIntentPromise = persistSchedule(
+            'updateSchedule-disable-admission-intent',
+            {
+              syncFromLiveAlarm: false,
+              markSyncPublishPending: true
+            }
+          );
+          // queue reservation 在下一行同步发生；先挂 rejection handler，避免
+          // 前序长事务令 intent promise 在真正 await 前产生未处理拒绝。
+          void explicitDisableIntentPromise.catch(() => {});
         }
         await runSerializedScheduleUpdate(async () => {
+      if (explicitDisableIntentPromise) {
+        // disable 在首次 await 前已发起 durable 写，同时本 callback 已同步
+        // 占住 schedule queue。更晚 enable 必须排在完整停用收口之后执行，
+        // 不会被旧 cancelAutomaticOn 反向取消。
+        await explicitDisableIntentPromise;
+        explicitDisableDurablyPersisted = true;
+        await scheduleSyncRetry('publish');
+        await finishExplicitDisablePreemption();
+      }
+      const staleByExplicitDisable = () => msg.data?.enabled !== false
+        && updateAdmissionEpoch !== automaticDisableAdmissionEpoch;
+      if (staleByExplicitDisable()) {
+        throw new Error('设置请求已被更晚的明确停用取消');
+      }
       // 提取（Fowler Extract Function）：用户停用路径——B1 顺序：先持久化"已关闭"状态再执行关机。
       const shutdownAfterScheduleDisable = async ({ activeHoursPause = false } = {}) => {
         await resetDisabledPwmRuntime();
@@ -5585,9 +8200,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           await persistSchedule('updateSchedule-active-hours-paused', { syncFromLiveAlarm: false });
         } else {
           await persistSchedule('updateSchedule');
-        }
-        if (msg.data?.enabled === false) {
-          explicitDisableDurablyPersisted = true;
         }
         const offResult = activeHoursPause
           ? await requestTimerBasedShutdown('schedule-active-hours-paused')
@@ -5598,7 +8210,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         return offResult;
       };
 
-      const wasEnabled = schedule.enabled;
+      const wasEnabled = explicitDisablePreviousEnabled === null
+        ? schedule.enabled
+        : explicitDisablePreviousEnabled;
       const wasAutomationAllowed = isAutomationAllowed();
       const previousActiveHours = JSON.stringify(schedule.activeHours);
       // 防止 restart 泄漏到 schedule 对象中；手动时长单独取出，智能模式下不上送覆盖。
@@ -5664,6 +8278,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       await persistSchedule('updateSchedule');
+      if (staleByExplicitDisable()) {
+        throw new Error('设置请求已被更晚的明确停用取消');
+      }
       if (msg.data?.enabled === false) {
         explicitDisableDurablyPersisted = true;
       } else if (msg.data?.enabled === true

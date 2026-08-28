@@ -176,6 +176,10 @@ async function run() {
       });
       await chrome.storage.local.remove('ac_balance_cache');
       await chrome.storage.sync.remove('ac_schedule_sync');
+      await chrome.storage.local.remove([
+        'ac_schedule_sync_publish_pending',
+        'ac_schedule_sync_watermark'
+      ]);
       // 模拟上一个 Service Worker 保存的最近有效余额。当前 Worker 尚未在
       // 模块内存中读取过余额，popup 首次 full 轮询必须从 session 恢复 Est.
       // 并迁移到 local，才能跨越完整浏览器重启。
@@ -1157,12 +1161,30 @@ async function run() {
           missingClockAction: 'repair-clock'
         })
         : null;
+      const shortRetryAt = boundaryAt + 8 * 60_000;
       const preservedShortRetryPlan = typeof planPwmLifecycleRecovery === 'function'
-        ? planPwmLifecycleRecovery(recoveredSchedule, {
+        ? planPwmLifecycleRecovery({
+          ...recoveredSchedule,
+          pwmRetryKind: 'smart-on-safe-delay',
+          pwmRetryBoundaryAt: boundaryAt,
+          pwmRetryScheduledAt: shortRetryAt
+        }, {
           now: boundaryAt + 7 * 60_000,
-          plannedActionAt: boundaryAt + 8 * 60_000,
-          liveAlarmAt: boundaryAt + 8 * 60_000,
-          allowNonBoundarySmartClock: true,
+          smartClockPlannedAt: boundaryAt + 7 * 60_000,
+          plannedActionAt: shortRetryAt,
+          liveAlarmAt: shortRetryAt,
+          maxOnMinutes: 25,
+          missingClockAction: 'repair-clock'
+        })
+        : undefined;
+      const acceptanceBoundaryAt = boundaryAt + 30 * 60_000;
+      const skippedNearestClockPlan = typeof planPwmLifecycleRecovery === 'function'
+        ? planPwmLifecycleRecovery(recoveredSchedule, {
+          now: acceptanceBoundaryAt - 63_000,
+          smartClockPlannedAt: acceptanceBoundaryAt - 4 * 60_000,
+          plannedActionAt: acceptanceBoundaryAt + 30 * 60_000,
+          liveAlarmAt: acceptanceBoundaryAt + 30 * 60_000,
+          storedAlarmAt: acceptanceBoundaryAt + 30 * 60_000,
           maxOnMinutes: 25,
           missingClockAction: 'repair-clock'
         })
@@ -1189,6 +1211,7 @@ async function run() {
         tooLateRecoveryPlan,
         lifecycleRecoveryPlan,
         preservedShortRetryPlan,
+        skippedNearestClockPlan,
         rejectedLateLifecyclePlan,
         persisted
       };
@@ -1242,6 +1265,11 @@ async function run() {
         && smartWorkerState.preservedShortRetryPlan?.kind === 'preserve-live-alarm'
         && smartWorkerState.preservedShortRetryPlan?.smartDecisionReason
           === 'current-cycle-action-preserved'
+        && smartWorkerState.skippedNearestClockPlan?.kind === 'repair-clock'
+        && smartWorkerState.skippedNearestClockPlan?.reason
+          === 'skipped-nearest-smart-on-boundary'
+        && smartWorkerState.skippedNearestClockPlan?.expectedAt
+          === smartBoundaryAt + 30 * 60 * 1000
         && smartWorkerState.rejectedLateLifecyclePlan?.kind === 'preserve-live-alarm'
         && smartWorkerState.rejectedLateLifecyclePlan?.smartDecisionReason
           === 'wait-for-smart-on-window',
@@ -1496,13 +1524,19 @@ async function run() {
         smartMode: { enabled: false, sensitivity: 5 }
       };
       await chrome.storage.sync.remove('ac_schedule_sync');
+      await chrome.storage.local.remove([
+        'ac_schedule_sync_publish_pending',
+        'ac_schedule_sync_watermark'
+      ]);
       await Promise.all([
         'ac-pwm',
         'ac-badge-tick',
         'ac-watchdog',
         'ac-active-boundary',
         'ac-comfort-end',
-        'ac-page-timer-retry'
+        'ac-page-timer-retry',
+        'ac-sync-publish-retry',
+        'ac-sync-adopt-retry'
       ].map(name => chrome.alarms.clear(name)));
       await chrome.storage.local.set({ ac_schedule: disabled });
       await loadScheduleFromStorage();

@@ -520,7 +520,8 @@ function planSmartModeOnWindow(schedule, opts = {}) {
     };
   }
 
-  if (now - boundaryAt < PWM_PHASE_MINUTE_MS && pageTimerTargetAt > now) {
+  if (now - boundaryAt < PWM_PHASE_MINUTE_MS
+      && pageTimerTargetAt >= nextSafePageTimerTargetAt(now)) {
     return {
       kind: 'allow',
       reason: 'smart-on-window',
@@ -581,6 +582,334 @@ function planSmartOnRetryExceptionRecovery(schedule, boundaryAt, opts = {}) {
   };
 }
 
+// 已确认物理 OFF 后规划下一次智能 ON。普通路径仍取最近未来半点；若恢复链
+// 的实际关机太晚，五分钟压缩机保护跨过该半点，则以该半点拥有的 typed retry
+// 在最早安全时刻补执行剩余 ON 窗口。窗口余量不足时才显式跳到后一个半点。
+function planSmartOnAfterConfirmedOff(schedule, opts = {}) {
+  const now = pwmPhaseNow(opts);
+  const confirmedOffAt = Number(opts?.confirmedOffAt);
+  const minOffMinutes = Number(opts?.minOffMinutes);
+  const storedOnMinutes = Number(schedule?.onMinutes);
+  const noRunSentinel = storedOnMinutes === 30
+    && Number(schedule?.offMinutes) === 30;
+  const onMinutes = noRunSentinel ? 0 : storedOnMinutes;
+  const validOnDuration = Number.isInteger(onMinutes)
+    && onMinutes >= 0
+    && onMinutes <= SMART_MODE_ON_HARD_MAX_MINUTES;
+  if (!schedule?.enabled
+      || schedule?.smartMode?.enabled !== true
+      || !Number.isFinite(confirmedOffAt)
+      || confirmedOffAt <= 0
+      || confirmedOffAt > now
+      || !Number.isFinite(minOffMinutes)
+      || minOffMinutes <= 0) {
+    return { kind: 'refuse', reason: 'invalid-smart-off-confirmation' };
+  }
+
+  const requestedBoundaryAt = normalizeHalfHourAlarmBoundary(opts?.boundaryAt);
+  const boundaryAt = requestedBoundaryAt > 0
+    ? requestedBoundaryAt
+    : nextHalfHourBoundary(now);
+  const nearestBoundaryAt = nextHalfHourBoundary(now);
+  const notBeforeAt = confirmedOffAt + minOffMinutes * PWM_PHASE_MINUTE_MS;
+  const planBoundaryEvaluation = (nextTriggerAt, reason) => {
+    const markerBoundaryAt = halfHourBoundaryAtOrBefore(nextTriggerAt - 1);
+    return {
+      kind: 'smart-on-safety-skip',
+      reason,
+      nextAction: 'on',
+      nextTriggerAt,
+      boundaryAt: markerBoundaryAt,
+      skippedBoundaryAt: boundaryAt,
+      pageTimerTargetAt: onMinutes > 0
+        ? smartModePageTimerTargetAt(onMinutes, now, nextTriggerAt)
+        : 0,
+      delayMinutes: Math.max(1, (nextTriggerAt - now) / PWM_PHASE_MINUTE_MS),
+      phasePatch: { pwmState: 'on', nextTriggerAt }
+    };
+  };
+  if (!validOnDuration) {
+    return planBoundaryEvaluation(
+      nextHalfHourBoundaryAtOrAfter(notBeforeAt),
+      'smart-invalid-duration-next-evaluation'
+    );
+  }
+  if (onMinutes === 0) {
+    return planBoundaryEvaluation(
+      nextHalfHourBoundaryAtOrAfter(notBeforeAt),
+      'smart-zero-duration-next-evaluation'
+    );
+  }
+  if (boundaryAt >= notBeforeAt) {
+    if (boundaryAt === nearestBoundaryAt) {
+      return {
+        kind: 'smart-on-boundary',
+        reason: 'compressor-safe-nearest-boundary',
+        nextAction: 'on',
+        nextTriggerAt: boundaryAt,
+        boundaryAt,
+        pageTimerTargetAt: smartModePageTimerTargetAt(
+          onMinutes,
+          now,
+          boundaryAt
+        ),
+        delayMinutes: Math.max(1, (boundaryAt - now) / PWM_PHASE_MINUTE_MS),
+        phasePatch: { pwmState: 'on', nextTriggerAt: boundaryAt }
+      };
+    }
+    return planBoundaryEvaluation(
+      boundaryAt,
+      'compressor-safe-requested-later-boundary'
+    );
+  }
+
+  const retryPlan = onMinutes > 0
+    ? planSmartOnRetryExceptionRecovery(
+        schedule,
+        boundaryAt,
+        { now, retryAt: notBeforeAt }
+      )
+    : { kind: 'defer', reason: 'smart-on-duration-zero' };
+  if (retryPlan.kind === 'retry-smart-on-exception') {
+    return {
+      ...retryPlan,
+      kind: 'smart-on-safe-delay',
+      reason: 'compressor-min-off-safe-delay',
+      delayMinutes: Math.max(1, (retryPlan.nextTriggerAt - now) / PWM_PHASE_MINUTE_MS)
+    };
+  }
+
+  const nextTriggerAt = nextHalfHourBoundaryAtOrAfter(notBeforeAt);
+  return planBoundaryEvaluation(
+    nextTriggerAt,
+    'compressor-min-off-window-exhausted'
+  );
+}
+
+// 对智能下一 ON 时钟做语义校验。三方一致只证明同一个时戳被复制，不能证明
+// 它属于“现在应到的最近半点”。唯一例外是 marker、alarm 与剩余 ON 截止都
+// 匹配的本机 typed retry。
+function classifySmartOnClock(schedule, candidateAt, opts = {}) {
+  const now = pwmPhaseNow(opts);
+  const candidate = Number(candidateAt);
+  const nextAction = opts?.nextAction === 'on' || opts?.nextAction === 'off'
+    ? opts.nextAction
+    : schedule?.pwmState;
+  const toleranceMs = pwmPhaseTolerance(
+    Number(opts?.toleranceMs),
+    PWM_ALARM_BOUNDARY_TOLERANCE_MS
+  );
+  const allowDue = opts?.allowDue === true;
+  const requirePlannedAt = opts?.requirePlannedAt === true;
+  const storedOnMinutes = Number(schedule?.onMinutes);
+  const onMinutes = storedOnMinutes === 30 && Number(schedule?.offMinutes) === 30
+    ? 0
+    : storedOnMinutes;
+  if (!schedule?.enabled
+      || schedule?.smartMode?.enabled !== true
+      || nextAction !== 'on') {
+    return {
+      applicable: false,
+      valid: true,
+      kind: 'not-applicable',
+      candidateAt: Number.isFinite(candidate) ? candidate : 0,
+      expectedAt: 0,
+      boundaryAt: 0
+    };
+  }
+
+  // expectedAt 必须锚定在 durable 计划生成时刻，而不是每次诊断的当前时刻。
+  // 否则 18:56 错排的 19:30 到 19:03 会突然变成“最近半点”并假绿。
+  const requestedPlannedAt = Number(opts?.plannedAt);
+  const hasDurablePlannedAt = Number.isFinite(requestedPlannedAt)
+      && requestedPlannedAt > 0
+      && requestedPlannedAt <= now + toleranceMs;
+  const plannedAt = hasDurablePlannedAt
+    ? requestedPlannedAt
+    : now;
+  const plannedLowerBoundaryAt = halfHourBoundaryAtOrBefore(plannedAt);
+  const candidateBoundaryAt = normalizeHalfHourAlarmBoundary(candidate);
+  const plannedBoundaryAt = normalizeHalfHourAlarmBoundary(plannedAt);
+  // 兼容旧版在 alarm 已到点后才记录 origin 的快照：只有 candidate 本身就是
+  // 该到期半点时，才允许把“边界后 1.5s 内”的 origin 解释为当前边界。
+  // 若 candidate 是下一半点（例如 19:30:00.017 确认 OFF 后计划 20:00），
+  // origin 靠近 19:30 绝不能反过来把合法 20:00 判成跳周期。
+  const candidateOwnsPlannedBoundary = hasDurablePlannedAt
+    && plannedBoundaryAt > 0
+    && candidateBoundaryAt === plannedBoundaryAt;
+  const expectedAt = hasDurablePlannedAt
+    ? (candidateOwnsPlannedBoundary
+      ? plannedBoundaryAt
+      : nextHalfHourBoundary(plannedAt))
+    : (plannedAt - plannedLowerBoundaryAt <= toleranceMs
+      ? plannedLowerBoundaryAt
+      : nextHalfHourBoundary(plannedAt));
+
+  const retryKind = String(schedule?.pwmRetryKind || '');
+  const retryBoundaryAt = Number(schedule?.pwmRetryBoundaryAt);
+  const retryScheduledAt = Number(schedule?.pwmRetryScheduledAt);
+  const retryTargetAt = smartModePageTimerTargetAt(
+    onMinutes,
+    Math.max(now, candidate),
+    retryBoundaryAt
+  );
+  const typedRetryKinds = retryKind === 'smart-on'
+    || retryKind === 'smart-on-safe-delay';
+  const validTypedRetry = typedRetryKinds
+    && schedule?.pwmState === 'on'
+    && isHalfHourBoundary(retryBoundaryAt)
+    && Number.isFinite(retryScheduledAt)
+    && Math.abs(candidate - retryScheduledAt) <= toleranceMs
+    && candidate >= retryBoundaryAt
+    && retryTargetAt >= nextSafePageTimerTargetAt(Math.max(now, candidate));
+  if (validTypedRetry) {
+    return {
+      applicable: true,
+      valid: true,
+      kind: 'typed-retry',
+      retryKind,
+      candidateAt: candidate,
+      expectedAt,
+      boundaryAt: retryBoundaryAt,
+      pageTimerTargetAt: retryTargetAt
+    };
+  }
+
+  // 页面 timer 写入失败后的安全重试只会重新观察实际状态并修复关机保险；
+  // 它不拥有普通半点 ON 权限，boundary 可为 0。tuple 必须精确绑定 durable
+  // scheduledAt，alarm 到期时由 repair 路径处理，绝不能落入普通 toggle。
+  const isSafetyTimerRetry = retryKind === 'smart-on-safety-timer';
+  const validSafetyTimerRetry = isSafetyTimerRetry
+    && schedule?.pwmState === 'on'
+    && (retryBoundaryAt === 0 || isHalfHourBoundary(retryBoundaryAt))
+    && Number.isFinite(retryScheduledAt)
+    && Math.abs(candidate - retryScheduledAt) <= toleranceMs;
+  if (validSafetyTimerRetry
+      && (candidate > now - toleranceMs || allowDue)) {
+    return {
+      applicable: true,
+      valid: true,
+      kind: 'safety-timer-retry',
+      retryKind,
+      candidateAt: candidate,
+      expectedAt,
+      boundaryAt: retryBoundaryAt
+    };
+  }
+
+  // 若五分钟压缩机保护已经吃完原半点的剩余 ON 窗口，允许一个显式
+  // safety-skip marker 把下一次评估交给后一个半点。它不是 typed ON retry，
+  // 到时必须走普通半点天气与 ON 门禁。
+  const validSafetySkip = retryKind === 'smart-on-safety-skip'
+    && schedule?.pwmState === 'on'
+    && isHalfHourBoundary(retryBoundaryAt)
+    && Number.isFinite(retryScheduledAt)
+    && Math.abs(candidate - retryScheduledAt) <= toleranceMs
+    && Math.abs(candidate - nextHalfHourBoundary(retryBoundaryAt)) <= toleranceMs;
+  const safetySkipBoundaryAt = normalizeHalfHourAlarmBoundary(candidate);
+  const safetySkipTargetAt = smartModePageTimerTargetAt(
+    onMinutes,
+    Math.max(now, candidate),
+    safetySkipBoundaryAt
+  );
+  const safetySkipDueSafe = onMinutes === 0
+    ? now - candidate < PWM_PHASE_MINUTE_MS
+    : safetySkipTargetAt >= nextSafePageTimerTargetAt(now);
+  if (validSafetySkip
+      && (candidate > now - toleranceMs || (allowDue && safetySkipDueSafe))) {
+    return {
+      applicable: true,
+      valid: true,
+      kind: 'safety-skip',
+      retryKind,
+      candidateAt: candidate,
+      expectedAt,
+      boundaryAt: retryBoundaryAt
+    };
+  }
+
+  // Durable marker 是排他性的执行身份，而不是普通半点的可选提示。只要
+  // storage 声称存在 smart ON exception，但 tuple / cutoff / live ownership
+  // 任一不匹配，就必须判红；绝不能降级为 nearest-boundary 后假绿。
+  const hasSmartOnMarker = typedRetryKinds
+    || isSafetyTimerRetry
+    || retryKind === 'smart-on-safety-skip';
+  if (hasSmartOnMarker) {
+    return {
+      applicable: true,
+      valid: false,
+      kind: candidate <= now - toleranceMs
+        ? 'smart-on-marker-expired'
+        : 'smart-on-marker-mismatch',
+      retryKind,
+      candidateAt: Number.isFinite(candidate) ? candidate : 0,
+      expectedAt,
+      boundaryAt: Number.isFinite(retryBoundaryAt) ? retryBoundaryAt : 0
+    };
+  }
+
+  if (requirePlannedAt && !hasDurablePlannedAt) {
+    return {
+      applicable: true,
+      valid: false,
+      kind: 'missing-clock-origin',
+      candidateAt: Number.isFinite(candidate) ? candidate : 0,
+      expectedAt,
+      boundaryAt: 0
+    };
+  }
+
+  const candidateMatchesExpected = Number.isFinite(candidate)
+    && Math.abs(candidate - expectedAt) <= toleranceMs;
+  const expectedPageTimerTargetAt = smartModePageTimerTargetAt(
+    onMinutes,
+    Math.max(now, candidate),
+    expectedAt
+  );
+  const expectedDueSafe = onMinutes === 0
+    ? now - candidate < PWM_PHASE_MINUTE_MS
+    : expectedPageTimerTargetAt >= nextSafePageTimerTargetAt(now);
+  if (!Number.isFinite(candidate)
+      || (candidate <= now - toleranceMs
+        && !(allowDue && candidateMatchesExpected && expectedDueSafe))) {
+    return {
+      applicable: true,
+      valid: false,
+      kind: 'missing-or-expired-clock',
+      candidateAt: Number.isFinite(candidate) ? candidate : 0,
+      expectedAt,
+      boundaryAt: expectedAt
+    };
+  }
+
+  if (candidateMatchesExpected) {
+    return {
+      applicable: true,
+      valid: true,
+      kind: 'nearest-boundary',
+      candidateAt: candidate,
+      expectedAt,
+      boundaryAt: expectedAt,
+      pageTimerTargetAt: smartModePageTimerTargetAt(
+        onMinutes,
+        candidate,
+        expectedAt
+      )
+    };
+  }
+
+  return {
+    applicable: true,
+    valid: false,
+    kind: candidateBoundaryAt > expectedAt
+      ? 'skipped-nearest-boundary'
+      : 'untrusted-nonboundary',
+    candidateAt: candidate,
+    expectedAt,
+    boundaryAt: candidateBoundaryAt || 0
+  };
+}
+
 // 智能模式：把 OFF 提交的下一 ON 触发锚定到半点，使 30 分钟周期与半点对齐。
 // ON 提交（nextAction='off'）保持 now + onMinutes 不变——因 ON 相位已在半点开始，
 // 其结束时刻（半点 + onMinutes）天然落在半点节奏上。
@@ -617,6 +946,8 @@ if (typeof module !== 'undefined' && module.exports) {
     nextSafePageTimerTargetAt,
     planSmartModeOnWindow,
     planSmartOnRetryExceptionRecovery,
+    planSmartOnAfterConfirmedOff,
+    classifySmartOnClock,
     alignSmartModeNextTrigger
   };
 }

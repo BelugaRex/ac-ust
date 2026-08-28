@@ -23,10 +23,10 @@
 //     ESM interop 仍能拿到具名导出。
 
 // 只这些字段会被跨设备同步。其余字段（__heartbeat / pageTimer* /
-// alarmCreatedAt / alarmDelayMinutes）属于本机运行态，不应同步——
+// alarmCreatedAt / alarmDelayMinutes / pwmRetry*）属于本机运行态，不应同步——
 // 特别是 __heartbeat 每 20s 写一次，会瞬间打爆 sync 写入配额
 // （8 写/分钟、100 写/小时、1200 写/天）。
-const SYNC_FIELDS = ['enabled', 'onMinutes', 'offMinutes', 'activeHours', 'smartMode', 'pwmState', 'nextTriggerAt'];
+const SYNC_FIELDS = ['enabled', 'onMinutes', 'offMinutes', 'activeHours', 'smartMode', 'pwmState', 'nextTriggerAt', 'smartClockPlannedAt'];
 
 // 把内存 schedule 组装成 push 到 chrome.storage.sync 的瘦化对象。
 // nextTriggerAt 若已是过去时戳则推 0——让接收方识别为"相位未定"，
@@ -49,6 +49,13 @@ function composeSyncPayload(schedule, now = Date.now()) {
     nextTriggerAt: (schedule.nextTriggerAt && schedule.nextTriggerAt > now)
       ? schedule.nextTriggerAt
       : 0,
+    // syncedAt 是这次配置写入时间，不是 phase 的生成时间。智能 ON 的接收方
+    // 必须沿用原始本机计划来源，避免一次无关配置 push 把旧坏钟重新锚定为正常。
+    smartClockPlannedAt: Number(schedule.smartClockPlannedAt) > 0
+      ? Number(schedule.smartClockPlannedAt)
+      : (Number(schedule.alarmCreatedAt) > 0
+        ? Number(schedule.alarmCreatedAt)
+        : 0),
     syncedAt: now
   };
 }
@@ -85,14 +92,39 @@ function computePhaseAdoption(localSchedule, remote, opts = {}) {
   if (remoteTrigger < now - staleMs) return null;
 
   const localTrigger = Number(localSchedule?.nextTriggerAt) || 0;
+  const remotePwmState = remote.pwmState === 'on' ? 'on' : 'off';
+  const remotePlannedAt = Number(remote.smartClockPlannedAt) || 0;
+  const localPlannedAt = Number(localSchedule?.smartClockPlannedAt)
+    || Number(localSchedule?.alarmCreatedAt)
+    || 0;
+  // OFF 是安全动作：两端都计划 OFF 时，远端较晚的截止绝不能
+  // 延后本机已有的较早 OFF。这也让 timer-only 修复投影在新版对端
+  // 只会收紧、不会放宽关机保险。
+  if (localTrigger > now
+      && localSchedule?.pwmState === 'off'
+      && remotePwmState === 'off'
+      && localTrigger <= remoteTrigger) {
+    return null;
+  }
   // 容忍窗口内：偏差 ≤ 10s 且本地未来触发 → 视为已对齐
-  if (localTrigger > now && Math.abs(localTrigger - remoteTrigger) <= toleranceMs) {
+  if (localTrigger > now
+      && localSchedule?.pwmState === remotePwmState
+      && Math.abs(localTrigger - remoteTrigger) <= toleranceMs) {
+    if (remotePlannedAt > 0 && remotePlannedAt !== localPlannedAt) {
+      return {
+        pwmState: remotePwmState,
+        nextTriggerAt: remoteTrigger,
+        smartClockPlannedAt: remotePlannedAt,
+        metadataOnly: true
+      };
+    }
     return null;
   }
 
   return {
-    pwmState: remote.pwmState === 'on' ? 'on' : 'off',
-    nextTriggerAt: remoteTrigger
+    pwmState: remotePwmState,
+    nextTriggerAt: remoteTrigger,
+    ...(remotePlannedAt > 0 ? { smartClockPlannedAt: remotePlannedAt } : {})
   };
 }
 

@@ -588,6 +588,34 @@ function formatBalanceExhaustionAt(displayAt, locale) {
   };
 }
 
+// hero 的动作属于 scheduler phase；页面真实状态只用于状态灯和检测失配。
+// 不能用“实际 OFF”反推“下一步 ON”，否则人工关机时会把 19:23 的计划 OFF
+// 错写成“17 分钟后自动开启”。
+function classifyCountdownPresentation(schedule = {}) {
+  const action = schedule?._nextAction === 'on' || schedule?._nextAction === 'off'
+    ? schedule._nextAction
+    : (schedule?.pwmState === 'off' ? 'off' : 'on');
+  const actualIsOn = typeof schedule?.actualStatus?.isOn === 'boolean'
+    ? schedule.actualStatus.isOn
+    : null;
+  if (schedule?.pwmRetryKind === 'smart-on-safety-timer') {
+    return { kind: 'safety-retry', action, actualIsOn };
+  }
+  if (actualIsOn === null || actualIsOn === (action === 'off')) {
+    if (schedule?.pwmRetryKind === 'smart-on-safe-delay') {
+      return { kind: 'smart-safe-delay', action: 'on', actualIsOn };
+    }
+    if (schedule?.pwmRetryKind === 'smart-on-safety-skip') {
+      return { kind: 'smart-safety-skip', action: 'on', actualIsOn };
+    }
+    return { kind: 'normal-action', action, actualIsOn };
+  }
+  if (schedule?.pageTimerError && actualIsOn && action === 'on') {
+    return { kind: 'safety-retry', action, actualIsOn };
+  }
+  return { kind: 'phase-reconcile', action, actualIsOn };
+}
+
 function updateCountdownDisplay(schedule, alarm) {
   renderBalanceEstimate(schedule);
   idleDisplay.textContent = t('acIdle');
@@ -617,20 +645,8 @@ function updateCountdownDisplay(schedule, alarm) {
     idleDisplay.textContent = t('activeHoursOutside');
   }
 
-  // 优先级：full 路径 _effectivePwmState（页面真实状态反推）> lite 路径合并的
-  // cached actualStatus 反推 > 兜底 pwmState。fallback 加 cached 反推是为了
-  // ON 路径 setPageTimer 失败的故障态：background.js 故意保持 pwmState='on' 让
-  // 1 分钟后整轮幂等 ON + 重试 setPageTimer（见 background.js runPwmStep 顶部
-  // "PWM ON 失败重试" 注释），此时 pwmState='on' 既不代表"AC 当前 OFF"也不代表
-  // "用户应看到分钟后自动开启"。状态行已通过 refreshStatus() 合并的 cached
-  // actualStatus 显示"冷气运行中"，hero caption 必须同源取 cached actualStatus
-  // 反推，否则会出现"运行中、分钟后自动开启"这种自相矛盾文案。
-  const nextAction = schedule._effectivePwmState
-    || schedule._nextAction
-    || (typeof schedule.actualStatus?.isOn === 'boolean'
-      ? (schedule.actualStatus.isOn ? 'off' : 'on')
-      : schedule.pwmState);
-  const inferredACOn = nextAction !== 'on';
+  const presentation = classifyCountdownPresentation(schedule);
+  const inferredACOn = presentation.action !== 'on';
   const currentACOn = typeof schedule.actualStatus?.isOn === 'boolean'
     ? schedule.actualStatus.isOn
     : inferredACOn;
@@ -662,11 +678,11 @@ function updateCountdownDisplay(schedule, alarm) {
   }
 
   // 计算并渲染 hero 倒计时（提取自 updateCountdownDisplay，Fowler Extract Function）
-  renderCountdown(schedule, alarm, nextAction);
+  renderCountdown(schedule, alarm, presentation);
 }
 
 // 提取（Fowler Extract Function）：倒计时来源链（_nextBoundary → live alarm → alarmCreatedAt 推算）与 hero 渲染。
-function renderCountdown(schedule, alarm, nextAction) {
+function renderCountdown(schedule, alarm, presentation) {
   // 计算倒计时（v0.5.x 起只保留间隔模式）
   let remainingMs = 0;
   if (schedule._nextBoundary) {
@@ -682,10 +698,33 @@ function renderCountdown(schedule, alarm, nextAction) {
     // hero 结构：大数字独立元素，下方 caption 说明动作；文本节点写入不带 HTML
     countdownNumber.textContent = String(minutes);
     countdownNumber.style.display = '';
-    countdownText.textContent = t('countdownCaption', t(nextAction === 'on' ? 'actionOn' : 'actionOff'));
+    switch (presentation.kind) {
+      case 'safety-retry':
+        countdownText.textContent = t('countdownSafetyRetry');
+        break;
+      case 'smart-safe-delay':
+        countdownText.textContent = t('countdownSmartSafeDelay');
+        break;
+      case 'smart-safety-skip':
+        countdownText.textContent = t('countdownSmartSafetySkip');
+        break;
+      case 'phase-reconcile':
+        countdownText.textContent = t(
+          'countdownPhaseReconcile',
+          t(presentation.action === 'on' ? 'actionOn' : 'actionOff')
+        );
+        break;
+      default:
+        countdownText.textContent = t('countdownCaption',
+          t(presentation.action === 'on' ? 'actionOn' : 'actionOff')
+        );
+    }
   } else {
     countdownNumber.style.display = 'none';
-    countdownText.textContent = t('countdownSoon', t(nextAction === 'on' ? 'actionOn' : 'actionOff'));
+    countdownText.textContent = t(
+      presentation.kind === 'normal-action' ? 'countdownSoon' : 'countdownPhasePending',
+      t(presentation.action === 'on' ? 'actionOn' : 'actionOff')
+    );
   }
 }
 
@@ -1372,13 +1411,27 @@ btnDiagnose.addEventListener('click', async () => {
     const nowMs = Date.now();
     const storedIsStale = !effectiveNextTriggerAt || effectiveNextTriggerAt < nowMs;
     let pwmAlarmEarly = await chrome.alarms.get('ac-pwm');
+    const liveClockAssessment = classifySmartOnClock(
+      s,
+      pwmAlarmEarly?.scheduledTime,
+      {
+        now: nowMs,
+        plannedAt: Number(s._clockPlannedAt)
+          || Number(storedSchedule.alarmCreatedAt)
+          || 0,
+        nextAction: s._nextAction || s.pwmState,
+        requirePlannedAt: true
+      }
+    );
     let selfHealed = false;
     if (s.enabled === true
       && !automationPausedByActiveHours
+        && s._phaseAdoptionInFlight !== true
         && s.clockMode === false
         && storedIsStale
         && pwmAlarmEarly?.scheduledTime
-        && pwmAlarmEarly.scheduledTime > nowMs) {
+        && pwmAlarmEarly.scheduledTime > nowMs
+        && (!liveClockAssessment.applicable || liveClockAssessment.valid)) {
       try {
         const repairedSchedule = projectPersistentSchedule({
           ...storedSchedule,
@@ -1618,6 +1671,66 @@ btnDiagnose.addEventListener('click', async () => {
           domain: t('diagnoseDomainScheduler'),
           action: t('diagnoseActionReloadExtension'),
           priority: 5
+        });
+      }
+
+      const currentSmartClockAssessment = classifySmartOnClock(
+        s,
+        pwmAlarm?.scheduledTime || effectiveNextTriggerAt,
+        {
+          now: nowMs,
+          plannedAt: Number(s._clockPlannedAt)
+            || Number(storedSchedule.alarmCreatedAt)
+            || 0,
+          nextAction: s._nextAction || s.pwmState,
+          requirePlannedAt: true
+        }
+      );
+      const smartClockRepairVerified = repairedItems.has('smart-on-clock')
+        && (!currentSmartClockAssessment.applicable
+          || currentSmartClockAssessment.valid);
+      if (smartClockRepairVerified) {
+        add(true, t('diagnoseSmartOnClockRepaired'), {
+          level: 'repaired',
+          code: 'SCHED-SMART-ON-CLOCK-REPAIRED',
+          domain: t('diagnoseDomainScheduler'),
+          priority: 5
+        });
+      } else if (currentSmartClockAssessment.applicable
+          && !currentSmartClockAssessment.valid) {
+        const skippedNearest = currentSmartClockAssessment.kind
+          === 'skipped-nearest-boundary';
+        const invalidClockMetadata = skippedNearest ? {
+          code: 'SCHED-SMART-ON-CLOCK-SKIPPED',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionRecheckRecovery'),
+          priority: 0
+        } : {
+          code: 'SCHED-SMART-ON-CLOCK-INVALID',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionRecheckRecovery'),
+          priority: 0
+        };
+        add(false, t(
+          skippedNearest
+            ? 'diagnoseSmartOnClockSkipped'
+            : 'diagnoseSmartOnClockInvalid',
+          fmt(currentSmartClockAssessment.expectedAt),
+          fmt(currentSmartClockAssessment.candidateAt)
+        ), invalidClockMetadata);
+      }
+
+      const countdownPresentation = classifyCountdownPresentation(s);
+      if (countdownPresentation.kind === 'phase-reconcile' && !pwmStepInFlight) {
+        add(false, t(
+          'diagnosePhaseStatusDesync',
+          t(countdownPresentation.action === 'on' ? 'actionOn' : 'actionOff')
+        ), {
+          level: 'warning',
+          code: 'SCHED-PHASE-STATUS-DESYNC',
+          domain: t('diagnoseDomainScheduler'),
+          action: t('diagnoseActionRecheckRecovery'),
+          priority: 25
         });
       }
 

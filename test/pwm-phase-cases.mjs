@@ -13,6 +13,8 @@ const {
   nextSafePageTimerTargetAt,
   planSmartModeOnWindow,
   planSmartOnRetryExceptionRecovery,
+  planSmartOnAfterConfirmedOff,
+  classifySmartOnClock,
   alignSmartModeNextTrigger
 } = pwmPhase;
 
@@ -32,7 +34,7 @@ export function runPwmPhaseCases(assertPass) {
 
   assertPass(
     Object.keys(pwmPhase).sort().join(',')
-      === 'alignSmartModeNextTrigger,halfHourBoundaryAtOrBefore,nextHalfHourBoundary,nextSafePageTimerTargetAt,planNextSmartWeatherPrefetch,planPwmRecovery,planPwmStep,planSmartModeOnWindow,planSmartOnRetryExceptionRecovery,reconcilePwmTrigger,smartModePageTimerTargetAt,smartWeatherTargetBoundaryAt'
+      === 'alignSmartModeNextTrigger,classifySmartOnClock,halfHourBoundaryAtOrBefore,nextHalfHourBoundary,nextSafePageTimerTargetAt,planNextSmartWeatherPrefetch,planPwmRecovery,planPwmStep,planSmartModeOnWindow,planSmartOnAfterConfirmedOff,planSmartOnRetryExceptionRecovery,reconcilePwmTrigger,smartModePageTimerTargetAt,smartWeatherTargetBoundaryAt'
       && typeof nextSafePageTimerTargetAt === 'function'
       && typeof halfHourBoundaryAtOrBefore === 'function',
     'PWM phase module 导出规划函数、天气预取槽与半点对齐函数'
@@ -322,6 +324,252 @@ export function runPwmPhaseCases(assertPass) {
   assertPass(smartFiveMinuteGap.nextTriggerAt === hourTime(13, 30)
       && smartShortGap.nextTriggerAt === hourTime(14, 0),
     'alignSmartModeNextTrigger: 下一智能 ON 至少晚于已确认关机 5 分钟');
+
+  const recoveredOverrunOffAt = hourTime(18, 56, 0, 17);
+  const recoveredBoundaryAt = hourTime(19, 0);
+  const recoveredSafeRetryAt = recoveredOverrunOffAt + 5 * MINUTE_MS;
+  const recoveredOffClock = typeof planSmartOnAfterConfirmedOff === 'function'
+    ? planSmartOnAfterConfirmedOff({
+        enabled: true,
+        pwmState: 'on',
+        onMinutes: 23,
+        offMinutes: 7,
+        smartMode: { enabled: true }
+      }, {
+        now: recoveredOverrunOffAt,
+        confirmedOffAt: recoveredOverrunOffAt,
+        minOffMinutes: 5
+      })
+    : null;
+  assertPass(recoveredOffClock?.kind === 'smart-on-safe-delay'
+      && recoveredOffClock.nextTriggerAt === recoveredSafeRetryAt
+      && recoveredOffClock.phasePatch.nextTriggerAt === recoveredSafeRetryAt
+      && recoveredOffClock.boundaryAt === recoveredBoundaryAt
+      && recoveredOffClock.pageTimerTargetAt === hourTime(19, 23)
+      && recoveredOffClock.nextTriggerAt < hourTime(19, 30),
+    'planSmartOnAfterConfirmedOff: 18:56 恢复关机保留 19:00 所有权，五分钟保护后 typed retry，不静默跳到 19:30');
+
+  const classifyNow = hourTime(18, 58, 57);
+  const lateSmartClock = typeof classifySmartOnClock === 'function'
+    ? classifySmartOnClock({
+        enabled: true,
+        pwmState: 'on',
+        onMinutes: 23,
+        smartMode: { enabled: true }
+      }, hourTime(19, 30), { now: classifyNow })
+    : null;
+  const nearestSmartClock = typeof classifySmartOnClock === 'function'
+    ? classifySmartOnClock({
+        enabled: true,
+        pwmState: 'on',
+        onMinutes: 23,
+        smartMode: { enabled: true }
+      }, hourTime(19, 0), { now: classifyNow })
+    : null;
+  const typedSafeClock = typeof classifySmartOnClock === 'function'
+    ? classifySmartOnClock({
+        enabled: true,
+        pwmState: 'on',
+        onMinutes: 23,
+        smartMode: { enabled: true },
+        pwmRetryKind: 'smart-on-safe-delay',
+        pwmRetryBoundaryAt: hourTime(19, 0),
+        pwmRetryScheduledAt: recoveredSafeRetryAt
+      }, recoveredSafeRetryAt, { now: classifyNow })
+    : null;
+  const stillLateAfterBoundary = classifySmartOnClock({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 23,
+    smartMode: { enabled: true }
+  }, hourTime(19, 30), {
+    now: hourTime(19, 3),
+    plannedAt: recoveredOverrunOffAt
+  });
+  const exhaustedOffClock = planSmartOnAfterConfirmedOff({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 3,
+    offMinutes: 27,
+    smartMode: { enabled: true }
+  }, {
+    now: hourTime(18, 59),
+    confirmedOffAt: hourTime(18, 59),
+    minOffMinutes: 5
+  });
+  const typedSafetySkipClock = classifySmartOnClock({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 3,
+    smartMode: { enabled: true },
+    pwmRetryKind: 'smart-on-safety-skip',
+    pwmRetryBoundaryAt: hourTime(19, 0),
+    pwmRetryScheduledAt: hourTime(19, 30)
+  }, hourTime(19, 30), {
+    now: hourTime(19, 3),
+    plannedAt: hourTime(18, 59)
+  });
+  const zeroDurationNearBoundary = planSmartOnAfterConfirmedOff({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 0,
+    offMinutes: 30,
+    smartMode: { enabled: true }
+  }, {
+    now: hourTime(22, 28),
+    confirmedOffAt: hourTime(22, 28),
+    minOffMinutes: 5
+  });
+  const encodedZeroDurationNearBoundary = planSmartOnAfterConfirmedOff({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 30,
+    offMinutes: 30,
+    smartMode: { enabled: true }
+  }, {
+    now: hourTime(22, 28),
+    confirmedOffAt: hourTime(22, 28),
+    minOffMinutes: 5
+  });
+  const postBoundaryNormalClock = classifySmartOnClock({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 23,
+    smartMode: { enabled: true }
+  }, hourTime(19, 0), {
+    now: hourTime(18, 30, 0, 200),
+    plannedAt: hourTime(18, 30, 0, 200)
+  });
+  const boundaryOffCommitNextClock = classifySmartOnClock({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 23,
+    smartMode: { enabled: true }
+  }, hourTime(20, 0), {
+    now: hourTime(19, 30, 0, 17),
+    plannedAt: hourTime(19, 30, 0, 17),
+    requirePlannedAt: true
+  });
+  const ordinarySafeBoundary = planSmartOnAfterConfirmedOff({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 23,
+    offMinutes: 7,
+    smartMode: { enabled: true }
+  }, {
+    now: hourTime(18, 50),
+    confirmedOffAt: hourTime(18, 50),
+    minOffMinutes: 5
+  });
+  const zeroDurationSafeBoundary = planSmartOnAfterConfirmedOff({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 0,
+    offMinutes: 30,
+    smartMode: { enabled: true }
+  }, {
+    now: hourTime(22, 20),
+    confirmedOffAt: hourTime(22, 20),
+    minOffMinutes: 5
+  });
+  const invalidDurationBoundary = planSmartOnAfterConfirmedOff({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 26,
+    offMinutes: 4,
+    smartMode: { enabled: true }
+  }, {
+    now: hourTime(22, 28),
+    confirmedOffAt: hourTime(22, 28),
+    minOffMinutes: 5
+  });
+  const oneMinuteWindowExhausted = planSmartOnAfterConfirmedOff({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 1,
+    offMinutes: 29,
+    smartMode: { enabled: true }
+  }, {
+    now: hourTime(18, 59, 0, 1),
+    confirmedOffAt: hourTime(18, 59, 0, 1),
+    minOffMinutes: 5,
+    boundaryAt: hourTime(19, 0)
+  });
+  const mismatchedMarkerClock = classifySmartOnClock({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 23,
+    smartMode: { enabled: true },
+    pwmRetryKind: 'smart-on-safe-delay',
+    pwmRetryBoundaryAt: hourTime(19, 0),
+    pwmRetryScheduledAt: hourTime(19, 5)
+  }, hourTime(19, 30), {
+    now: hourTime(19, 21),
+    plannedAt: hourTime(18, 56)
+  });
+  const safetyTimerClock = classifySmartOnClock({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 23,
+    smartMode: { enabled: true },
+    pwmRetryKind: 'smart-on-safety-timer',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: hourTime(18, 53)
+  }, hourTime(18, 53), {
+    now: hourTime(18, 54),
+    plannedAt: hourTime(18, 52),
+    allowDue: true,
+    requirePlannedAt: true
+  });
+  const originlessNearestClock = classifySmartOnClock({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 23,
+    smartMode: { enabled: true }
+  }, hourTime(19, 0), {
+    now: hourTime(18, 58),
+    plannedAt: 0,
+    requirePlannedAt: true
+  });
+  assertPass(lateSmartClock?.applicable === true
+      && lateSmartClock.valid === false
+      && lateSmartClock.kind === 'skipped-nearest-boundary'
+      && lateSmartClock.expectedAt === hourTime(19, 0)
+      && nearestSmartClock?.valid === true
+      && nearestSmartClock.kind === 'nearest-boundary'
+      && typedSafeClock?.valid === true
+      && typedSafeClock.kind === 'typed-retry'
+      && typedSafeClock.boundaryAt === hourTime(19, 0)
+      && typedSafeClock.pageTimerTargetAt === hourTime(19, 23)
+      && stillLateAfterBoundary.valid === false
+      && stillLateAfterBoundary.expectedAt === hourTime(19, 0)
+      && exhaustedOffClock.kind === 'smart-on-safety-skip'
+      && exhaustedOffClock.nextTriggerAt === hourTime(19, 30)
+      && typedSafetySkipClock.valid === true
+      && typedSafetySkipClock.kind === 'safety-skip'
+      && zeroDurationNearBoundary.kind === 'smart-on-safety-skip'
+      && zeroDurationNearBoundary.nextTriggerAt === hourTime(23, 0)
+      && encodedZeroDurationNearBoundary.kind === 'smart-on-safety-skip'
+      && encodedZeroDurationNearBoundary.nextTriggerAt === hourTime(23, 0)
+      && postBoundaryNormalClock.valid === true
+      && postBoundaryNormalClock.expectedAt === hourTime(19, 0)
+      && boundaryOffCommitNextClock.valid === true
+      && boundaryOffCommitNextClock.expectedAt === hourTime(20, 0)
+      && ordinarySafeBoundary.kind === 'smart-on-boundary'
+      && ordinarySafeBoundary.nextTriggerAt === hourTime(19, 0)
+      && zeroDurationSafeBoundary.kind === 'smart-on-safety-skip'
+      && zeroDurationSafeBoundary.nextTriggerAt === hourTime(22, 30)
+      && invalidDurationBoundary.kind === 'smart-on-safety-skip'
+      && invalidDurationBoundary.nextTriggerAt === hourTime(23, 0)
+      && oneMinuteWindowExhausted.kind === 'smart-on-safety-skip'
+      && oneMinuteWindowExhausted.nextTriggerAt === hourTime(19, 30)
+      && mismatchedMarkerClock.valid === false
+      && mismatchedMarkerClock.kind === 'smart-on-marker-mismatch'
+      && safetyTimerClock.valid === true
+      && safetyTimerClock.kind === 'safety-timer-retry'
+      && originlessNearestClock.valid === false
+      && originlessNearestClock.kind === 'missing-clock-origin',
+    'classifySmartOnClock: durable 计划时刻保持 19:00 所有权；显式安全延迟与窗口耗尽 marker 才可越过普通半点门禁');
 
   const smartOnCommit = {
     kind: 'commit',

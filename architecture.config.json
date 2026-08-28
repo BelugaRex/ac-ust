@@ -31,7 +31,7 @@
     "documents": [
       {
         "file": "popup.html",
-        "scripts": ["i18n.js", "popup-diagnostic-fallback.js", "billing-helpers.js", "smart-mode.js", "popup.js"]
+        "scripts": ["i18n.js", "popup-diagnostic-fallback.js", "billing-helpers.js", "smart-mode.js", "pwm-phase.js", "popup.js"]
       },
       {
         "file": "offscreen.html",
@@ -134,6 +134,9 @@
           "halfHourBoundaryAtOrBefore",
           "smartModePageTimerTargetAt",
           "planSmartModeOnWindow",
+          "planSmartOnRetryExceptionRecovery",
+          "planSmartOnAfterConfirmedOff",
+          "classifySmartOnClock",
           "alignSmartModeNextTrigger"
         ]
       },
@@ -149,8 +152,19 @@
             "halfHourBoundaryAtOrBefore",
             "smartModePageTimerTargetAt",
             "planSmartModeOnWindow",
+            "planSmartOnRetryExceptionRecovery",
+            "planSmartOnAfterConfirmedOff",
+            "classifySmartOnClock",
             "alignSmartModeNextTrigger"
           ]
+        },
+        {
+          "file": "popup.js",
+          "symbols": ["classifySmartOnClock"]
+        },
+        {
+          "file": "recovery-coordinator.js",
+          "symbols": ["classifySmartOnClock"]
         },
         {
           "file": "smart-recovery.js",

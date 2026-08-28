@@ -2,6 +2,8 @@
 
 ## 0.8.2
 
+- 修复真实 `:00` 智能周期在页面 timer proof 失败后漏开且诊断假绿：权威页面较晚确认 AC 已 OFF 时，保留原半点所有权，从该次 OFF 证明起满足至少 5 分钟压缩机保护后，以 typed safety retry 补执行仍安全的剩余窗口；不足时才跳到下一半点。恢复、同步、闹钟 admission 与诊断统一拒绝语义无效的智能 ON 时钟，Popup 状态与倒计时改由 `pwmState` 的下一动作推导，不再把下一 OFF 误标成自动开启。
+- 加固跨设备同步的失败与交错恢复：timer-only repair 向新旧对端投影明确未来 OFF，已有更早 OFF 不会被延后；慢时钟旧端的显式 disable 可越过全局 watermark。外发 publish 与入站 adopt 共享顺序屏障，失败发布以本机 durable marker 和独立 alarm 重试，入站读取失败单独重试；重叠写完成后丢弃事件副本并重读物理 store，避免一次 storage 故障永久吞掉停用或按错误次序采纳已被覆盖的快照。时钟修复 single-flight 同时绑定 automation revision 与智能边界，不同生命周期会合并为一次尾随修复。
 - 自动 ON 改为同页“先保险后开机”事务：初始 OFF 时先在锁定的精确 home tab 写入并确认 `Power-off after`，再进行唯一 ON 点击，最后沿既有独立新鲜页链记录正式 proof；预置失败、URL 漂移和 BFCache 断口均不点击且预置后禁用刷新接力。正常点击仍要求新的 `Execution succeeded` + ON；若返回含糊但同页实际已 ON，则零追加点击，只验证保险。PWM、舒适启动与手动 ON 共用该链，页面原本已 ON 继续零点击直设 timer。
 - 按 Fowler 的 Move Function、Introduce Parameter Object 与 Replace Flag Argument 拆分 PWM 生命周期恢复：`smart-recovery.js` 只判断智能当前周期，`interval-recovery.js` 只判断普通循环 alarm/storage，`recovery-coordinator.js` 负责智能优先、循环兜底；启动、看门狗、过期闹钟与诊断时钟统一提交恢复上下文，`background.js` 继续独占开关、`Execution succeeded`、页面定时器、闹钟和 storage 副作用，不新增第二套开机链。
 - 修复智能模式在生命周期恢复时把当前理论 ON 窗口快进到下个半点，造成冷气关闭后仍等待十几分钟：启动、过期闹钟和看门狗会在下一 ON 已越过本周期绝对截止时立即补执行剩余窗口，并消费当前半点的新鲜天气建议；关机仍锁定原半点加建议分钟，既有本周期关机闹钟／一分钟失败重试不被抢占，安全余量不足时仍等待下个半点。

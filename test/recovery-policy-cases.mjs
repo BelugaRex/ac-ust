@@ -159,14 +159,16 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   const ownedSmartRetryClock = planPwmLifecycleRecovery({
     ...smartSchedule,
-    pwmState: 'on'
+    pwmState: 'on',
+    pwmRetryKind: 'smart-on',
+    pwmRetryBoundaryAt: at(22, 0),
+    pwmRetryScheduledAt: at(22, 22)
   }, {
-    now: at(22, 25),
-    plannedActionAt: at(22, 26),
+    now: at(22, 21),
+    plannedActionAt: at(22, 22),
     liveAlarmAt: 0,
-    storedAlarmAt: at(22, 26),
+    storedAlarmAt: at(22, 22),
     maxOnMinutes: 25,
-    allowNonBoundarySmartClock: true,
     missingClockAction: 'repair-clock'
   });
   const driftedSmartBoundary = planPwmLifecycleRecovery({
@@ -209,14 +211,101 @@ export function runRecoveryPolicyCases(assertPass) {
     maxOnMinutes: 25,
     missingClockAction: 'repair-clock'
   });
+  const exactButSkippedSmartClock = planPwmLifecycleRecovery({
+    ...smartSchedule,
+    pwmState: 'on'
+  }, {
+    now: at(18, 58, 57),
+    plannedActionAt: at(19, 30),
+    liveAlarmAt: at(19, 30),
+    storedAlarmAt: at(19, 30),
+    maxOnMinutes: 25,
+    missingClockAction: 'repair-clock'
+  });
+  const nearestSmartBoundaryClock = planPwmLifecycleRecovery({
+    ...smartSchedule,
+    pwmState: 'on'
+  }, {
+    now: at(18, 58, 57),
+    plannedActionAt: at(19, 0),
+    liveAlarmAt: at(19, 0),
+    storedAlarmAt: at(19, 0),
+    maxOnMinutes: 25,
+    missingClockAction: 'repair-clock'
+  });
+  const skippedClockStillInvalidAt1903 = planPwmLifecycleRecovery({
+    ...smartSchedule,
+    pwmState: 'on'
+  }, {
+    now: at(19, 3),
+    smartClockPlannedAt: at(18, 56),
+    plannedActionAt: at(19, 30),
+    liveAlarmAt: at(19, 30),
+    storedAlarmAt: at(19, 30),
+    maxOnMinutes: 25,
+    missingClockAction: 'repair-clock'
+  });
+  const explicitSafetySkipPreserved = planPwmLifecycleRecovery({
+    ...smartSchedule,
+    pwmState: 'on',
+    onMinutes: 3,
+    offMinutes: 27,
+    pwmRetryKind: 'smart-on-safety-skip',
+    pwmRetryBoundaryAt: at(19, 0),
+    pwmRetryScheduledAt: at(19, 30)
+  }, {
+    now: at(19, 1),
+    smartClockPlannedAt: at(18, 59),
+    plannedActionAt: at(19, 30),
+    liveAlarmAt: at(19, 30),
+    storedAlarmAt: at(19, 30),
+    maxOnMinutes: 25,
+    missingClockAction: 'repair-clock'
+  });
+  const badClockDue = planPwmLifecycleRecovery({
+    ...smartSchedule,
+    pwmState: 'on'
+  }, {
+    now: at(19, 30),
+    smartClockPlannedAt: at(18, 56),
+    plannedActionAt: at(19, 30),
+    storedAlarmAt: at(19, 30),
+    maxOnMinutes: 25,
+    missingClockAction: 'repair-clock'
+  });
+  const badClockExpired = planPwmLifecycleRecovery({
+    ...smartSchedule,
+    pwmState: 'on'
+  }, {
+    now: at(19, 30, 2),
+    smartClockPlannedAt: at(18, 56),
+    plannedActionAt: at(19, 30),
+    expiredAlarmAt: at(19, 30),
+    maxOnMinutes: 25,
+    missingClockAction: 'repair-clock'
+  });
   assertPass(untrustedSmartStoredClock.kind === 'repair-clock'
       && untrustedSmartStoredClock.reason === 'untrusted-smart-on-clock'
       && ownedSmartRetryClock.kind === 'restore-stored-alarm'
-      && ownedSmartRetryClock.scheduledTime === at(22, 26)
+      && ownedSmartRetryClock.scheduledTime === at(22, 22)
       && driftedSmartBoundary.kind === 'preserve-live-alarm'
       && driftedSmartBoundary.scheduledTime === at(22, 30) + 500.5
       && preparedWeatherProjectedOff.kind === 'repair-clock'
       && preparedWeatherProjectedOff.reason === 'untrusted-smart-on-clock'
-      && actualOffPhaseClock.kind === 'preserve-live-alarm',
-    '智能 ON 拒绝 22:50 残留钟；天气临时投影 OFF 仍沿用原 ON 所有权；真实 OFF、typed retry 与 1500ms 内边界漂移可保留');
+      && actualOffPhaseClock.kind === 'preserve-live-alarm'
+      && exactButSkippedSmartClock.kind === 'repair-clock'
+      && exactButSkippedSmartClock.reason === 'skipped-nearest-smart-on-boundary'
+      && exactButSkippedSmartClock.expectedAt === at(19, 0)
+      && nearestSmartBoundaryClock.kind === 'preserve-live-alarm'
+      && nearestSmartBoundaryClock.scheduledTime === at(19, 0)
+      && skippedClockStillInvalidAt1903.kind === 'repair-clock'
+      && skippedClockStillInvalidAt1903.expectedAt === at(19, 0)
+      && explicitSafetySkipPreserved.kind === 'preserve-live-alarm'
+      && explicitSafetySkipPreserved.smartDecisionReason
+        === 'explicit-smart-on-safety-skip'
+      && badClockDue.kind === 'repair-clock'
+      && badClockDue.expectedAt === at(19, 0)
+      && badClockExpired.kind === 'repair-clock'
+      && badClockExpired.expectedAt === at(19, 0),
+    '智能 ON 拒绝非半点与跳过最近周期的精确半点钟；天气临时投影 OFF 仍沿用原 ON 所有权；真实 OFF、typed retry、最近边界与 1500ms 漂移可保留');
 }
