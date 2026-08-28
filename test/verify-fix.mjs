@@ -1,6 +1,4 @@
-// 单元测试:验证 popup.js 诊断面板的"storage 自愈"修复逻辑
-// 模拟用户报告的场景:storage.nextTriggerAt=0 + live ac-pwm 存在(间隔模式 + enabled)
-// 预期:popup 侧主动写 storage,把 nextTriggerAt 修复为 ac-pwm.scheduledTime
+// AC-UST source-level regression and architecture checks.
 
 import fs from 'node:fs';
 import path from 'node:path';
@@ -33,205 +31,6 @@ function extractSourceSection(source, startMarker, endMarker, label) {
   return section;
 }
 
-// ----- Mock chrome.* API -----
-function createMockChrome(initialSchedule, liveAcPwmScheduledTime, scheduleSnapshotPatch = {}) {
-  let storage = {
-    ac_schedule: { ...initialSchedule }
-  };
-  let storageSync = {};  // [v0.5.6] sync 区的 mock 存储
-  const alarms = {
-    'ac-pwm': liveAcPwmScheduledTime
-      ? { name: 'ac-pwm', scheduledTime: liveAcPwmScheduledTime }
-      : undefined
-  };
-  const messageHandlers = {};
-
-  const chrome = {
-    storage: {
-      local: {
-        async get(key) {
-          if (key === 'ac_schedule') return { ac_schedule: { ...storage.ac_schedule } };
-          if (key === '__heartbeat') return { __heartbeat: Date.now() };
-          return { ...storage };
-        },
-        async set(obj) {
-          if (obj.ac_schedule) storage.ac_schedule = { ...obj.ac_schedule };
-          if (obj.__heartbeat) storage.__heartbeat = obj.__heartbeat;
-        }
-      },
-      // [v0.5.6] sync area（跨设备同步测试模拟）
-      sync: {
-        async get(key) {
-          if (key === 'ac_schedule_sync') return storageSync.ac_schedule_sync
-            ? { ac_schedule_sync: { ...storageSync.ac_schedule_sync } }
-            : {};
-          return { ...storageSync };
-        },
-        async set(obj) {
-          if (obj.ac_schedule_sync) storageSync.ac_schedule_sync = { ...obj.ac_schedule_sync };
-        }
-      },
-      onChanged: { addListener() {} }
-    },
-    alarms: {
-      async get(name) { return alarms[name] ? { ...alarms[name] } : undefined; },
-      async getAll() {
-        return Object.values(alarms).filter(Boolean).map(a => ({ ...a }));
-      },
-      async create() {},
-      async clear() {},
-      onAlarm: { addListener() {} }
-    },
-    runtime: {
-      async sendMessage(msg) {
-        const handler = messageHandlers[msg.type];
-        if (!handler) return undefined;
-        return handler(msg);
-      },
-      getManifest: () => ({ version: manifest.version }),
-      getPlatformInfo: async () => ({ os: 'win' }),
-      onConnect: { addListener() {} },
-      onUpdateAvailable: { addListener() {} }
-    },
-    tabs: {
-      async query() { return [{ id: 1, discarded: false }]; },
-      async sendMessage() { return { isOn: true }; }
-    },
-    action: {
-      async setBadgeText() {},
-      async setBadgeBackgroundColor() {},
-      async setTitle() {}
-    },
-    offscreen: { hasDocument: async () => true, createDocument: async () => {} }
-  };
-
-  // 注册后台消息处理器(模拟 v0.4.30 background.js 的关键路径)
-  messageHandlers['ensureDiagnostics'] = () => ({
-    success: true, enabled: true, repaired: false,
-    schedule: { ...storage.ac_schedule },
-    alarms: {
-      badge: { scheduledTime: Date.now() + 60000 },
-      watchdog: { scheduledTime: Date.now() + 300000, periodInMinutes: 5 },
-      pwm: alarms['ac-pwm'] ? { scheduledTime: alarms['ac-pwm'].scheduledTime } : null
-    }
-  });
-  messageHandlers['getSchedule'] = () => ({ ...storage.ac_schedule, ...scheduleSnapshotPatch });
-  messageHandlers['getSwStatus'] = () => ({
-    success: true,
-    swStartupTime: Date.now() - 10000,
-    initCompletedAt: Date.now() - 9000,
-    swAgeMs: 10000,
-    initAgeMs: 9000,
-    initCompleted: true,
-    memorySchedule: { ...storage.ac_schedule },
-    liveAlarmScheduledTime: alarms['ac-pwm']?.scheduledTime || 0,
-    offscreenAlive: true
-  });
-
-  return { chrome, _storage: storage, _alarms: alarms };
-}
-
-// ----- 提取 popup.js 中诊断函数的修复逻辑(逐行复制核心代码) -----
-// 这段代码是 popup.js 中 btnDiagnose.addEventListener 的核心自愈逻辑,
-// 完整对应用刚才提交的 v0.4.30 修复。
-async function runDiagnosticSelfHeal(chrome, opts = {}) {
-  const lines = [];
-  const add = (ok, msg) => lines.push((ok ? '✅' : '❌') + ' ' + msg);
-  const setTimeout_mock = (fn) => new Promise(resolve => {
-    fn();
-    resolve();
-  });
-  const projectPersistentSchedule = scheduleSnapshot => Object.fromEntries(
-    Object.entries(scheduleSnapshot || {}).filter(([key]) => (
-      key !== 'actualStatus'
-      && key !== 'balanceMinutes'
-      && !key.startsWith('_')
-    ))
-  );
-
-  // 模拟 popup.js 中诊断函数开头读取的数据
-  const ensured = await chrome.runtime.sendMessage({ type: 'ensureDiagnostics' });
-  const bg = await chrome.runtime.sendMessage({ type: 'getSchedule' });
-
-  const stored = await chrome.storage.local.get('ac_schedule');
-  const storedSchedule = stored.ac_schedule || {};
-  const bgSchedule = bg?.success === false && bg?.schedule
-    ? bg.schedule
-    : (bg || {});
-  let s = { ...storedSchedule, ...(ensured?.schedule || {}), ...bgSchedule };
-  let effectiveNextTriggerAt = s.nextTriggerAt || 0;
-
-  // 1.5 自愈逻辑(v0.4.34: 过期也触发) - 直接从 popup.js 复制
-  const nowMs = Date.now();
-  const storedIsStale = !effectiveNextTriggerAt || effectiveNextTriggerAt < nowMs;
-  let pwmAlarmEarly = await chrome.alarms.get('ac-pwm');
-  let selfHealed = false;
-  if (s.enabled === true
-      && s._automationPausedByActiveHours !== true
-      && s.clockMode === false
-      && storedIsStale
-      && pwmAlarmEarly?.scheduledTime
-      && pwmAlarmEarly.scheduledTime > nowMs) {
-    try {
-      const repairedSchedule = projectPersistentSchedule({
-        ...storedSchedule,
-        ...s,
-        nextTriggerAt: pwmAlarmEarly.scheduledTime,
-        alarmCreatedAt: Date.now(),
-        alarmDelayMinutes: Math.max(1, (pwmAlarmEarly.scheduledTime - Date.now()) / 60000)
-      });
-      await chrome.storage.local.set({ ac_schedule: repairedSchedule });
-      await new Promise(r => setTimeout(r, 200));
-      // 自愈成功后直接用 repairedSchedule,不合并旧 ensured/bgSchedule(它们携带 nextTriggerAt=0/过期 会覆盖)
-      s = { ...s, ...repairedSchedule };
-      effectiveNextTriggerAt = s.nextTriggerAt || 0;
-      selfHealed = true;
-    } catch (e) {
-      add(false, 'popup 侧 storage 自愈失败: ' + (e.message||'').slice(0,60));
-    }
-  }
-
-  // 红灯判断(直接复制 popup.js 逻辑)
-  add(!!storedSchedule, 'storage 可读写');
-  add(s.enabled === true, 'schedule.enabled=true (自动控制已启用)');
-  add(!!s.mode, 'mode=' + (s.mode || '?'));
-  add(s.clockMode !== undefined, 'clockMode=' + (s.clockMode ? '时钟' : '间隔'));
-  if (s.clockMode === false && s.enabled && !effectiveNextTriggerAt) {
-    add(false, 'storage 绝对触发时间缺失');
-  } else if (effectiveNextTriggerAt) {
-    const repairedLabel = selfHealed
-      ? ' (popup 已自愈)'
-      : (storedSchedule.nextTriggerAt === effectiveNextTriggerAt ? '' : ' (后台已回写)');
-    add(true, 'storage 绝对触发时间: ' + new Date(effectiveNextTriggerAt).toLocaleTimeString() + repairedLabel);
-  }
-
-  let alarms = await chrome.alarms.getAll();
-  const pwmAlarm = ensured?.alarms?.pwm || alarms.find(a => a.name === 'ac-pwm');
-  add(!!pwmAlarm, 'ac-pwm 闹钟存在' + (pwmAlarm ? ' (触发: ' + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
-  if (pwmAlarm && s.clockMode === false && !effectiveNextTriggerAt) {
-    add(false, 'ac-pwm 与 storage 触发时间同步');
-  } else if (pwmAlarm && effectiveNextTriggerAt) {
-    add(Math.abs(pwmAlarm.scheduledTime - effectiveNextTriggerAt) < 1500, 'ac-pwm 与 storage 触发时间同步' + (selfHealed ? ' (popup 已自愈)' : ''));
-  }
-
-  // 正式构建即使完成 popup storage 自愈，也不能把无法核验身份的旧 SW 判绿。
-  let sw = null;
-  try {
-    sw = await chrome.runtime.sendMessage({ type: 'getSwStatus' });
-  } catch (_) {}
-  if (sw && sw.success === true) {
-    add(true, 'SW init 已完成 (getSwStatus 响应正常)');
-  } else if (selfHealed) {
-    add(false, '[SW-BUILD-UNVERIFIED] storage 已修复，但 Service Worker 构建身份无法验证');
-  } else if (!sw) {
-    add(false, 'getSwStatus 无响应且 popup 未自愈');
-  } else {
-    add(false, 'getSwStatus 后台失败');
-  }
-
-  return { lines, selfHealed, storage_after: (await chrome.storage.local.get('ac_schedule')).ac_schedule };
-}
-
 // ----- 跑测试用例 -----
 async function runTests() {
   const results = [];
@@ -261,45 +60,6 @@ async function runTests() {
     results.push({ suite: currentSuite, name, pass });
   };
 
-  // 用例 1:用户实际报告的场景(storage.nextTriggerAt 过期 + ac-pwm 在未来 + 间隔 + enabled)
-  // 这模拟 SW 跑旧代码、storage 没跟上闹钟推进的情况(v0.4.34 新触发条件:不只 0,过期也触发)
-  const pwmTime = Date.now() + 5 * 60 * 1000; // 5 分钟后,模拟 01:57:55
-  const staleTime = Date.now() - 24 * 60 * 1000; // 24 分钟前已过期,模拟 01:29:41
-  const initialSchedule = {
-    enabled: true,
-    mode: 'pwm',
-    clockMode: false,           // 间隔模式
-    onMinutes: 60,
-    offMinutes: 60,
-    pwmState: 'off',
-    nextTriggerAt: staleTime,   // ← 已过期(v0.4.34 新触发条件),这是红灯根因
-    alarmCreatedAt: 0,
-    alarmDelayMinutes: 0
-  };
-  const { chrome, _storage } = createMockChrome(initialSchedule, pwmTime);
-
-  beginSuite('用例 1：诊断自愈',
-    '\n=== 用例 1:用户报告场景(storage.nextTriggerAt 已过期 + ac-pwm 在未来 + 间隔模式) ===\n');
-  verboseLog('初始 storage.nextTriggerAt =', initialSchedule.nextTriggerAt, '(已过期 24 分钟)');
-  verboseLog('live ac-pwm.scheduledTime =', new Date(pwmTime).toLocaleTimeString(), '(timestamp:', pwmTime + ')');
-  verboseLog('');
-
-  const before = (await chrome.storage.local.get('ac_schedule')).ac_schedule;
-  verboseLog('修复前 storage:', { nextTriggerAt: before.nextTriggerAt, alarmCreatedAt: before.alarmCreatedAt });
-
-  const result = await runDiagnosticSelfHeal(chrome);
-
-  verboseLog('\n--- 诊断输出 ---');
-  for (const line of result.lines) verboseLog(line);
-
-  const after = result.storage_after;
-  verboseLog('\n修复后 storage:', {
-    nextTriggerAt: after.nextTriggerAt,
-    nextTriggerAt_time: new Date(after.nextTriggerAt).toLocaleTimeString(),
-    alarmCreatedAt: after.alarmCreatedAt ? new Date(after.alarmCreatedAt).toLocaleTimeString() : 0,
-    alarmDelayMinutes: after.alarmDelayMinutes?.toFixed(2)
-  });
-
   beginSuite('PWM 纯决策', '\n\n=== PWM phase 纯决策接口 ===\n');
   runPwmPhaseCases(assertPass);
 
@@ -308,106 +68,6 @@ async function runTests() {
 
   beginSuite('恢复策略纯决策', '\n\n=== 恢复策略模块化纯决策接口 ===\n');
   runRecoveryPolicyCases(assertPass);
-
-  setSuite('用例 1：诊断自愈');
-  verboseLog('\n--- 断言 ---');
-  assertPass(result.selfHealed === true, 'selfHealed 标志为 true(自愈触发)');
-  assertPass(after.nextTriggerAt === pwmTime, 'storage.nextTriggerAt 被修复为 ac-pwm.scheduledTime');
-  assertPass(after.alarmCreatedAt > 0, 'alarmCreatedAt 已写入');
-  assertPass(after.alarmDelayMinutes > 0, 'alarmDelayMinutes 已写入');
-  assertPass(!result.lines.some(l => l.includes('storage 绝对触发时间缺失')),
-    '红灯"storage 绝对触发时间缺失"已消除');
-  assertPass(!result.lines.some(l => l.startsWith('❌') && l.includes('ac-pwm 与 storage 触发时间同步')),
-    '红灯"ac-pwm 与 storage 触发时间同步"已消除');
-  assertPass(result.lines.some(l => l.includes('(popup 已自愈)')),
-    '修复后显示"(popup 已自愈)"标签');
-
-  const runtimeSnapshotPatch = {
-    actualStatus: { isOn: true, balanceState: 'available', balanceMinutes: 156 },
-    balanceMinutes: 156,
-    _nextBoundary: pwmTime,
-    _effectivePwmState: 'off'
-  };
-  const pollutedSnapshotMock = createMockChrome(
-    initialSchedule,
-    pwmTime,
-    runtimeSnapshotPatch
-  );
-  const pollutionResult = await runDiagnosticSelfHeal(pollutedSnapshotMock.chrome);
-  const pollutionKeys = Object.keys(pollutionResult.storage_after);
-  assertPass(!pollutionKeys.includes('actualStatus')
-      && !pollutionKeys.includes('balanceMinutes')
-      && !pollutionKeys.some(key => key.startsWith('_')),
-    '诊断自愈只持久化 schedule 字段，不把 full snapshot 运行时字段写入 ac_schedule');
-  const popupProjectionSource = fs.readFileSync(path.join(ROOT, 'popup.js'), 'utf8');
-  const projectPersistentScheduleSource = extractSourceSection(
-    popupProjectionSource,
-    'function projectPersistentSchedule(scheduleSnapshot) {',
-    'btnDiagnose.addEventListener',
-    'projectPersistentSchedule'
-  );
-  const projectPersistentSchedule = new Function(
-    `${projectPersistentScheduleSource}; return projectPersistentSchedule;`
-  )();
-  const projectedSchedule = projectPersistentSchedule({
-    ...initialSchedule,
-    ...runtimeSnapshotPatch
-  });
-  assertPass(projectedSchedule.enabled === true
-      && projectedSchedule.nextTriggerAt === staleTime
-      && !Object.hasOwn(projectedSchedule, 'actualStatus')
-      && !Object.hasOwn(projectedSchedule, 'balanceMinutes')
-      && !Object.keys(projectedSchedule).some(key => key.startsWith('_')),
-    'popup 真实持久化投影保留 schedule 数据并剥离余额与所有下划线运行态字段');
-
-  // 用例 2:storage 已有正确 nextTriggerAt,不应触发自愈
-  beginSuite('用例 2：已有正确状态', '\n\n=== 用例 2:storage 已有正确值(不该触发自愈) ===\n');
-  const initialSchedule2 = { ...initialSchedule, nextTriggerAt: pwmTime };
-  const mock2 = createMockChrome(initialSchedule2, pwmTime);
-  const result2 = await runDiagnosticSelfHeal(mock2.chrome);
-  for (const line of result2.lines) verboseLog(line);
-  verboseLog('');
-  assertPass(result2.selfHealed === false, '已有正确值时不触发自愈(selfHealed=false)');
-  assertPass(!result2.lines.some(l => l.startsWith('❌')),
-    '用例 2 无任何红灯');
-
-  // 用例 3:非间隔模式(时钟模式),不该触发自愈
-  beginSuite('用例 3：时钟模式', '\n\n=== 用例 3:时钟模式(不该触发自愈) ===\n');
-  const initialSchedule3 = { ...initialSchedule, clockMode: true };
-  const mock3 = createMockChrome(initialSchedule3, pwmTime);
-  const result3 = await runDiagnosticSelfHeal(mock3.chrome);
-  for (const line of result3.lines) verboseLog(line);
-  verboseLog('');
-  assertPass(result3.selfHealed === false, '时钟模式不触发自愈');
-
-  // 用例 4:SW 不响应 getSwStatus(模拟跑旧代码)+ popup 自愈成功 → 正式构建仍须红灯
-  beginSuite('用例 4：Service Worker 降级', '\n\n=== 用例 4:SW 不响应 getSwStatus + popup 自愈成功 ===\n');
-  const initialSchedule4 = { ...initialSchedule, nextTriggerAt: staleTime };
-  const mock4 = createMockChrome(initialSchedule4, pwmTime);
-  // 让 SW 不响应 getSwStatus(模拟旧代码无此 handler)
-  mock4.chrome.runtime.sendMessage = async (msg) => {
-    if (msg.type === 'getSwStatus') return undefined;
-    if (msg.type === 'ensureDiagnostics') {
-      return mock4.chrome.runtime['_ensureDiagnosticsResult']?.() || {
-        success: true, enabled: true, repaired: false,
-        schedule: { ...mock4._storage.ac_schedule },
-        alarms: { badge: null, watchdog: null, pwm: { scheduledTime: pwmTime } }
-      };
-    }
-    if (msg.type === 'getSchedule') return { ...mock4._storage.ac_schedule };
-    return undefined;
-  };
-  const result4 = await runDiagnosticSelfHeal(mock4.chrome);
-  for (const line of result4.lines) verboseLog(line);
-  verboseLog('');
-  assertPass(result4.selfHealed === true, '用例 4 自愈触发');
-  assertPass(result4.lines.some(l => l.startsWith('❌')
-      && l.includes('SW-BUILD-UNVERIFIED')
-      && l.includes('构建身份无法验证')),
-    '用例 4 正式构建无法核验旧 SW 时保持红灯，storage 自愈不再制造假绿');
-  assertPass(result4.lines.some(l => l.includes('storage 绝对触发时间')
-      && l.includes('popup 已自愈')),
-    '用例 4 仍明确报告 popup 已修复 storage 时钟，但不据此放行旧 SW');
 
   // ===== 用例 5: i18n fetch-based 加载器 — 验证用户报告的三个坏键 =====
   beginSuite('用例 5：i18n、页面逻辑与产物契约',
@@ -1665,13 +1325,6 @@ async function runTests() {
   // 6L: computeConfigDiff 字段全部一致 → changed=false
   const diffSame = computeConfigDiff(baseSchedule, { onMinutes: 30, offMinutes: 30, activeHours: baseSchedule.activeHours, enabled: true });
   assertPass(diffSame.changed === false, '6L: computeConfigDiff 字段一致 → changed=false');
-
-  // 6M: chrome.storage.sync mock 自身可读写（同步链路 mock 完整性回归）
-  const syncMock = createMockChrome(baseSchedule, futureTime);
-  await syncMock.chrome.storage.sync.set({ ac_schedule_sync: composeSyncPayload(baseSchedule, Date.now()) });
-  const syncRead = await syncMock.chrome.storage.sync.get('ac_schedule_sync');
-  assertPass(!!syncRead.ac_schedule_sync && syncRead.ac_schedule_sync.enabled === true,
-    '6M: mock chrome.storage.sync 可写入并回读（sync 区 mock 完整）');
 
   const proofNow = Date.now();
   assertPass(isPageTimerProofFresh({
@@ -7573,14 +7226,11 @@ return { reapplySmartSensitivityNow };`
     '14G: 诊断区分独立 page-timer retry 与任意当前相位的 live ac-pwm 重试，并保留 L2 真状态读取');
   const popupPwmPhaseScriptAt14G = popupHtml.indexOf('<script src="pwm-phase.js"></script>');
   const popupMainScriptAt14G = popupHtml.indexOf('<script src="popup.js?v=0.8.2"></script>');
-  const popupDiagnoseStart14G = popupSource.indexOf("btnDiagnose.addEventListener('click'");
-  const popupDiagnoseEnd14G = popupSource.indexOf(
-    "btnCopyDiag?.addEventListener('click'",
-    popupDiagnoseStart14G
-  );
-  const popupDiagnoseSource14G = popupSource.slice(
-    popupDiagnoseStart14G,
-    popupDiagnoseEnd14G
+  const popupDiagnoseSource14G = extractSourceSection(
+    popupSource,
+    "btnDiagnose.addEventListener('click', async () => {",
+    '\n// 独立兜底脚本只在该标记缺失时接管诊断按钮。',
+    'popup diagnostic click handler'
   );
   assertPass(popupPwmPhaseScriptAt14G > 0
       && popupMainScriptAt14G > popupPwmPhaseScriptAt14G
@@ -7591,8 +7241,10 @@ return { reapplySmartSensitivityNow };`
       && popupSource.includes('const diagnosticEvidence = readDiagnosticEvidence(ensured);')
       && popupSource.includes('const diagnosticBefore = diagnosticEvidence.before;')
       && popupSource.includes('const diagnosticAfter = diagnosticEvidence.after;')
+      && !popupSource.includes('function projectPersistentSchedule(')
+      && !popupDiagnoseSource14G.includes("chrome.alarms.get('ac-pwm')")
       && !popupDiagnoseSource14G.includes('chrome.storage.local.set('),
-    '14G-0: Popup 继续报告智能时钟语义错误，但只消费后台 before/after，不在诊断中直接改 storage');
+    '14G-0: Popup 只消费后台 before/after；不保留旧 storage 自愈投影、冗余 ac-pwm 读取或直接写 storage');
   const pwmRetryHelperStart14G = popupSource.indexOf(
     'function isPwmPageTimerRetryActive('
   );
@@ -7680,12 +7332,87 @@ return { reapplySmartSensitivityNow };`
       && /chrome\.runtime\.getManifest\(\)\.version/.test(popupSource),
     `14M: 诊断末行 diagnoseVersion 不再直接传 APP_VERSION 硬编码,改为优先读 chrome.runtime.getManifest().version (治本 — 即便作者漏同步源码 APP_VERSION,诊断仍显示真实 manifest 版本)`);
 
-  const diagnoseHandlerSource = popupSource.slice(
-    popupSource.indexOf("btnDiagnose.addEventListener('click', async () => {")
+  const diagnoseHandlerSource = extractSourceSection(
+    popupSource,
+    "btnDiagnose.addEventListener('click', async () => {",
+    '\n// 独立兜底脚本只在该标记缺失时接管诊断按钮。',
+    'popup diagnostic click handler'
   );
+  const captureDiagnosticInputsSource = extractSourceSection(
+    popupSource,
+    'async function capturePopupDiagnosticInputs(report, runtime = {}) {',
+    "\nbtnDiagnose.addEventListener('click', async () => {",
+    'popup diagnostic input capture'
+  );
+  const diagnosticOrchestrationSource = `${captureDiagnosticInputsSource}\n${diagnoseHandlerSource}`;
+  const capturePopupDiagnosticInputs14 = new Function(
+    `${captureDiagnosticInputsSource}; return capturePopupDiagnosticInputs;`
+  )();
+  const captureTrace14 = [];
+  let captureInspectCount14 = 0;
+  const captureResult14 = await capturePopupDiagnosticInputs14({
+    add() {},
+    translate: key => key
+  }, {
+    buildTimeEpochMs: 123,
+    matchServiceWorkerBuild: () => true,
+    warn() {},
+    async sendMessage(message) {
+      captureTrace14.push(message.type);
+      if (message.type === 'getSwStatus') return { success: true, marker: 'sw' };
+      if (message.type === 'inspectContentRuntime') {
+        captureInspectCount14 += 1;
+        return { success: true, marker: `content-${captureInspectCount14}` };
+      }
+      if (message.type === 'ensureDiagnostics') return { success: true, marker: 'evidence' };
+      if (message.type === 'getSchedule') return { marker: 'schedule' };
+      throw new Error(`unexpected message: ${message.type}`);
+    },
+    async readStoredSchedule() {
+      captureTrace14.push('storage.get');
+      return { ac_schedule: { marker: 'stored' } };
+    }
+  });
+  assertPass(captureTrace14.join(',') === (
+    'getSwStatus,inspectContentRuntime,ensureDiagnostics,getSchedule,'
+      + 'inspectContentRuntime,storage.get'
+    )
+      && captureResult14.sw.marker === 'sw'
+      && captureResult14.contentRuntimeBefore.marker === 'content-1'
+      && captureResult14.ensured.marker === 'evidence'
+      && captureResult14.bg.marker === 'schedule'
+      && captureResult14.contentRuntimeAfter.marker === 'content-2'
+      && captureResult14.storedSchedule.marker === 'stored',
+    '14M-1: Popup 诊断严格按 SW preflight→content before→repair→schedule→content after→storage 采集');
+
+  const mismatchedCaptureTrace14 = [];
+  const mismatchedCapture14 = await capturePopupDiagnosticInputs14({
+    add() {},
+    translate: key => key
+  }, {
+    buildTimeEpochMs: 123,
+    matchServiceWorkerBuild: () => false,
+    warn() {},
+    async sendMessage(message) {
+      mismatchedCaptureTrace14.push(message.type);
+      if (message.type === 'getSwStatus') return { success: true };
+      if (message.type === 'getSchedule') return {};
+      throw new Error(`mixed build must not call ${message.type}`);
+    },
+    async readStoredSchedule() {
+      mismatchedCaptureTrace14.push('storage.get');
+      return { ac_schedule: {} };
+    }
+  });
+  assertPass(mismatchedCaptureTrace14.join(',') === 'getSwStatus,getSchedule,storage.get'
+      && mismatchedCapture14.runtimeBuildCompatible === false
+      && mismatchedCapture14.contentRuntimeBefore === null
+      && mismatchedCapture14.ensured === null
+      && mismatchedCapture14.contentRuntimeAfter === null,
+    '14M-2: Popup/SW build 不一致时跳过 content inspect 与 ensureDiagnostics，首现场不被混版修复');
   assertPass(popupSource.includes('const DIAGNOSTIC_MESSAGE_TIMEOUT_MS = 10000;')
       && popupSource.includes('async function sendDiagnosticRuntimeMessage(message)')
-      && countOccurrences(diagnoseHandlerSource, 'sendDiagnosticRuntimeMessage(') >= 4
+      && countOccurrences(captureDiagnosticInputsSource, 'sendMessage(') >= 4
       && /finally\s*\{[\s\S]*btnDiagnose\.disabled = false;/.test(diagnoseHandlerSource),
     '14N: 诊断后台往返有 10 秒边界，所有退出路径都恢复按钮并结束“诊断中”状态');
 
@@ -7827,7 +7554,10 @@ return { reapplySmartSensitivityNow };`
   }
 
   const diagnosticReportStart = popupSource.indexOf('const DIAGNOSTIC_LEVEL_SYMBOLS =');
-  const diagnosticReportEnd = popupSource.indexOf('\nfunction projectPersistentSchedule', diagnosticReportStart);
+  const diagnosticReportEnd = popupSource.indexOf(
+    "\nbtnDiagnose.addEventListener('click', async () => {",
+    diagnosticReportStart
+  );
   const diagnosticReportSource = diagnosticReportStart >= 0 && diagnosticReportEnd > diagnosticReportStart
     ? popupSource.slice(diagnosticReportStart, diagnosticReportEnd)
     : '';
@@ -7958,32 +7688,32 @@ return { reapplySmartSensitivityNow };`
     'diagnoseRuntimeAlarmsLeaked'
   ];
   assertPass(diagnosticFindingLocaleKeys.every(key => zhCN[key]?.message && en[key]?.message)
-      && diagnoseHandlerSource.includes("code: 'CFG-AUTOMATION-OFF'")
-      && diagnoseHandlerSource.includes("code: 'SCHED-PWM-MISSING'")
-      && diagnoseHandlerSource.includes("code: 'PAGE-HOME-MISSING'")
-      && diagnoseHandlerSource.includes("code: 'SW-STATUS-FAILED'")
-      && diagnoseHandlerSource.includes("'SAFETY-TIMER-FAILED'")
-      && diagnoseHandlerSource.includes("code: 'SAFETY-TIMER-MISSING'")
-      && diagnoseHandlerSource.includes("code: 'SMART-CURRENT-CYCLE-RECOVERY-STARTED'")
-      && diagnoseHandlerSource.includes("repairedItems.has('smart-current-cycle-started')")
-      && diagnoseHandlerSource.includes("action: t('diagnoseActionRecheckRecovery')")
-      && diagnoseHandlerSource.includes("code: 'SCHED-RUNTIME-ALARMS-LEAKED'")
-      && diagnoseHandlerSource.includes("code: 'POPUP-CONTROLS-DESYNC'")
-      && diagnoseHandlerSource.includes("code: 'POPUP-HORIZONTAL-OVERFLOW'")
-      && diagnoseHandlerSource.includes("code: 'POPUP-KEEPALIVE-DISCONNECTED'")
-      && diagnoseHandlerSource.includes('readPopupPageSnapshot()')
-      && diagnoseHandlerSource.includes('ACPopupDiagnosticFallback?.getCapturedErrors?.()')
+      && diagnosticOrchestrationSource.includes("code: 'CFG-AUTOMATION-OFF'")
+      && diagnosticOrchestrationSource.includes("code: 'SCHED-PWM-MISSING'")
+      && diagnosticOrchestrationSource.includes("code: 'PAGE-HOME-MISSING'")
+      && diagnosticOrchestrationSource.includes("code: 'SW-STATUS-FAILED'")
+      && diagnosticOrchestrationSource.includes("'SAFETY-TIMER-FAILED'")
+      && diagnosticOrchestrationSource.includes("code: 'SAFETY-TIMER-MISSING'")
+      && diagnosticOrchestrationSource.includes("code: 'SMART-CURRENT-CYCLE-RECOVERY-STARTED'")
+      && diagnosticOrchestrationSource.includes("repairedItems.has('smart-current-cycle-started')")
+      && diagnosticOrchestrationSource.includes("action: t('diagnoseActionRecheckRecovery')")
+      && diagnosticOrchestrationSource.includes("code: 'SCHED-RUNTIME-ALARMS-LEAKED'")
+      && diagnosticOrchestrationSource.includes("code: 'POPUP-CONTROLS-DESYNC'")
+      && diagnosticOrchestrationSource.includes("code: 'POPUP-HORIZONTAL-OVERFLOW'")
+      && diagnosticOrchestrationSource.includes("code: 'POPUP-KEEPALIVE-DISCONNECTED'")
+      && diagnosticOrchestrationSource.includes('readPopupPageSnapshot()')
+      && diagnosticOrchestrationSource.includes('ACPopupDiagnosticFallback?.getCapturedErrors?.()')
       && popupSource.includes('globalThis.__AC_POPUP_DIAGNOSTICS_READY__ = true;')
-      && diagnoseHandlerSource.includes('isDiagnosticPageTimerRequired(')
-      && diagnoseHandlerSource.includes("code: 'WEATHER-SLOT-MISMATCH'")
-      && diagnoseHandlerSource.includes('ensured?.success === false && ensured.error')
-      && diagnoseHandlerSource.includes('if (!bgProbeFailed)')
-      && diagnoseHandlerSource.includes('if (!automationEnabled)')
-      && diagnoseHandlerSource.includes('if (!automationEnabled && smartOnDiag)')
-      && diagnoseHandlerSource.includes('if (automationEnabled)')
-      && diagnoseHandlerSource.includes('if (!automationEnabled || automationPausedByActiveHours)')
-      && diagnoseHandlerSource.includes("level: automationEnabled ? 'warning' : 'info'")
-      && diagnoseHandlerSource.includes('report.getSummaryLines()'),
+      && diagnosticOrchestrationSource.includes('isDiagnosticPageTimerRequired(')
+      && diagnosticOrchestrationSource.includes("code: 'WEATHER-SLOT-MISMATCH'")
+      && diagnosticOrchestrationSource.includes('ensured?.success === false && ensured.error')
+      && diagnosticOrchestrationSource.includes('if (!bgProbeFailed)')
+      && diagnosticOrchestrationSource.includes('if (!automationEnabled)')
+      && diagnosticOrchestrationSource.includes('if (!automationEnabled && smartOnDiag)')
+      && diagnosticOrchestrationSource.includes('if (automationEnabled)')
+      && diagnosticOrchestrationSource.includes('if (!automationEnabled || automationPausedByActiveHours)')
+      && diagnosticOrchestrationSource.includes("level: automationEnabled ? 'warning' : 'info'")
+      && diagnosticOrchestrationSource.includes('report.getSummaryLines()'),
     '14Q-3: 关键故障域使用稳定 code/action，停用态跳过运行闹钟并由双语摘要定位首要问题');
 
   // ===== 用例 15: 持久化脱敏诊断日志 =====
@@ -15930,24 +15660,24 @@ ${commitDurableSource16}
       '|| isAutomationPausedByActiveHours(s);'
     ),
     '16M-0: popup 诊断在旧或降级后台缺少瞬态字段时，也从持久化运行时段重建暂停态');
-  assertPass(diagnoseHandlerSource.includes("sendDiagnosticRuntimeMessage({ type: 'ensureDiagnostics' })")
-      && !diagnoseHandlerSource.includes("chrome.alarms.create('ac-badge-tick'")
-      && !diagnoseHandlerSource.includes("chrome.alarms.create('ac-watchdog'"),
+  assertPass(captureDiagnosticInputsSource.includes("sendMessage({ type: 'ensureDiagnostics' })")
+      && !diagnosticOrchestrationSource.includes("chrome.alarms.create('ac-badge-tick'")
+      && !diagnosticOrchestrationSource.includes("chrome.alarms.create('ac-watchdog'"),
     '16M-1: popup 诊断只委派后台自愈，不绕过最终门禁直接创建运行闹钟');
-  const diagnosticSwProbeIndex16 = diagnoseHandlerSource.indexOf(
-    "sendDiagnosticRuntimeMessage({ type: 'getSwStatus' })"
+  const diagnosticSwProbeIndex16 = captureDiagnosticInputsSource.indexOf(
+    "sendMessage({ type: 'getSwStatus' })"
   );
-  const diagnosticEnsureIndex16 = diagnoseHandlerSource.indexOf(
-    "sendDiagnosticRuntimeMessage({ type: 'ensureDiagnostics' })"
+  const diagnosticEnsureIndex16 = captureDiagnosticInputsSource.indexOf(
+    "sendMessage({ type: 'ensureDiagnostics' })"
   );
   assertPass(diagnosticSwProbeIndex16 >= 0
       && diagnosticSwProbeIndex16 < diagnosticEnsureIndex16
-      && diagnoseHandlerSource.includes("type: 'inspectContentRuntime'")
-      && diagnoseHandlerSource.includes('runtimeBuildCompatible')
+      && captureDiagnosticInputsSource.includes("type: 'inspectContentRuntime'")
+      && diagnosticOrchestrationSource.includes('runtimeBuildCompatible')
       && diagnoseHandlerSource.includes('readDiagnosticEvidence(ensured)')
       && popupSource.includes('envelope?.evidence?.before')
       && popupSource.includes('envelope?.evidence?.after')
-      && !diagnoseHandlerSource.includes('chrome.storage.local.set('),
+      && !diagnosticOrchestrationSource.includes('chrome.storage.local.set('),
     '16M-1A: Popup 先只读核对四方构建与首现场，再委派修复；诊断自身不直接写 storage');
 
   const serializedScheduleUpdateSourceF90 = extractSourceSection(
@@ -16802,24 +16532,6 @@ ${commitDurableSource16}
   assertPass(staleShutdown16.result16.shutdownStale === true
       && staleShutdown16.timerCalls16.length === 0,
     '16N-1: 恢复 lifecycle 使关机 revision 失效后，不再发送页面定时器写入');
-
-  const pausedDiagnosticTime16 = Date.now() + 5 * 60_000;
-  const pausedDiagnosticSchedule16 = {
-    enabled: true,
-    mode: 'pwm',
-    clockMode: false,
-    nextTriggerAt: 0,
-    _automationPausedByActiveHours: true
-  };
-  const pausedDiagnosticMock16 = createMockChrome(
-    pausedDiagnosticSchedule16,
-    pausedDiagnosticTime16,
-    { _automationPausedByActiveHours: true }
-  );
-  const pausedDiagnosticResult16 = await runDiagnosticSelfHeal(pausedDiagnosticMock16.chrome);
-  assertPass(pausedDiagnosticResult16.selfHealed === false
-      && pausedDiagnosticResult16.storage_after.nextTriggerAt === 0,
-    '16O: popup 暂停态不会从泄漏的 live ac-pwm 回填 storage 时钟');
 
   const popupUpdateScheduleSourceF90 = extractSourceSection(
     popupJs,

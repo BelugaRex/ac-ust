@@ -1339,14 +1339,133 @@ function createDiagnosticReport(translate) {
   return { detailLines, findings, add, getSummaryLines, getCompletionLevel };
 }
 
-function projectPersistentSchedule(scheduleSnapshot) {
-  return Object.fromEntries(
-    Object.entries(scheduleSnapshot || {}).filter(([key]) => (
-      key !== 'actualStatus'
-      && key !== 'balanceMinutes'
-      && !key.startsWith('_')
-    ))
-  );
+async function capturePopupDiagnosticInputs(report, runtime = {}) {
+  const add = report.add;
+  const translate = report.translate;
+  const sendMessage = runtime.sendMessage || sendDiagnosticRuntimeMessage;
+  const matchServiceWorkerBuild = runtime.matchServiceWorkerBuild
+    || isMatchingServiceWorkerBuild;
+  const buildTimeEpochMs = runtime.buildTimeEpochMs ?? BUILD_TIME_EPOCH_MS;
+  const readStoredSchedule = runtime.readStoredSchedule
+    || (() => chrome.storage.local.get('ac_schedule'));
+  const warn = runtime.warn || ((...args) => console.warn(...args));
+
+  // 先冻结只读 runtime 身份。Popup/SW 已混版时绝不能先让旧 SW 执行
+  // ensureDiagnostics；否则“诊断”会改写本应保留的首现场。
+  let sw = null;
+  try {
+    sw = await sendMessage({ type: 'getSwStatus' });
+  } catch (error) {
+    warn('getSwStatus preflight 异常:', error?.message);
+  }
+  const preflightSwBuildMatch = sw?.success === true
+    ? matchServiceWorkerBuild(sw)
+    : false;
+  const runtimeBuildCompatible = Number(buildTimeEpochMs) > 0
+    ? preflightSwBuildMatch === true
+    : true;
+
+  let contentRuntimeBefore = null;
+  if (runtimeBuildCompatible) {
+    try {
+      contentRuntimeBefore = await sendMessage({ type: 'inspectContentRuntime' });
+    } catch (error) {
+      contentRuntimeBefore = { success: false, error: error?.message || String(error) };
+    }
+  }
+
+  let ensured = null;
+  if (runtimeBuildCompatible) {
+    try {
+      ensured = await sendMessage({ type: 'ensureDiagnostics' });
+      if (ensured?.success === false && ensured.error) {
+        add(false, translate('diagnoseEnsureFailed') + String(ensured.error).slice(0, 80), {
+          code: 'SCHED-REPAIR-FAILED',
+          domain: translate('diagnoseDomainScheduler'),
+          action: translate('diagnoseActionReloadExtension'),
+          priority: 10
+        });
+      }
+    } catch (error) {
+      add(false, translate('diagnoseEnsureFailed') + (error.message || '').slice(0, 80), {
+        code: 'SCHED-REPAIR-FAILED',
+        domain: translate('diagnoseDomainScheduler'),
+        action: translate('diagnoseActionReloadExtension'),
+        priority: 10
+      });
+    }
+  }
+
+  let bg = null;
+  let bgProbeFailed = false;
+  try {
+    bg = await sendMessage({ type: 'getSchedule' });
+    if (bg?.success === false) {
+      bgProbeFailed = true;
+      add(false, translate('diagnoseScheduleReadFailed') + String(bg.error || '?').slice(0, 80), {
+        code: 'SW-SNAPSHOT-FAILED',
+        domain: translate('diagnoseDomainBackground'),
+        action: translate('diagnoseActionReloadExtension'),
+        priority: 5
+      });
+    }
+  } catch (error) {
+    bgProbeFailed = true;
+    add(false, translate('diagnoseScheduleReadFailed') + (error.message || '').slice(0, 80), {
+      code: 'SW-SNAPSHOT-FAILED',
+      domain: translate('diagnoseDomainBackground'),
+      action: translate('diagnoseActionReloadExtension'),
+      priority: 5
+    });
+  }
+
+  let contentRuntimeAfter = contentRuntimeBefore;
+  if (runtimeBuildCompatible) {
+    try {
+      contentRuntimeAfter = await sendMessage({ type: 'inspectContentRuntime' });
+    } catch (error) {
+      contentRuntimeAfter = { success: false, error: error?.message || String(error) };
+    }
+  }
+
+  let stored = {};
+  let storageReadOk = false;
+  try {
+    stored = await readStoredSchedule();
+    storageReadOk = true;
+    add(true, translate('diagnoseStorageRW'));
+  } catch (error) {
+    add(false, translate('diagnoseStorageReadFailed') + (error.message || '').slice(0, 80), {
+      code: 'CFG-STORAGE-READ-FAILED',
+      domain: translate('diagnoseDomainConfig'),
+      action: translate('diagnoseActionReloadExtension'),
+      priority: 0
+    });
+  }
+  const storedScheduleExists = storageReadOk
+    && stored?.ac_schedule
+    && typeof stored.ac_schedule === 'object';
+  const storedSchedule = storedScheduleExists ? stored.ac_schedule : {};
+  if (storageReadOk && !storedScheduleExists) {
+    add(false, translate('diagnoseScheduleMissing'), {
+      level: 'warning',
+      code: 'CFG-SCHEDULE-MISSING',
+      domain: translate('diagnoseDomainConfig'),
+      action: translate('diagnoseActionReloadExtension'),
+      priority: 20
+    });
+  }
+
+  return {
+    sw,
+    runtimeBuildCompatible,
+    contentRuntimeBefore,
+    ensured,
+    bg,
+    bgProbeFailed,
+    contentRuntimeAfter,
+    storedSchedule
+  };
 }
 
 btnDiagnose.addEventListener('click', async () => {
@@ -1374,114 +1493,19 @@ btnDiagnose.addEventListener('click', async () => {
   lines.push(t('diagnoseBrowser') + browserName + ' ' + browserVer);
   
   try {
-    // 先冻结只读 runtime 身份。Popup/SW 已混版时绝不能先让旧 SW 执行
-    // ensureDiagnostics；否则“诊断”会改写本应保留的首现场。
-    let sw = null;
-    try {
-      sw = await sendDiagnosticRuntimeMessage({ type: 'getSwStatus' });
-    } catch (e) {
-      console.warn('getSwStatus preflight 异常:', e?.message);
-    }
-    const preflightSwBuildMatch = sw?.success === true
-      ? isMatchingServiceWorkerBuild(sw)
-      : false;
-    const runtimeBuildCompatible = Number(BUILD_TIME_EPOCH_MS) > 0
-      ? preflightSwBuildMatch === true
-      : true;
-    let contentRuntimeBefore = null;
-    if (runtimeBuildCompatible) {
-      try {
-        contentRuntimeBefore = await sendDiagnosticRuntimeMessage({
-          type: 'inspectContentRuntime'
-        });
-      } catch (e) {
-        contentRuntimeBefore = { success: false, error: e?.message || String(e) };
-      }
-    }
-
-    let ensured = null;
-    if (runtimeBuildCompatible) {
-      try {
-        ensured = await sendDiagnosticRuntimeMessage({ type: 'ensureDiagnostics' });
-        if (ensured?.success === false && ensured.error) {
-          add(false, t('diagnoseEnsureFailed') + String(ensured.error).slice(0, 80), {
-            code: 'SCHED-REPAIR-FAILED',
-            domain: t('diagnoseDomainScheduler'),
-            action: t('diagnoseActionReloadExtension'),
-            priority: 10
-          });
-        }
-      } catch (e) {
-        add(false, t('diagnoseEnsureFailed') + (e.message || '').slice(0, 80), {
-          code: 'SCHED-REPAIR-FAILED',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 10
-        });
-      }
-    }
-
-    let bg = null;
-    let bgProbeFailed = false;
-    try {
-      bg = await sendDiagnosticRuntimeMessage({ type: 'getSchedule' });
-      if (bg?.success === false) {
-        bgProbeFailed = true;
-        add(false, t('diagnoseScheduleReadFailed') + String(bg.error || '?').slice(0, 80), {
-          code: 'SW-SNAPSHOT-FAILED',
-          domain: t('diagnoseDomainBackground'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 5
-        });
-      }
-    } catch (e) {
-      bgProbeFailed = true;
-      add(false, t('diagnoseScheduleReadFailed') + (e.message || '').slice(0, 80), {
-        code: 'SW-SNAPSHOT-FAILED',
-        domain: t('diagnoseDomainBackground'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 5
-      });
-    }
-    let contentRuntimeAfter = contentRuntimeBefore;
-    if (runtimeBuildCompatible) {
-      try {
-        contentRuntimeAfter = await sendDiagnosticRuntimeMessage({
-          type: 'inspectContentRuntime'
-        });
-      } catch (e) {
-        contentRuntimeAfter = { success: false, error: e?.message || String(e) };
-      }
-    }
+    const captured = await capturePopupDiagnosticInputs({ add, translate: t });
+    const {
+      sw,
+      runtimeBuildCompatible,
+      contentRuntimeBefore,
+      ensured,
+      bg,
+      bgProbeFailed,
+      contentRuntimeAfter,
+      storedSchedule
+    } = captured;
 
     // 1. 检查 storage / 后台权威快照
-    let stored = {};
-    let storageReadOk = false;
-    try {
-      stored = await chrome.storage.local.get('ac_schedule');
-      storageReadOk = true;
-      add(true, t('diagnoseStorageRW'));
-    } catch (e) {
-      add(false, t('diagnoseStorageReadFailed') + (e.message || '').slice(0, 80), {
-        code: 'CFG-STORAGE-READ-FAILED',
-        domain: t('diagnoseDomainConfig'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 0
-      });
-    }
-    const storedScheduleExists = storageReadOk
-      && stored?.ac_schedule
-      && typeof stored.ac_schedule === 'object';
-    const storedSchedule = storedScheduleExists ? stored.ac_schedule : {};
-    if (storageReadOk && !storedScheduleExists) {
-      add(false, t('diagnoseScheduleMissing'), {
-        level: 'warning',
-        code: 'CFG-SCHEDULE-MISSING',
-        domain: t('diagnoseDomainConfig'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 20
-      });
-    }
     const bgSchedule = bg?.success === false && bg?.schedule
       ? bg.schedule
       : (bg || {});
@@ -1541,7 +1565,6 @@ btnDiagnose.addEventListener('click', async () => {
     // 修复只允许后台执行。Popup 消费 before/repair/after，不再直接写 storage，
     // 因而复制报告能同时保留事故首现场与修复后的收敛状态。
     const nowMs = Date.now();
-    let pwmAlarmEarly = await chrome.alarms.get('ac-pwm');
     const selfHealed = repairedItems.has('pwm-trigger');
     if (diagnosticEvidence.status === 'incomplete') {
       const evidenceReadErrors = [
