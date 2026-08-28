@@ -175,13 +175,7 @@ let deferredRepairAfterPwmOptions = null;
 let scheduleRepairEpoch = 0;
 let scheduleLoadBlockedRevision = null;
 let lastPwmStepAt = 0;  // A4: 看门狗 cooldown 追踪
-let acToggleInFlight = null;
-let acToggleInFlightAction = null;
-let acToggleInFlightNotAfterAt = 0;
-let acToggleInFlightRequiresAutomation = false;
-let acToggleInFlightAutomationRevision = null;
-let acToggleInFlightPageTimerMinutes = 0;
-let acToggleInFlightPageTimerTargetAt = 0;
+let activeAcToggleAttempt = null;
 let timerBasedShutdownRevision = 0;
 
 function claimTimerBasedShutdown() {
@@ -873,8 +867,8 @@ async function runComfortStart(reason = 'user-enable') {
   schedule.pageTimerRetryAt = 0;
   schedule.pageTimerRetryMinutes = 0;
   await cancelAutomaticOnRequests();
-  if (acToggleInFlight) {
-    await acToggleInFlight.catch(() => {});
+  if (activeAcToggleAttempt?.promise) {
+    await activeAcToggleAttempt.promise.catch(() => {});
   }
   await clearPwmAlarm(automationRevision);
   await chrome.alarms.clear('ac-page-timer-retry');
@@ -6900,7 +6894,7 @@ async function turnOnWithPreparedPageTimer(
 }
 
 // ----- 切换 AC 状态 -----
-async function toggleAC(
+function normalizeAcToggleRequest(
   action,
   {
     notAfterAt = 0,
@@ -6934,52 +6928,79 @@ async function toggleAC(
         || requestedPageTimerTargetAt <= Date.now())) {
     return { success: false, error: '开机前页面定时器绝对目标无效' };
   }
-  const requestedAutomationIsCurrent = requestedAutomationRevision === null
+  return {
+    request: {
+      action,
+      notAfterAt: requestedNotAfterAt,
+      requireAutomationAllowed: requestedRequiresAutomation,
+      automationRevision: requestedAutomationRevision,
+      pageTimerMinutes: requestedPageTimerMinutes,
+      pageTimerTargetAt: requestedPageTimerTargetAt
+    }
+  };
+}
+
+function sameAcToggleRequest(left, right) {
+  return left?.action === right?.action
+    && left?.notAfterAt === right?.notAfterAt
+    && left?.requireAutomationAllowed === right?.requireAutomationAllowed
+    && left?.automationRevision === right?.automationRevision
+    && left?.pageTimerMinutes === right?.pageTimerMinutes
+    && left?.pageTimerTargetAt === right?.pageTimerTargetAt;
+}
+
+async function toggleAC(
+  action,
+  {
+    notAfterAt = 0,
+    requireAutomationAllowed = false,
+    automationRevision = null,
+    pageTimerMinutes = 0,
+    pageTimerTargetAt = 0
+  } = {}
+) {
+  const normalized = normalizeAcToggleRequest(action, {
+    notAfterAt,
+    requireAutomationAllowed,
+    automationRevision,
+    pageTimerMinutes,
+    pageTimerTargetAt
+  });
+  if (!normalized.request) return normalized;
+  const request = normalized.request;
+  const requestedAutomationIsCurrent = request.automationRevision === null
     ? isAutomationAllowed()
-    : isAutomationOperationCurrent(requestedAutomationRevision);
-  if (requestedRequiresAutomation && !requestedAutomationIsCurrent) {
+    : isAutomationOperationCurrent(request.automationRevision);
+  if (request.requireAutomationAllowed && !requestedAutomationIsCurrent) {
     return { success: false, automationPausedByActiveHours: true, error: '运行时段外已暂停自动开启' };
   }
-  if (acToggleInFlight) {
-    if (acToggleInFlightAction === action
-      && acToggleInFlightNotAfterAt === requestedNotAfterAt
-      && acToggleInFlightRequiresAutomation === requestedRequiresAutomation
-      && acToggleInFlightAutomationRevision === requestedAutomationRevision
-      && acToggleInFlightPageTimerMinutes === requestedPageTimerMinutes
-      && acToggleInFlightPageTimerTargetAt === requestedPageTimerTargetAt) {
+  if (activeAcToggleAttempt) {
+    if (sameAcToggleRequest(activeAcToggleAttempt.request, request)) {
       console.log(`[AC扩展] 合并重复的 toggleAC(${action}) 请求`);
-      return acToggleInFlight;
+      return activeAcToggleAttempt.promise;
     }
     return {
       success: false,
       busy: true,
-      error: `toggleAC(${acToggleInFlightAction}) 仍在执行，本次 ${action} 不重复点击`
+      error: `toggleAC(${activeAcToggleAttempt.request.action}) 仍在执行，本次 ${action} 不重复点击`
     };
   }
 
-  acToggleInFlightAction = action;
-  acToggleInFlightNotAfterAt = requestedNotAfterAt;
-  acToggleInFlightRequiresAutomation = requestedRequiresAutomation;
-  acToggleInFlightAutomationRevision = requestedAutomationRevision;
-  acToggleInFlightPageTimerMinutes = requestedPageTimerMinutes;
-  acToggleInFlightPageTimerTargetAt = requestedPageTimerTargetAt;
-  acToggleInFlight = toggleACOnce(action, {
-    notAfterAt: requestedNotAfterAt,
-    requireAutomationAllowed: requestedRequiresAutomation,
-    automationRevision: requestedAutomationRevision,
-    pageTimerMinutes: requestedPageTimerMinutes,
-    pageTimerTargetAt: requestedPageTimerTargetAt
-  });
+  const attempt = {
+    request,
+    promise: toggleACOnce(action, {
+      notAfterAt: request.notAfterAt,
+      requireAutomationAllowed: request.requireAutomationAllowed,
+      automationRevision: request.automationRevision,
+      pageTimerMinutes: request.pageTimerMinutes,
+      pageTimerTargetAt: request.pageTimerTargetAt
+    })
+  };
+  activeAcToggleAttempt = attempt;
   try {
-    return await acToggleInFlight;
+    return await attempt.promise;
   } finally {
-    acToggleInFlight = null;
-    acToggleInFlightAction = null;
-    acToggleInFlightNotAfterAt = 0;
-    acToggleInFlightRequiresAutomation = false;
-    acToggleInFlightAutomationRevision = null;
-    acToggleInFlightPageTimerMinutes = 0;
-    acToggleInFlightPageTimerTargetAt = 0;
+    if (activeAcToggleAttempt === attempt) activeAcToggleAttempt = null;
   }
 }
 

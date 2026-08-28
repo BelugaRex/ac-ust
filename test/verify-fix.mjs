@@ -2159,7 +2159,7 @@ async function runTests() {
       && timeoutBridge.listeners.size === 0,
     '9Bridge-3: 两条主世界通道保留各自的超时返回值并清理监听器');
 
-  const ensureStart = pageConfirmSource.indexOf('async function ensureACState(targetState, clickCount = 0)');
+  const ensureStart = pageConfirmSource.indexOf('async function ensureACState(attempt, clickCount = 0)');
   const ensureEnd = pageConfirmSource.indexOf(
     '\n  function findACToggleExecutionSuccessMessagesInPageWorld',
     ensureStart
@@ -2218,9 +2218,9 @@ async function runTests() {
     : '';
 
   assertPass(ensureStart >= 0,
-    '9A: 主世界存在 ensureACState(targetState, clickCount) 递归收敛函数');
-  assertPass(ensureBody.includes('return ensureACState(targetState, clickCount + 1);'),
-    '9B: 每轮等待后只递归调用 ensureACState 自身');
+    '9A: 主世界存在 ensureACState(attempt, clickCount) 递归收敛函数');
+  assertPass(ensureBody.includes('return ensureACState(attempt, clickCount + 1);'),
+    '9B: 每轮等待后携带同一不可变 attempt 递归调用 ensureACState 自身');
   assertPass(ensureBody.includes('await waitForTargetACStateInPageWorld(')
       && !ensureBody.includes('await sleepInPageWorld(AC_STATE_SETTLE_MS);')
       && pageConfirmSource.includes('const AC_STATE_SETTLE_MS = 10000;')
@@ -2258,9 +2258,266 @@ async function runTests() {
       && !pageConfirmSource.includes('new MouseEvent')
       && !pageConfirmSource.includes('new KeyboardEvent'),
     '9F: AC 主世界不再叠发 pointer/mouse/keyboard 激活事件');
-  assertPass(pageConfirmSource.includes('acStateRequestInFlight')
+  assertPass(pageConfirmSource.includes('activeAcStateRequest')
       && pageConfirmSource.includes('合并重复的'),
     '9G: 主世界同目标并发请求复用 single-flight Promise');
+
+  const toggleCoordinatorSource9G = extractSourceSection(
+    backgroundSource,
+    '// ----- 切换 AC 状态 -----',
+    '\nasync function toggleACOnce(action, options = {})',
+    'background toggle coordinator'
+  );
+  const createToggleCoordinator9G = implementations => {
+    const calls = [];
+    const queue = [...implementations];
+    const { toggleAC } = new Function(
+      'sanitizeMinutes', 'isAutomationAllowed', 'isAutomationOperationCurrent',
+      'toggleACOnce', 'console',
+      `let acToggleInFlight = null;
+       let acToggleInFlightAction = null;
+       let acToggleInFlightNotAfterAt = 0;
+       let acToggleInFlightRequiresAutomation = false;
+       let acToggleInFlightAutomationRevision = null;
+       let acToggleInFlightPageTimerMinutes = 0;
+       let acToggleInFlightPageTimerTargetAt = 0;
+       let activeAcToggleAttempt = null;
+       ${toggleCoordinatorSource9G}
+       return { toggleAC };`
+    )(
+      (value, fallback) => {
+        const parsed = Number.parseInt(value, 10);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+      },
+      () => true,
+      () => true,
+      (...args) => {
+        calls.push(args);
+        const implementation = queue.shift();
+        if (!implementation) throw new Error('unexpected toggleACOnce call');
+        return implementation(...args);
+      },
+      testConsole
+    );
+    return { toggleAC, calls };
+  };
+  const makeDeferred9G = () => {
+    let resolve;
+    let reject;
+    const promise = new Promise((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    return { promise, resolve, reject };
+  };
+  const toggleDeadline9G = Date.now() + 120000;
+  const toggleOptions9G = {
+    notAfterAt: toggleDeadline9G,
+    requireAutomationAllowed: true,
+    automationRevision: 7,
+    pageTimerMinutes: 23,
+    pageTimerTargetAt: toggleDeadline9G + 60000
+  };
+  const sameToggleDeferred9G = makeDeferred9G();
+  const sameToggleHarness9G = createToggleCoordinator9G([
+    () => sameToggleDeferred9G.promise,
+    async () => ({ success: true, generation: 2 })
+  ]);
+  const sameToggleFirst9G = sameToggleHarness9G.toggleAC('on', toggleOptions9G);
+  const sameToggleSecond9G = sameToggleHarness9G.toggleAC('on', toggleOptions9G);
+  await Promise.resolve();
+  assertPass(sameToggleHarness9G.calls.length === 1,
+    '9G-0A: 后台完全相同的 toggle 请求共享一次执行，single-flight 不重复点击');
+  sameToggleDeferred9G.resolve({ success: true, generation: 1 });
+  const [sameToggleResultA9G, sameToggleResultB9G] = await Promise.all([
+    sameToggleFirst9G,
+    sameToggleSecond9G
+  ]);
+  const afterResolvedToggle9G = await sameToggleHarness9G.toggleAC('on', toggleOptions9G);
+  assertPass(sameToggleResultA9G.generation === 1
+      && sameToggleResultB9G.generation === 1
+      && afterResolvedToggle9G.generation === 2
+      && sameToggleHarness9G.calls.length === 2,
+    '9G-0B: 后台 toggle 成功结算后释放 single-flight，后续同请求可重新执行');
+
+  const busyToggleDeferred9G = makeDeferred9G();
+  const busyToggleHarness9G = createToggleCoordinator9G([
+    () => busyToggleDeferred9G.promise
+  ]);
+  const busyToggleFirst9G = busyToggleHarness9G.toggleAC('on', toggleOptions9G);
+  const busyToggleResults9G = await Promise.all([
+    busyToggleHarness9G.toggleAC('off'),
+    busyToggleHarness9G.toggleAC('on', { ...toggleOptions9G, notAfterAt: toggleDeadline9G + 1 }),
+    busyToggleHarness9G.toggleAC('on', { ...toggleOptions9G, requireAutomationAllowed: false }),
+    busyToggleHarness9G.toggleAC('on', { ...toggleOptions9G, automationRevision: 8 }),
+    busyToggleHarness9G.toggleAC('on', { ...toggleOptions9G, pageTimerMinutes: 24 }),
+    busyToggleHarness9G.toggleAC('on', { ...toggleOptions9G, pageTimerTargetAt: toggleDeadline9G + 60001 })
+  ]);
+  assertPass(busyToggleHarness9G.calls.length === 1
+      && busyToggleResults9G.every(result => result?.success === false && result.busy === true),
+    '9G-0C: action、截止、自动控制版本与页面 timer 任一不同都返回 busy，不合并为同一物理动作');
+  busyToggleDeferred9G.resolve({ success: true });
+  await busyToggleFirst9G;
+
+  const rejectedToggleHarness9G = createToggleCoordinator9G([
+    async () => { throw new Error('synthetic toggle rejection'); },
+    async () => ({ success: true, recovered: true })
+  ]);
+  let rejectedToggleError9G = '';
+  try {
+    await rejectedToggleHarness9G.toggleAC('on', toggleOptions9G);
+  } catch (error) {
+    rejectedToggleError9G = error?.message || String(error);
+  }
+  const afterRejectedToggle9G = await rejectedToggleHarness9G.toggleAC('on', toggleOptions9G);
+  assertPass(rejectedToggleError9G === 'synthetic toggle rejection'
+      && afterRejectedToggle9G.recovered === true
+      && rejectedToggleHarness9G.calls.length === 2,
+    '9G-0D: 后台 toggle executor 抛错后也释放 single-flight，不遗留永久 busy');
+
+  const invalidToggleHarness9G = createToggleCoordinator9G([
+    async () => ({ success: true })
+  ]);
+  const invalidToggleResults9G = await Promise.all([
+    invalidToggleHarness9G.toggleAC('on', { ...toggleOptions9G, notAfterAt: Number.NaN }),
+    invalidToggleHarness9G.toggleAC('on', { ...toggleOptions9G, pageTimerMinutes: -1 }),
+    invalidToggleHarness9G.toggleAC('on', { ...toggleOptions9G, pageTimerTargetAt: Date.now() - 1 })
+  ]);
+  const afterInvalidToggle9G = await invalidToggleHarness9G.toggleAC('on', toggleOptions9G);
+  assertPass(invalidToggleResults9G.every(result => result?.success === false && !result.busy)
+      && afterInvalidToggle9G.success === true
+      && invalidToggleHarness9G.calls.length === 1,
+    '9G-0E: 无效 toggle 参数在认领 single-flight 前失败，不会阻塞下一次合法动作');
+
+  const pageRequestCoordinatorSource9G = extractSourceSection(
+    pageConfirmSource,
+    'async function requestACState(targetState, notAfterAt = 0)',
+    '\n\n  // 递归状态收敛',
+    'page request coordinator'
+  );
+  const createPageRequestCoordinator9G = implementations => {
+    const calls = [];
+    const queue = [...implementations];
+    const lease = {
+      inFlight: null,
+      target: null,
+      notAfterAt: 0,
+      ownerGeneration: 5
+    };
+    const ensureACState = (...args) => {
+      calls.push({
+        args,
+        attempt: args[0]
+      });
+      const implementation = queue.shift();
+      if (!implementation) throw new Error('unexpected ensureACState call');
+      return implementation(...args);
+    };
+    const { requestACState } = new Function(
+      'ensureACState', 'mainBridgeLease', 'automaticOnCancellationRevision',
+      'mainBridgeOwnerGeneration', 'PAGE_MAIN_LISTENER_ID', 'console',
+      `let acStateRequestInFlight = null;
+       let acStateRequestTarget = null;
+       let acStateRequestNotAfterAt = 0;
+       let activeAcStateRequest = null;
+       ${pageRequestCoordinatorSource9G}
+       return { requestACState };`
+    )(
+      ensureACState,
+      lease,
+      11,
+      5,
+      'main-listener-test',
+      testConsole
+    );
+    return { requestACState, calls, lease };
+  };
+  const pageRequestDeadline9G = Date.now() + 120000;
+  const samePageRequestDeferred9G = makeDeferred9G();
+  const samePageRequestHarness9G = createPageRequestCoordinator9G([
+    () => samePageRequestDeferred9G.promise,
+    async () => ({ success: true, generation: 2 })
+  ]);
+  const samePageRequestFirst9G = samePageRequestHarness9G.requestACState(true, pageRequestDeadline9G);
+  const samePageRequestSecond9G = samePageRequestHarness9G.requestACState(true, pageRequestDeadline9G);
+  await Promise.resolve();
+  const firstPageAttempt9G = samePageRequestHarness9G.calls[0]?.attempt;
+  assertPass(samePageRequestHarness9G.calls.length === 1
+      && Object.isFrozen(firstPageAttempt9G)
+      && firstPageAttempt9G.targetState === true
+      && firstPageAttempt9G.notAfterAt === pageRequestDeadline9G
+      && firstPageAttempt9G.cancellationRevision === 11
+      && firstPageAttempt9G.ownerGeneration === 5
+      && typeof firstPageAttempt9G.requestId === 'string'
+      && firstPageAttempt9G.requestId.startsWith('main-listener-test-'),
+    '9G-0F: 主世界完全相同的 target/deadline 请求共享一个冻结 attempt 与一次 ensure 执行');
+  samePageRequestDeferred9G.resolve({ success: true, generation: 1 });
+  const [samePageRequestResultA9G, samePageRequestResultB9G] = await Promise.all([
+    samePageRequestFirst9G,
+    samePageRequestSecond9G
+  ]);
+  const afterResolvedPageRequest9G = await samePageRequestHarness9G.requestACState(
+    true,
+    pageRequestDeadline9G
+  );
+  assertPass(samePageRequestResultA9G.generation === 1
+      && samePageRequestResultB9G.generation === 1
+      && afterResolvedPageRequest9G.generation === 2
+      && samePageRequestHarness9G.calls.length === 2,
+    '9G-0G: 主世界 request 成功结算后清理本地与共享 lease，后续请求可重新执行');
+
+  const busyPageRequestDeferred9G = makeDeferred9G();
+  const busyPageRequestHarness9G = createPageRequestCoordinator9G([
+    () => busyPageRequestDeferred9G.promise
+  ]);
+  const busyPageRequestFirst9G = busyPageRequestHarness9G.requestACState(true, pageRequestDeadline9G);
+  const busyPageRequestResults9G = await Promise.all([
+    busyPageRequestHarness9G.requestACState(false, pageRequestDeadline9G),
+    busyPageRequestHarness9G.requestACState(true, pageRequestDeadline9G + 1)
+  ]);
+  assertPass(busyPageRequestHarness9G.calls.length === 1
+      && busyPageRequestResults9G.every(result => result?.success === false && result.busy === true),
+    '9G-0H: 主世界 target 或 deadline 任一不同都返回 busy，不合并为同一点击事务');
+  busyPageRequestDeferred9G.resolve({ success: true });
+  await busyPageRequestFirst9G;
+
+  const rejectedPageRequestHarness9G = createPageRequestCoordinator9G([
+    async () => { throw new Error('synthetic page request rejection'); },
+    async () => ({ success: true, recovered: true })
+  ]);
+  let rejectedPageRequestError9G = '';
+  try {
+    await rejectedPageRequestHarness9G.requestACState(true, pageRequestDeadline9G);
+  } catch (error) {
+    rejectedPageRequestError9G = error?.message || String(error);
+  }
+  const afterRejectedPageRequest9G = await rejectedPageRequestHarness9G.requestACState(
+    true,
+    pageRequestDeadline9G
+  );
+  assertPass(rejectedPageRequestError9G === 'synthetic page request rejection'
+      && afterRejectedPageRequest9G.recovered === true
+      && rejectedPageRequestHarness9G.calls.length === 2
+      && rejectedPageRequestHarness9G.lease.inFlight === null,
+    '9G-0I: 主世界 ensure 抛错后也清理 request/lease，不遗留永久 busy');
+
+  const invalidPageRequestHarness9G = createPageRequestCoordinator9G([
+    async () => ({ success: true })
+  ]);
+  const invalidPageRequestResult9G = await invalidPageRequestHarness9G.requestACState(
+    true,
+    Number.NaN
+  );
+  const afterInvalidPageRequest9G = await invalidPageRequestHarness9G.requestACState(
+    true,
+    pageRequestDeadline9G
+  );
+  assertPass(invalidPageRequestResult9G.success === false
+      && !invalidPageRequestResult9G.busy
+      && afterInvalidPageRequest9G.success === true
+      && invalidPageRequestHarness9G.calls.length === 1,
+    '9G-0J: 主世界无效 deadline 在认领 request/lease 前失败，不阻塞下一次合法动作');
+
   const scopedClickStart = pageConfirmSource.indexOf('function clickElementOnceInPageWorld(element)');
   const scopedClickEnd = pageConfirmSource.indexOf('\n  async function clickConfirmDialogInPageWorld(', scopedClickStart);
   const scopedClickSource = scopedClickStart >= 0 && scopedClickEnd > scopedClickStart
@@ -2396,7 +2653,7 @@ async function runTests() {
       && isACSwitchDisabledInPageWorld(disabledAttrMock) === true,
     '9G-4: isACSwitchDisabledInPageWorld 实测：disabled 属性 / ant-switch-disabled 类 / aria-disabled 均判禁用');
   // 9G-5: 行为级证明——禁用开关时 ensureACState 直接返回失败，绝不调用点击。
-  const ensureFnStart = pageConfirmSource.indexOf('async function ensureACState(targetState, clickCount = 0)');
+  const ensureFnStart = pageConfirmSource.indexOf('async function ensureACState(attempt, clickCount = 0)');
   const ensureFnEnd = pageConfirmSource.indexOf(
     '\n  async function waitForTargetACStateInPageWorld',
     ensureFnStart
@@ -2419,6 +2676,19 @@ async function runTests() {
     uncertainClickUntil: 0,
     blockedUntil: 0
   });
+  const createEnsureAttempt9G = ({
+    targetState = true,
+    notAfterAt = 0,
+    cancellationRevision = 0,
+    ownerGeneration = 1,
+    requestId = 'ensure-test'
+  } = {}) => Object.freeze({
+    targetState,
+    notAfterAt,
+    cancellationRevision,
+    ownerGeneration,
+    requestId
+  });
   const ensureLease9G = createEnsureLease9G();
   const { ensureACState } = loadEnsure(
     () => ({ isOn: false, disabled: true, source: 'main-world-ant-switch' }),
@@ -2437,10 +2707,13 @@ async function runTests() {
     60000,
     testConsole
   );
-  ensureACState.cancellationRevision = 0;
-  ensureACState.ownerGeneration = 1;
-  ensureACState.requestId = 'disabled-test';
-  const disabledEnsureResult = await ensureACState(true);
+  const disabledEnsureResult = await ensureACState(Object.freeze({
+    targetState: true,
+    notAfterAt: 0,
+    cancellationRevision: 0,
+    ownerGeneration: 1,
+    requestId: 'disabled-test'
+  }));
   let expiredWindowClickCalls = 0;
   const { ensureACState: ensureExpiredWindow } = loadEnsure(
     () => ({ isOn: false, disabled: false, source: 'main-world-ant-switch' }),
@@ -2459,11 +2732,13 @@ async function runTests() {
     60000,
     testConsole
   );
-  ensureExpiredWindow.notAfterAt = Date.now() - 1;
-  ensureExpiredWindow.cancellationRevision = 0;
-  ensureExpiredWindow.ownerGeneration = 1;
-  ensureExpiredWindow.requestId = 'expired-test';
-  const expiredWindowResult = await ensureExpiredWindow(true);
+  const expiredWindowResult = await ensureExpiredWindow(Object.freeze({
+    targetState: true,
+    notAfterAt: Date.now() - 1,
+    cancellationRevision: 0,
+    ownerGeneration: 1,
+    requestId: 'expired-test'
+  }));
   const confirmFnStart = pageConfirmSource.indexOf('async function clickConfirmDialogInPageWorld(');
   const confirmFnEnd = pageConfirmSource.indexOf('\n  async function waitForACSwitchInPageWorld', confirmFnStart);
   const confirmFnSource = confirmFnStart >= 0 && confirmFnEnd > confirmFnStart
@@ -2641,10 +2916,9 @@ async function runTests() {
     60000,
     testConsole
   );
-  ensureCancelled.cancellationRevision = 0;
-  ensureCancelled.ownerGeneration = 1;
-  ensureCancelled.requestId = 'cancelled-test';
-  const cancelledEnsureResult = await ensureCancelled(true);
+  const cancelledEnsureResult = await ensureCancelled(createEnsureAttempt9G({
+    requestId: 'cancelled-test'
+  }));
   assertPass(cancelledEnsureResult.success === false
       && cancelledEnsureResult.error.includes('请求已被后台取消')
       && cancelledEnsureClickCalls === 0,
@@ -2681,10 +2955,9 @@ async function runTests() {
     60000,
     testConsole
   );
-  ensureEnabled.cancellationRevision = 0;
-  ensureEnabled.ownerGeneration = 1;
-  ensureEnabled.requestId = 'enabled-test';
-  const enabledEnsureResult = await ensureEnabled(true);
+  const enabledEnsureResult = await ensureEnabled(createEnsureAttempt9G({
+    requestId: 'enabled-test'
+  }));
   assertPass(enabledEnsureResult.success === false
       && enabledEnsureResult.clicks === 3
       && enabledEnsureClickCalls === 3,
@@ -2778,10 +3051,9 @@ async function runTests() {
     60000,
     testConsole
   );
-  ensureClickedSuccess9G.cancellationRevision = 0;
-  ensureClickedSuccess9G.ownerGeneration = 1;
-  ensureClickedSuccess9G.requestId = 'clicked-success-test';
-  const clickedSuccessResult9G = await ensureClickedSuccess9G(true);
+  const clickedSuccessResult9G = await ensureClickedSuccess9G(createEnsureAttempt9G({
+    requestId: 'clicked-success-test'
+  }));
   let missingSuccessStatusCalls9G = 0;
   const { ensureACState: ensureMissingSuccess9G } = loadEnsure(
     () => ({
@@ -2804,10 +3076,9 @@ async function runTests() {
     60000,
     testConsole
   );
-  ensureMissingSuccess9G.cancellationRevision = 0;
-  ensureMissingSuccess9G.ownerGeneration = 1;
-  ensureMissingSuccess9G.requestId = 'missing-success-test';
-  const missingSuccessResult9G = await ensureMissingSuccess9G(true);
+  const missingSuccessResult9G = await ensureMissingSuccess9G(createEnsureAttempt9G({
+    requestId: 'missing-success-test'
+  }));
   let alreadyOnSuccessQueries9G = 0;
   const { ensureACState: ensureAlreadyOn9G } = loadEnsure(
     () => ({ isOn: true, disabled: false, source: 'main-world-ant-switch' }),
@@ -2826,10 +3097,9 @@ async function runTests() {
     60000,
     testConsole
   );
-  ensureAlreadyOn9G.cancellationRevision = 0;
-  ensureAlreadyOn9G.ownerGeneration = 1;
-  ensureAlreadyOn9G.requestId = 'already-on-test';
-  const alreadyOnResult9G = await ensureAlreadyOn9G(true);
+  const alreadyOnResult9G = await ensureAlreadyOn9G(createEnsureAttempt9G({
+    requestId: 'already-on-test'
+  }));
   assertPass(successHelperBehavior9G?.staleResult9G?.success === false
       && successHelperBehavior9G?.freshResult9G?.success === true
       && successHelperBehavior9G?.rejectedCount === 0

@@ -121,9 +121,7 @@
       Date.now() + HOT_TAKEOVER_CLICK_QUIET_MS
     );
   }
-  let acStateRequestInFlight = null;
-  let acStateRequestTarget = null;
-  let acStateRequestNotAfterAt = 0;
+  let activeAcStateRequest = null;
   let automaticOnCancellationRevision = Number(mainBridgeLease.cancelRevision) || 0;
 
   const handleAutomaticOnCancel = () => {
@@ -222,7 +220,7 @@
     channel: MAIN_BRIDGE_CHANNEL,
     cancelAndDrain() {
       handleAutomaticOnCancel();
-      const pending = acStateRequestInFlight || mainBridgeLease.inFlight;
+      const pending = activeAcStateRequest?.promise || mainBridgeLease.inFlight;
       return pending
         ? Promise.resolve(pending).catch(() => null)
         : Promise.resolve(null);
@@ -282,21 +280,20 @@
         via: 'main-world-ensureACState'
       };
     }
-    if (acStateRequestInFlight) {
-      if (acStateRequestTarget === targetState
-          && acStateRequestNotAfterAt === requestedNotAfterAt) {
+    if (activeAcStateRequest) {
+      if (activeAcStateRequest.attempt.targetState === targetState
+          && activeAcStateRequest.attempt.notAfterAt === requestedNotAfterAt) {
         console.log(`[AC扩展] ensureACState: 合并重复的 ${targetState ? 'ON' : 'OFF'} 请求`);
-        return acStateRequestInFlight;
+        return activeAcStateRequest.promise;
       }
       return {
         success: false,
         busy: true,
-        error: `另一个 ${acStateRequestTarget ? 'ON' : 'OFF'} 操作仍在进行，本次请求不重复点击`,
+        error: `另一个 ${activeAcStateRequest.attempt.targetState ? 'ON' : 'OFF'} 操作仍在进行，本次请求不重复点击`,
         via: 'main-world-ensureACState'
       };
     }
-    if (mainBridgeLease.inFlight
-        && mainBridgeLease.inFlight !== acStateRequestInFlight) {
+    if (mainBridgeLease.inFlight) {
       return {
         success: false,
         busy: true,
@@ -305,31 +302,27 @@
       };
     }
 
-    acStateRequestTarget = targetState;
-    acStateRequestNotAfterAt = requestedNotAfterAt;
-    ensureACState.notAfterAt = requestedNotAfterAt;
-    ensureACState.cancellationRevision = automaticOnCancellationRevision;
-    ensureACState.ownerGeneration = mainBridgeOwnerGeneration;
-    ensureACState.requestId = `${PAGE_MAIN_LISTENER_ID}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    acStateRequestInFlight = ensureACState(targetState);
-    mainBridgeLease.inFlight = acStateRequestInFlight;
+    const attempt = Object.freeze({
+      targetState,
+      notAfterAt: requestedNotAfterAt,
+      cancellationRevision: automaticOnCancellationRevision,
+      ownerGeneration: mainBridgeOwnerGeneration,
+      requestId: `${PAGE_MAIN_LISTENER_ID}-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    });
+    const promise = ensureACState(attempt);
+    activeAcStateRequest = { attempt, promise };
+    mainBridgeLease.inFlight = promise;
     mainBridgeLease.target = targetState;
     mainBridgeLease.notAfterAt = requestedNotAfterAt;
     try {
-      return await acStateRequestInFlight;
+      return await promise;
     } finally {
-      if (mainBridgeLease.inFlight === acStateRequestInFlight) {
+      if (mainBridgeLease.inFlight === promise) {
         mainBridgeLease.inFlight = null;
         mainBridgeLease.target = null;
         mainBridgeLease.notAfterAt = 0;
       }
-      acStateRequestInFlight = null;
-      acStateRequestTarget = null;
-      acStateRequestNotAfterAt = 0;
-      ensureACState.notAfterAt = 0;
-      ensureACState.cancellationRevision = automaticOnCancellationRevision;
-      ensureACState.ownerGeneration = mainBridgeOwnerGeneration;
-      ensureACState.requestId = '';
+      activeAcStateRequest = null;
     }
   }
 
@@ -337,7 +330,8 @@
   // 若状态仍未收敛则等 10 秒后递归复查」。
   // 所有物理开关尝试都集中在这里，content/background 不再叠加点击重试；
   // 当前生产调度仅传入 true（ON），OFF 完全由页面定时器执行。
-  async function ensureACState(targetState, clickCount = 0) {
+  async function ensureACState(attempt, clickCount = 0) {
+    const { targetState } = attempt;
     // 提取（Fowler Extract Function）：统一结果形状——避免三处成功/四处失败对象重复构造。
     function successResult(status, clickCount) {
       if (targetState && status?.isOn === true) {
@@ -368,13 +362,13 @@
       };
     }
     function getOnWindowError() {
-      if (ensureACState.cancellationRevision !== automaticOnCancellationRevision) {
+      if (attempt.cancellationRevision !== automaticOnCancellationRevision) {
         return '请求已被后台取消';
       }
-      if (ensureACState.ownerGeneration !== mainBridgeLease.ownerGeneration) {
+      if (attempt.ownerGeneration !== mainBridgeLease.ownerGeneration) {
         return '请求已由更新的主世界脚本接管';
       }
-      const notAfterAt = Number(ensureACState.notAfterAt) || 0;
+      const notAfterAt = Number(attempt.notAfterAt) || 0;
       if (!targetState || notAfterAt === 0) return '';
       if (!Number.isSafeInteger(notAfterAt)) return '自动开启窗口截止时间无效';
       return Date.now() >= notAfterAt ? '自动开启窗口已结束' : '';
@@ -420,7 +414,7 @@
       return failureResult(beforeClick, clickCount, 'AC 开关被禁用（余额不足或页面加载中），无法切换');
     }
 
-    const clickOwner = String(ensureACState.requestId || '');
+    const clickOwner = String(attempt.requestId || '');
     if (targetState
         && mainBridgeLease.uncertainClickOwner
         && mainBridgeLease.uncertainClickOwner !== clickOwner
@@ -449,14 +443,14 @@
     const executionSuccessPromise = waitForNewACToggleExecutionSuccessInPageWorld(
       executionSuccessBaseline,
       AC_EXECUTION_SUCCESS_TIMEOUT_MS,
-      Number(ensureACState.notAfterAt) || 0,
-      ensureACState.cancellationRevision
+      Number(attempt.notAfterAt) || 0,
+      attempt.cancellationRevision
     );
     const dialogWait = { stopped: false };
     const dialogPromise = clickConfirmDialogInPageWorld(
       5000,
-      Number(ensureACState.notAfterAt) || 0,
-      ensureACState.cancellationRevision,
+      Number(attempt.notAfterAt) || 0,
+      attempt.cancellationRevision,
       () => dialogWait.stopped
     );
     const executionSuccess = await executionSuccessPromise;
@@ -481,8 +475,8 @@
     const settled = await waitForTargetACStateInPageWorld(
       targetState,
       AC_STATE_SETTLE_MS,
-      Number(ensureACState.notAfterAt) || 0,
-      ensureACState.cancellationRevision
+      Number(attempt.notAfterAt) || 0,
+      attempt.cancellationRevision
     );
     const settledStatus = settled.status || afterClick;
     if (settled.error) {
@@ -496,7 +490,7 @@
     } else {
       console.warn(afterClickMessage);
     }
-    return ensureACState(targetState, clickCount + 1);
+    return ensureACState(attempt, clickCount + 1);
   }
 
   function findACToggleExecutionSuccessMessagesInPageWorld() {
