@@ -4889,6 +4889,27 @@ async function runPwmStep({
     });
   }
 
+  // 提取（Fowler Extract Function）：应用智能 ON 窗口。只有 allow 路径保留
+  // 原有的持久化 await；无窗口和 defer 路径同步返回，不新增控制权交还点。
+  function prepareSmartOnWindow(plan, targetAction, observations) {
+    const smartOnWindow = planSmartAutomaticOn(targetAction, observations.acIsOn);
+    let persistence = null;
+    let requiresPersistence = false;
+    if (smartOnWindow?.kind === 'allow') {
+      observations.smartPageTimerTargetAt = Number(smartOnWindow.pageTimerTargetAt);
+      observations.smartOnWindowEndsAt = Number(smartOnWindow.windowEndsAt) || 0;
+      schedule.smartOnBoundaryAt = Number(smartOnWindow.boundaryAt) || 0;
+      requiresPersistence = true;
+      persistence = persistSchedule('runPwmStep-smart-on-boundary', { syncFromLiveAlarm: false });
+    } else {
+      if (smartOnWindow) {
+        schedule.smartOnBoundaryAt = 0;
+        plan = smartOnWindow;
+      }
+    }
+    return { plan, smartOnWindow, persistence, requiresPersistence };
+  }
+
   // 提取（Fowler Extract Function）：PWM 开机 hold 分支——单次点击 + 只读复核，不在外围重试。
   // 观察结果写回 observations，最终返回重新规划后的 plan。
   async function resolveToggleOnHold(plan, observations) {
@@ -5185,17 +5206,16 @@ async function runPwmStep({
     }
     plan = planPwmStep(schedule, observations);
 
-    const smartOnWindow = planSmartAutomaticOn(targetAction, observations.acIsOn);
-    if (smartOnWindow?.kind === 'allow') {
-      observations.smartPageTimerTargetAt = Number(smartOnWindow.pageTimerTargetAt);
-      observations.smartOnWindowEndsAt = Number(smartOnWindow.windowEndsAt) || 0;
-      schedule.smartOnBoundaryAt = Number(smartOnWindow.boundaryAt) || 0;
-      await persistSchedule('runPwmStep-smart-on-boundary', { syncFromLiveAlarm: false });
-    } else if (smartOnWindow) {
-      schedule.smartOnBoundaryAt = 0;
-      plan = smartOnWindow;
+    const smartOnWindowResolution = prepareSmartOnWindow(
+      plan,
+      targetAction,
+      observations
+    );
+    if (smartOnWindowResolution.requiresPersistence) {
+      await smartOnWindowResolution.persistence;
     }
-    capturePwmExceptionRecoveryContext(smartOnWindow);
+    plan = smartOnWindowResolution.plan;
+    capturePwmExceptionRecoveryContext(smartOnWindowResolution.smartOnWindow);
 
     if (preCheckStatus?.isOn === (targetAction === 'on')) {
       console.log(`[AC扩展] 预检：AC 已在目标状态 (${targetAction})，跳过切换，直接推进周期`);

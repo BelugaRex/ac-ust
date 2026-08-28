@@ -2795,8 +2795,15 @@ async function runTests() {
       && !pwmBody.includes('for (let retry'),
     '9H: 每个 PWM 开机步骤只调用一次 toggleAC(on)，无外围点击重试循环');
   const smartWindowGuardIndex = pwmBody.indexOf('planSmartModeOnWindow(schedule');
+  const smartWindowApplyIndex = pwmBody.indexOf(
+    'function prepareSmartOnWindow(plan, targetAction, observations) {'
+  );
+  const smartWindowApplyEnd = pwmBody.indexOf(
+    'async function resolveToggleOnHold(',
+    smartWindowApplyIndex
+  );
   const smartWindowPlanIndex = pwmBody.indexOf(
-    'const smartOnWindow = planSmartAutomaticOn(targetAction, observations.acIsOn);'
+    'const smartOnWindowResolution = prepareSmartOnWindow('
   );
   const smartToggleBranchIndex = pwmBody.indexOf(
     "if (plan.kind === 'hold' && plan.prerequisite === 'toggle-on')"
@@ -2809,8 +2816,9 @@ async function runTests() {
       && smartWindowGuardIndex < toggleOnIndex
       && smartWindowPlanIndex > toggleOnIndex
       && smartWindowPlanIndex < smartToggleBranchIndex
-      && smartBoundaryPersistIndex > smartWindowPlanIndex
-      && smartBoundaryPersistIndex < smartToggleBranchIndex
+      && smartBoundaryPersistIndex > smartWindowApplyIndex
+      && smartBoundaryPersistIndex < smartWindowApplyEnd
+      && countOccurrences(pwmBody, 'prepareSmartOnWindow(') === 2
       && countOccurrences(
         pwmBody,
         'planSmartAutomaticOn(targetAction, observations.acIsOn)'
@@ -16344,7 +16352,7 @@ ${commitDurableSource16}
     'function planSmartAutomaticOn(targetAction, acIsOn) {'
   );
   const smartAutomaticOnEnd16 = pwmBody.indexOf(
-    '\n  // 提取（Fowler Extract Function）：PWM 开机 hold 分支',
+    'function prepareSmartOnWindow(',
     smartAutomaticOnStart16
   );
   const smartAutomaticOnSource16 = smartAutomaticOnStart16 >= 0
@@ -16400,6 +16408,355 @@ ${commitDurableSource16}
         === delayedSmartBoundary16 + 60_000
       && ordinaryLateContext16?.recoverCurrentCycle === false,
     '16F-0B-2: typed retry 消费原半点；无 provenance 的普通 22:31 仍保留原调用时间并受窗口门禁');
+
+  const smartOnWindowBlock16 = extractSourceSection(
+    pwmBody,
+    'function prepareSmartOnWindow(plan, targetAction, observations) {',
+    'async function resolveToggleOnHold(',
+    'runPwmStep smart ON window block'
+  );
+  const createSmartOnWindowBlockHarness16 = ({
+    smartOnWindow,
+    persistence = Promise.resolve(),
+    persistError = null,
+    captureError = null
+  }) => {
+    const schedule = { smartOnBoundaryAt: 999 };
+    const trace = [];
+    const captures = [];
+    const persistCalls = [];
+    let activeObservations = null;
+    let callerPlan = null;
+    const captureSmartOnWindow = capturedWindow => {
+      trace.push('capture');
+      captures.push(capturedWindow);
+      if (captureError) throw captureError;
+    };
+    const prepareSmartOnWindow = new Function(
+      'schedule', 'planSmartAutomaticOn', 'persistSchedule',
+      `${smartOnWindowBlock16}; return prepareSmartOnWindow;`
+    )(
+      schedule,
+      (targetAction, acIsOn) => {
+        trace.push(`plan:${targetAction}:${acIsOn}`);
+        return smartOnWindow;
+      },
+      (reason, options) => {
+        trace.push('persist');
+        persistCalls.push({
+          reason,
+          options: { ...options },
+          smartOnBoundaryAt: schedule.smartOnBoundaryAt,
+          smartPageTimerTargetAt: activeObservations?.smartPageTimerTargetAt,
+          smartOnWindowEndsAt: activeObservations?.smartOnWindowEndsAt
+        });
+        if (persistError) throw persistError;
+        return persistence;
+      }
+    );
+    const run = async (plan, targetAction, observations) => {
+      activeObservations = observations;
+      callerPlan = plan;
+      const resolution = prepareSmartOnWindow(plan, targetAction, observations);
+      if (resolution.requiresPersistence) {
+        await resolution.persistence;
+      }
+      plan = resolution.plan;
+      callerPlan = plan;
+      captureSmartOnWindow(resolution.smartOnWindow);
+      return {
+        plan,
+        smartOnWindow: resolution.smartOnWindow,
+        persistence: resolution.persistence,
+        requiresPersistence: resolution.requiresPersistence
+      };
+    };
+    return {
+      run,
+      schedule,
+      trace,
+      captures,
+      persistCalls,
+      callerPlan: () => callerPlan
+    };
+  };
+
+  const untouchedSmartOnPlan16 = { kind: 'hold', marker: 'untouched' };
+  const noSmartOnWindow16 = createSmartOnWindowBlockHarness16({
+    smartOnWindow: null
+  });
+  const noSmartOnObservations16 = { acIsOn: false };
+  const noSmartOnPending16 = noSmartOnWindow16.run(
+    untouchedSmartOnPlan16,
+    'off',
+    noSmartOnObservations16
+  );
+  const noSmartOnImmediateTrace16 = noSmartOnWindow16.trace.join(',');
+  const noSmartOnResult16 = await noSmartOnPending16;
+  assertPass(noSmartOnImmediateTrace16 === 'plan:off:false,capture'
+      && noSmartOnWindow16.persistCalls.length === 0
+      && noSmartOnWindow16.schedule.smartOnBoundaryAt === 999
+      && noSmartOnWindow16.captures[0] === null
+      && noSmartOnResult16.plan === untouchedSmartOnPlan16
+      && noSmartOnResult16.smartOnWindow === null
+      && noSmartOnResult16.requiresPersistence === false
+      && noSmartOnResult16.persistence === null
+      && noSmartOnObservations16.smartPageTimerTargetAt === undefined,
+    '16F-0B-2A: 非智能窗口路径同步 capture、零 persist，不改 plan/owner/observations');
+
+  const deferredSmartOnPlan16 = {
+    kind: 'defer',
+    reason: 'smart-on-window-expired',
+    nextTriggerAt: delayedSmartBoundary16 + 30 * 60_000
+  };
+  const deferredSmartOnWindow16 = createSmartOnWindowBlockHarness16({
+    smartOnWindow: deferredSmartOnPlan16
+  });
+  const deferredSmartOnPending16 = deferredSmartOnWindow16.run(
+    untouchedSmartOnPlan16,
+    'on',
+    { acIsOn: false }
+  );
+  const deferredSmartOnImmediateTrace16 = deferredSmartOnWindow16.trace.join(',');
+  const deferredSmartOnResult16 = await deferredSmartOnPending16;
+  assertPass(deferredSmartOnImmediateTrace16 === 'plan:on:false,capture'
+      && deferredSmartOnWindow16.persistCalls.length === 0
+      && deferredSmartOnWindow16.schedule.smartOnBoundaryAt === 0
+      && deferredSmartOnWindow16.captures[0] === deferredSmartOnPlan16
+      && deferredSmartOnResult16.plan === deferredSmartOnPlan16
+      && deferredSmartOnResult16.requiresPersistence === false
+      && deferredSmartOnResult16.persistence === null,
+    '16F-0B-2B: defer 窗口同步清 owner、替换 plan 并 capture，零 persist');
+
+  let releaseSmartOnPersistence16;
+  const smartOnPersistence16 = new Promise(resolve => {
+    releaseSmartOnPersistence16 = resolve;
+  });
+  const allowedSmartOnWindowPlan16 = {
+    kind: 'allow',
+    pageTimerTargetAt: String(delayedSmartBoundary16 + 21 * 60_000),
+    windowEndsAt: delayedSmartBoundary16 + 25 * 60_000,
+    boundaryAt: delayedSmartBoundary16
+  };
+  const allowedSmartOnWindow16 = createSmartOnWindowBlockHarness16({
+    smartOnWindow: allowedSmartOnWindowPlan16,
+    persistence: smartOnPersistence16
+  });
+  const allowedSmartOnObservations16 = { acIsOn: false };
+  const allowedSmartOnPending16 = allowedSmartOnWindow16.run(
+    untouchedSmartOnPlan16,
+    'on',
+    allowedSmartOnObservations16
+  );
+  assertPass(allowedSmartOnWindow16.trace.join(',') === 'plan:on:false,persist'
+      && allowedSmartOnWindow16.captures.length === 0
+      && allowedSmartOnWindow16.schedule.smartOnBoundaryAt === delayedSmartBoundary16
+      && allowedSmartOnObservations16.smartPageTimerTargetAt
+        === delayedSmartBoundary16 + 21 * 60_000
+      && allowedSmartOnObservations16.smartOnWindowEndsAt
+        === delayedSmartBoundary16 + 25 * 60_000
+      && allowedSmartOnWindow16.persistCalls[0]?.reason
+        === 'runPwmStep-smart-on-boundary'
+      && allowedSmartOnWindow16.persistCalls[0]?.options?.syncFromLiveAlarm === false,
+    '16F-0B-2C: allow 先写 observations/owner 再 persist，持久化完成前不 capture');
+  releaseSmartOnPersistence16();
+  const allowedSmartOnResult16 = await allowedSmartOnPending16;
+  assertPass(allowedSmartOnWindow16.trace.join(',') === 'plan:on:false,persist,capture'
+      && allowedSmartOnWindow16.captures[0] === allowedSmartOnWindowPlan16
+      && allowedSmartOnResult16.plan === untouchedSmartOnPlan16
+      && allowedSmartOnResult16.requiresPersistence === true
+      && allowedSmartOnResult16.persistence === smartOnPersistence16
+      && allowedSmartOnWindow16.persistCalls[0]?.smartOnBoundaryAt
+        === delayedSmartBoundary16
+      && allowedSmartOnWindow16.persistCalls[0]?.smartPageTimerTargetAt
+        === delayedSmartBoundary16 + 21 * 60_000
+      && allowedSmartOnWindow16.persistCalls[0]?.smartOnWindowEndsAt
+        === delayedSmartBoundary16 + 25 * 60_000,
+    '16F-0B-2D: allow persist 成功后才 capture，并保留原外围 plan identity');
+
+  const smartOnPersistFailure16 = new Error('smart-on-boundary-persist-failed');
+  const failedSmartOnWindow16 = createSmartOnWindowBlockHarness16({
+    smartOnWindow: allowedSmartOnWindowPlan16,
+    persistence: Promise.reject(smartOnPersistFailure16)
+  });
+  let thrownSmartOnPersistFailure16 = null;
+  try {
+    await failedSmartOnWindow16.run(
+      untouchedSmartOnPlan16,
+      'on',
+      { acIsOn: false }
+    );
+  } catch (error) {
+    thrownSmartOnPersistFailure16 = error;
+  }
+  assertPass(thrownSmartOnPersistFailure16 === smartOnPersistFailure16
+      && failedSmartOnWindow16.trace.join(',') === 'plan:on:false,persist'
+      && failedSmartOnWindow16.captures.length === 0
+      && failedSmartOnWindow16.schedule.smartOnBoundaryAt === delayedSmartBoundary16,
+    '16F-0B-2E: allow persist 失败保持原异常 identity 与已写 owner，不提前 capture');
+
+  const smartOnPersistSyncFailure16 = new Error('smart-on-boundary-persist-sync-throw');
+  const syncFailedSmartOnWindow16 = createSmartOnWindowBlockHarness16({
+    smartOnWindow: allowedSmartOnWindowPlan16,
+    persistError: smartOnPersistSyncFailure16
+  });
+  let thrownSmartOnPersistSyncFailure16 = null;
+  try {
+    await syncFailedSmartOnWindow16.run(
+      untouchedSmartOnPlan16,
+      'on',
+      { acIsOn: false }
+    );
+  } catch (error) {
+    thrownSmartOnPersistSyncFailure16 = error;
+  }
+  assertPass(thrownSmartOnPersistSyncFailure16 === smartOnPersistSyncFailure16
+      && syncFailedSmartOnWindow16.trace.join(',') === 'plan:on:false,persist'
+      && syncFailedSmartOnWindow16.captures.length === 0
+      && syncFailedSmartOnWindow16.callerPlan() === untouchedSmartOnPlan16,
+    '16F-0B-2F: persist 同步抛错保持 identity，未接回 plan 且不 capture');
+
+  const smartOnCaptureFailure16 = new Error('smart-on-window-capture-failed');
+  const captureFailedSmartOnWindow16 = createSmartOnWindowBlockHarness16({
+    smartOnWindow: deferredSmartOnPlan16,
+    captureError: smartOnCaptureFailure16
+  });
+  let thrownSmartOnCaptureFailure16 = null;
+  try {
+    await captureFailedSmartOnWindow16.run(
+      untouchedSmartOnPlan16,
+      'on',
+      { acIsOn: false }
+    );
+  } catch (error) {
+    thrownSmartOnCaptureFailure16 = error;
+  }
+  assertPass(thrownSmartOnCaptureFailure16 === smartOnCaptureFailure16
+      && captureFailedSmartOnWindow16.trace.join(',') === 'plan:on:false,capture'
+      && captureFailedSmartOnWindow16.callerPlan() === deferredSmartOnPlan16
+      && captureFailedSmartOnWindow16.schedule.smartOnBoundaryAt === 0,
+    '16F-0B-2G: defer 先接回替换 plan 再 capture；capture 抛错 identity 不变');
+
+  const smartOnWindowCaller16 = extractSourceSection(
+    pwmBody,
+    '    const smartOnWindowResolution = prepareSmartOnWindow(',
+    '\n\n    if (preCheckStatus?.isOn',
+    'runPwmStep smart ON window caller'
+  );
+  const createSmartOnWindowCallerHarness16 = ({
+    resolution,
+    trace,
+    captureError = null,
+    observedPlans = []
+  }) => new Function(
+    'prepareSmartOnWindow', 'capturePwmExceptionRecoveryContext', 'observePlan',
+    `return async function runSmartOnWindowCaller(plan, targetAction, observations) {
+try {
+${smartOnWindowCaller16}
+return plan;
+} finally {
+  observePlan(plan);
+}
+};`
+  )(
+    (plan, targetAction, observations) => {
+      trace.push({ kind: 'prepare', plan, targetAction, observations });
+      return resolution;
+    },
+    smartOnWindow => {
+      trace.push({ kind: 'capture', smartOnWindow });
+      if (captureError) throw captureError;
+    },
+    plan => observedPlans.push(plan)
+  );
+  const wiredSyncSmartOnTrace16 = [];
+  const wiredSyncSmartOnPlan16 = { marker: 'wired-sync-plan' };
+  const wiredSyncSmartOnWindow16 = { kind: 'defer', marker: 'wired-sync-window' };
+  const runWiredSyncSmartOn16 = createSmartOnWindowCallerHarness16({
+    resolution: {
+      plan: wiredSyncSmartOnPlan16,
+      smartOnWindow: wiredSyncSmartOnWindow16,
+      persistence: null,
+      requiresPersistence: false
+    },
+    trace: wiredSyncSmartOnTrace16
+  });
+  const wiredSyncSmartOnObservations16 = { acIsOn: false };
+  const wiredSyncSmartOnPending16 = runWiredSyncSmartOn16(
+    untouchedSmartOnPlan16,
+    'on',
+    wiredSyncSmartOnObservations16
+  );
+  const wiredSyncImmediateKinds16 = wiredSyncSmartOnTrace16.map(item => item.kind).join(',');
+  const wiredSyncSmartOnResult16 = await wiredSyncSmartOnPending16;
+  assertPass(wiredSyncImmediateKinds16 === 'prepare,capture'
+      && wiredSyncSmartOnResult16 === wiredSyncSmartOnPlan16
+      && wiredSyncSmartOnTrace16[0]?.plan === untouchedSmartOnPlan16
+      && wiredSyncSmartOnTrace16[0]?.targetAction === 'on'
+      && wiredSyncSmartOnTrace16[0]?.observations === wiredSyncSmartOnObservations16
+      && wiredSyncSmartOnTrace16[1]?.smartOnWindow === wiredSyncSmartOnWindow16,
+    '16F-0B-2H: production caller 同步路径零 await，接回 helper plan 后传同一 window 给 capture');
+
+  let releaseWiredSmartOnPersistence16;
+  const wiredSmartOnPersistence16 = new Promise(resolve => {
+    releaseWiredSmartOnPersistence16 = resolve;
+  });
+  const wiredAsyncSmartOnTrace16 = [];
+  const wiredAsyncSmartOnPlan16 = { marker: 'wired-async-plan' };
+  const wiredAsyncSmartOnWindow16 = { kind: 'allow', marker: 'wired-async-window' };
+  const runWiredAsyncSmartOn16 = createSmartOnWindowCallerHarness16({
+    resolution: {
+      plan: wiredAsyncSmartOnPlan16,
+      smartOnWindow: wiredAsyncSmartOnWindow16,
+      persistence: wiredSmartOnPersistence16,
+      requiresPersistence: true
+    },
+    trace: wiredAsyncSmartOnTrace16
+  });
+  const wiredAsyncSmartOnPending16 = runWiredAsyncSmartOn16(
+    untouchedSmartOnPlan16,
+    'on',
+    { acIsOn: false }
+  );
+  assertPass(wiredAsyncSmartOnTrace16.map(item => item.kind).join(',') === 'prepare',
+    '16F-0B-2I: production caller allow 路径等待 persistence，完成前不 capture');
+  releaseWiredSmartOnPersistence16();
+  const wiredAsyncSmartOnResult16 = await wiredAsyncSmartOnPending16;
+  assertPass(wiredAsyncSmartOnTrace16.map(item => item.kind).join(',') === 'prepare,capture'
+      && wiredAsyncSmartOnResult16 === wiredAsyncSmartOnPlan16
+      && wiredAsyncSmartOnTrace16[1]?.smartOnWindow === wiredAsyncSmartOnWindow16,
+    '16F-0B-2J: production caller persistence 完成后接回 plan 并立即 capture 同一 window');
+
+  const wiredCallerCaptureFailure16 = new Error('wired-caller-capture-failed');
+  const wiredCallerCaptureTrace16 = [];
+  const wiredCallerObservedPlans16 = [];
+  const wiredCallerReplacementPlan16 = { marker: 'wired-capture-failure-plan' };
+  const runWiredCallerCaptureFailure16 = createSmartOnWindowCallerHarness16({
+    resolution: {
+      plan: wiredCallerReplacementPlan16,
+      smartOnWindow: wiredSyncSmartOnWindow16,
+      persistence: null,
+      requiresPersistence: false
+    },
+    trace: wiredCallerCaptureTrace16,
+    captureError: wiredCallerCaptureFailure16,
+    observedPlans: wiredCallerObservedPlans16
+  });
+  let thrownWiredCallerCaptureFailure16 = null;
+  try {
+    await runWiredCallerCaptureFailure16(
+      untouchedSmartOnPlan16,
+      'on',
+      { acIsOn: false }
+    );
+  } catch (error) {
+    thrownWiredCallerCaptureFailure16 = error;
+  }
+  assertPass(thrownWiredCallerCaptureFailure16 === wiredCallerCaptureFailure16
+      && wiredCallerCaptureTrace16.map(item => item.kind).join(',') === 'prepare,capture'
+      && wiredCallerObservedPlans16[0] === wiredCallerReplacementPlan16,
+    '16F-0B-2K: production caller 在 capture 抛错前已接回 helper plan，异常 identity 不变');
+
   assertPass(backgroundSource.includes(
       'alreadyDone: result?.alreadyDone === true'
     )
