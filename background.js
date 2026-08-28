@@ -8205,224 +8205,249 @@ async function toggleNowAndSync(action) {
   return { success: true, schedule: { ...schedule, actualStatus: status } };
 }
 
-async function ensureDiagnosticAlarms() {
-  const diagnosticRequestAt = Date.now();
-  const repairs = [];
-  const cloneDiagnosticValue = value => {
-    if (value == null) return value;
-    try {
-      return JSON.parse(JSON.stringify(value));
-    } catch (_) {
-      return null;
-    }
-  };
-  const snapshotAlarm = alarm => alarm ? {
+function cloneDiagnosticValue(value) {
+  if (value == null) return value;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (_) {
+    return null;
+  }
+}
+
+function snapshotAlarm(alarm) {
+  return alarm ? {
     scheduledTime: Number(alarm.scheduledTime) || 0,
     ...(Number.isFinite(Number(alarm.periodInMinutes))
       ? { periodInMinutes: Number(alarm.periodInMinutes) }
       : {})
   } : null;
-  const readDiagnosticExternal = async (label, read, readErrors) => {
-    try {
-      return await read();
-    } catch (error) {
-      readErrors.push(`${label}: ${String(error?.message || error).slice(0, 120)}`);
-      return null;
-    }
-  };
-  const snapshotNamedAlarms = async (
-    readErrors = [],
-    includePageTimerRetry = false
-  ) => {
-    const names = [
-      ['badge', 'ac-badge-tick'],
-      ['watchdog', 'ac-watchdog'],
-      ['pwm', 'ac-pwm'],
-      ['smartWeather', 'ac-smart-weather'],
-      ...(includePageTimerRetry
-        ? [['pageTimerRetry', 'ac-page-timer-retry']]
-        : [])
-    ];
-    const values = await Promise.all(names.map(([, alarmName]) => (
-      readDiagnosticExternal(
-        `alarm:${alarmName}`,
-        () => chrome.alarms.get(alarmName),
-        readErrors
-      )
-    )));
-    return Object.fromEntries(names.map(([key], index) => (
-      [key, snapshotAlarm(values[index])]
-    )));
-  };
-  function readDiagnosticRuntimeState() {
-    return {
-      memorySchedule: cloneDiagnosticValue(schedule) || {},
-      revision: typeof pwmRuntimeRevision === 'number' ? pwmRuntimeRevision : 0,
-      pwmStepRunning: typeof isCurrentPwmStepRunning === 'function'
-        ? isCurrentPwmStepRunning()
-        : false,
-      runningRevision: typeof pwmStepRunningRevision === 'number'
-        ? pwmStepRunningRevision
-        : null,
-      phaseAdoptionInFlight: typeof isSyncPhaseAdoptionAdmissionBlocked === 'function'
-        ? isSyncPhaseAdoptionAdmissionBlocked()
-        : false,
-      phaseAdoptionOwner: typeof syncPhaseAdoptionAdmissionOwner === 'number'
-        ? syncPhaseAdoptionAdmissionOwner
-        : 0,
-      pwmExecutionCount: typeof pwmExecutionWithRecoveryCount === 'number'
-        ? pwmExecutionWithRecoveryCount
-        : 0,
-      repairInFlight: typeof repairScheduleClock === 'function'
-        && !!repairScheduleClock.inFlight,
-      currentAttempt: typeof currentPwmAttempt === 'object'
-        ? cloneDiagnosticValue(currentPwmAttempt)
-        : null,
-      currentAttempts: typeof getActivePwmDiagnosticAttempts === 'function'
-        ? cloneDiagnosticValue(getActivePwmDiagnosticAttempts())
-        : [],
-      lastOutcome: typeof lastPwmOutcome === 'object'
-        ? cloneDiagnosticValue(lastPwmOutcome)
-        : null
-    };
+}
+
+async function readDiagnosticExternal(label, read, readErrors) {
+  try {
+    return await read();
+  } catch (error) {
+    readErrors.push(`${label}: ${String(error?.message || error).slice(0, 120)}`);
+    return null;
   }
-  function diagnosticSnapshotFingerprint(state) {
-    return JSON.stringify({
-      memorySchedule: state?.memorySchedule || {},
-      revision: state?.revision || 0,
-      pwmStepRunning: state?.pwmStepRunning === true,
-      runningRevision: state?.runningRevision ?? null,
-      phaseAdoptionInFlight: state?.phaseAdoptionInFlight === true,
-      phaseAdoptionOwner: state?.phaseAdoptionOwner || 0,
-      pwmExecutionCount: state?.pwmExecutionCount || 0,
-      repairInFlight: state?.repairInFlight === true,
-      currentAttempt: state?.currentAttempt || null,
-      currentAttempts: state?.currentAttempts || [],
-      lastOutcome: state?.lastOutcome || null
-    });
-  }
-  const captureDiagnosticSnapshotAttempt = async (
-    captureAttempts,
-    firstObservedAt
-  ) => {
-    const capturedAt = Date.now();
-    const startState = readDiagnosticRuntimeState();
-    const readErrors = [];
-    const storageAvailable = typeof chrome.storage?.local?.get === 'function';
-    const [stored, persistedEnvelope, alarms] = await Promise.all([
-      storageAvailable
-        ? readDiagnosticExternal(
-            'storage:ac_schedule',
-            () => chrome.storage.local.get('ac_schedule'),
-            readErrors
-          )
-        : Promise.resolve({}),
-      storageAvailable
-        ? readDiagnosticExternal(
-            `storage:${typeof PWM_LAST_OUTCOME_KEY === 'string'
+}
+
+async function snapshotNamedAlarms(
+  readErrors = [],
+  includePageTimerRetry = false
+) {
+  const names = [
+    ['badge', 'ac-badge-tick'],
+    ['watchdog', 'ac-watchdog'],
+    ['pwm', 'ac-pwm'],
+    ['smartWeather', 'ac-smart-weather'],
+    ...(includePageTimerRetry
+      ? [['pageTimerRetry', 'ac-page-timer-retry']]
+      : [])
+  ];
+  const values = await Promise.all(names.map(([, alarmName]) => (
+    readDiagnosticExternal(
+      `alarm:${alarmName}`,
+      () => chrome.alarms.get(alarmName),
+      readErrors
+    )
+  )));
+  return Object.fromEntries(names.map(([key], index) => (
+    [key, snapshotAlarm(values[index])]
+  )));
+}
+
+function readDiagnosticRuntimeState() {
+  return {
+    memorySchedule: cloneDiagnosticValue(schedule) || {},
+    revision: typeof pwmRuntimeRevision === 'number' ? pwmRuntimeRevision : 0,
+    pwmStepRunning: typeof isCurrentPwmStepRunning === 'function'
+      ? isCurrentPwmStepRunning()
+      : false,
+    runningRevision: typeof pwmStepRunningRevision === 'number'
+      ? pwmStepRunningRevision
+      : null,
+    phaseAdoptionInFlight: typeof isSyncPhaseAdoptionAdmissionBlocked === 'function'
+      ? isSyncPhaseAdoptionAdmissionBlocked()
+      : false,
+    phaseAdoptionOwner: typeof syncPhaseAdoptionAdmissionOwner === 'number'
+      ? syncPhaseAdoptionAdmissionOwner
+      : 0,
+    pwmExecutionCount: typeof pwmExecutionWithRecoveryCount === 'number'
+      ? pwmExecutionWithRecoveryCount
+      : 0,
+    repairInFlight: typeof repairScheduleClock === 'function'
+      && !!repairScheduleClock.inFlight,
+    currentAttempt: typeof currentPwmAttempt === 'object'
+      ? cloneDiagnosticValue(currentPwmAttempt)
+      : null,
+    currentAttempts: typeof getActivePwmDiagnosticAttempts === 'function'
+      ? cloneDiagnosticValue(getActivePwmDiagnosticAttempts())
+      : [],
+    lastOutcome: typeof lastPwmOutcome === 'object'
+      ? cloneDiagnosticValue(lastPwmOutcome)
+      : null
+  };
+}
+
+function diagnosticSnapshotFingerprint(state) {
+  return JSON.stringify({
+    memorySchedule: state?.memorySchedule || {},
+    revision: state?.revision || 0,
+    pwmStepRunning: state?.pwmStepRunning === true,
+    runningRevision: state?.runningRevision ?? null,
+    phaseAdoptionInFlight: state?.phaseAdoptionInFlight === true,
+    phaseAdoptionOwner: state?.phaseAdoptionOwner || 0,
+    pwmExecutionCount: state?.pwmExecutionCount || 0,
+    repairInFlight: state?.repairInFlight === true,
+    currentAttempt: state?.currentAttempt || null,
+    currentAttempts: state?.currentAttempts || [],
+    lastOutcome: state?.lastOutcome || null
+  });
+}
+
+async function captureDiagnosticSnapshotAttempt(captureAttempts, firstObservedAt) {
+  const capturedAt = Date.now();
+  const startState = readDiagnosticRuntimeState();
+  const readErrors = [];
+  const storageAvailable = typeof chrome.storage?.local?.get === 'function';
+  const [stored, persistedEnvelope, alarms] = await Promise.all([
+    storageAvailable
+      ? readDiagnosticExternal(
+          'storage:ac_schedule',
+          () => chrome.storage.local.get('ac_schedule'),
+          readErrors
+        )
+      : Promise.resolve({}),
+    storageAvailable
+      ? readDiagnosticExternal(
+          `storage:${typeof PWM_LAST_OUTCOME_KEY === 'string'
+            ? PWM_LAST_OUTCOME_KEY
+            : 'ac_pwm_last_outcome'}`,
+          () => chrome.storage.local.get(
+            typeof PWM_LAST_OUTCOME_KEY === 'string'
               ? PWM_LAST_OUTCOME_KEY
-              : 'ac_pwm_last_outcome'}`,
-            () => chrome.storage.local.get(
-              typeof PWM_LAST_OUTCOME_KEY === 'string'
-                ? PWM_LAST_OUTCOME_KEY
-                : 'ac_pwm_last_outcome'
-            ),
-            readErrors
-          )
-        : Promise.resolve({}),
-      snapshotNamedAlarms(readErrors, true)
-    ]);
-    const endState = readDiagnosticRuntimeState();
-    const coherent = diagnosticSnapshotFingerprint(startState)
-      === diagnosticSnapshotFingerprint(endState);
-    const persistedKey = typeof PWM_LAST_OUTCOME_KEY === 'string'
-      ? PWM_LAST_OUTCOME_KEY
-      : 'ac_pwm_last_outcome';
-    const persistedRaw = persistedEnvelope?.[persistedKey] || null;
-    let persistedOutcome = typeof normalizePwmDiagnosticOutcome === 'function'
-      ? normalizePwmDiagnosticOutcome(persistedRaw)
-      : cloneDiagnosticValue(persistedRaw);
-    if (persistedOutcome
-        && typeof BUILD_TIME === 'string'
-        && typeof BUILD_TIME_EPOCH_MS === 'number'
-        && (persistedOutcome.buildTime !== BUILD_TIME
-          || persistedOutcome.buildTimeEpochMs !== BUILD_TIME_EPOCH_MS)) {
-      persistedOutcome = null;
+              : 'ac_pwm_last_outcome'
+          ),
+          readErrors
+        )
+      : Promise.resolve({}),
+    snapshotNamedAlarms(readErrors, true)
+  ]);
+  const endState = readDiagnosticRuntimeState();
+  const coherent = diagnosticSnapshotFingerprint(startState)
+    === diagnosticSnapshotFingerprint(endState);
+  const persistedKey = typeof PWM_LAST_OUTCOME_KEY === 'string'
+    ? PWM_LAST_OUTCOME_KEY
+    : 'ac_pwm_last_outcome';
+  const persistedRaw = persistedEnvelope?.[persistedKey] || null;
+  let persistedOutcome = typeof normalizePwmDiagnosticOutcome === 'function'
+    ? normalizePwmDiagnosticOutcome(persistedRaw)
+    : cloneDiagnosticValue(persistedRaw);
+  if (persistedOutcome
+      && typeof BUILD_TIME === 'string'
+      && typeof BUILD_TIME_EPOCH_MS === 'number'
+      && (persistedOutcome.buildTime !== BUILD_TIME
+        || persistedOutcome.buildTimeEpochMs !== BUILD_TIME_EPOCH_MS)) {
+    persistedOutcome = null;
+  }
+  const latestOutcome = typeof selectLatestPwmDiagnosticOutcome === 'function'
+    ? selectLatestPwmDiagnosticOutcome(startState.lastOutcome, persistedOutcome)
+    : (startState.lastOutcome || persistedOutcome || null);
+  const liveAlarmAt = Number(alarms?.pwm?.scheduledTime) || 0;
+  return {
+    firstObservedAt,
+    capturedAt,
+    captureAttempts,
+    coherent,
+    complete: readErrors.length === 0,
+    readErrors,
+    coherenceReason: coherent ? '' : 'runtime-changed-during-capture',
+    memorySchedule: startState.memorySchedule,
+    storedSchedule: cloneDiagnosticValue(stored?.ac_schedule) || {},
+    alarms,
+    owner: {
+      action: startState.memorySchedule.pwmState === 'on' ? 'on' : 'off',
+      pwmState: startState.memorySchedule.pwmState || '',
+      kind: startState.memorySchedule.pwmRetryKind || 'phase',
+      boundaryAt: Number(startState.memorySchedule.pwmRetryBoundaryAt)
+        || Number(startState.memorySchedule.smartOnBoundaryAt)
+        || 0,
+      scheduledAt: Number(startState.memorySchedule.pwmRetryScheduledAt)
+        || Number(startState.memorySchedule.nextTriggerAt)
+        || liveAlarmAt,
+      liveAlarmAt
+    },
+    runtime: {
+      revision: startState.revision,
+      pwmStepRunning: startState.pwmStepRunning,
+      runningRevision: startState.runningRevision,
+      phaseAdoptionInFlight: startState.phaseAdoptionInFlight,
+      pwmExecutionCount: startState.pwmExecutionCount,
+      repairInFlight: startState.repairInFlight,
+      currentAttempt: startState.currentAttempt,
+      currentAttempts: startState.currentAttempts,
+      activeAttemptCount: startState.currentAttempts.length,
+      lastOutcome: latestOutcome
     }
-    const latestOutcome = typeof selectLatestPwmDiagnosticOutcome === 'function'
-      ? selectLatestPwmDiagnosticOutcome(startState.lastOutcome, persistedOutcome)
-      : (startState.lastOutcome || persistedOutcome || null);
-    const liveAlarmAt = Number(alarms?.pwm?.scheduledTime) || 0;
-    return {
-      firstObservedAt,
-      capturedAt,
-      captureAttempts,
-      coherent,
-      complete: readErrors.length === 0,
-      readErrors,
-      coherenceReason: coherent ? '' : 'runtime-changed-during-capture',
-      memorySchedule: startState.memorySchedule,
-      storedSchedule: cloneDiagnosticValue(stored?.ac_schedule) || {},
-      alarms,
-      owner: {
-        action: startState.memorySchedule.pwmState === 'on' ? 'on' : 'off',
-        pwmState: startState.memorySchedule.pwmState || '',
-        kind: startState.memorySchedule.pwmRetryKind || 'phase',
-        boundaryAt: Number(startState.memorySchedule.pwmRetryBoundaryAt)
-          || Number(startState.memorySchedule.smartOnBoundaryAt)
-          || 0,
-        scheduledAt: Number(startState.memorySchedule.pwmRetryScheduledAt)
-          || Number(startState.memorySchedule.nextTriggerAt)
-          || liveAlarmAt,
-        liveAlarmAt
+  };
+}
+
+async function captureDiagnosticSnapshot() {
+  const firstObservedAt = Date.now();
+  const first = await captureDiagnosticSnapshotAttempt(1, firstObservedAt);
+  if (first.coherent && first.complete) return first;
+  const second = await captureDiagnosticSnapshotAttempt(2, firstObservedAt);
+  return {
+    ...second,
+    coherenceReason: second.coherent
+      ? (first.coherent ? '' : 'runtime-changed-during-first-capture')
+      : 'runtime-changed-during-capture',
+    completenessReason: second.complete
+      ? ''
+      : 'external-read-incomplete-after-retry'
+  };
+}
+
+function buildDiagnosticResultEnvelope({
+  result,
+  requestAt,
+  before,
+  repairs,
+  lifecycle,
+  after
+}) {
+  return {
+    ...result,
+    schemaVersion: 2,
+    evidence: {
+      requestAt,
+      before,
+      repair: {
+        requested: true,
+        items: [...repairs],
+        lifecycle: cloneDiagnosticValue(lifecycle)
       },
-      runtime: {
-        revision: startState.revision,
-        pwmStepRunning: startState.pwmStepRunning,
-        runningRevision: startState.runningRevision,
-        phaseAdoptionInFlight: startState.phaseAdoptionInFlight,
-        pwmExecutionCount: startState.pwmExecutionCount,
-        repairInFlight: startState.repairInFlight,
-        currentAttempt: startState.currentAttempt,
-        currentAttempts: startState.currentAttempts,
-        activeAttemptCount: startState.currentAttempts.length,
-        lastOutcome: latestOutcome
-      }
-    };
+      after
+    }
   };
-  const captureDiagnosticSnapshot = async () => {
-    const firstObservedAt = Date.now();
-    const first = await captureDiagnosticSnapshotAttempt(1, firstObservedAt);
-    if (first.coherent && first.complete) return first;
-    const second = await captureDiagnosticSnapshotAttempt(2, firstObservedAt);
-    return {
-      ...second,
-      coherenceReason: second.coherent
-        ? (first.coherent ? '' : 'runtime-changed-during-first-capture')
-        : 'runtime-changed-during-capture',
-      completenessReason: second.complete
-        ? ''
-        : 'external-read-incomplete-after-retry'
-    };
-  };
+}
+
+async function ensureDiagnosticAlarms() {
+  const diagnosticRequestAt = Date.now();
+  const repairs = [];
   const diagnosticBefore = await captureDiagnosticSnapshot();
   await loadScheduleFromStorage();
   const finalizeDiagnosticResult = async (result, lifecycle = null) => {
     const diagnosticAfter = await captureDiagnosticSnapshot();
-    return {
-      ...result,
-      schemaVersion: 2,
-      evidence: {
-        requestAt: diagnosticRequestAt,
-        before: diagnosticBefore,
-        repair: {
-          requested: true,
-          items: [...repairs],
-          lifecycle: cloneDiagnosticValue(lifecycle)
-        },
-        after: diagnosticAfter
-      }
-    };
+    return buildDiagnosticResultEnvelope({
+      result,
+      requestAt: diagnosticRequestAt,
+      before: diagnosticBefore,
+      repairs,
+      lifecycle,
+      after: diagnosticAfter
+    });
   };
   const snapshotDeferredPhaseAdoption = async () => {
     const alarms = await snapshotNamedAlarms();

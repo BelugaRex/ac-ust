@@ -6980,7 +6980,7 @@ return { reapplySmartSensitivityNow };`
   );
   const ensureDiagnosticAlarmsBody = extractSourceSection(
     backgroundSource,
-    'async function ensureDiagnosticAlarms() {',
+    'function cloneDiagnosticValue(value) {',
     '\nchrome.runtime.onMessage.addListener',
     'ensureDiagnosticAlarms'
   );
