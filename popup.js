@@ -1565,7 +1565,7 @@ btnDiagnose.addEventListener('click', async () => {
     // 修复只允许后台执行。Popup 消费 before/repair/after，不再直接写 storage，
     // 因而复制报告能同时保留事故首现场与修复后的收敛状态。
     const nowMs = Date.now();
-    const selfHealed = repairedItems.has('pwm-trigger');
+    const pwmTriggerRepaired = repairedItems.has('pwm-trigger');
     if (diagnosticEvidence.status === 'incomplete') {
       const evidenceReadErrors = [
         ...(diagnosticBefore?.readErrors || []),
@@ -1770,12 +1770,12 @@ btnDiagnose.addEventListener('click', async () => {
         priority: 10
       });
     } else if (effectiveNextTriggerAt) {
-      const repairedLabel = selfHealed
-        ? t('diagnosePopHealed')
-        : (storedSchedule.nextTriggerAt === effectiveNextTriggerAt ? '' : t('diagnoseBgWriteback'));
-      const triggerWasRepaired = selfHealed || repairedItems.has('pwm-trigger');
+      const repairedLabel = pwmTriggerRepaired
+        || storedSchedule.nextTriggerAt !== effectiveNextTriggerAt
+        ? t('diagnoseBgWriteback')
+        : '';
       add(true, t('diagnoseTriggerTime') + new Date(effectiveNextTriggerAt).toLocaleTimeString() + repairedLabel,
-        triggerWasRepaired ? {
+        pwmTriggerRepaired ? {
           level: 'repaired',
           code: 'SCHED-TRIGGER-REPAIRED',
           domain: t('diagnoseDomainScheduler'),
@@ -1861,7 +1861,8 @@ btnDiagnose.addEventListener('click', async () => {
         });
       } else if (pwmAlarm && effectiveNextTriggerAt) {
         const pwmAligned = areDiagnosticTriggersAligned(pwmAlarm.scheduledTime, effectiveNextTriggerAt);
-        add(pwmAligned, t(pwmAligned ? 'diagnosePwmSync' : 'diagnosePwmDesync') + (selfHealed ? t('diagnosePopHealed') : ''), {
+        add(pwmAligned, t(pwmAligned ? 'diagnosePwmSync' : 'diagnosePwmDesync')
+          + (pwmTriggerRepaired ? t('diagnoseBgWriteback') : ''), {
           code: 'SCHED-PWM-DESYNC',
           domain: t('diagnoseDomainScheduler'),
           action: t('diagnoseActionReloadExtension'),
@@ -2412,23 +2413,14 @@ btnDiagnose.addEventListener('click', async () => {
           priority: 5
         });
       }
-    } else if (selfHealed) {
-      if (Number(BUILD_TIME_EPOCH_MS) > 0) {
-        add(false, t('diagnoseSwBuildUnverified'), {
-          code: 'SW-BUILD-UNVERIFIED',
-          domain: t('diagnoseDomainBackground'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 1
-        });
-      } else {
-        add(false, t('diagnosePopHealedSw'), {
-          level: 'warning',
-          code: 'SW-STATUS-DEGRADED',
-          domain: t('diagnoseDomainBackground'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 50
-        });
-      }
+    } else if (pwmTriggerRepaired) {
+      add(false, t('diagnoseBgRepairedSw'), {
+        level: 'warning',
+        code: 'SW-STATUS-DEGRADED',
+        domain: t('diagnoseDomainBackground'),
+        action: t('diagnoseActionReloadExtension'),
+        priority: 50
+      });
     } else if (sw && sw.success === false) {
       add(false, t('diagnoseGetSwFailed') + (sw.error||'?').slice(0,80), {
         code: 'SW-STATUS-FAILED',

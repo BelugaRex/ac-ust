@@ -157,7 +157,6 @@
   "diagnoseInterval": { "message": "间隔", "description": "间隔模式名称" },
   "diagnoseMissingTrigger": { "message": "storage 绝对触发时间缺失", "description": "诊断：nextTriggerAt 缺失" },
   "diagnoseTriggerTime": { "message": "storage 绝对触发时间: ", "description": "诊断：显示触发时间前缀" },
-  "diagnosePopHealed": { "message": " (popup 已自愈)", "description": "诊断：popup 自愈标签" },
   "diagnoseBgWriteback": { "message": " (后台已回写)", "description": "诊断：后台回写标签" },
   "diagnosePwmExists": { "message": "ac-pwm 闹钟存在", "description": "诊断：ac-pwm 闹钟存在" },
   "diagnosePwmMissing": { "message": "ac-pwm 闹钟缺失", "description": "诊断：ac-pwm 闹钟缺失" },
@@ -206,15 +205,14 @@
   "diagnoseContentBuildMatch": { "message": "四方构建一致（content $1，main $2）", "description": "诊断：Popup、SW、content、main 构建一致" },
   "diagnoseContentBuildReinjected": { "message": "已在原页替换旧页面脚本；四方构建现一致（content $1，main $2）", "description": "诊断：不刷新页面完成 content/main 重注入" },
   "diagnoseContentBuildMismatch": { "message": "页面脚本混版（content $1，main $2，期望 $3）", "description": "诊断：content 或 main 与 Popup/SW 构建不一致" },
-  "diagnoseSwBuildUnverified": { "message": "storage 已修复，但 Service Worker 构建身份无法验证", "description": "诊断：正式构建无法验证后台身份" },
   "diagnoseSWBuildUnknown": { "message": "开发版未注入前后台构建身份", "description": "诊断：源码开发模式没有可比较的构建身份" },
   "diagnoseSWInitPending": { "message": "SW init 尚未完成 (启动 $1s 前，init $2s 前)", "description": "诊断：SW init 未完成。$1=启动秒数，$2=init秒数" },
   "diagnoseTriMatch": { "message": "三方一致: live ac-pwm = 内存 = storage = $1", "description": "诊断：三方一致。$1=触发时间" },
   "diagnoseTriMismatch": { "message": "三方校验: live=$1 内存=$2 storage=$3", "description": "诊断：三方校验。$1/$2/$3=live/内存/storage 触发时间" },
-  "diagnosePopHealedSw": { "message": "popup 已接管 storage 自愈(SW 详细状态不可用,功能正常)", "description": "诊断：popup 已自愈接管提示" },
+  "diagnoseBgRepairedSw": { "message": "后台已修复 storage，但 SW 详细状态不可用", "description": "诊断：后台修复后缺少 SW 详细状态" },
   "diagnoseGetSwFailed": { "message": "getSwStatus 后台失败: ", "description": "诊断：getSwStatus 失败前缀" },
   "diagnoseGetSwAbnormal": { "message": "getSwStatus 异常响应: ", "description": "诊断：getSwStatus 异常前缀" },
-  "diagnoseGetSwNone": { "message": "getSwStatus 无响应且 popup 未自愈 — 请在扩展管理页重新加载扩展", "description": "诊断：SW 完全无响应且未自愈" },
+  "diagnoseGetSwNone": { "message": "getSwStatus 无响应 — 请在扩展管理页重新加载扩展", "description": "诊断：SW 完全无响应" },
   "diagnoseBuildTime": { "message": "BUILD_TIME: $1", "description": "诊断：构建时间戳。$1=时间字符串" },
   "diagnoseVersion": { "message": "版本 $1 (build $2)", "description": "诊断：扩展版本+构建时间。$1=APP_VERSION,$2=BUILD_TIME" },
   "diagnoseException": { "message": "诊断异常: ", "description": "诊断：异常前缀" },
@@ -227,7 +225,6 @@
   "diagnosePwmEvidenceAfter": { "message": "修复后 PWM owner: action=$1, kind=$2, scheduled=$3, live=$4", "description": "诊断：修复后的 PWM owner" },
   "diagnosePwmEvidenceIncoherent": { "message": "PWM 现场在采集期间仍变化；本次不判定 pending/in-flight/result，请再次诊断", "description": "诊断：两次快照仍无法取得一致运行时现场" },
   "diagnosePwmEvidenceIncomplete": { "message": "PWM 现场读取不完整；本次不判定 pending/in-flight/result：$1", "description": "诊断：两次快照后仍有 storage 或 alarm 读取失败" },
-  "diagnoseSelfHealFail": { "message": "popup 侧 storage 自愈失败: ", "description": "诊断：popup 侧自愈失败前缀" },
   "diagnoseEnabledPrefix": { "message": "schedule.enabled=", "description": "诊断：enabled 显示前缀" },
   "diagnoseOn": { "message": "自动控制已启用", "description": "诊断：全局自动控制启用文案" },
   "diagnoseOff": { "message": "自动控制未启用", "description": "诊断：全局自动控制未启用文案" },
@@ -273,6 +270,5 @@
 
   "scheduleHintPinTab": { "message": "请在浏览器中固定 UST AC 页面标签页并保持开启，否则定时无法控制冷气。", "description": "提醒用户固定 AC 标签页" },
 
-  "versionMismatch": { "message": "[AC-UST] 版本不一致：manifest=$1, 源码=$2。请重载扩展。", "description": "版本不一致的 console 警告" },
-  "popupSelfHealFail": { "message": "popup 侧 storage 自愈失败: ", "description": "popup 自愈失败日志前缀" }
+  "versionMismatch": { "message": "[AC-UST] 版本不一致：manifest=$1, 源码=$2。请重载扩展。", "description": "版本不一致的 console 警告" }
 }

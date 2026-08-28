@@ -157,7 +157,6 @@
   "diagnoseInterval": { "message": "interval" },
   "diagnoseMissingTrigger": { "message": "storage missing absolute trigger time" },
   "diagnoseTriggerTime": { "message": "storage trigger time: " },
-  "diagnosePopHealed": { "message": " (popup self-healed)" },
   "diagnoseBgWriteback": { "message": " (BG writeback)" },
   "diagnosePwmExists": { "message": "ac-pwm alarm exists" },
   "diagnosePwmMissing": { "message": "ac-pwm alarm missing" },
@@ -206,15 +205,14 @@
   "diagnoseContentBuildMatch": { "message": "All four runtime builds match (content $1, main $2)" },
   "diagnoseContentBuildReinjected": { "message": "Replaced stale page scripts in place; all four builds now match (content $1, main $2)" },
   "diagnoseContentBuildMismatch": { "message": "Mixed page-script builds (content $1, main $2, expected $3)" },
-  "diagnoseSwBuildUnverified": { "message": "Storage was repaired, but the Service Worker build identity could not be verified" },
   "diagnoseSWBuildUnknown": { "message": "Development build identity was not injected" },
   "diagnoseSWInitPending": { "message": "SW init is not complete (started $1s ago, init $2s ago)" },
   "diagnoseTriMatch": { "message": "3-way match: live ac-pwm = memory = storage = $1" },
   "diagnoseTriMismatch": { "message": "3-way check: live=$1 memory=$2 storage=$3" },
-  "diagnosePopHealedSw": { "message": "popup self-healed storage (SW details unavailable, functions OK)" },
+  "diagnoseBgRepairedSw": { "message": "The background repaired storage, but detailed SW status is unavailable" },
   "diagnoseGetSwFailed": { "message": "getSwStatus background failed: " },
   "diagnoseGetSwAbnormal": { "message": "getSwStatus abnormal response: " },
-  "diagnoseGetSwNone": { "message": "getSwStatus no response & popup not self-healed — reload the extension on the extensions page" },
+  "diagnoseGetSwNone": { "message": "getSwStatus did not respond — reload the extension on the extensions page" },
   "diagnoseBuildTime": { "message": "BUILD_TIME: $1" },
   "diagnoseVersion": { "message": "version $1 (build $2)" },
   "diagnoseException": { "message": "Diagnostics error: " },
@@ -227,7 +225,6 @@
   "diagnosePwmEvidenceAfter": { "message": "Post-repair PWM owner: action=$1, kind=$2, scheduled=$3, live=$4" },
   "diagnosePwmEvidenceIncoherent": { "message": "PWM state kept changing during capture; pending/in-flight/result is not classified in this report. Run diagnostics again" },
   "diagnosePwmEvidenceIncomplete": { "message": "PWM evidence is incomplete; pending/in-flight/result is not classified: $1" },
-  "diagnoseSelfHealFail": { "message": "Popup storage self-heal failed: " },
   "diagnoseEnabledPrefix": { "message": "schedule.enabled=" },
   "diagnoseOn": { "message": "automatic control active" },
   "diagnoseOff": { "message": "automatic control inactive" },
@@ -273,6 +270,5 @@
 
   "scheduleHintPinTab": { "message": "Keep the UST AC tab pinned and open for timer control." },
 
-  "versionMismatch": { "message": "[AC-UST] Version mismatch: manifest=$1, source=$2. Please reload extension." },
-  "popupSelfHealFail": { "message": "popup self-heal storage failed: " }
+  "versionMismatch": { "message": "[AC-UST] Version mismatch: manifest=$1, source=$2. Please reload extension." }
 }

@@ -419,13 +419,28 @@ async function runTests() {
       && packagedBuildMatcher({}) === false
       && devBuildMatcher({}) === null
       && popupJs.includes("code: 'SW-BUILD-MISMATCH'")
-      && popupJs.includes("code: 'SW-BUILD-UNVERIFIED'")
-      && popupJs.includes('Number(BUILD_TIME_EPOCH_MS) > 0')
+      && popupJs.includes('const runtimeBuildCompatible = Number(buildTimeEpochMs) > 0')
+      && popupJs.includes("code: 'SW-STATUS-FAILED'")
       && popupJs.includes("action: t('diagnoseActionReloadExtension')")
       && zhCN.diagnoseSWBuildMismatch?.message.includes('构建不一致')
-      && zhCN.diagnoseSwBuildUnverified?.message.includes('构建身份无法验证')
+      && zhCN.diagnoseGetSwNone?.message.includes('重新加载扩展')
       && en.diagnoseSWBuildMismatch?.message.includes('builds differ'),
     '诊断：打包版 Popup/SW 构建一致才绿；旧 SW 缺字段、无响应或身份不同均提示重新加载扩展');
+  const retiredPopupRepairKeys = [
+    'diagnosePopHealed',
+    'diagnosePopHealedSw',
+    'diagnoseSwBuildUnverified',
+    'diagnoseSelfHealFail',
+    'popupSelfHealFail'
+  ];
+  assertPass(popupJs.includes("const pwmTriggerRepaired = repairedItems.has('pwm-trigger');")
+      && popupJs.includes("t('diagnoseBgWriteback')")
+      && popupJs.includes("t('diagnoseBgRepairedSw')")
+      && !popupJs.includes('selfHealed')
+      && retiredPopupRepairKeys.every(key => !Object.hasOwn(zhCN, key) && !Object.hasOwn(en, key))
+      && zhCN.diagnoseBgRepairedSw?.message.includes('后台已修复')
+      && en.diagnoseBgRepairedSw?.message.includes('background repaired'),
+    '诊断：pwm-trigger 修复统一归因后台，删除不可达的 Popup 自愈分支与陈旧双语键');
   const formatBuildTimeStart = popupJs.indexOf('function formatBuildTimeShort(buildTime)');
   const formatBuildTimeEnd = popupJs.indexOf('\nconst versionInfo =', formatBuildTimeStart);
   const formatBuildTimeShort = new Function(
@@ -7232,6 +7247,12 @@ return { reapplySmartSensitivityNow };`
     '\n// 独立兜底脚本只在该标记缺失时接管诊断按钮。',
     'popup diagnostic click handler'
   );
+  const popupDiagnosticFlowSource14G = extractSourceSection(
+    popupSource,
+    'async function capturePopupDiagnosticInputs(report, runtime = {}) {',
+    '\n// 独立兜底脚本只在该标记缺失时接管诊断按钮。',
+    'popup diagnostic capture and handler'
+  );
   assertPass(popupPwmPhaseScriptAt14G > 0
       && popupMainScriptAt14G > popupPwmPhaseScriptAt14G
       && popupSource.includes('classifySmartOnClock(')
@@ -7242,7 +7263,7 @@ return { reapplySmartSensitivityNow };`
       && popupSource.includes('const diagnosticBefore = diagnosticEvidence.before;')
       && popupSource.includes('const diagnosticAfter = diagnosticEvidence.after;')
       && !popupSource.includes('function projectPersistentSchedule(')
-      && !popupDiagnoseSource14G.includes("chrome.alarms.get('ac-pwm')")
+      && !popupDiagnosticFlowSource14G.includes("chrome.alarms.get('ac-pwm')")
       && !popupDiagnoseSource14G.includes('chrome.storage.local.set('),
     '14G-0: Popup 只消费后台 before/after；不保留旧 storage 自愈投影、冗余 ac-pwm 读取或直接写 storage');
   const pwmRetryHelperStart14G = popupSource.indexOf(
@@ -7412,6 +7433,9 @@ return { reapplySmartSensitivityNow };`
     '14M-2: Popup/SW build 不一致时跳过 content inspect 与 ensureDiagnostics，首现场不被混版修复');
   assertPass(popupSource.includes('const DIAGNOSTIC_MESSAGE_TIMEOUT_MS = 10000;')
       && popupSource.includes('async function sendDiagnosticRuntimeMessage(message)')
+      && captureDiagnosticInputsSource.includes(
+        'const sendMessage = runtime.sendMessage || sendDiagnosticRuntimeMessage;'
+      )
       && countOccurrences(captureDiagnosticInputsSource, 'sendMessage(') >= 4
       && /finally\s*\{[\s\S]*btnDiagnose\.disabled = false;/.test(diagnoseHandlerSource),
     '14N: 诊断后台往返有 10 秒边界，所有退出路径都恢复按钮并结束“诊断中”状态');
