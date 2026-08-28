@@ -2566,6 +2566,31 @@ function getSmartOnPwmRetryContext(scheduleSnapshot, scheduledTime, options = {}
   };
 }
 
+function classifyPwmSmartRetryAdmission(scheduleSnapshot, scheduledTime) {
+  const candidate = getSmartOnPwmRetryContext(scheduleSnapshot, scheduledTime);
+  const isTyped = candidate.hasTypedSmartOnRetry === true;
+  const clearInvalidOwner = candidate.hasStoredSmartOnRetry === true && !isTyped;
+  return Object.freeze({
+    isTyped,
+    boundaryAt: Number(candidate.boundaryAt) || 0,
+    priorError: String(candidate.priorError || ''),
+    rejectedError: clearInvalidOwner
+      ? `智能开机重试身份不匹配：${scheduleSnapshot?.pageTimerError || '原重试闹钟已失效'}；等待可信半点或新周期`
+      : '',
+    clearInvalidOwner
+  });
+}
+
+function activatePwmSmartRetryContext(admission, scheduleSnapshot, now = Date.now) {
+  const targetAt = Number(admission?.boundaryAt)
+    + Number(scheduleSnapshot?.onMinutes) * 60000;
+  const active = admission?.isTyped === true
+    && scheduleSnapshot?.smartMode?.enabled
+    && scheduleSnapshot?.pwmState === 'on'
+    && targetAt >= nextSafePageTimerTargetAt(now());
+  return Object.freeze({ ...admission, active, targetAt });
+}
+
 function getActiveSmartOnPwmRetryContext(
   scheduleSnapshot,
   liveAlarmScheduledTime = 0,
@@ -4834,20 +4859,15 @@ async function runPwmStep({
     : 0;
   const recoveringSmartCurrentCycle = recoveryPlan?.kind
     === 'recover-smart-current-cycle';
-  let hasTypedSmartOnRetry = false;
-  let retryingSmartOn = false;
-  let smartOnRetryBoundaryAt = 0;
-  let priorPwmRetryError = '';
-  let rejectedSmartOnRetryError = '';
   let pwmExceptionRecoveryContext = null;
 
-  function capturePwmExceptionRecoveryContext(smartOnWindow = undefined) {
+  function capturePwmExceptionRecoveryContext(smartRetry, smartOnWindow = undefined) {
     const triggerAt = pwmTriggerScheduledTime;
-    const retryContext = hasTypedSmartOnRetry
+    const retryContext = smartRetry.isTyped
       ? {
           hasTypedSmartOnRetry: true,
-          boundaryAt: smartOnRetryBoundaryAt,
-          priorError: priorPwmRetryError
+          boundaryAt: smartRetry.boundaryAt,
+          priorError: smartRetry.priorError
         }
       : getSmartOnPwmRetryContext(schedule, triggerAt);
     const resolvedSmartOnWindow = smartOnWindow === undefined
@@ -4874,25 +4894,29 @@ async function runPwmStep({
     };
   }
 
-  function planSmartAutomaticOn(targetAction, acIsOn) {
+  function planSmartAutomaticOn(smartRetry, targetAction, acIsOn) {
     if (!(schedule.smartMode?.enabled && targetAction === 'on')) return null;
     return planSmartModeOnWindow(schedule, {
       maxOnMinutes: SMART_MODE.ON_MAX,
       acIsOn,
-      boundaryAt: retryingSmartOn
-        ? smartOnRetryBoundaryAt
+      boundaryAt: smartRetry.active
+        ? smartRetry.boundaryAt
         : schedule.smartOnBoundaryAt,
-      triggeredBoundaryAt: retryingSmartOn
-        ? smartOnRetryBoundaryAt
+      triggeredBoundaryAt: smartRetry.active
+        ? smartRetry.boundaryAt
         : pwmTriggerScheduledTime,
-      recoverCurrentCycle: retryingSmartOn || recoveringSmartCurrentCycle
+      recoverCurrentCycle: smartRetry.active || recoveringSmartCurrentCycle
     });
   }
 
   // 提取（Fowler Extract Function）：应用智能 ON 窗口。只有 allow 路径保留
   // 原有的持久化 await；无窗口和 defer 路径同步返回，不新增控制权交还点。
-  function prepareSmartOnWindow(plan, targetAction, observations) {
-    const smartOnWindow = planSmartAutomaticOn(targetAction, observations.acIsOn);
+  function prepareSmartOnWindow(plan, targetAction, observations, smartRetry) {
+    const smartOnWindow = planSmartAutomaticOn(
+      smartRetry,
+      targetAction,
+      observations.acIsOn
+    );
     let persistence = null;
     let requiresPersistence = false;
     if (smartOnWindow?.kind === 'allow') {
@@ -5110,21 +5134,17 @@ async function runPwmStep({
     await loadScheduleFromStorage();
     if (!isAutomationAllowed()) return;
 
-    const smartOnRetryContext = getSmartOnPwmRetryContext(
+    const smartRetryAdmission = classifyPwmSmartRetryAdmission(
       schedule,
       pwmTriggerScheduledTime
     );
-    hasTypedSmartOnRetry = smartOnRetryContext.hasTypedSmartOnRetry;
-    smartOnRetryBoundaryAt = smartOnRetryContext.boundaryAt;
-    priorPwmRetryError = smartOnRetryContext.priorError;
-    if (smartOnRetryContext.hasStoredSmartOnRetry && !hasTypedSmartOnRetry) {
-      rejectedSmartOnRetryError = `智能开机重试身份不匹配：${schedule.pageTimerError || '原重试闹钟已失效'}；等待可信半点或新周期`;
+    if (smartRetryAdmission.clearInvalidOwner) {
       clearPwmRetryState();
     }
 
     // typed retry 必须保留首败时已持久化的时长/相位；新半点天气只能由真正的
     // 新周期消费，不能在旧事务恢复期间先清 marker 或改写 pwmState。
-    if (!hasTypedSmartOnRetry) {
+    if (!smartRetryAdmission.isTyped) {
       const smartPreparedBoundaryAt = currentSmartControlBoundary(pwmTriggerScheduledTime);
       await applyPreparedSmartModeDurations({
         allowActiveOnPhase: recoveringSmartCurrentCycle,
@@ -5133,18 +5153,16 @@ async function runPwmStep({
     }
     // 到这里已消费本半点天气计划。异常恢复必须以此刻的 action/on/off 为准，
     // 不能回退到 shared executor 入场时的旧 12/18 或默认 30/30。
-    capturePwmExceptionRecoveryContext();
+    capturePwmExceptionRecoveryContext(smartRetryAdmission);
     if (await abortStaleAutomation(
       automationRevision,
       'runPwmStep-weather-active-hours-paused'
     )) return;
 
-    const smartOnRetryTargetAt = smartOnRetryBoundaryAt
-      + Number(schedule.onMinutes) * 60000;
-    retryingSmartOn = hasTypedSmartOnRetry
-      && schedule.smartMode?.enabled
-      && schedule.pwmState === 'on'
-      && smartOnRetryTargetAt >= nextSafePageTimerTargetAt(Date.now());
+    const smartRetryContext = activatePwmSmartRetryContext(
+      smartRetryAdmission,
+      schedule
+    );
 
     if (recoveringSmartCurrentCycle) {
       const refreshedRecoveryPlan = planSmartRecovery(schedule, {
@@ -5162,7 +5180,7 @@ async function runPwmStep({
           `[AC扩展] 智能当前周期恢复重新规划：${refreshedRecoveryPlan.reason || '状态已变化'}`
         );
       }
-      capturePwmExceptionRecoveryContext();
+      capturePwmExceptionRecoveryContext(smartRetryContext);
       await clearPwmAlarm(automationRevision);
       if (await abortStaleAutomation(
         automationRevision,
@@ -5187,10 +5205,10 @@ async function runPwmStep({
     }
 
     applyPwmPlanState(plan);
-    if (hasTypedSmartOnRetry && priorPwmRetryError) {
-      schedule.pageTimerError = priorPwmRetryError;
-    } else if (rejectedSmartOnRetryError) {
-      schedule.pageTimerError = rejectedSmartOnRetryError;
+    if (smartRetryContext.isTyped && smartRetryContext.priorError) {
+      schedule.pageTimerError = smartRetryContext.priorError;
+    } else if (smartRetryContext.rejectedError) {
+      schedule.pageTimerError = smartRetryContext.rejectedError;
     }
 
     console.log(`[AC扩展] PWM 执行: ${targetAction}，持续 ${currentDuration} 分钟`);
@@ -5209,13 +5227,17 @@ async function runPwmStep({
     const smartOnWindowResolution = prepareSmartOnWindow(
       plan,
       targetAction,
-      observations
+      observations,
+      smartRetryContext
     );
     if (smartOnWindowResolution.requiresPersistence) {
       await smartOnWindowResolution.persistence;
     }
     plan = smartOnWindowResolution.plan;
-    capturePwmExceptionRecoveryContext(smartOnWindowResolution.smartOnWindow);
+    capturePwmExceptionRecoveryContext(
+      smartRetryContext,
+      smartOnWindowResolution.smartOnWindow
+    );
 
     if (preCheckStatus?.isOn === (targetAction === 'on')) {
       console.log(`[AC扩展] 预检：AC 已在目标状态 (${targetAction})，跳过切换，直接推进周期`);
@@ -5242,10 +5264,10 @@ async function runPwmStep({
         kind: 'smart-on-safety-skip',
         boundaryAt: deferredBoundaryAt
       });
-      if (hasTypedSmartOnRetry) {
-        schedule.pageTimerError = `本周期智能开机重试已超过安全关机余量：${priorPwmRetryError || '自动开启未确认'}；等待下一个半点`;
-      } else if (rejectedSmartOnRetryError) {
-        schedule.pageTimerError = rejectedSmartOnRetryError;
+      if (smartRetryContext.isTyped) {
+        schedule.pageTimerError = `本周期智能开机重试已超过安全关机余量：${smartRetryContext.priorError || '自动开启未确认'}；等待下一个半点`;
+      } else if (smartRetryContext.rejectedError) {
+        schedule.pageTimerError = smartRetryContext.rejectedError;
       }
       // 先把“下一半点 + marker 已清”的终态写入 storage。live alarm 若创建
       // 失败，看门狗仍可从 durable clock 恢复，不会复活旧一分钟事务。

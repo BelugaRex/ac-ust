@@ -2796,7 +2796,7 @@ async function runTests() {
     '9H: 每个 PWM 开机步骤只调用一次 toggleAC(on)，无外围点击重试循环');
   const smartWindowGuardIndex = pwmBody.indexOf('planSmartModeOnWindow(schedule');
   const smartWindowApplyIndex = pwmBody.indexOf(
-    'function prepareSmartOnWindow(plan, targetAction, observations) {'
+    'function prepareSmartOnWindow(plan, targetAction, observations, smartRetry) {'
   );
   const smartWindowApplyEnd = pwmBody.indexOf(
     'async function resolveToggleOnHold(',
@@ -2819,14 +2819,14 @@ async function runTests() {
       && smartBoundaryPersistIndex > smartWindowApplyIndex
       && smartBoundaryPersistIndex < smartWindowApplyEnd
       && countOccurrences(pwmBody, 'prepareSmartOnWindow(') === 2
-      && countOccurrences(
-        pwmBody,
-        'planSmartAutomaticOn(targetAction, observations.acIsOn)'
-      ) === 1
+      && countOccurrences(pwmBody, 'planSmartAutomaticOn(') === 2
+      && pwmBody.includes(
+        'function planSmartAutomaticOn(smartRetry, targetAction, acIsOn) {'
+      )
       && pwmBody.includes("schedule.smartMode?.enabled && targetAction === 'on'")
       && pwmBody.includes('maxOnMinutes: SMART_MODE.ON_MAX')
       && pwmBody.includes('acIsOn')
-      && pwmBody.includes('boundaryAt: retryingSmartOn')
+      && pwmBody.includes('boundaryAt: smartRetry.active')
       && pwmBody.includes(': schedule.smartOnBoundaryAt')
       && pwmBody.includes('schedule.smartOnBoundaryAt = Number(smartOnWindow.boundaryAt) || 0;')
       && pwmBody.includes("persistSchedule('runPwmStep-smart-on-boundary', { syncFromLiveAlarm: false })")
@@ -13442,12 +13442,12 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
         > retryPlanSource16.indexOf("persistSchedule('runPwmStep-retry-intent'")
       && retryPlanSource16.indexOf('setSmartOnPwmRetryState(\n      targetAction,\n      schedule.nextTriggerAt,')
         > retryPlanSource16.indexOf('createPwmAlarmFromPlan(')
-      && pwmBody.includes('getSmartOnPwmRetryContext(')
-      && pwmBody.includes('recoverCurrentCycle: retryingSmartOn')
-      && pwmBody.includes('triggeredBoundaryAt: retryingSmartOn')
+      && pwmBody.includes('classifyPwmSmartRetryAdmission(')
+      && pwmBody.includes('recoverCurrentCycle: smartRetry.active')
+      && pwmBody.includes('triggeredBoundaryAt: smartRetry.active')
       && pwmBody.includes('clearPwmRetryState()')
-      && pwmBody.includes('rejectedSmartOnRetryError')
-      && pwmBody.includes('智能开机重试身份不匹配')
+      && pwmBody.includes('smartRetryContext.rejectedError')
+      && backgroundSource.includes('智能开机重试身份不匹配')
       && pwmBody.includes('本周期智能开机重试已超过安全关机余量'),
     '16F-0B-1A: retry intent 先持久化再建 alarm、再写 canonical 时刻；失配和超窗都保留红灯而非静默延期');
   const timerOnlyRetrySchedule16 = {
@@ -13615,8 +13615,8 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
       && recoverLifecycleBody16.includes('if (!lifecycleRetryContext.hasTypedSmartOnRetry\n      && !hasOwnedSmartBoundaryWait)')
       && recoverLifecycleBody16.indexOf('const lifecycleClockAssessment = classifySmartOnClock(')
         < recoverLifecycleBody16.indexOf('await applyPreparedSmartModeDurations({')
-      && pwmBody.includes('if (!hasTypedSmartOnRetry) {')
-      && pwmBody.indexOf('if (!hasTypedSmartOnRetry) {')
+      && pwmBody.includes('if (!smartRetryAdmission.isTyped) {')
+      && pwmBody.indexOf('if (!smartRetryAdmission.isTyped) {')
         < pwmBody.indexOf('await applyPreparedSmartModeDurations({')
       && pwmBody.includes("refreshedRecoveryPlan.kind === 'recover-smart-current-cycle'")
       && recoverLifecycleBody16.includes('smartNextAction: preparedRuntimeSnapshot?.pwmState || schedule.pwmState')
@@ -14024,9 +14024,9 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
       && backgroundSource.includes('function tagPwmAutomationError(')
       && backgroundSource.includes('Object.defineProperties(taggedError, {')
       && backgroundSource.includes('wrappedError.pwmRecoveryContext = recoveryContext')
-      && pwmBody.includes('capturePwmExceptionRecoveryContext();')
+      && pwmBody.includes('capturePwmExceptionRecoveryContext(smartRetryAdmission);')
       && pwmBody.indexOf('await applyPreparedSmartModeDurations({')
-        < pwmBody.indexOf('capturePwmExceptionRecoveryContext();')
+        < pwmBody.indexOf('capturePwmExceptionRecoveryContext(smartRetryAdmission);')
       && pwmBody.includes('throw tagPwmAutomationError(')
       && pwmStepWithRecoveryBody16.includes('const postPrepareContext = error?.pwmRecoveryContext;')
       && pwmStepWithRecoveryBody16.includes('postPrepareContext?.snapshot')
@@ -16177,8 +16177,7 @@ ${alarmPwmCatchBody16}
     const order = [];
     const persisted = [];
     const run = new Function(
-      'schedule', 'hasTypedSmartOnRetry', 'priorPwmRetryError',
-      'rejectedSmartOnRetryError', 'applyPwmPlanState', 'clearPwmRetryState',
+      'schedule', 'smartRetryContext', 'applyPwmPlanState', 'clearPwmRetryState',
       'setSmartOnPwmRetryState', 'halfHourBoundaryAtOrBefore',
       'persistSchedule', 'clearPwmAlarm', 'createPwmAlarmFromPlan',
       'isAutomationOperationCurrent', 'createAlarm', 'abortStaleAutomation',
@@ -16188,9 +16187,11 @@ ${deferDurableSource16}
 };`
     )(
       testSchedule,
-      true,
-      '原半点 ON 未确认',
-      '',
+      Object.freeze({
+        isTyped: true,
+        priorError: '原半点 ON 未确认',
+        rejectedError: ''
+      }),
       plan => Object.assign(testSchedule, plan.phasePatch),
       () => {
         testSchedule.pwmRetryKind = '';
@@ -16348,8 +16349,281 @@ ${commitDurableSource16}
       && staleCommitSchedule16.enabled === false
       && staleCommitSchedule16.nextTriggerAt === 0,
     '16F-0B-1I-1: commit 建钟期间 revision 失效后仅保留已发生的 intent，不写旧失败状态覆盖新 lifecycle');
+  const smartRetryAdmissionHelperSource16 = extractSourceSection(
+    backgroundSource,
+    'function classifyPwmSmartRetryAdmission(scheduleSnapshot, scheduledTime) {',
+    '\n\nfunction activatePwmSmartRetryContext(',
+    'smart retry admission helper'
+  );
+  const loadSmartRetryAdmissionHelper16 = getSmartOnPwmRetryContext => new Function(
+    'getSmartOnPwmRetryContext', 'Object',
+    `${smartRetryAdmissionHelperSource16}; return classifyPwmSmartRetryAdmission;`
+  )(getSmartOnPwmRetryContext, Object);
+  const smartRetryAdmissionCallerSource16 = extractSourceSection(
+    pwmBody,
+    '    const smartRetryAdmission = classifyPwmSmartRetryAdmission(',
+    '\n\n    if (recoveringSmartCurrentCycle) {',
+    'runPwmStep smart retry admission caller'
+  );
+  const runSmartRetryAdmissionBlock16 = ({ retryContext, pageTimerError = '' }) => {
+    const schedule = {
+      smartMode: { enabled: true },
+      pwmState: 'on',
+      pageTimerError,
+      pwmRetryKind: retryContext.hasStoredSmartOnRetry ? 'smart-on' : '',
+      pwmRetryBoundaryAt: retryContext.boundaryAt || 0,
+      pwmRetryScheduledAt: delayedSmartBoundary16 + 60_000
+    };
+    const trace = [];
+    const weatherOptions = [];
+    const classificationCalls = [];
+    const activationCalls = [];
+    const classifyPwmSmartRetryAdmission = loadSmartRetryAdmissionHelper16((
+      scheduleSnapshot,
+      scheduledTime
+    ) => {
+      trace.push('classify');
+      classificationCalls.push({ scheduleSnapshot, scheduledTime });
+      return { ...retryContext };
+    });
+    const run = new Function(
+      'schedule', 'pwmTriggerScheduledTime', 'classifyPwmSmartRetryAdmission',
+      'clearPwmRetryState', 'currentSmartControlBoundary',
+      'applyPreparedSmartModeDurations', 'recoveringSmartCurrentCycle',
+      'capturePwmExceptionRecoveryContext', 'abortStaleAutomation',
+      'automationRevision', 'activatePwmSmartRetryContext',
+      `return async function runSmartRetryAdmission() {
+${smartRetryAdmissionCallerSource16}
+return { smartRetryAdmission, smartRetryContext };
+};`
+    )(
+      schedule,
+      delayedSmartBoundary16 + 60_000,
+      classifyPwmSmartRetryAdmission,
+      () => {
+        trace.push('clear');
+        schedule.pwmRetryKind = '';
+        schedule.pwmRetryBoundaryAt = 0;
+        schedule.pwmRetryScheduledAt = 0;
+      },
+      () => delayedSmartBoundary16,
+      async options => {
+        trace.push('weather');
+        weatherOptions.push({ ...options });
+      },
+      false,
+      () => { trace.push('capture'); },
+      async (_revision, reason) => {
+        trace.push(`abort:${reason}`);
+        return false;
+      },
+      41,
+      (admission, scheduleSnapshot) => {
+        trace.push('activate');
+        const context = Object.freeze({
+          ...admission,
+          active: admission.isTyped,
+          targetAt: 0
+        });
+        activationCalls.push({ admission, scheduleSnapshot, context });
+        return context;
+      }
+    );
+    return run().then(result => ({
+      result,
+      schedule,
+      trace,
+      weatherOptions,
+      classificationCalls,
+      activationCalls
+    }));
+  };
+  const emptySmartRetryAdmission16 = await runSmartRetryAdmissionBlock16({
+    retryContext: {
+      hasStoredSmartOnRetry: false,
+      hasTypedSmartOnRetry: false,
+      boundaryAt: 0,
+      priorError: ''
+    }
+  });
+  const typedSmartRetryAdmission16 = await runSmartRetryAdmissionBlock16({
+    retryContext: {
+      hasStoredSmartOnRetry: true,
+      hasTypedSmartOnRetry: true,
+      boundaryAt: delayedSmartBoundary16,
+      priorError: 'typed-prior-error'
+    },
+    pageTimerError: 'typed-prior-error'
+  });
+  const mismatchedSmartRetryAdmission16 = await runSmartRetryAdmissionBlock16({
+    retryContext: {
+      hasStoredSmartOnRetry: true,
+      hasTypedSmartOnRetry: false,
+      boundaryAt: 0,
+      priorError: ''
+    },
+    pageTimerError: 'mismatched-owner-error'
+  });
+  assertPass(emptySmartRetryAdmission16.trace.join(',')
+        === 'classify,weather,capture,abort:runPwmStep-weather-active-hours-paused,activate'
+      && emptySmartRetryAdmission16.result.smartRetryAdmission.isTyped === false
+      && emptySmartRetryAdmission16.result.smartRetryAdmission.rejectedError === ''
+      && emptySmartRetryAdmission16.result.smartRetryAdmission.clearInvalidOwner === false
+      && Object.isFrozen(emptySmartRetryAdmission16.result.smartRetryAdmission)
+      && emptySmartRetryAdmission16.classificationCalls[0]?.scheduleSnapshot
+        === emptySmartRetryAdmission16.schedule
+      && emptySmartRetryAdmission16.classificationCalls[0]?.scheduledTime
+        === delayedSmartBoundary16 + 60_000
+      && emptySmartRetryAdmission16.activationCalls[0]?.admission
+        === emptySmartRetryAdmission16.result.smartRetryAdmission
+      && emptySmartRetryAdmission16.activationCalls[0]?.scheduleSnapshot
+        === emptySmartRetryAdmission16.schedule
+      && emptySmartRetryAdmission16.result.smartRetryContext
+        === emptySmartRetryAdmission16.activationCalls[0]?.context
+      && Object.isFrozen(emptySmartRetryAdmission16.result.smartRetryContext)
+      && emptySmartRetryAdmission16.weatherOptions[0]?.boundaryAt
+        === delayedSmartBoundary16
+      && emptySmartRetryAdmission16.weatherOptions[0]?.allowActiveOnPhase === false,
+    '16F-0B-1J: 无 retry owner 时消费当前天气，再 capture 与复核门禁');
+  assertPass(typedSmartRetryAdmission16.trace.join(',')
+        === 'classify,capture,abort:runPwmStep-weather-active-hours-paused,activate'
+      && typedSmartRetryAdmission16.result.smartRetryAdmission.isTyped === true
+      && typedSmartRetryAdmission16.result.smartRetryAdmission.boundaryAt
+        === delayedSmartBoundary16
+      && typedSmartRetryAdmission16.result.smartRetryAdmission.priorError
+        === 'typed-prior-error'
+      && typedSmartRetryAdmission16.result.smartRetryAdmission.clearInvalidOwner === false
+      && Object.isFrozen(typedSmartRetryAdmission16.result.smartRetryAdmission)
+      && typedSmartRetryAdmission16.activationCalls[0]?.admission
+        === typedSmartRetryAdmission16.result.smartRetryAdmission
+      && typedSmartRetryAdmission16.activationCalls[0]?.scheduleSnapshot
+        === typedSmartRetryAdmission16.schedule
+      && typedSmartRetryAdmission16.weatherOptions.length === 0,
+    '16F-0B-1J-1: typed retry 保留原 owner/error 并跳过新天气消费');
+  assertPass(mismatchedSmartRetryAdmission16.trace.join(',')
+        === 'classify,clear,weather,capture,abort:runPwmStep-weather-active-hours-paused,activate'
+      && mismatchedSmartRetryAdmission16.schedule.pwmRetryKind === ''
+      && mismatchedSmartRetryAdmission16.result.smartRetryAdmission.isTyped === false
+      && mismatchedSmartRetryAdmission16.result.smartRetryAdmission.clearInvalidOwner === true
+      && mismatchedSmartRetryAdmission16.result.smartRetryAdmission.rejectedError
+        === '智能开机重试身份不匹配：mismatched-owner-error；等待可信半点或新周期',
+    '16F-0B-1J-2: retry identity 失配先清 owner、保留拒绝错误，再消费天气与 capture');
+
+  const smartRetryActivationHelperSource16 = extractSourceSection(
+    backgroundSource,
+    'function activatePwmSmartRetryContext(admission, scheduleSnapshot, now = Date.now) {',
+    '\n\nfunction getActiveSmartOnPwmRetryContext(',
+    'smart retry activation helper'
+  );
+  const loadSmartRetryActivationHelper16 = nextSafePageTimerTargetAt => new Function(
+    'nextSafePageTimerTargetAt', 'Date', 'Object',
+    `${smartRetryActivationHelperSource16}; return activatePwmSmartRetryContext;`
+  )(nextSafePageTimerTargetAt, Date, Object);
+  const runSmartRetryActivationBlock16 = ({
+    hasTypedSmartOnRetry,
+    smartModeEnabled = true,
+    pwmState = 'on',
+    boundaryAt = delayedSmartBoundary16,
+    onMinutes = 23,
+    nowMs = delayedSmartBoundary16 + 60_000,
+    safeDelayMs = 5 * 60_000
+  }) => {
+    let dateReadCount = 0;
+    const activatePwmSmartRetryContext = loadSmartRetryActivationHelper16(
+      now => now + safeDelayMs
+    );
+    const result = activatePwmSmartRetryContext(
+      { isTyped: hasTypedSmartOnRetry, boundaryAt },
+      {
+        smartMode: { enabled: smartModeEnabled },
+        pwmState,
+        onMinutes
+      },
+      () => {
+        dateReadCount += 1;
+        return nowMs;
+      }
+    );
+    return { result, dateReadCount };
+  };
+  const inactiveSmartRetry16 = runSmartRetryActivationBlock16({
+    hasTypedSmartOnRetry: false
+  });
+  const disabledTypedSmartRetry16 = runSmartRetryActivationBlock16({
+    hasTypedSmartOnRetry: true,
+    smartModeEnabled: false
+  });
+  const offPhaseTypedSmartRetry16 = runSmartRetryActivationBlock16({
+    hasTypedSmartOnRetry: true,
+    pwmState: 'off'
+  });
+  const activeSmartRetry16 = runSmartRetryActivationBlock16({
+    hasTypedSmartOnRetry: true
+  });
+  const exactSafeTargetSmartRetry16 = runSmartRetryActivationBlock16({
+    hasTypedSmartOnRetry: true,
+    nowMs: delayedSmartBoundary16 + 18 * 60_000
+  });
+  const expiredSmartRetry16 = runSmartRetryActivationBlock16({
+    hasTypedSmartOnRetry: true,
+    nowMs: delayedSmartBoundary16 + 18 * 60_000 + 1
+  });
+  assertPass(inactiveSmartRetry16.result.active === false
+      && inactiveSmartRetry16.dateReadCount === 0
+      && disabledTypedSmartRetry16.result.active === false
+      && disabledTypedSmartRetry16.dateReadCount === 0
+      && offPhaseTypedSmartRetry16.result.active === false
+      && offPhaseTypedSmartRetry16.dateReadCount === 0
+      && activeSmartRetry16.result.active === true
+      && activeSmartRetry16.result.targetAt
+        === delayedSmartBoundary16 + 23 * 60_000
+      && activeSmartRetry16.dateReadCount === 1
+      && exactSafeTargetSmartRetry16.result.active === true
+      && exactSafeTargetSmartRetry16.dateReadCount === 1
+      && expiredSmartRetry16.result.active === false
+      && expiredSmartRetry16.dateReadCount === 1
+      && Object.isFrozen(activeSmartRetry16.result),
+    '16F-0B-1J-3: retry activation 仅在 typed+enabled+ON 时读钟；安全线含等号，过期拒绝');
+
+  const classifyFailure16 = new Error('smart-retry-classify-failed');
+  let thrownClassifyFailure16 = null;
+  try {
+    loadSmartRetryAdmissionHelper16(() => { throw classifyFailure16; })(
+      { marker: 'classification-schedule' },
+      delayedSmartBoundary16
+    );
+  } catch (error) {
+    thrownClassifyFailure16 = error;
+  }
+  const activationNowFailure16 = new Error('smart-retry-now-failed');
+  let thrownActivationNowFailure16 = null;
+  try {
+    loadSmartRetryActivationHelper16(() => 0)(
+      { isTyped: true, boundaryAt: delayedSmartBoundary16 },
+      { smartMode: { enabled: true }, pwmState: 'on', onMinutes: 23 },
+      () => { throw activationNowFailure16; }
+    );
+  } catch (error) {
+    thrownActivationNowFailure16 = error;
+  }
+  const activationDeadlineFailure16 = new Error('smart-retry-deadline-failed');
+  let thrownActivationDeadlineFailure16 = null;
+  try {
+    loadSmartRetryActivationHelper16(() => { throw activationDeadlineFailure16; })(
+      { isTyped: true, boundaryAt: delayedSmartBoundary16 },
+      { smartMode: { enabled: true }, pwmState: 'on', onMinutes: 23 },
+      () => delayedSmartBoundary16
+    );
+  } catch (error) {
+    thrownActivationDeadlineFailure16 = error;
+  }
+  assertPass(thrownClassifyFailure16 === classifyFailure16
+      && thrownActivationNowFailure16 === activationNowFailure16
+      && thrownActivationDeadlineFailure16 === activationDeadlineFailure16,
+    '16F-0B-1J-4: retry 分类、时钟与安全线依赖抛错均保持原异常 identity');
+
   const smartAutomaticOnStart16 = pwmBody.indexOf(
-    'function planSmartAutomaticOn(targetAction, acIsOn) {'
+    'function planSmartAutomaticOn(smartRetry, targetAction, acIsOn) {'
   );
   const smartAutomaticOnEnd16 = pwmBody.indexOf(
     'function prepareSmartOnWindow(',
@@ -16366,20 +16640,21 @@ ${commitDurableSource16}
     recoveringSmartCurrentCycle = false
   }) => {
     let captured = null;
+    const smartRetry = Object.freeze({
+      active: retryingSmartOn,
+      boundaryAt: smartOnRetryBoundaryAt
+    });
     const schedule = {
       smartMode: { enabled: true },
       smartOnBoundaryAt: delayedSmartBoundary16,
       onMinutes: 21
     };
     const planSmartAutomaticOn = new Function(
-      'schedule', 'retryingSmartOn', 'smartOnRetryBoundaryAt',
-      'pwmTriggerScheduledTime', 'recoveringSmartCurrentCycle',
+      'schedule', 'pwmTriggerScheduledTime', 'recoveringSmartCurrentCycle',
       'SMART_MODE', 'planSmartModeOnWindow',
       `${smartAutomaticOnSource16}; return planSmartAutomaticOn;`
     )(
       schedule,
-      retryingSmartOn,
-      smartOnRetryBoundaryAt,
       pwmTriggerScheduledTime,
       recoveringSmartCurrentCycle,
       { ON_MAX: 25 },
@@ -16388,7 +16663,7 @@ ${commitDurableSource16}
         return { kind: 'allow' };
       }
     );
-    planSmartAutomaticOn('on', false);
+    planSmartAutomaticOn(smartRetry, 'on', false);
     return captured;
   };
   const typedRetryContext16 = runSmartAutomaticOnContext16({
@@ -16411,7 +16686,7 @@ ${commitDurableSource16}
 
   const smartOnWindowBlock16 = extractSourceSection(
     pwmBody,
-    'function prepareSmartOnWindow(plan, targetAction, observations) {',
+    'function prepareSmartOnWindow(plan, targetAction, observations, smartRetry) {',
     'async function resolveToggleOnHold(',
     'runPwmStep smart ON window block'
   );
@@ -16425,6 +16700,8 @@ ${commitDurableSource16}
     const trace = [];
     const captures = [];
     const persistCalls = [];
+    const smartRetry = Object.freeze({ active: false, boundaryAt: 0 });
+    const plannedSmartRetries = [];
     let activeObservations = null;
     let callerPlan = null;
     const captureSmartOnWindow = capturedWindow => {
@@ -16437,7 +16714,8 @@ ${commitDurableSource16}
       `${smartOnWindowBlock16}; return prepareSmartOnWindow;`
     )(
       schedule,
-      (targetAction, acIsOn) => {
+      (receivedSmartRetry, targetAction, acIsOn) => {
+        plannedSmartRetries.push(receivedSmartRetry);
         trace.push(`plan:${targetAction}:${acIsOn}`);
         return smartOnWindow;
       },
@@ -16457,7 +16735,12 @@ ${commitDurableSource16}
     const run = async (plan, targetAction, observations) => {
       activeObservations = observations;
       callerPlan = plan;
-      const resolution = prepareSmartOnWindow(plan, targetAction, observations);
+      const resolution = prepareSmartOnWindow(
+        plan,
+        targetAction,
+        observations,
+        smartRetry
+      );
       if (resolution.requiresPersistence) {
         await resolution.persistence;
       }
@@ -16477,6 +16760,8 @@ ${commitDurableSource16}
       trace,
       captures,
       persistCalls,
+      smartRetry,
+      plannedSmartRetries,
       callerPlan: () => callerPlan
     };
   };
@@ -16497,6 +16782,7 @@ ${commitDurableSource16}
       && noSmartOnWindow16.persistCalls.length === 0
       && noSmartOnWindow16.schedule.smartOnBoundaryAt === 999
       && noSmartOnWindow16.captures[0] === null
+      && noSmartOnWindow16.plannedSmartRetries[0] === noSmartOnWindow16.smartRetry
       && noSmartOnResult16.plan === untouchedSmartOnPlan16
       && noSmartOnResult16.smartOnWindow === null
       && noSmartOnResult16.requiresPersistence === false
@@ -16650,7 +16936,12 @@ ${commitDurableSource16}
     observedPlans = []
   }) => new Function(
     'prepareSmartOnWindow', 'capturePwmExceptionRecoveryContext', 'observePlan',
-    `return async function runSmartOnWindowCaller(plan, targetAction, observations) {
+    `return async function runSmartOnWindowCaller(
+  plan,
+  targetAction,
+  observations,
+  smartRetryContext
+) {
 try {
 ${smartOnWindowCaller16}
 return plan;
@@ -16659,17 +16950,28 @@ return plan;
 }
 };`
   )(
-    (plan, targetAction, observations) => {
-      trace.push({ kind: 'prepare', plan, targetAction, observations });
+    (plan, targetAction, observations, smartRetryContext) => {
+      trace.push({
+        kind: 'prepare',
+        plan,
+        targetAction,
+        observations,
+        smartRetryContext
+      });
       return resolution;
     },
-    smartOnWindow => {
-      trace.push({ kind: 'capture', smartOnWindow });
+    (smartRetryContext, smartOnWindow) => {
+      trace.push({ kind: 'capture', smartRetryContext, smartOnWindow });
       if (captureError) throw captureError;
     },
     plan => observedPlans.push(plan)
   );
   const wiredSyncSmartOnTrace16 = [];
+  const wiredSmartRetryContext16 = Object.freeze({
+    active: true,
+    isTyped: true,
+    boundaryAt: delayedSmartBoundary16
+  });
   const wiredSyncSmartOnPlan16 = { marker: 'wired-sync-plan' };
   const wiredSyncSmartOnWindow16 = { kind: 'defer', marker: 'wired-sync-window' };
   const runWiredSyncSmartOn16 = createSmartOnWindowCallerHarness16({
@@ -16685,7 +16987,8 @@ return plan;
   const wiredSyncSmartOnPending16 = runWiredSyncSmartOn16(
     untouchedSmartOnPlan16,
     'on',
-    wiredSyncSmartOnObservations16
+    wiredSyncSmartOnObservations16,
+    wiredSmartRetryContext16
   );
   const wiredSyncImmediateKinds16 = wiredSyncSmartOnTrace16.map(item => item.kind).join(',');
   const wiredSyncSmartOnResult16 = await wiredSyncSmartOnPending16;
@@ -16694,6 +16997,8 @@ return plan;
       && wiredSyncSmartOnTrace16[0]?.plan === untouchedSmartOnPlan16
       && wiredSyncSmartOnTrace16[0]?.targetAction === 'on'
       && wiredSyncSmartOnTrace16[0]?.observations === wiredSyncSmartOnObservations16
+      && wiredSyncSmartOnTrace16[0]?.smartRetryContext === wiredSmartRetryContext16
+      && wiredSyncSmartOnTrace16[1]?.smartRetryContext === wiredSmartRetryContext16
       && wiredSyncSmartOnTrace16[1]?.smartOnWindow === wiredSyncSmartOnWindow16,
     '16F-0B-2H: production caller 同步路径零 await，接回 helper plan 后传同一 window 给 capture');
 
@@ -16716,7 +17021,8 @@ return plan;
   const wiredAsyncSmartOnPending16 = runWiredAsyncSmartOn16(
     untouchedSmartOnPlan16,
     'on',
-    { acIsOn: false }
+    { acIsOn: false },
+    wiredSmartRetryContext16
   );
   assertPass(wiredAsyncSmartOnTrace16.map(item => item.kind).join(',') === 'prepare',
     '16F-0B-2I: production caller allow 路径等待 persistence，完成前不 capture');
@@ -16747,7 +17053,8 @@ return plan;
     await runWiredCallerCaptureFailure16(
       untouchedSmartOnPlan16,
       'on',
-      { acIsOn: false }
+      { acIsOn: false },
+      wiredSmartRetryContext16
     );
   } catch (error) {
     thrownWiredCallerCaptureFailure16 = error;
