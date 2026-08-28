@@ -5015,6 +5015,75 @@ async function runPwmStep({
     console.warn(`[AC扩展] PWM 未提交，保持 pwmState=${schedule.pwmState}，1分钟后重试`);
   }
 
+  function prepareSmartCommitPlan(plan, targetAction) {
+    let smartLocalExceptionBoundaryAt = 0;
+    let smartLocalExceptionKind = '';
+    clearPwmRetryState();
+    schedule.pageTimerError = '';
+
+    // 智能模式：把下一 ON 触发对齐到半点，30 分钟周期锚定半点。
+    if (schedule.smartMode?.enabled) {
+      const recordedOffAt = Number(schedule.pageTimerTargetAt);
+      const observedCommitAt = Date.now();
+      const smartAlignNow = targetAction === 'off'
+        ? Math.max(
+            observedCommitAt,
+            Number.isFinite(recordedOffAt) && recordedOffAt > 0
+              ? recordedOffAt
+              : 0
+          )
+        : observedCommitAt;
+      const notBeforeAt = smartAlignNow + SMART_MODE.MIN_OFF_MINUTES * 60000;
+      const activeSmartBoundaryAt = Number(schedule.smartOnBoundaryAt);
+      const expectedSmartOffAt = smartModePageTimerTargetAt(
+        Number(schedule.onMinutes),
+        smartAlignNow,
+        activeSmartBoundaryAt
+      );
+      const retainedSmartBoundaryAt = expectedSmartOffAt
+          >= nextSafePageTimerTargetAt(smartAlignNow)
+        ? activeSmartBoundaryAt
+        : 0;
+      const safeDelayPlan = targetAction === 'off'
+        ? planSmartOnAfterConfirmedOff(schedule, {
+            now: smartAlignNow,
+            confirmedOffAt: smartAlignNow,
+            minOffMinutes: SMART_MODE.MIN_OFF_MINUTES,
+            ...(retainedSmartBoundaryAt > 0
+              ? { boundaryAt: retainedSmartBoundaryAt }
+              : {})
+          })
+        : null;
+      if (safeDelayPlan?.kind === 'smart-on-safe-delay'
+          || safeDelayPlan?.kind === 'smart-on-safety-skip') {
+        // 保留原 commit/proofAction，只改下一时钟；否则会丢掉 OFF proof clear。
+        plan.nextTriggerAt = safeDelayPlan.nextTriggerAt;
+        plan.delayMinutes = safeDelayPlan.delayMinutes;
+        if (plan.phasePatch) {
+          plan.phasePatch.nextTriggerAt = safeDelayPlan.nextTriggerAt;
+        }
+        smartLocalExceptionBoundaryAt = safeDelayPlan.boundaryAt;
+        smartLocalExceptionKind = safeDelayPlan.kind;
+        schedule.smartOnBoundaryAt = smartLocalExceptionBoundaryAt;
+        setSmartOnPwmRetryState('on', safeDelayPlan.nextTriggerAt, {
+          kind: smartLocalExceptionKind,
+          boundaryAt: smartLocalExceptionBoundaryAt
+        });
+        const actionLabel = smartLocalExceptionKind === 'smart-on-safe-delay'
+          ? '压缩机保护后补开'
+          : '本周期窗口不足，跳到下一半点重新评估';
+        console.warn(
+          `[AC扩展] 恢复关机晚于原截止：保留 ${new Date(smartLocalExceptionBoundaryAt).toLocaleTimeString()}`
+          + ` 所有权，${actionLabel} ${new Date(safeDelayPlan.nextTriggerAt).toLocaleTimeString()}`
+        );
+      } else {
+        alignSmartModeNextTrigger(plan, smartAlignNow, { notBeforeAt });
+      }
+    }
+
+    return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };
+  }
+
   return waitUntil((async () => {
   try {
     await loadScheduleFromStorage();
@@ -5234,70 +5303,12 @@ async function runPwmStep({
       throw new Error(`未处理的 PWM plan: ${plan.kind}/${plan.reason}`);
     }
 
-    let smartLocalExceptionBoundaryAt = 0;
-    let smartLocalExceptionKind = '';
-    clearPwmRetryState();
-    schedule.pageTimerError = '';
-
-    // 智能模式：把下一 ON 触发对齐到半点，30 分钟周期锚定半点。
-    if (schedule.smartMode?.enabled) {
-      const recordedOffAt = Number(schedule.pageTimerTargetAt);
-      const observedCommitAt = Date.now();
-      const smartAlignNow = targetAction === 'off'
-        ? Math.max(
-            observedCommitAt,
-            Number.isFinite(recordedOffAt) && recordedOffAt > 0
-              ? recordedOffAt
-              : 0
-          )
-        : observedCommitAt;
-      const notBeforeAt = smartAlignNow + SMART_MODE.MIN_OFF_MINUTES * 60000;
-      const activeSmartBoundaryAt = Number(schedule.smartOnBoundaryAt);
-      const expectedSmartOffAt = smartModePageTimerTargetAt(
-        Number(schedule.onMinutes),
-        smartAlignNow,
-        activeSmartBoundaryAt
-      );
-      const retainedSmartBoundaryAt = expectedSmartOffAt
-          >= nextSafePageTimerTargetAt(smartAlignNow)
-        ? activeSmartBoundaryAt
-        : 0;
-      const safeDelayPlan = targetAction === 'off'
-        ? planSmartOnAfterConfirmedOff(schedule, {
-            now: smartAlignNow,
-            confirmedOffAt: smartAlignNow,
-            minOffMinutes: SMART_MODE.MIN_OFF_MINUTES,
-            ...(retainedSmartBoundaryAt > 0
-              ? { boundaryAt: retainedSmartBoundaryAt }
-              : {})
-          })
-        : null;
-      if (safeDelayPlan?.kind === 'smart-on-safe-delay'
-          || safeDelayPlan?.kind === 'smart-on-safety-skip') {
-        // 保留原 commit/proofAction，只改下一时钟；否则会丢掉 OFF proof clear。
-        plan.nextTriggerAt = safeDelayPlan.nextTriggerAt;
-        plan.delayMinutes = safeDelayPlan.delayMinutes;
-        if (plan.phasePatch) {
-          plan.phasePatch.nextTriggerAt = safeDelayPlan.nextTriggerAt;
-        }
-        smartLocalExceptionBoundaryAt = safeDelayPlan.boundaryAt;
-        smartLocalExceptionKind = safeDelayPlan.kind;
-        schedule.smartOnBoundaryAt = smartLocalExceptionBoundaryAt;
-        setSmartOnPwmRetryState('on', safeDelayPlan.nextTriggerAt, {
-          kind: smartLocalExceptionKind,
-          boundaryAt: smartLocalExceptionBoundaryAt
-        });
-        const actionLabel = smartLocalExceptionKind === 'smart-on-safe-delay'
-          ? '压缩机保护后补开'
-          : '本周期窗口不足，跳到下一半点重新评估';
-        console.warn(
-          `[AC扩展] 恢复关机晚于原截止：保留 ${new Date(smartLocalExceptionBoundaryAt).toLocaleTimeString()}`
-          + ` 所有权，${actionLabel} ${new Date(safeDelayPlan.nextTriggerAt).toLocaleTimeString()}`
-        );
-      } else {
-        alignSmartModeNextTrigger(plan, smartAlignNow, { notBeforeAt });
-      }
-    }
+    const smartCommit = prepareSmartCommitPlan(plan, targetAction);
+    plan = smartCommit.plan;
+    const {
+      smartLocalExceptionBoundaryAt,
+      smartLocalExceptionKind
+    } = smartCommit;
 
     applyPwmPlanState(plan);
   if (await abortStaleAutomation(

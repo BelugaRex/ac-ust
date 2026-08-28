@@ -13061,8 +13061,367 @@ return { reapplySmartSensitivityNow };`
       && reloadedFailedTransaction16.pwmRetryBoundaryAt === 0
       && reloadedFailedTransaction16.pwmRetryScheduledAt === 0,
     '16F-0B-1C: 动态执行 首轮 toggle 失败→JSON 重载→22:31 typed retry→原 22:30 截止 commit，并在终态清 marker');
+
+  const smartCommitPreparationSource16 = extractSourceSection(
+    pwmBody,
+    'function prepareSmartCommitPlan(plan, targetAction) {',
+    '\n\n  return waitUntil(',
+    'runPwmStep smart commit preparation'
+  );
+  const createSmartCommitPreparationHarness16 = ({
+    initialSchedule,
+    nowMs,
+    plannerError = null
+  }) => {
+    const schedule = structuredClone(initialSchedule);
+    const trace = [];
+    const warnings = [];
+    const markers = [];
+    const plannerCalls = [];
+    const alignCalls = [];
+    let dateReadCount = 0;
+    class FixedDate16 extends Date {
+      static now() {
+        dateReadCount += 1;
+        return nowMs;
+      }
+    }
+    const execute = new Function(
+      'schedule', 'SMART_MODE', 'clearPwmRetryState',
+      'smartModePageTimerTargetAt', 'nextSafePageTimerTargetAt',
+      'planSmartOnAfterConfirmedOff', 'setSmartOnPwmRetryState',
+      'alignSmartModeNextTrigger', 'Date', 'console',
+      `${smartCommitPreparationSource16}
+return prepareSmartCommitPlan;`
+    )(
+      schedule,
+      smartMode.SMART_MODE,
+      () => {
+        trace.push('clear');
+        schedule.pwmRetryKind = '';
+        schedule.pwmRetryBoundaryAt = 0;
+        schedule.pwmRetryScheduledAt = 0;
+      },
+      pwmPhase.smartModePageTimerTargetAt,
+      pwmPhase.nextSafePageTimerTargetAt,
+      (candidateSchedule, options) => {
+        trace.push('planner');
+        plannerCalls.push({
+          candidateSchedule,
+          scheduleSnapshot: {
+            pageTimerError: candidateSchedule.pageTimerError,
+            pwmRetryKind: candidateSchedule.pwmRetryKind,
+            pwmRetryBoundaryAt: candidateSchedule.pwmRetryBoundaryAt,
+            pwmRetryScheduledAt: candidateSchedule.pwmRetryScheduledAt
+          },
+          options: { ...options }
+        });
+        if (plannerError) throw plannerError;
+        return pwmPhase.planSmartOnAfterConfirmedOff(candidateSchedule, options);
+      },
+      (action, scheduledAt, options = {}) => {
+        trace.push('set');
+        const marker = { action, scheduledAt, options: { ...options } };
+        markers.push(marker);
+        schedule.pwmRetryKind = options.kind || 'smart-on';
+        schedule.pwmRetryBoundaryAt = Number(options.boundaryAt) || 0;
+        schedule.pwmRetryScheduledAt = Number(scheduledAt) || 0;
+      },
+      (candidatePlan, alignedAt, options) => {
+        trace.push('align');
+        alignCalls.push({ candidatePlan, alignedAt, options: { ...options } });
+        pwmPhase.alignSmartModeNextTrigger(candidatePlan, alignedAt, options);
+      },
+      FixedDate16,
+      {
+        warn(message) {
+          trace.push('warn');
+          warnings.push(message);
+        }
+      }
+    );
+    return {
+      execute,
+      schedule,
+      trace,
+      warnings,
+      markers,
+      plannerCalls,
+      alignCalls,
+      dateReadCount: () => dateReadCount
+    };
+  };
+  const commitAt16 = (hour, minute, second = 0, millisecond = 0) => (
+    new Date(2026, 7, 29, hour, minute, second, millisecond).getTime()
+  );
+  const baseCommitSchedule16 = {
+    enabled: true,
+    smartMode: { enabled: true },
+    onMinutes: 23,
+    offMinutes: 7,
+    smartOnBoundaryAt: 0,
+    pageTimerTargetAt: 0,
+    pageTimerError: 'old-error',
+    pwmRetryKind: 'old-kind',
+    pwmRetryBoundaryAt: 111,
+    pwmRetryScheduledAt: 222
+  };
+
+  const disabledCommitPreparation16 = createSmartCommitPreparationHarness16({
+    initialSchedule: {
+      ...baseCommitSchedule16,
+      smartMode: { enabled: false }
+    },
+    nowMs: commitAt16(13, 10)
+  });
+  const disabledCommitPlan16 = {
+    kind: 'commit',
+    reason: 'ac-already-off',
+    nextAction: 'on',
+    nextTriggerAt: commitAt16(13, 17),
+    delayMinutes: 7,
+    proofAction: 'clear',
+    phasePatch: { pwmState: 'off', nextTriggerAt: commitAt16(13, 17) }
+  };
+  const disabledCommitPlanBefore16 = structuredClone(disabledCommitPlan16);
+  const disabledCommitResult16 = disabledCommitPreparation16.execute(
+    disabledCommitPlan16,
+    'off'
+  );
+  assertPass(disabledCommitResult16.plan === disabledCommitPlan16
+      && JSON.stringify(disabledCommitPlan16) === JSON.stringify(disabledCommitPlanBefore16)
+      && disabledCommitResult16.smartLocalExceptionBoundaryAt === 0
+      && disabledCommitResult16.smartLocalExceptionKind === ''
+      && disabledCommitPreparation16.trace.join(',') === 'clear'
+      && disabledCommitPreparation16.dateReadCount() === 0
+      && disabledCommitPreparation16.schedule.pageTimerError === ''
+      && disabledCommitPreparation16.schedule.pwmRetryKind === ''
+      && disabledCommitPreparation16.schedule.pwmRetryBoundaryAt === 0
+      && disabledCommitPreparation16.schedule.pwmRetryScheduledAt === 0,
+    '16F-0B-1C-1: 非智能 commit 仅先清 retry/error，不读时钟、不改 plan，并返回原对象');
+
+  const smartOnCommitPreparation16 = createSmartCommitPreparationHarness16({
+    initialSchedule: baseCommitSchedule16,
+    nowMs: commitAt16(13, 10)
+  });
+  const smartOnCommitPlan16 = {
+    kind: 'commit',
+    reason: 'page-timer-confirmed',
+    nextAction: 'off',
+    nextTriggerAt: commitAt16(13, 33),
+    delayMinutes: 23,
+    proofAction: 'clear',
+    phasePatch: { pwmState: 'off', nextTriggerAt: commitAt16(13, 33) }
+  };
+  const smartOnCommitPlanBefore16 = structuredClone(smartOnCommitPlan16);
+  const smartOnCommitResult16 = smartOnCommitPreparation16.execute(
+    smartOnCommitPlan16,
+    'on'
+  );
+  assertPass(smartOnCommitResult16.plan === smartOnCommitPlan16
+      && JSON.stringify(smartOnCommitPlan16) === JSON.stringify(smartOnCommitPlanBefore16)
+      && smartOnCommitPreparation16.trace.join(',') === 'clear,align'
+      && smartOnCommitPreparation16.dateReadCount() === 1
+      && smartOnCommitPreparation16.plannerCalls.length === 0
+      && smartOnCommitPreparation16.alignCalls[0]?.alignedAt === commitAt16(13, 10)
+      && smartOnCommitPreparation16.alignCalls[0]?.options?.notBeforeAt
+        === commitAt16(13, 15),
+    '16F-0B-1C-2: 智能 ON commit 只采样一次时钟并走无修改 align，不调用 OFF planner');
+
+  const ordinaryOffCommitPreparation16 = createSmartCommitPreparationHarness16({
+    initialSchedule: baseCommitSchedule16,
+    nowMs: commitAt16(13, 10)
+  });
+  const ordinaryOffCommitPlan16 = {
+    kind: 'commit',
+    reason: 'ac-already-off',
+    nextAction: 'on',
+    nextTriggerAt: commitAt16(13, 17),
+    delayMinutes: 7,
+    proofAction: 'clear',
+    phasePatch: { pwmState: 'off', nextTriggerAt: commitAt16(13, 17) }
+  };
+  const ordinaryOffCommitResult16 = ordinaryOffCommitPreparation16.execute(
+    ordinaryOffCommitPlan16,
+    'off'
+  );
+  assertPass(ordinaryOffCommitResult16.plan === ordinaryOffCommitPlan16
+      && ordinaryOffCommitPreparation16.trace.join(',') === 'clear,planner,align'
+      && ordinaryOffCommitPreparation16.dateReadCount() === 1
+      && ordinaryOffCommitPlan16.nextTriggerAt === commitAt16(13, 30)
+      && ordinaryOffCommitPlan16.phasePatch.nextTriggerAt === commitAt16(13, 30)
+      && ordinaryOffCommitPlan16.delayMinutes === 20
+      && ordinaryOffCommitPlan16.reason === 'ac-already-off'
+      && ordinaryOffCommitPlan16.proofAction === 'clear'
+      && ordinaryOffCommitResult16.smartLocalExceptionBoundaryAt === 0
+      && ordinaryOffCommitResult16.smartLocalExceptionKind === '',
+    '16F-0B-1C-3: 普通智能 OFF commit 用一次时钟把 plan/phasePatch 对齐同一最近半点');
+
+  const runLateOffCommitPreparation16 = ({ onMinutes, offMinutes }) => {
+    const boundaryAt = commitAt16(19, 0);
+    const recordedOffAt = commitAt16(18, 56, 0, 17);
+    const harness = createSmartCommitPreparationHarness16({
+      initialSchedule: {
+        ...baseCommitSchedule16,
+        onMinutes,
+        offMinutes,
+        smartOnBoundaryAt: boundaryAt,
+        pageTimerTargetAt: recordedOffAt
+      },
+      nowMs: commitAt16(18, 55)
+    });
+    const plan = {
+      kind: 'commit',
+      reason: 'ac-already-off',
+      nextAction: 'on',
+      nextTriggerAt: commitAt16(19, 3),
+      delayMinutes: 8,
+      proofAction: 'clear',
+      phasePatch: { pwmState: 'off', nextTriggerAt: commitAt16(19, 3) }
+    };
+    const result = harness.execute(plan, 'off');
+    return { harness, plan, result, boundaryAt, recordedOffAt };
+  };
+  const safeDelayCommitPreparation16 = runLateOffCommitPreparation16({
+    onMinutes: 23,
+    offMinutes: 7
+  });
+  const safetySkipCommitPreparation16 = runLateOffCommitPreparation16({
+    onMinutes: 30,
+    offMinutes: 30
+  });
+  assertPass(safeDelayCommitPreparation16.result.plan === safeDelayCommitPreparation16.plan
+      && safeDelayCommitPreparation16.harness.trace.join(',') === 'clear,planner,set,warn'
+      && safeDelayCommitPreparation16.harness.dateReadCount() === 1
+      && safeDelayCommitPreparation16.harness.plannerCalls[0]?.options?.now
+        === safeDelayCommitPreparation16.recordedOffAt
+      && safeDelayCommitPreparation16.harness.plannerCalls[0]?.options?.confirmedOffAt
+        === safeDelayCommitPreparation16.recordedOffAt
+      && safeDelayCommitPreparation16.harness.plannerCalls[0]?.scheduleSnapshot?.pageTimerError
+        === ''
+      && safeDelayCommitPreparation16.harness.plannerCalls[0]?.scheduleSnapshot?.pwmRetryKind
+        === ''
+      && safeDelayCommitPreparation16.harness.plannerCalls[0]?.scheduleSnapshot?.pwmRetryBoundaryAt
+        === 0
+      && safeDelayCommitPreparation16.harness.plannerCalls[0]?.scheduleSnapshot?.pwmRetryScheduledAt
+        === 0
+      && safeDelayCommitPreparation16.result.smartLocalExceptionBoundaryAt
+        === safeDelayCommitPreparation16.boundaryAt
+      && safeDelayCommitPreparation16.result.smartLocalExceptionKind
+        === 'smart-on-safe-delay'
+      && safeDelayCommitPreparation16.harness.schedule.smartOnBoundaryAt
+        === safeDelayCommitPreparation16.result.smartLocalExceptionBoundaryAt
+      && safeDelayCommitPreparation16.plan.nextTriggerAt
+        === commitAt16(19, 1, 0, 17)
+      && safeDelayCommitPreparation16.plan.delayMinutes === 5
+      && safeDelayCommitPreparation16.plan.phasePatch.nextTriggerAt
+        === safeDelayCommitPreparation16.plan.nextTriggerAt
+      && safeDelayCommitPreparation16.plan.reason === 'ac-already-off'
+      && safeDelayCommitPreparation16.plan.proofAction === 'clear'
+      && safeDelayCommitPreparation16.harness.markers[0]?.action === 'on'
+      && safeDelayCommitPreparation16.harness.markers[0]?.scheduledAt
+        === safeDelayCommitPreparation16.plan.nextTriggerAt
+      && safeDelayCommitPreparation16.harness.markers[0]?.options?.kind
+        === 'smart-on-safe-delay'
+      && safeDelayCommitPreparation16.harness.warnings[0]?.includes('压缩机保护后补开'),
+    '16F-0B-1C-4: 晚关以 recorded OFF 规划 19:01 补开，保留 commit proof 并按 clear→planner→set→warn 落 marker');
+  assertPass(safetySkipCommitPreparation16.result.plan === safetySkipCommitPreparation16.plan
+      && safetySkipCommitPreparation16.harness.trace.join(',') === 'clear,planner,set,warn'
+      && safetySkipCommitPreparation16.harness.dateReadCount() === 1
+      && safetySkipCommitPreparation16.result.smartLocalExceptionBoundaryAt
+        === safetySkipCommitPreparation16.boundaryAt
+      && safetySkipCommitPreparation16.result.smartLocalExceptionKind
+        === 'smart-on-safety-skip'
+      && safetySkipCommitPreparation16.harness.schedule.smartOnBoundaryAt
+        === safetySkipCommitPreparation16.result.smartLocalExceptionBoundaryAt
+      && safetySkipCommitPreparation16.plan.nextTriggerAt === commitAt16(19, 30)
+      && safetySkipCommitPreparation16.plan.delayMinutes
+        === (commitAt16(19, 30) - safetySkipCommitPreparation16.recordedOffAt) / 60000
+      && safetySkipCommitPreparation16.plan.phasePatch.nextTriggerAt
+        === safetySkipCommitPreparation16.plan.nextTriggerAt
+      && safetySkipCommitPreparation16.harness.markers[0]?.options?.kind
+        === 'smart-on-safety-skip'
+      && safetySkipCommitPreparation16.harness.warnings[0]?.includes('本周期窗口不足'),
+    '16F-0B-1C-5: 30/30 零运行窗口跳到 19:30，并保留 19:00 typed owner 与 safety-skip marker');
+
+  const plannerFailure16 = new Error('smart-off-planner-failed');
+  const failedCommitPreparation16 = createSmartCommitPreparationHarness16({
+    initialSchedule: baseCommitSchedule16,
+    nowMs: commitAt16(18, 55),
+    plannerError: plannerFailure16
+  });
+  let thrownCommitPreparation16 = null;
+  try {
+    failedCommitPreparation16.execute({
+      kind: 'commit',
+      reason: 'ac-already-off',
+      nextAction: 'on',
+      nextTriggerAt: commitAt16(19, 0),
+      phasePatch: { pwmState: 'off', nextTriggerAt: commitAt16(19, 0) }
+    }, 'off');
+  } catch (error) {
+    thrownCommitPreparation16 = error;
+  }
+  assertPass(thrownCommitPreparation16 === plannerFailure16
+      && failedCommitPreparation16.trace.join(',') === 'clear,planner'
+      && failedCommitPreparation16.schedule.pageTimerError === ''
+      && failedCommitPreparation16.schedule.pwmRetryKind === ''
+      && failedCommitPreparation16.markers.length === 0
+      && failedCommitPreparation16.warnings.length === 0,
+    '16F-0B-1C-6: planner 抛错仍保持先清旧 retry/error，异常前不写新 marker 或 warning');
+
+  const smartCommitCallAt16 = pwmBody.indexOf(
+    'const smartCommit = prepareSmartCommitPlan(plan, targetAction);'
+  );
+  const smartCommitOuterApplyAt16 = pwmBody.indexOf(
+    '    applyPwmPlanState(plan);',
+    smartCommitCallAt16
+  );
+  const smartCommitCallerSource16 = smartCommitCallAt16 >= 0
+      && smartCommitOuterApplyAt16 > smartCommitCallAt16
+    ? pwmBody.slice(smartCommitCallAt16, smartCommitOuterApplyAt16)
+    : '';
+  const wiredSmartCommitPlan16 = { marker: 'wired-plan' };
+  const wiredSmartCommit16 = new Function(
+    'prepareSmartCommitPlan', 'plan', 'targetAction',
+    `${smartCommitCallerSource16}
+return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
+  )(
+    () => ({
+      plan: wiredSmartCommitPlan16,
+      smartLocalExceptionBoundaryAt: 12345,
+      smartLocalExceptionKind: 'smart-on-safe-delay'
+    }),
+    { marker: 'old-plan' },
+    'off'
+  );
+  assertPass(countOccurrences(pwmBody, 'prepareSmartCommitPlan(') === 2
+      && countOccurrences(smartCommitPreparationSource16, 'Date.now()') === 1
+      && smartCommitCallAt16 > pwmBody.indexOf("if (plan.kind !== 'commit')")
+      && smartCommitOuterApplyAt16 > smartCommitCallAt16
+      && wiredSmartCommit16.plan === wiredSmartCommitPlan16
+      && wiredSmartCommit16.smartLocalExceptionBoundaryAt === 12345
+      && wiredSmartCommit16.smartLocalExceptionKind === 'smart-on-safe-delay'
+      && countOccurrences(
+        pwmBody.slice(
+          smartCommitOuterApplyAt16,
+          pwmBody.indexOf('    console.log(`[AC扩展] PWM 下一阶段:', smartCommitOuterApplyAt16)
+        ),
+        'applyPwmPlanState(plan);'
+      ) === 1
+      && pwmBody.indexOf("persistSchedule('runPwmStep-commit-intent'", smartCommitCallAt16)
+        > smartCommitOuterApplyAt16
+      && pwmBody.indexOf('createPwmAlarmFromPlan(plan,', smartCommitCallAt16)
+        > smartCommitOuterApplyAt16
+      && pwmBody.indexOf('if (smartLocalExceptionBoundaryAt > 0)', smartCommitCallAt16)
+        > pwmBody.indexOf('createPwmAlarmFromPlan(plan,', smartCommitCallAt16),
+    '16F-0B-1C-7: smart commit helper 定义/调用唯一，并保持 prepare→apply→durable intent→建钟→canonical marker 顺序');
+
   const retryPlanStart16 = pwmBody.indexOf('async function resolveRetryPlan(');
-  const retryPlanEnd16 = pwmBody.indexOf('\n\n  return waitUntil(', retryPlanStart16);
+  const retryPlanEnd16 = pwmBody.indexOf(
+    '\n\n  function prepareSmartCommitPlan(',
+    retryPlanStart16
+  );
   const retryPlanSource16 = retryPlanStart16 >= 0 && retryPlanEnd16 > retryPlanStart16
     ? pwmBody.slice(retryPlanStart16, retryPlanEnd16)
     : '';
@@ -15893,7 +16252,7 @@ ${deferDurableSource16}
       && staleDeferredFailure16.schedule.enabled === false
       && staleDeferredFailure16.schedule.nextTriggerAt === 0,
     '16F-0B-1H-2: smart defer 建钟期间 revision 失效后零失败写回，不覆盖新 lifecycle sentinel');
-  const commitDurableStart16 = pwmBody.lastIndexOf('    applyPwmPlanState(plan);');
+  const commitDurableStart16 = smartCommitOuterApplyAt16;
   const commitDurableEnd16 = pwmBody.indexOf(
     '    console.log(`[AC扩展] PWM 下一阶段:',
     commitDurableStart16
