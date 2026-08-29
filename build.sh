@@ -21,6 +21,7 @@ RUNTIME_FILES=(
   popup-diagnostic-fallback.js
   i18n.js
   billing-helpers.js
+  ac-page-contract.js
   sync-helpers.js
   schedule-mutations.js
   pwm-retry.js

@@ -5,6 +5,11 @@
 // ============================================================
 
 (() => {
+  const {
+    AC_SWITCH_SELECTOR,
+    findUniqueACControl,
+    isACSwitchDisabled
+  } = window.__AC_EXTENSION_PAGE_CONTRACT__;
   const PAGE_BUILD_TIME = 'dev';
   const PAGE_BUILD_TIME_EPOCH_MS = 0;
   const PAGE_MAIN_LISTENER_ID = `${PAGE_BUILD_TIME_EPOCH_MS || 'dev'}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -263,11 +268,7 @@
   // 页面把开关设 disabled 的条件 = (余额<=0 || 余额百分比<=0 || 加载中) && free_mode===null，
   // free mode 时 DOM 无 disabled 标记，本函数返回 false，仍可正常点击开机。
   function isACSwitchDisabledInPageWorld(sw) {
-    if (!sw) return false;
-    return sw.disabled === true
-      || sw.hasAttribute?.('disabled')
-      || sw.getAttribute?.('aria-disabled') === 'true'
-      || String(sw.className || '').includes('ant-switch-disabled');
+    return isACSwitchDisabled(sw);
   }
 
   function createAcStateAttemptGuard(attempt) {
@@ -571,35 +572,7 @@
   }
 
   function findACSwitchInPageWorld() {
-    return findUniqueACControlInPageWorld(
-      'button.ant-switch[role="switch"], .ui.toggle.checkbox input[type="checkbox"]'
-    );
-  }
-
-  function findUniqueACControlInPageWorld(selector) {
-    const labels = Array.from(document.querySelectorAll('small, label, span, div'))
-      .filter(label => label.children.length === 0 && isACStatusLabelInPageWorld(label.textContent));
-    const matches = new Set();
-
-    for (const label of labels) {
-      let container = label.parentElement;
-      for (let depth = 0; depth < 10 && container; depth++) {
-        const candidates = Array.from(container.querySelectorAll(selector));
-        if (candidates.length === 1) {
-          matches.add(candidates[0]);
-          break;
-        }
-        // 向上只会扩大范围；当前语义区已含多个候选时不再猜测。
-        if (candidates.length > 1) break;
-        container = container.parentElement;
-      }
-    }
-
-    return matches.size === 1 ? matches.values().next().value : null;
-  }
-
-  function isACStatusLabelInPageWorld(text) {
-    return /^air\s*conditioning\s+status$/i.test(String(text || '').trim());
+    return findUniqueACControl(document, AC_SWITCH_SELECTOR);
   }
 
   function clickElementOnceInPageWorld(element) {

@@ -18,14 +18,14 @@
     "contentScripts": [
       {
         "matches": ["https://w5.ab.ust.hk/njggt/app/home"],
-        "js": ["page-confirm.js"],
+        "js": ["ac-page-contract.js", "page-confirm.js"],
         "run_at": "document_start",
         "world": "MAIN",
         "all_frames": false
       },
       {
         "matches": ["https://w5.ab.ust.hk/njggt/app/home"],
-        "js": ["billing-helpers.js", "content.js"],
+        "js": ["billing-helpers.js", "ac-page-contract.js", "content.js"],
         "run_at": "document_idle",
         "all_frames": false
       }
@@ -43,11 +43,11 @@
     "dynamicInjections": [
       {
         "source": "background.js",
-        "files": ["billing-helpers.js", "content.js"]
+        "files": ["billing-helpers.js", "ac-page-contract.js", "content.js"]
       },
       {
         "source": "background.js",
-        "files": ["page-confirm.js"]
+        "files": ["ac-page-contract.js", "page-confirm.js"]
       }
     ]
   },
@@ -91,6 +91,36 @@
         {
           "file": "popup.js",
           "symbols": ["estimateBalanceExhaustion", "isBalanceEstimateUrgent"]
+        }
+      ]
+    },
+    {
+      "name": "AC page semantics",
+      "provider": {
+        "file": "ac-page-contract.js",
+        "symbols": [
+          "AC_SWITCH_SELECTOR",
+          "isACStatusLabel",
+          "findUniqueACControl",
+          "isACSwitchDisabled"
+        ]
+      },
+      "consumers": [
+        {
+          "file": "page-confirm.js",
+          "symbols": [
+            "AC_SWITCH_SELECTOR",
+            "findUniqueACControl",
+            "isACSwitchDisabled"
+          ]
+        },
+        {
+          "file": "content.js",
+          "symbols": [
+            "AC_SWITCH_SELECTOR",
+            "findUniqueACControl",
+            "isACSwitchDisabled"
+          ]
         }
       ]
     },
@@ -303,6 +333,7 @@
       "popup-diagnostic-fallback.js",
       "i18n.js",
       "billing-helpers.js",
+      "ac-page-contract.js",
       "sync-helpers.js",
       "schedule-mutations.js",
       "pwm-retry.js",
@@ -338,6 +369,18 @@
         "\\bwindow\\s*\\.",
         "\\blocalStorage\\b",
         "\\bfetch\\s*\\("
+      ]
+    },
+    {
+      "name": "AC page semantics remain browser independent",
+      "files": ["ac-page-contract.js"],
+      "forbidPatterns": [
+        "\\bchrome\\s*\\.",
+        "\\bdocument\\s*\\.",
+        "\\bwindow\\s*\\.",
+        "\\blocalStorage\\b",
+        "\\bfetch\\s*\\(",
+        "\\bimportScripts\\s*\\("
       ]
     },
     {

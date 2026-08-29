@@ -9,6 +9,12 @@
 // 后旧页面可能保留 JS global，却已失去旧 extension runtime 的消息接收端。
 (() => {
 
+const {
+  AC_SWITCH_SELECTOR,
+  findUniqueACControl,
+  isACSwitchDisabled
+} = self.__AC_EXTENSION_PAGE_CONTRACT__;
+
 const CONTENT_BUILD_TIME = 'dev';
 const CONTENT_BUILD_TIME_EPOCH_MS = 0;
 const CONTENT_LISTENER_ID = `${CONTENT_BUILD_TIME_EPOCH_MS || 'dev'}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -231,11 +237,7 @@ function getACStatus() {
 
 // 基于 DOM 的 disabled 状态判定，而非余额数值：free mode 下余额为 0 也不禁用。
 function isAntACSwitchDisabled(sw) {
-  if (!sw) return false;
-  return sw.disabled === true
-    || sw.hasAttribute?.('disabled')
-    || sw.getAttribute?.('aria-disabled') === 'true'
-    || String(sw.className || '').includes('ant-switch-disabled');
+  return isACSwitchDisabled(sw);
 }
 
 // 提取（Fowler Extract Function）：读取已经 AC 语义唯一定位的旧版开关。
@@ -653,34 +655,7 @@ async function typeOnceIntoPickerInput(picker, input, value) {
 
 // ----- 查找 AC 开关 DOM 元素 -----
 function findACSwitch() {
-  return findUniqueACControl(
-    'button.ant-switch[role="switch"], .ui.toggle.checkbox input[type="checkbox"]'
-  );
-}
-
-function findUniqueACControl(selector) {
-  const labels = Array.from(document.querySelectorAll('small, label, span, div'))
-    .filter(label => label.children.length === 0 && isACStatusLabel(label.textContent));
-  const matches = new Set();
-
-  for (const label of labels) {
-    let container = label.parentElement;
-    for (let depth = 0; depth < 10 && container; depth++) {
-      const candidates = Array.from(container.querySelectorAll(selector));
-      if (candidates.length === 1) {
-        matches.add(candidates[0]);
-        break;
-      }
-      if (candidates.length > 1) break;
-      container = container.parentElement;
-    }
-  }
-
-  return matches.size === 1 ? matches.values().next().value : null;
-}
-
-function isACStatusLabel(text) {
-  return /^air\s*conditioning\s+status$/i.test(String(text || '').trim());
+  return findUniqueACControl(document, AC_SWITCH_SELECTOR);
 }
 
 // ----- 设置页面自带的定时关闭（作为保险）-----

@@ -5,6 +5,7 @@ import path from 'node:path';
 import url from 'node:url';
 import syncHelpers from '../sync-helpers.js';
 import billingHelpers from '../billing-helpers.js';
+import acPageContract from '../ac-page-contract.js';
 import scheduleMutations from '../schedule-mutations.js';
 import pwmRetry from '../pwm-retry.js';
 import pwmPhase from '../pwm-phase.js';
@@ -12,6 +13,7 @@ import smartMode from '../smart-mode.js';
 import recoveryCoordinator from '../recovery-coordinator.js';
 import { runPwmPhaseCases } from './pwm-phase-cases.mjs';
 import { runPwmRetryCases } from './pwm-retry-cases.mjs';
+import { runAcPageContractCases } from './ac-page-contract-cases.mjs';
 import { runScheduleMutationCases } from './schedule-mutation-cases.mjs';
 import { runSmartModeCases } from './smart-mode-cases.mjs';
 import { runRecoveryPolicyCases } from './recovery-policy-cases.mjs';
@@ -69,6 +71,9 @@ async function runTests() {
 
   beginSuite('PWM retry 纯决策', '\n\n=== PWM retry kind 纯决策接口 ===\n');
   runPwmRetryCases(assertPass);
+
+  beginSuite('AC 页面纯契约', '\n\n=== AC 页面纯契约 ===\n');
+  runAcPageContractCases(assertPass);
 
   beginSuite('Schedule mutation 纯接口', '\n\n=== Schedule mutation 纯接口 ===\n');
   runScheduleMutationCases(assertPass);
@@ -536,6 +541,7 @@ async function runTests() {
   const distRequiredFiles = [
     'manifest.json', 'background.js', 'content.js', 'page-confirm.js',
     'popup.html', 'popup.js', 'popup-diagnostic-fallback.js', 'i18n.js',
+    'ac-page-contract.js',
     'sync-helpers.js', 'pwm-phase.js', 'smart-recovery.js',
     'interval-recovery.js', 'recovery-coordinator.js', 'smart-mode.js',
     'billing-helpers.js',
@@ -2242,18 +2248,6 @@ async function runTests() {
       && scopedWindow9G.prompt === originalPrompt9G
       && !pageConfirmSource.includes('__AC_EXTENSION_DIALOG_PATCHED__'),
     '9G-1: 原生对话框只在单次 AC click 调用栈内接管，成功或异常后均恢复页面函数');
-  const pageSwitchLocatorSource9G = extractSourceSection(
-    pageConfirmSource,
-    'function findACSwitchInPageWorld() {',
-    '\n\n  function clickElementOnceInPageWorld(element) {',
-    'main-world unique AC switch locator'
-  );
-  const contentSwitchLocatorSource9G = extractSourceSection(
-    contentSource,
-    'function findACSwitch() {',
-    '\n\n// ----- 设置页面自带的定时关闭（作为保险）-----',
-    'isolated-world unique AC switch locator'
-  );
   const makeSemanticSwitchDocument9G = (groups = []) => {
     const labels = groups.map(({ text = 'Air Conditioning Status', controls }) => {
       const container = {
@@ -2266,14 +2260,6 @@ async function runTests() {
       querySelectorAll() { return labels; }
     };
   };
-  const loadPageSwitchLocator9G = document => new Function(
-    'document',
-    `${pageSwitchLocatorSource9G}; return findACSwitchInPageWorld;`
-  )(document);
-  const loadContentSwitchLocator9G = document => new Function(
-    'document',
-    `${contentSwitchLocatorSource9G}; return findACSwitch;`
-  )(document);
   const semanticSwitch9G = { id: 'semantic-ac-switch' };
   const otherSwitch9G = { id: 'other-switch' };
   const uniqueSwitchDocument9G = makeSemanticSwitchDocument9G([
@@ -2287,15 +2273,23 @@ async function runTests() {
     { controls: [otherSwitch9G] }
   ]);
   const unlabeledSwitchDocument9G = makeSemanticSwitchDocument9G([]);
-  assertPass(loadPageSwitchLocator9G(uniqueSwitchDocument9G)() === semanticSwitch9G
-      && loadContentSwitchLocator9G(uniqueSwitchDocument9G)() === semanticSwitch9G
-      && loadPageSwitchLocator9G(ambiguousSwitchDocument9G)() === null
-      && loadContentSwitchLocator9G(ambiguousSwitchDocument9G)() === null
-      && loadPageSwitchLocator9G(duplicateSwitchDocument9G)() === null
-      && loadContentSwitchLocator9G(duplicateSwitchDocument9G)() === null
-      && loadPageSwitchLocator9G(unlabeledSwitchDocument9G)() === null
-      && loadContentSwitchLocator9G(unlabeledSwitchDocument9G)() === null,
-    '9G-1A: 主世界与隔离世界只接受 Air Conditioning Status 语义区内唯一开关，歧义或无标签均失败关闭');
+  assertPass(pageConfirmSource.includes(
+        '} = window.__AC_EXTENSION_PAGE_CONTRACT__;'
+      )
+      && contentSource.includes(
+        '} = self.__AC_EXTENSION_PAGE_CONTRACT__;'
+      )
+      && pageConfirmSource.includes(
+        'return findUniqueACControl(document, AC_SWITCH_SELECTOR);'
+      )
+      && contentSource.includes(
+        'return findUniqueACControl(document, AC_SWITCH_SELECTOR);'
+      )
+      && acPageContract.findUniqueACControl(uniqueSwitchDocument9G) === semanticSwitch9G
+      && acPageContract.findUniqueACControl(ambiguousSwitchDocument9G) === null
+      && acPageContract.findUniqueACControl(duplicateSwitchDocument9G) === null
+      && acPageContract.findUniqueACControl(unlabeledSwitchDocument9G) === null,
+    '9G-1A: 两个执行世界共用语义唯一定位；歧义或无标签均失败关闭');
   // 主世界 toggle 握手异常也必须回包：否则隔离世界静默等满超时拿到 null，
   // 误触发后台刷新恢复。隔离世界超时也放宽到 90s 容纳慢异步 confirm + 最多 3 次点击。
   assertPass(pageConfirmSource.includes('result = await requestACState(true, notAfterAt);')
@@ -2313,29 +2307,24 @@ async function runTests() {
   assertPass(pageConfirmSource.includes('isACSwitchDisabledInPageWorld')
       && ensureBody.includes('current.disabled')
       && ensureBody.includes('beforeClick.disabled')
-      && pageConfirmSource.includes('ant-switch-disabled'),
-    '9G-2: 主世界识别禁用开关（disabled 属性 / ant-switch-disabled 类），点击前拦截而非徒劳点击');
+      && pageConfirmSource.includes('return isACSwitchDisabled(sw);'),
+    '9G-2: 主世界委托共享 disabled 语义，点击前拦截禁用开关而非徒劳点击');
   assertPass(contentSource.includes('isAntACSwitchDisabled')
       && contentSource.includes("disabled, source: 'ant-switch'")
-      && contentSource.includes('ant-switch-disabled'),
-    '9G-3: 隔离世界同样上报 disabled 标记，供诊断面板提示余额不足/加载中');
-  const disabledHelperStart = pageConfirmSource.indexOf('function isACSwitchDisabledInPageWorld(');
-  const disabledHelperEnd = pageConfirmSource.indexOf('\n  async function requestACState', disabledHelperStart);
-  const disabledHelperSource = disabledHelperStart >= 0 && disabledHelperEnd > disabledHelperStart
-    ? pageConfirmSource.slice(disabledHelperStart, disabledHelperEnd)
-    : '';
-  const loadDisabledHelper = new Function(`${disabledHelperSource}; return { isACSwitchDisabledInPageWorld };`);
-  const { isACSwitchDisabledInPageWorld } = loadDisabledHelper();
+      && contentSource.includes('return isACSwitchDisabled(sw);'),
+    '9G-3: 隔离世界委托同一 disabled 语义并上报标记，供诊断提示余额不足/加载中');
   const enabledSwitchMock = { disabled: false, className: 'ant-switch', hasAttribute: () => false, getAttribute: () => null };
   const disabledPropMock = { disabled: true, className: 'ant-switch', hasAttribute: () => false, getAttribute: () => null };
   const disabledClassMock = { disabled: false, className: 'ant-switch ant-switch-disabled', hasAttribute: () => false, getAttribute: () => null };
   const disabledAttrMock = { disabled: false, className: 'ant-switch', hasAttribute: (a) => a === 'disabled', getAttribute: () => null };
-  assertPass(isACSwitchDisabledInPageWorld(null) === false
-      && isACSwitchDisabledInPageWorld(enabledSwitchMock) === false
-      && isACSwitchDisabledInPageWorld(disabledPropMock) === true
-      && isACSwitchDisabledInPageWorld(disabledClassMock) === true
-      && isACSwitchDisabledInPageWorld(disabledAttrMock) === true,
-    '9G-4: isACSwitchDisabledInPageWorld 实测：disabled 属性 / ant-switch-disabled 类 / aria-disabled 均判禁用');
+  const disabledAriaMock = { disabled: false, className: 'ant-switch', hasAttribute: () => false, getAttribute: (a) => a === 'aria-disabled' ? 'true' : null };
+  assertPass(acPageContract.isACSwitchDisabled(null) === false
+      && acPageContract.isACSwitchDisabled(enabledSwitchMock) === false
+      && acPageContract.isACSwitchDisabled(disabledPropMock) === true
+      && acPageContract.isACSwitchDisabled(disabledClassMock) === true
+      && acPageContract.isACSwitchDisabled(disabledAttrMock) === true
+      && acPageContract.isACSwitchDisabled(disabledAriaMock) === true,
+    '9G-4: 共享 disabled 契约实测：属性 / AntD class / aria-disabled 均判禁用');
   const attemptGuardStart = pageConfirmSource.indexOf(
     'function createAcStateAttemptGuard(attempt)'
   );
@@ -3434,11 +3423,13 @@ async function runTests() {
       && normalizeContentLocale('zh-CN') === 'zh_CN'
       && normalizeContentLocale() === 'zh_CN',
     '9O-3: content locale 语义验证覆盖 en-US/en-GB、zh-CN 与空语言兜底');
-  assertPass(manifest.content_scripts?.[1]?.js?.join(',') === 'billing-helpers.js,content.js'
+  assertPass(manifest.content_scripts?.[0]?.js?.join(',') === 'ac-page-contract.js,page-confirm.js'
+      && manifest.content_scripts?.[1]?.js?.join(',') === 'billing-helpers.js,ac-page-contract.js,content.js'
       && manifest.content_scripts?.every(script => script.matches?.[0] === 'https://w5.ab.ust.hk/njggt/app/home')
       && manifest.content_scripts?.every(script => script.all_frames === false)
-      && backgroundSource.includes("files: ['billing-helpers.js', 'content.js']"),
-    '9O-4: manifest 只向顶层精确 home 注入，且兜底注入保证余额 helper 先于 content script');
+      && backgroundSource.includes("files: ['billing-helpers.js', 'ac-page-contract.js', 'content.js']")
+      && backgroundSource.includes("files: ['ac-page-contract.js', 'page-confirm.js']"),
+    '9O-4: manifest 只向顶层精确 home 注入，两个世界均在适配器前加载共享页面契约');
   assertPass(contentSource.includes("const AC_HOME_URL = 'https://w5.ab.ust.hk/njggt/app/home';")
       && contentSource.includes('return window.top === window && window.location.href === AC_HOME_URL;')
       && contentSource.includes('if (isACOperation && !isExactACHomeContext())')
@@ -4070,6 +4061,7 @@ async function runTests() {
   };
   contentWindow.top = contentWindow;
   const contentWorld = {};
+  contentWorld.__AC_EXTENSION_PAGE_CONTRACT__ = acPageContract;
   const executeContentScript = new Function(
     'self',
     'window',
@@ -4103,6 +4095,7 @@ async function runTests() {
   const mainRuntimeListeners9Z = new Map();
   let mainRuntimeListenerRemoveCount9Z = 0;
   const mainRuntimeWindow9Z = {
+    __AC_EXTENSION_PAGE_CONTRACT__: acPageContract,
     addEventListener(type, listener) {
       if (!mainRuntimeListeners9Z.has(type)) mainRuntimeListeners9Z.set(type, new Set());
       mainRuntimeListeners9Z.get(type).add(listener);
@@ -4219,6 +4212,7 @@ async function runTests() {
       }
     };
     const window = {
+      __AC_EXTENSION_PAGE_CONTRACT__: acPageContract,
       confirm: () => false,
       alert() {},
       prompt: (_message, defaultValue = '') => defaultValue,
@@ -4443,8 +4437,8 @@ async function runTests() {
       && recoveredReadStatus.balanceMinutes === 156
       && staleReceiverSendCount >= 2
       && staleReceiverInjections.length === 2
-      && staleReceiverInjections[0]?.files?.join(',') === 'billing-helpers.js,content.js'
-      && staleReceiverInjections[1]?.files?.join(',') === 'page-confirm.js'
+      && staleReceiverInjections[0]?.files?.join(',') === 'billing-helpers.js,ac-page-contract.js,content.js'
+      && staleReceiverInjections[1]?.files?.join(',') === 'ac-page-contract.js,page-confirm.js'
       && staleReceiverInjections[1]?.world === 'MAIN',
     '9Z-2: full 状态读取遇到 Receiving end 不存在时原页注入接收端并重试，且不刷新或导航');
 

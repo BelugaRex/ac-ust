@@ -27,14 +27,14 @@
   "content_scripts": [
     {
       "matches": ["https://w5.ab.ust.hk/njggt/app/home"],
-      "js": ["page-confirm.js"],
+      "js": ["ac-page-contract.js", "page-confirm.js"],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": false
     },
     {
       "matches": ["https://w5.ab.ust.hk/njggt/app/home"],
-      "js": ["billing-helpers.js", "content.js"],
+      "js": ["billing-helpers.js", "ac-page-contract.js", "content.js"],
       "run_at": "document_idle",
       "all_frames": false
     }

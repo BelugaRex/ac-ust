@@ -6642,13 +6642,13 @@ async function injectContentScriptsIntoExactHome(tabId) {
     if (!await getExactACHomeTab(tabId)) return false;
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['billing-helpers.js', 'content.js'],
+      files: ['billing-helpers.js', 'ac-page-contract.js', 'content.js'],
       injectImmediately: true
     });
     if (!await getExactACHomeTab(tabId)) return false;
     await chrome.scripting.executeScript({
       target: { tabId },
-      files: ['page-confirm.js'],
+      files: ['ac-page-contract.js', 'page-confirm.js'],
       world: 'MAIN',
       injectImmediately: true
     });
