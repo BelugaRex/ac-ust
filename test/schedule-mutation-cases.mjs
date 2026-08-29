@@ -1,13 +1,17 @@
 import scheduleMutations from '../schedule-mutations.js';
 
-const { setScheduleNextTrigger, setSchedulePwmClockIntent } = scheduleMutations;
+const {
+  setScheduleNextTrigger,
+  setSchedulePwmClockIntent,
+  replaceSchedulePwmRetryState
+} = scheduleMutations;
 
 export function runScheduleMutationCases(assertPass) {
   assertPass(
     Object.keys(scheduleMutations).join(',')
-      === 'setScheduleNextTrigger,setSchedulePwmClockIntent'
+      === 'setScheduleNextTrigger,setSchedulePwmClockIntent,replaceSchedulePwmRetryState'
       && Object.isFrozen(scheduleMutations),
-    'schedule mutation module 只导出冻结的 clock 写入 primitives'
+    'schedule mutation module 只导出冻结的复合状态写入 primitives'
   );
 
   const originAt = 1_787_983_200_017;
@@ -113,5 +117,34 @@ export function runScheduleMutationCases(assertPass) {
       && intentSchedule.alarmDelayMinutes === 0
       && nowReads === 2,
     '撤销 clock intent 同步清四个时钟字段且不读取当前时间'
+  );
+
+  const retrySchedule = {
+    pwmRetryKind: 'old-kind',
+    pwmRetryBoundaryAt: 111,
+    pwmRetryScheduledAt: 222,
+    untouched: 'kept'
+  };
+  const fractionalRetryAt = targetAt + 0.5;
+  replaceSchedulePwmRetryState(retrySchedule, {
+    kind: 'unknown-kind',
+    boundaryAt: originAt,
+    scheduledAt: fractionalRetryAt
+  });
+  assertPass(
+    retrySchedule.pwmRetryKind === 'unknown-kind'
+      && retrySchedule.pwmRetryBoundaryAt === originAt
+      && retrySchedule.pwmRetryScheduledAt === fractionalRetryAt
+      && retrySchedule.untouched === 'kept',
+    'retry primitive 原样原子替换三字段，不吞掉 unknown kind 或小数毫秒'
+  );
+
+  replaceSchedulePwmRetryState(retrySchedule);
+  assertPass(
+    retrySchedule.pwmRetryKind === ''
+      && retrySchedule.pwmRetryBoundaryAt === 0
+      && retrySchedule.pwmRetryScheduledAt === 0
+      && retrySchedule.untouched === 'kept',
+    '空 retry replacement 只清 retry 三字段'
   );
 }

@@ -40,8 +40,18 @@
     scheduleState.alarmDelayMinutes = 0;
   }
 
+  function replaceSchedulePwmRetryState(
+    scheduleState,
+    { kind = '', boundaryAt = 0, scheduledAt = 0 } = {}
+  ) {
+    scheduleState.pwmRetryKind = kind;
+    scheduleState.pwmRetryBoundaryAt = boundaryAt;
+    scheduleState.pwmRetryScheduledAt = scheduledAt;
+  }
+
   return Object.freeze({
     setScheduleNextTrigger,
-    setSchedulePwmClockIntent
+    setSchedulePwmClockIntent,
+    replaceSchedulePwmRetryState
   });
 });

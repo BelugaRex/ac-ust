@@ -5,7 +5,7 @@
 // i18n 辅助函数 — 使用 fetch-based I18n 模块（绕过 chrome.i18n 不可靠性）
 importScripts('i18n.js');
 importScripts('sync-helpers.js');  // 跨设备同步的纯函数（composeSyncPayload / computePhaseAdoption）
-importScripts('schedule-mutations.js');  // schedule 时钟字段的受控 mutation primitive
+importScripts('schedule-mutations.js');  // schedule 复合字段的受控 mutation primitives
 importScripts('pwm-retry.js');  // PWM retry kind 的唯一语义目录（纯决策）
 importScripts('pwm-phase.js');  // PWM 阶段推进、恢复与 live alarm 对齐的纯决策
 importScripts('smart-recovery.js');  // 智能当前周期恢复策略（纯决策）
@@ -2456,9 +2456,7 @@ function clearPageTimerProofState() {
 }
 
 function clearPwmRetryState() {
-  schedule.pwmRetryKind = '';
-  schedule.pwmRetryBoundaryAt = 0;
-  schedule.pwmRetryScheduledAt = 0;
+  replaceSchedulePwmRetryState(schedule);
 }
 
 function setSmartOnPwmRetryState(targetAction, retryScheduledAt, options = {}) {
@@ -2482,9 +2480,11 @@ function setSmartOnPwmRetryState(targetAction, retryScheduledAt, options = {}) {
       || (boundaryOptionalRetry && boundaryAt !== 0 && !exactHalfHour)
       || !Number.isFinite(scheduledAt)
       || scheduledAt <= 0) return;
-  schedule.pwmRetryKind = retryKind;
-  schedule.pwmRetryBoundaryAt = exactHalfHour ? boundaryAt : 0;
-  schedule.pwmRetryScheduledAt = scheduledAt;
+  replaceSchedulePwmRetryState(schedule, {
+    kind: retryKind,
+    boundaryAt: exactHalfHour ? boundaryAt : 0,
+    scheduledAt
+  });
 }
 
 function getSmartOnPwmRetryContext(scheduleSnapshot, scheduledTime, options = {}) {
@@ -2843,9 +2843,7 @@ async function resetDisabledPwmRuntime() {
   schedule.comfortStartOnConfirmedAt = 0;
   schedule.pwmState = 'off';
   schedule.smartOnBoundaryAt = 0;
-  schedule.pwmRetryKind = '';
-  schedule.pwmRetryBoundaryAt = 0;
-  schedule.pwmRetryScheduledAt = 0;
+  clearPwmRetryState();
   setPwmClockIntent(0);
   await clearPwmAlarm(null, true);
   await chrome.alarms.clear('ac-badge-tick');
@@ -3390,9 +3388,7 @@ async function persistSchedule(reason = '', options = {}) {
   } = options;
   if (!schedule.smartMode?.enabled) {
     schedule.smartOnBoundaryAt = 0;
-    schedule.pwmRetryKind = '';
-    schedule.pwmRetryBoundaryAt = 0;
-    schedule.pwmRetryScheduledAt = 0;
+    clearPwmRetryState();
   }
 
   if (syncFromLiveAlarm && isAutomationAllowed()) {

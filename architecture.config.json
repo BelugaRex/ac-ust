@@ -153,15 +153,23 @@
       ]
     },
     {
-      "name": "schedule clock mutations",
+      "name": "schedule state mutations",
       "provider": {
         "file": "schedule-mutations.js",
-        "symbols": ["setScheduleNextTrigger", "setSchedulePwmClockIntent"]
+        "symbols": [
+          "setScheduleNextTrigger",
+          "setSchedulePwmClockIntent",
+          "replaceSchedulePwmRetryState"
+        ]
       },
       "consumers": [
         {
           "file": "background.js",
-          "symbols": ["setScheduleNextTrigger", "setSchedulePwmClockIntent"]
+          "symbols": [
+            "setScheduleNextTrigger",
+            "setSchedulePwmClockIntent",
+            "replaceSchedulePwmRetryState"
+          ]
         }
       ]
     },
@@ -384,7 +392,7 @@
       ]
     },
     {
-      "name": "schedule clock mutations remain browser independent",
+      "name": "schedule state mutations remain browser independent",
       "files": ["schedule-mutations.js"],
       "forbidPatterns": [
         "\\bchrome\\s*\\.",
@@ -404,6 +412,19 @@
       "forbidPatterns": [
         "\\bschedule\\.alarmCreatedAt\\s*=\\s*0",
         "\\bschedule\\.alarmDelayMinutes\\s*=\\s*0"
+      ]
+    },
+    {
+      "name": "PWM retry fields use the atomic replacement primitive",
+      "files": ["background.js"],
+      "requirePatterns": [
+        "function\\s+clearPwmRetryState\\s*\\(",
+        "replaceSchedulePwmRetryState\\s*\\("
+      ],
+      "forbidPatterns": [
+        "\\bschedule\\.pwmRetryKind\\s*=(?!=)",
+        "\\bschedule\\.pwmRetryBoundaryAt\\s*=(?!=)",
+        "\\bschedule\\.pwmRetryScheduledAt\\s*=(?!=)"
       ]
     },
     {

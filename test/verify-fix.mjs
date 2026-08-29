@@ -6576,12 +6576,16 @@ return { reapplySmartSensitivityNow };`
     'schedule',
     'setNextTriggerAt',
     'setPwmClockIntent',
+    'replaceSchedulePwmRetryState',
     'chrome',
     'clearPwmAlarm',
     'cancelAutomaticOnRequests',
     'updateBadge',
     `let pwmRuntimeRevision = 0;
     let lastPwmStepAt = 123456;
+    function clearPwmRetryState() {
+      replaceSchedulePwmRetryState(schedule);
+    }
     ${resetDisabledPwmRuntimeSource};
     return {
       resetDisabledPwmRuntime,
@@ -6623,6 +6627,7 @@ return { reapplySmartSensitivityNow };`
         { toleranceMs: 1500, readNow: Date.now }
       );
     },
+    scheduleMutations.replaceSchedulePwmRetryState,
     {
       alarms: {
         async clear(name) { resetRuntimeCalls.push(`clear:${name}`); }
@@ -7149,9 +7154,7 @@ return { reapplySmartSensitivityNow };`
   assertPass(persistScheduleBody.includes('reconcilePwmTrigger(schedule, liveAlarm, PWM_TRIGGER_NEXT_ONLY_OPTIONS)')
       && persistScheduleBody.includes('if (!schedule.smartMode?.enabled) {')
       && persistScheduleBody.includes('schedule.smartOnBoundaryAt = 0;')
-      && persistScheduleBody.includes("schedule.pwmRetryKind = '';")
-      && persistScheduleBody.includes('schedule.pwmRetryBoundaryAt = 0;')
-      && persistScheduleBody.includes('schedule.pwmRetryScheduledAt = 0;')
+      && persistScheduleBody.includes('clearPwmRetryState();')
       && !persistScheduleBody.includes('persistReconciledPwmTrigger(')
       && snapshotBody.includes('reconcilePwmTrigger(')
       && snapshotBody.includes('PWM_TRIGGER_SNAPSHOT_OPTIONS')
@@ -9689,7 +9692,7 @@ return { reapplySmartSensitivityNow };`
   );
   const loadRetryStateHarness16 = initialSchedule => new Function(
     'initialSchedule', 'getPwmRetryDescriptor', 'normalizePwmRetryKind',
-    'setSchedulePwmClockIntent',
+    'setSchedulePwmClockIntent', 'replaceSchedulePwmRetryState',
     `let schedule = initialSchedule;
     const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
     const setNextTriggerAt = value => { schedule.nextTriggerAt = value; };
@@ -9711,7 +9714,8 @@ return { reapplySmartSensitivityNow };`
     initialSchedule,
     pwmRetry.getPwmRetryDescriptor,
     pwmRetry.normalizePwmRetryKind,
-    scheduleMutations.setSchedulePwmClockIntent
+    scheduleMutations.setSchedulePwmClockIntent,
+    scheduleMutations.replaceSchedulePwmRetryState
   );
   const retryBoundary16 = new Date(2026, 7, 18, 22, 30, 0, 0).getTime();
   const retryScheduled16 = retryBoundary16 + 60_000;
@@ -9809,6 +9813,26 @@ return { reapplySmartSensitivityNow };`
     smartOnBoundaryAt: retryBoundary16
   });
   ignoredRetryHarness16.set('on', retryScheduled16);
+  const unknownKindRetryHarness16 = loadRetryStateHarness16({
+    smartMode: { enabled: true },
+    pwmState: 'on',
+    smartOnBoundaryAt: retryBoundary16,
+    pwmRetryKind: 'old-kind',
+    pwmRetryBoundaryAt: 111,
+    pwmRetryScheduledAt: 222
+  });
+  unknownKindRetryHarness16.set('on', fractionalRetryAt16, {
+    kind: 'constructor'
+  });
+  const invalidRetryHarness16 = loadRetryStateHarness16({
+    smartMode: { enabled: true },
+    pwmState: 'on',
+    smartOnBoundaryAt: retryBoundary16,
+    pwmRetryKind: 'old-kind',
+    pwmRetryBoundaryAt: 111,
+    pwmRetryScheduledAt: 222
+  });
+  invalidRetryHarness16.set('off', retryScheduled16);
   const resurrectedStartHarness16 = loadRetryStateHarness16({
     ...serializedRetry16,
     nextTriggerAt: retryScheduled16,
@@ -9843,6 +9867,12 @@ return { reapplySmartSensitivityNow };`
       && clearedRetry16.pwmRetryBoundaryAt === 0
       && clearedRetry16.pwmRetryScheduledAt === 0
       && ignoredRetryHarness16.snapshot().pwmRetryKind === ''
+      && unknownKindRetryHarness16.snapshot().pwmRetryKind === 'smart-on'
+      && unknownKindRetryHarness16.snapshot().pwmRetryBoundaryAt === retryBoundary16
+      && unknownKindRetryHarness16.snapshot().pwmRetryScheduledAt === fractionalRetryAt16
+      && invalidRetryHarness16.snapshot().pwmRetryKind === ''
+      && invalidRetryHarness16.snapshot().pwmRetryBoundaryAt === 0
+      && invalidRetryHarness16.snapshot().pwmRetryScheduledAt === 0
       && durableFreshStart16.pwmState === 'on'
       && durableFreshStart16.nextTriggerAt === 0
       && durableFreshStart16.alarmCreatedAt === 0
@@ -11999,6 +12029,7 @@ return { reapplySmartSensitivityNow };`
   ) => new Function(
     'initialSchedule', 'initialLiveAt', 'initialWatermark', 'harnessOptions',
     'setScheduleNextTrigger', 'setSchedulePwmClockIntent',
+    'replaceSchedulePwmRetryState',
     'getPwmRetryDescriptor', 'normalizePwmRetryKind',
     'classifySmartOnClock',
     'computeConfigDiff', 'protectSmartOnRetryConfigDiff',
@@ -12417,6 +12448,7 @@ return { reapplySmartSensitivityNow };`
     harnessOptions,
     scheduleMutations.setScheduleNextTrigger,
     scheduleMutations.setSchedulePwmClockIntent,
+    scheduleMutations.replaceSchedulePwmRetryState,
     pwmRetry.getPwmRetryDescriptor,
     pwmRetry.normalizePwmRetryKind,
     pwmPhase.classifySmartOnClock,
@@ -19591,6 +19623,7 @@ return plan;
   };
   const persistRaceHarness16 = new Function(
     'schedule', 'chrome', 'reconcilePwmTrigger', 'deferredAlarmRead',
+    'replaceSchedulePwmRetryState',
     `let pwmRuntimeRevision = 19;
     let scheduleLoadBlockedRevision = null;
     let automationAllowed = true;
@@ -19605,6 +19638,9 @@ return plan;
     }
     function applyPwmPlanState(plan) {
       if (plan?.phasePatch) Object.assign(schedule, plan.phasePatch);
+    }
+    function clearPwmRetryState() {
+      replaceSchedulePwmRetryState(schedule);
     }
     ${persistScheduleBody}
     return {
@@ -19635,7 +19671,8 @@ return plan;
       }
     },
     pwmPhase.reconcilePwmTrigger,
-    deferredPersistAlarmRead16
+    deferredPersistAlarmRead16,
+    scheduleMutations.replaceSchedulePwmRetryState
   );
   const stalePersistPromise16 = persistRaceHarness16.persistSchedule('stale-live-race');
   while (!persistAlarmReadStarted16) await Promise.resolve();
