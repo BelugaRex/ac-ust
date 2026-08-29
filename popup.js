@@ -598,15 +598,13 @@ function classifyCountdownPresentation(schedule = {}) {
   const actualIsOn = typeof schedule?.actualStatus?.isOn === 'boolean'
     ? schedule.actualStatus.isOn
     : null;
-  if (schedule?.pwmRetryKind === 'smart-on-safety-timer') {
-    return { kind: 'safety-retry', action, actualIsOn };
+  const retryPresentation = getPwmRetryDescriptor(schedule?.pwmRetryKind);
+  if (retryPresentation?.presentation && retryPresentation.presentationAlways) {
+    return { kind: retryPresentation.presentation, action, actualIsOn };
   }
   if (actualIsOn === null || actualIsOn === (action === 'off')) {
-    if (schedule?.pwmRetryKind === 'smart-on-safe-delay') {
-      return { kind: 'smart-safe-delay', action: 'on', actualIsOn };
-    }
-    if (schedule?.pwmRetryKind === 'smart-on-safety-skip') {
-      return { kind: 'smart-safety-skip', action: 'on', actualIsOn };
+    if (retryPresentation?.presentation) {
+      return { kind: retryPresentation.presentation, action: 'on', actualIsOn };
     }
     return { kind: 'normal-action', action, actualIsOn };
   }

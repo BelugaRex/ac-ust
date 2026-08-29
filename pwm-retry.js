@@ -22,8 +22,10 @@
       ownsTypedSmartOn: true,
       repairsSafetyTimer: false,
       boundaryRequired: true,
+      reevaluatesAtNextBoundary: false,
       syncProjection: 'safety-sentinel',
       presentation: '',
+      presentationAlways: false,
       diagnosticStatus: ''
     }),
     [PWM_RETRY_KINDS.SMART_ON_SAFE_DELAY]: descriptor(
@@ -33,8 +35,10 @@
         ownsTypedSmartOn: true,
         repairsSafetyTimer: false,
         boundaryRequired: true,
+        reevaluatesAtNextBoundary: false,
         syncProjection: 'safety-sentinel',
         presentation: 'smart-safe-delay',
+        presentationAlways: false,
         diagnosticStatus: ''
       }
     ),
@@ -45,8 +49,10 @@
         ownsTypedSmartOn: false,
         repairsSafetyTimer: false,
         boundaryRequired: true,
+        reevaluatesAtNextBoundary: true,
         syncProjection: 'safety-sentinel',
         presentation: 'smart-safety-skip',
+        presentationAlways: false,
         diagnosticStatus: 'deferred'
       }
     ),
@@ -57,8 +63,10 @@
         ownsTypedSmartOn: false,
         repairsSafetyTimer: true,
         boundaryRequired: false,
+        reevaluatesAtNextBoundary: false,
         syncProjection: 'safety-timer-off',
         presentation: 'safety-retry',
+        presentationAlways: true,
         diagnosticStatus: ''
       }
     )

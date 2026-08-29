@@ -357,7 +357,10 @@ async function runTests() {
     ? popupJs.slice(countdownClassifierStart, countdownClassifierEnd)
     : '';
   const classifyCountdownPresentation = countdownClassifierSource
-    ? new Function(`${countdownClassifierSource}; return classifyCountdownPresentation;`)()
+    ? new Function(
+      'getPwmRetryDescriptor',
+      `${countdownClassifierSource}; return classifyCountdownPresentation;`
+    )(pwmRetry.getPwmRetryDescriptor)
     : null;
   const normalOnCountdown = classifyCountdownPresentation?.({
     pwmState: 'on',
@@ -849,7 +852,7 @@ async function runTests() {
     const writes = [];
     const sync = new Function(
       'schedule', 'chrome', 'composeSyncPayload', 'nextHalfHourBoundary',
-      'appendDiagnosticLog', 'Date', 'console',
+      'appendDiagnosticLog', 'Date', 'console', 'getPwmRetryDescriptor',
       `const SYNC_KEY = 'ac_schedule_sync_test';
       let lastSyncedAt = 0;
       let syncWriteChain = Promise.resolve();
@@ -881,7 +884,8 @@ async function runTests() {
       pwmPhase.nextHalfHourBoundary,
       () => {},
       Date,
-      testConsole
+      testConsole,
+      pwmRetry.getPwmRetryDescriptor
     );
     await sync('sentinel-test');
     return writes[0]?.ac_schedule_sync_test;
@@ -1026,6 +1030,7 @@ async function runTests() {
     const actual = new Function(
       'schedule', 'chrome', 'composeSyncPayload', 'nextHalfHourBoundary',
       'appendDiagnosticLog', 'Date', 'console', 'applySyncedPhase',
+      'getPwmRetryDescriptor',
       `const SYNC_KEY = 'ac_schedule_sync_test';
       const SYNC_WATERMARK_KEY = 'ac_schedule_sync_watermark';
       const SYNC_PENDING_PUBLISH_KEY = 'ac_schedule_sync_publish_pending';
@@ -1085,7 +1090,8 @@ async function runTests() {
       () => {},
       SyncHarnessDate,
       testConsole,
-      options.applySyncedPhase || (async () => false)
+      options.applySyncedPhase || (async () => false),
+      pwmRetry.getPwmRetryDescriptor
     );
     return { ...actual, state, schedule: scheduleState };
   };
@@ -6852,6 +6858,7 @@ return { reapplySmartSensitivityNow };`
     'PWM diagnostic attempt instrumentation'
   );
   const pwmDiagnosticAttemptHarness13 = new Function(
+    'getPwmRetryDescriptor',
     `let pwmDiagnosticAttemptSequence = 0;
     let activePwmAttempts = new Map();
     let currentPwmAttempt = null;
@@ -6876,7 +6883,7 @@ return { reapplySmartSensitivityNow };`
       getActive: () => getActivePwmDiagnosticAttempts(),
       getLast: () => lastPwmOutcome
     };`
-  )();
+  )(pwmRetry.getPwmRetryDescriptor);
   const pwmAttemptId13 = pwmDiagnosticAttemptHarness13.beginPwmDiagnosticAttempt({
     source: 'alarm-ac-pwm',
     scheduledTime: 1787936760000,
@@ -7252,6 +7259,7 @@ return { reapplySmartSensitivityNow };`
       && popupSource.includes('pwmAlarm?.scheduledTime')
       && popupSource.includes("diagnoseHeartbeatStale"),
     '14G: 诊断区分独立 page-timer retry 与任意当前相位的 live ac-pwm 重试，并保留 L2 真状态读取');
+  const popupPwmRetryScriptAt14G = popupHtml.indexOf('<script src="pwm-retry.js"></script>');
   const popupPwmPhaseScriptAt14G = popupHtml.indexOf('<script src="pwm-phase.js"></script>');
   const popupMainScriptAt14G = popupHtml.indexOf('<script src="popup.js?v=0.8.2"></script>');
   const popupDiagnoseSource14G = extractSourceSection(
@@ -7266,7 +7274,8 @@ return { reapplySmartSensitivityNow };`
     '\n// 独立兜底脚本只在该标记缺失时接管诊断按钮。',
     'popup diagnostic capture and handler'
   );
-  assertPass(popupPwmPhaseScriptAt14G > 0
+  assertPass(popupPwmRetryScriptAt14G > 0
+      && popupPwmPhaseScriptAt14G > popupPwmRetryScriptAt14G
       && popupMainScriptAt14G > popupPwmPhaseScriptAt14G
       && popupSource.includes('classifySmartOnClock(')
       && popupSource.includes("code: 'SCHED-SMART-ON-CLOCK-SKIPPED'")
@@ -14593,7 +14602,7 @@ ${alarmPwmCatchBody16}
     harnessOptions = {}
   ) => new Function(
     'initialSchedule', 'initialLiveAt', 'harnessOptions',
-    'classifySmartOnClock', 'planSmartModeOnWindow',
+    'getPwmRetryDescriptor', 'classifySmartOnClock', 'planSmartModeOnWindow',
     'planSmartOnAfterConfirmedOff', 'nextSafePageTimerTargetAt',
     'nextHalfHourBoundary', 'halfHourBoundaryAtOrBefore',
     'computePageTimerAdoption', 'smartModePageTimerTargetAt',
@@ -15061,6 +15070,7 @@ ${alarmPwmCatchBody16}
     initialSchedule,
     initialLiveAt,
     harnessOptions,
+    pwmRetry.getPwmRetryDescriptor,
     pwmPhase.classifySmartOnClock,
     pwmPhase.planSmartModeOnWindow,
     pwmPhase.planSmartOnAfterConfirmedOff,

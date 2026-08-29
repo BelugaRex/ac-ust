@@ -353,7 +353,8 @@ function finishPwmDiagnosticAttempt(attemptId, status, reason = '', error = '') 
 }
 
 function inferPwmDiagnosticOutcomeStatus() {
-  if (schedule.pwmRetryKind === 'smart-on-safety-skip') return 'deferred';
+  const retryStatus = getPwmRetryDescriptor(schedule.pwmRetryKind)?.diagnosticStatus;
+  if (retryStatus) return retryStatus;
   if (schedule.pageTimerError && Number(schedule.nextTriggerAt) > Date.now()) {
     return 'retry-scheduled';
   }
@@ -2738,12 +2739,8 @@ async function hasDurableLivePwmOwner(automationRevision, options = {}) {
     const durableBoundaryAt = Number(durableSchedule.smartOnBoundaryAt) || 0;
     const durableRetryBoundaryAt = Number(durableSchedule.pwmRetryBoundaryAt) || 0;
     const durableRetryKind = String(durableSchedule.pwmRetryKind || '');
-    const retryOwnsBoundary = [
-      'smart-on',
-      'smart-on-safe-delay',
-      'smart-on-safety-skip',
-      'smart-on-safety-timer'
-    ].includes(durableRetryKind)
+    const durableRetryDescriptor = getPwmRetryDescriptor(durableRetryKind);
+    const retryOwnsBoundary = durableRetryDescriptor !== null
       && durableRetryBoundaryAt === expectedBoundaryAt;
     const exactBoundaryOwner = durableSchedule.pwmState === 'on'
       && Math.abs(durableAt - expectedBoundaryAt)
@@ -3601,17 +3598,17 @@ async function syncScheduleToSync(reason = '') {
     // 本地写入仍必须比已知版本新。wallNow 仍用于相位过期判定。
     const writeAt = Math.max(wallNow, lastSyncedAt + 1);
     const retryKind = String(schedule.pwmRetryKind || '');
+    const retryDescriptor = getPwmRetryDescriptor(retryKind);
     // timer-only repair 表示 AC 可能已 ON、但关机保险尚未确认。同步一个
     // 明确的近期 OFF 动作：新版对端会保留任何更早 OFF，而旧版／新设备
     // 也会建 OFF alarm，不会把 enabled=true + 无 phase 误解为立即新开一轮。
     const projectSafetyTimerOff = schedule.smartMode?.enabled === true
-      && retryKind === 'smart-on-safety-timer';
+      && retryDescriptor?.syncProjection === 'safety-timer-off';
     // 其余 smart ON retry/safety-wait 发生在 AC 尚未确认 ON 时。它们投影成
     // “下一半点执行 OFF”的安全哨兵，以替换对端旧 ON actuator；源端提交正常
     // OFF phase 后再同步真实截止。源端中断时，对端也只会幂等确认 OFF。
     const projectSafetySentinel = schedule.smartMode?.enabled === true
-      && ['smart-on', 'smart-on-safe-delay', 'smart-on-safety-skip']
-        .includes(retryKind);
+      && retryDescriptor?.syncProjection === 'safety-sentinel';
     const safetySentinelAt = projectSafetySentinel
       ? nextHalfHourBoundary(Math.max(wallNow, Number(schedule.nextTriggerAt) || wallNow))
       : 0;

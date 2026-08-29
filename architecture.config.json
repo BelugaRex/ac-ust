@@ -32,7 +32,7 @@
     "documents": [
       {
         "file": "popup.html",
-        "scripts": ["i18n.js", "popup-diagnostic-fallback.js", "billing-helpers.js", "smart-mode.js", "pwm-phase.js", "popup.js"]
+        "scripts": ["i18n.js", "popup-diagnostic-fallback.js", "billing-helpers.js", "smart-mode.js", "pwm-retry.js", "pwm-phase.js", "popup.js"]
       },
       {
         "file": "offscreen.html",
@@ -135,6 +135,14 @@
         {
           "file": "background.js",
           "symbols": ["getPwmRetryDescriptor", "normalizePwmRetryKind"]
+        },
+        {
+          "file": "pwm-phase.js",
+          "symbols": ["getPwmRetryDescriptor"]
+        },
+        {
+          "file": "popup.js",
+          "symbols": ["getPwmRetryDescriptor"]
         }
       ]
     },

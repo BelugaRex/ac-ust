@@ -23,15 +23,18 @@ export function runPwmRetryCases(assertPass) {
     smartOn?.storedSmartOnRetry === true
       && smartOn.ownsTypedSmartOn === true
       && smartOn.boundaryRequired === true
+      && smartOn.reevaluatesAtNextBoundary === false
       && smartOn.syncProjection === 'safety-sentinel'
       && safeDelay?.ownsTypedSmartOn === true
-      && safeDelay.presentation === 'smart-safe-delay',
+      && safeDelay.presentation === 'smart-safe-delay'
+      && safeDelay.presentationAlways === false,
     '普通与 safe-delay retry 共享 typed ON ownership，并保留不同展示语义'
   );
   assertPass(
     safetySkip?.storedSmartOnRetry === false
       && safetySkip.ownsTypedSmartOn === false
       && safetySkip.boundaryRequired === true
+      && safetySkip.reevaluatesAtNextBoundary === true
       && safetySkip.syncProjection === 'safety-sentinel'
       && safetySkip.diagnosticStatus === 'deferred',
     'safety-skip 只交接下一半点评估，不拥有 typed ON'
@@ -42,7 +45,8 @@ export function runPwmRetryCases(assertPass) {
       && safetyTimer.repairsSafetyTimer === true
       && safetyTimer.boundaryRequired === false
       && safetyTimer.syncProjection === 'safety-timer-off'
-      && safetyTimer.presentation === 'safety-retry',
+      && safetyTimer.presentation === 'safety-retry'
+      && safetyTimer.presentationAlways === true,
     'safety-timer 只修复关机保险，允许无原半点并投影为近期 OFF'
   );
   assertPass(

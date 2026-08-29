@@ -1,3 +1,7 @@
+const getPwmRetryDescriptorForPhase = typeof module !== 'undefined' && module.exports
+  ? require('./pwm-retry.js').getPwmRetryDescriptor
+  : globalThis.getPwmRetryDescriptor;
+
 const PWM_PHASE_MINUTE_MS = 60_000;
 const PWM_PHASE_RETRY_MINUTES = 1;
 const SMART_MODE_ON_HARD_MAX_MINUTES = 25;
@@ -746,6 +750,7 @@ function classifySmartOnClock(schedule, candidateAt, opts = {}) {
       : nextHalfHourBoundary(plannedAt));
 
   const retryKind = String(schedule?.pwmRetryKind || '');
+  const retryDescriptor = getPwmRetryDescriptorForPhase(retryKind);
   const retryBoundaryAt = Number(schedule?.pwmRetryBoundaryAt);
   const retryScheduledAt = Number(schedule?.pwmRetryScheduledAt);
   const retryTargetAt = smartModePageTimerTargetAt(
@@ -753,9 +758,7 @@ function classifySmartOnClock(schedule, candidateAt, opts = {}) {
     Math.max(now, candidate),
     retryBoundaryAt
   );
-  const typedRetryKinds = retryKind === 'smart-on'
-    || retryKind === 'smart-on-safe-delay';
-  const validTypedRetry = typedRetryKinds
+  const validTypedRetry = retryDescriptor?.ownsTypedSmartOn === true
     && schedule?.pwmState === 'on'
     && isHalfHourBoundary(retryBoundaryAt)
     && Number.isFinite(retryScheduledAt)
@@ -778,8 +781,7 @@ function classifySmartOnClock(schedule, candidateAt, opts = {}) {
   // 页面 timer 写入失败后的安全重试只会重新观察实际状态并修复关机保险；
   // 它不拥有普通半点 ON 权限，boundary 可为 0。tuple 必须精确绑定 durable
   // scheduledAt，alarm 到期时由 repair 路径处理，绝不能落入普通 toggle。
-  const isSafetyTimerRetry = retryKind === 'smart-on-safety-timer';
-  const validSafetyTimerRetry = isSafetyTimerRetry
+  const validSafetyTimerRetry = retryDescriptor?.repairsSafetyTimer === true
     && schedule?.pwmState === 'on'
     && (retryBoundaryAt === 0 || isHalfHourBoundary(retryBoundaryAt))
     && Number.isFinite(retryScheduledAt)
@@ -800,7 +802,7 @@ function classifySmartOnClock(schedule, candidateAt, opts = {}) {
   // 若五分钟压缩机保护已经吃完原半点的剩余 ON 窗口，允许一个显式
   // safety-skip marker 把下一次评估交给后一个半点。它不是 typed ON retry，
   // 到时必须走普通半点天气与 ON 门禁。
-  const validSafetySkip = retryKind === 'smart-on-safety-skip'
+  const validSafetySkip = retryDescriptor?.reevaluatesAtNextBoundary === true
     && schedule?.pwmState === 'on'
     && isHalfHourBoundary(retryBoundaryAt)
     && Number.isFinite(retryScheduledAt)
@@ -831,9 +833,7 @@ function classifySmartOnClock(schedule, candidateAt, opts = {}) {
   // Durable marker 是排他性的执行身份，而不是普通半点的可选提示。只要
   // storage 声称存在 smart ON exception，但 tuple / cutoff / live ownership
   // 任一不匹配，就必须判红；绝不能降级为 nearest-boundary 后假绿。
-  const hasSmartOnMarker = typedRetryKinds
-    || isSafetyTimerRetry
-    || retryKind === 'smart-on-safety-skip';
+  const hasSmartOnMarker = retryDescriptor !== null;
   if (hasSmartOnMarker) {
     return {
       applicable: true,
