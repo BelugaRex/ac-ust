@@ -270,6 +270,21 @@
       || String(sw.className || '').includes('ant-switch-disabled');
   }
 
+  function createAcStateAttemptGuard(attempt) {
+    return () => {
+      if (attempt.cancellationRevision !== automaticOnCancellationRevision) {
+        return '请求已被后台取消';
+      }
+      if (attempt.ownerGeneration !== mainBridgeLease.ownerGeneration) {
+        return '请求已由更新的主世界脚本接管';
+      }
+      const notAfterAt = Number(attempt.notAfterAt) || 0;
+      if (!attempt.targetState || notAfterAt === 0) return '';
+      if (!Number.isSafeInteger(notAfterAt)) return '自动开启窗口截止时间无效';
+      return Date.now() >= notAfterAt ? '自动开启窗口已结束' : '';
+    };
+  }
+
   async function requestACState(targetState, notAfterAt = 0) {
     const requestedNotAfterAt = notAfterAt === 0 ? 0 : Number(notAfterAt);
     if (requestedNotAfterAt !== 0 && !Number.isSafeInteger(requestedNotAfterAt)) {
@@ -332,6 +347,7 @@
   // 当前生产调度仅传入 true（ON），OFF 完全由页面定时器执行。
   async function ensureACState(attempt, clickCount = 0) {
     const { targetState } = attempt;
+    const getAttemptError = createAcStateAttemptGuard(attempt);
     // 提取（Fowler Extract Function）：统一结果形状——避免三处成功/四处失败对象重复构造。
     function successResult(status, clickCount) {
       if (targetState && status?.isOn === true) {
@@ -361,26 +377,13 @@
         ...details
       };
     }
-    function getOnWindowError() {
-      if (attempt.cancellationRevision !== automaticOnCancellationRevision) {
-        return '请求已被后台取消';
-      }
-      if (attempt.ownerGeneration !== mainBridgeLease.ownerGeneration) {
-        return '请求已由更新的主世界脚本接管';
-      }
-      const notAfterAt = Number(attempt.notAfterAt) || 0;
-      if (!targetState || notAfterAt === 0) return '';
-      if (!Number.isSafeInteger(notAfterAt)) return '自动开启窗口截止时间无效';
-      return Date.now() >= notAfterAt ? '自动开启窗口已结束' : '';
-    }
-
     const current = getACStatusInPageWorld();
     if (typeof current.isOn === 'boolean' && current.isOn === targetState) {
       console.log(`[AC扩展] ensureACState: 已达到 ${targetState ? 'ON' : 'OFF'}，点击数=${clickCount}`);
       return successResult(current, clickCount);
     }
 
-    const currentWindowError = getOnWindowError();
+    const currentWindowError = getAttemptError();
     if (currentWindowError) {
       return failureResult(current, clickCount, currentWindowError);
     }
@@ -405,7 +408,7 @@
     if (typeof beforeClick.isOn === 'boolean' && beforeClick.isOn === targetState) {
       return successResult(beforeClick, clickCount);
     }
-    const beforeClickWindowError = getOnWindowError();
+    const beforeClickWindowError = getAttemptError();
     if (beforeClickWindowError) {
       return failureResult(beforeClick, clickCount, beforeClickWindowError);
     }
@@ -443,21 +446,19 @@
     const executionSuccessPromise = waitForNewACToggleExecutionSuccessInPageWorld(
       executionSuccessBaseline,
       AC_EXECUTION_SUCCESS_TIMEOUT_MS,
-      Number(attempt.notAfterAt) || 0,
-      attempt.cancellationRevision
+      getAttemptError
     );
     const dialogWait = { stopped: false };
     const dialogPromise = clickConfirmDialogInPageWorld(
       5000,
-      Number(attempt.notAfterAt) || 0,
-      attempt.cancellationRevision,
+      getAttemptError,
       () => dialogWait.stopped
     );
     const executionSuccess = await executionSuccessPromise;
     dialogWait.stopped = true;
     const dialogConfirmed = await dialogPromise;
     const afterClick = getACStatusInPageWorld();
-    const afterClickWindowError = getOnWindowError();
+    const afterClickWindowError = getAttemptError();
     if (afterClickWindowError) {
       return failureResult(afterClick, clickCount + 1, afterClickWindowError);
     }
@@ -475,8 +476,7 @@
     const settled = await waitForTargetACStateInPageWorld(
       targetState,
       AC_STATE_SETTLE_MS,
-      Number(attempt.notAfterAt) || 0,
-      attempt.cancellationRevision
+      getAttemptError
     );
     const settledStatus = settled.status || afterClick;
     if (settled.error) {
@@ -527,21 +527,15 @@
   async function waitForNewACToggleExecutionSuccessInPageWorld(
     baselineMessages,
     timeoutMs,
-    notAfterAt = 0,
-    cancellationRevision = automaticOnCancellationRevision
+    getAttemptError = () => ''
   ) {
     const baseline = baselineMessages instanceof Set
       ? baselineMessages
       : new Set(baselineMessages || []);
     const start = Date.now();
     while (Date.now() - start <= timeoutMs) {
-      if (cancellationRevision !== automaticOnCancellationRevision) {
-        return { success: false, error: '请求已被后台取消' };
-      }
-      if (notAfterAt !== 0
-          && (!Number.isSafeInteger(notAfterAt) || Date.now() >= notAfterAt)) {
-        return { success: false, error: '自动开启窗口已结束' };
-      }
+      const attemptError = getAttemptError();
+      if (attemptError) return { success: false, error: attemptError };
       const freshMessage = findACToggleExecutionSuccessMessagesInPageWorld()
         .find(node => !baseline.has(node));
       if (freshMessage) {
@@ -559,19 +553,13 @@
   async function waitForTargetACStateInPageWorld(
     targetState,
     timeoutMs,
-    notAfterAt = 0,
-    cancellationRevision = automaticOnCancellationRevision
+    getAttemptError = () => ''
   ) {
     const start = Date.now();
     let status = getACStatusInPageWorld();
     while (Date.now() - start <= timeoutMs) {
-      if (cancellationRevision !== automaticOnCancellationRevision) {
-        return { reached: false, status, error: '请求已被后台取消' };
-      }
-      if (notAfterAt !== 0
-          && (!Number.isSafeInteger(notAfterAt) || Date.now() >= notAfterAt)) {
-        return { reached: false, status, error: '自动开启窗口已结束' };
-      }
+      const attemptError = getAttemptError();
+      if (attemptError) return { reached: false, status, error: attemptError };
       if (typeof status?.isOn === 'boolean' && status.isOn === targetState) {
         return { reached: true, status };
       }
@@ -659,8 +647,7 @@
 
   async function clickConfirmDialogInPageWorld(
     timeoutMs,
-    notAfterAt = 0,
-    cancellationRevision = automaticOnCancellationRevision,
+    getAttemptError = () => '',
     shouldStop = () => false
   ) {
     const start = Date.now();
@@ -707,13 +694,9 @@
     };
     while (Date.now() - start <= timeoutMs) {
       if (shouldStop()) return false;
-      if (cancellationRevision !== automaticOnCancellationRevision) {
-        console.warn('[AC扩展] ensureACState: 自动开启请求已被后台取消');
-        return false;
-      }
-      if (notAfterAt !== 0
-          && (!Number.isSafeInteger(notAfterAt) || Date.now() >= notAfterAt)) {
-        console.warn('[AC扩展] ensureACState: 等待确认框时自动开启窗口已结束');
+      const attemptError = getAttemptError();
+      if (attemptError) {
+        console.warn(`[AC扩展] ensureACState: ${attemptError}`);
         return false;
       }
       const dialog = findUniqueACDialog();

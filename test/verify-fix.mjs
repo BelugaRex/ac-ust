@@ -2336,6 +2336,17 @@ async function runTests() {
       && isACSwitchDisabledInPageWorld(disabledClassMock) === true
       && isACSwitchDisabledInPageWorld(disabledAttrMock) === true,
     '9G-4: isACSwitchDisabledInPageWorld 实测：disabled 属性 / ant-switch-disabled 类 / aria-disabled 均判禁用');
+  const attemptGuardStart = pageConfirmSource.indexOf(
+    'function createAcStateAttemptGuard(attempt)'
+  );
+  const attemptGuardEnd = pageConfirmSource.indexOf(
+    '\n  async function requestACState',
+    attemptGuardStart
+  );
+  const attemptGuardSource = attemptGuardStart >= 0
+      && attemptGuardEnd > attemptGuardStart
+    ? pageConfirmSource.slice(attemptGuardStart, attemptGuardEnd)
+    : '';
   // 9G-5: 行为级证明——禁用开关时 ensureACState 直接返回失败，绝不调用点击。
   const ensureFnStart = pageConfirmSource.indexOf('async function ensureACState(attempt, clickCount = 0)');
   const ensureFnEnd = pageConfirmSource.indexOf(
@@ -2352,7 +2363,7 @@ async function runTests() {
     'MAX_AC_SWITCH_CLICKS', 'AC_STATE_SETTLE_MS',
     'automaticOnCancellationRevision', 'mainBridgeLease', 'document', 'AC_ON_SUCCESS_TEXT',
     'AC_EXECUTION_SUCCESS_TIMEOUT_MS', 'HOT_TAKEOVER_CLICK_QUIET_MS', 'console',
-    `${ensureFnSource}; return { ensureACState };`
+    `${attemptGuardSource}\n${ensureFnSource}; return { ensureACState };`
   );
   const createEnsureLease9G = () => ({
     ownerGeneration: 1,
@@ -2373,6 +2384,59 @@ async function runTests() {
     ownerGeneration,
     requestId
   });
+  const attemptGuardHarness9G = new Function(
+    'Date',
+    `let automaticOnCancellationRevision = 7;
+    const mainBridgeLease = { ownerGeneration: 3 };
+    ${attemptGuardSource}
+    return {
+      create: createAcStateAttemptGuard,
+      setCancellationRevision(value) { automaticOnCancellationRevision = value; },
+      setOwnerGeneration(value) { mainBridgeLease.ownerGeneration = value; }
+    };`
+  )({ now: () => 2000 });
+  const liveAttemptGuard9G = attemptGuardHarness9G.create(Object.freeze({
+    targetState: true,
+    notAfterAt: 3000,
+    cancellationRevision: 7,
+    ownerGeneration: 3
+  }));
+  const currentAttemptError9G = liveAttemptGuard9G();
+  attemptGuardHarness9G.setCancellationRevision(8);
+  const cancelledAttemptError9G = liveAttemptGuard9G();
+  attemptGuardHarness9G.setCancellationRevision(7);
+  attemptGuardHarness9G.setOwnerGeneration(4);
+  const supersededAttemptError9G = liveAttemptGuard9G();
+  attemptGuardHarness9G.setOwnerGeneration(3);
+  const invalidAttemptError9G = attemptGuardHarness9G.create(Object.freeze({
+    targetState: true,
+    notAfterAt: 2000.5,
+    cancellationRevision: 7,
+    ownerGeneration: 3
+  }))();
+  const expiredAttemptError9G = attemptGuardHarness9G.create(Object.freeze({
+    targetState: true,
+    notAfterAt: 2000,
+    cancellationRevision: 7,
+    ownerGeneration: 3
+  }))();
+  const offAttemptError9G = attemptGuardHarness9G.create(Object.freeze({
+    targetState: false,
+    notAfterAt: 1,
+    cancellationRevision: 7,
+    ownerGeneration: 3
+  }))();
+  attemptGuardHarness9G.setCancellationRevision(8);
+  attemptGuardHarness9G.setOwnerGeneration(4);
+  const guardPriorityError9G = liveAttemptGuard9G();
+  assertPass(currentAttemptError9G === ''
+      && cancelledAttemptError9G === '请求已被后台取消'
+      && supersededAttemptError9G === '请求已由更新的主世界脚本接管'
+      && invalidAttemptError9G === '自动开启窗口截止时间无效'
+      && expiredAttemptError9G === '自动开启窗口已结束'
+      && offAttemptError9G === ''
+      && guardPriorityError9G === '请求已被后台取消',
+    '9G-4A: attempt guard 实时读取 cancel/owner/deadline，并按安全优先级拒绝过期 ON');
   const ensureLease9G = createEnsureLease9G();
   const { ensureACState } = loadEnsure(
     () => ({ isOn: false, disabled: true, source: 'main-world-ant-switch' }),
@@ -2432,17 +2496,19 @@ async function runTests() {
   const confirmDeadlineAt = Date.now();
   const { clickConfirmDialogInPageWorld } = new Function(
     'document', 'Date', 'clickElementOnceInPageWorld', 'sleepInPageWorld',
-    'automaticOnCancellationRevision', 'console',
+    'console',
     `${confirmFnSource}; return { clickConfirmDialogInPageWorld };`
   )(
     { querySelectorAll: () => [{ textContent: 'Confirm', className: '' }] },
     { now: () => confirmDeadlineAt },
     () => { expiredConfirmClickCalls += 1; return true; },
     async () => {},
-    0,
     testConsole
   );
-  const expiredConfirmResult = await clickConfirmDialogInPageWorld(5000, confirmDeadlineAt, 0);
+  const expiredConfirmResult = await clickConfirmDialogInPageWorld(
+    5000,
+    () => '自动开启窗口已结束'
+  );
   let stoppedConfirmClickCalls = 0;
   const stoppedConfirmButton = {
     textContent: 'Confirm',
@@ -2462,17 +2528,16 @@ async function runTests() {
   };
   const { clickConfirmDialogInPageWorld: clickStoppedConfirm } = new Function(
     'document', 'Date', 'clickElementOnceInPageWorld', 'sleepInPageWorld',
-    'automaticOnCancellationRevision', 'console',
+    'console',
     `${confirmFnSource}; return { clickConfirmDialogInPageWorld };`
   )(
     { querySelectorAll: () => [stoppedConfirmDialog] },
     Date,
     () => { stoppedConfirmClickCalls += 1; return true; },
     async () => {},
-    0,
     testConsole
   );
-  const stoppedConfirmResult = await clickStoppedConfirm(5000, 0, 0, () => true);
+  const stoppedConfirmResult = await clickStoppedConfirm(5000, () => '', () => true);
   assertPass(disabledEnsureResult.success === false
       && disabledEnsureResult.error.includes('被禁用')
       && disabledEnsureClickCalls === 0
@@ -2504,17 +2569,16 @@ async function runTests() {
     let clickCalls = 0;
     const { clickConfirmDialogInPageWorld: clickConfirm9G } = new Function(
       'document', 'Date', 'clickElementOnceInPageWorld', 'sleepInPageWorld',
-      'automaticOnCancellationRevision', 'console',
+      'console',
       `${confirmFnSource}; return { clickConfirmDialogInPageWorld };`
     )(
       { querySelectorAll: () => dialogs },
       { now: () => nowCalls++ < 2 ? 0 : 1 },
       () => { clickCalls += 1; return true; },
       async () => {},
-      0,
       testConsole
     );
-    const result = await clickConfirm9G(0, 0, 0);
+    const result = await clickConfirm9G(0, () => '');
     return { result, clickCalls };
   };
   const runDelayedConfirmDialogCase9G = async dialog => {
@@ -2523,17 +2587,16 @@ async function runTests() {
     let clickCalls = 0;
     const { clickConfirmDialogInPageWorld: clickConfirm9G } = new Function(
       'document', 'Date', 'clickElementOnceInPageWorld', 'sleepInPageWorld',
-      'automaticOnCancellationRevision', 'console',
+      'console',
       `${confirmFnSource}; return { clickConfirmDialogInPageWorld };`
     )(
       { querySelectorAll: () => (++queryCalls === 1 ? [] : [dialog]) },
       { now: () => nowCalls++ < 2 ? 0 : 100 },
       () => { clickCalls += 1; return true; },
       async () => {},
-      0,
       testConsole
     );
-    const result = await clickConfirm9G(500, 0, 0);
+    const result = await clickConfirm9G(500, () => '');
     return { result, clickCalls, queryCalls };
   };
   const uniqueACDialog9G = await runConfirmDialogCase9G([
@@ -2662,7 +2725,7 @@ async function runTests() {
     const wrongTextMessage9G = makeExecutionSuccessMessage9G('Operation queued');
     const wrongSemanticMessage9G = makeExecutionSuccessMessage9G('Execution succeeded', false);
     const loadSuccessHelpers9G = (document, getACStatusInPageWorld = () => ({ isOn: null })) => new Function(
-      'document', 'getACStatusInPageWorld', 'sleepInPageWorld', 'automaticOnCancellationRevision',
+      'document', 'getACStatusInPageWorld', 'sleepInPageWorld',
       'AC_ON_SUCCESS_TEXT', 'console',
       `${successHelperSource9G}; return {
         findACToggleExecutionSuccessMessagesInPageWorld,
@@ -2672,14 +2735,14 @@ async function runTests() {
             ? waitForTargetACStateInPageWorld
             : null
       };`
-    )(document, getACStatusInPageWorld, async () => {}, 0, 'Execution succeeded', testConsole);
+    )(document, getACStatusInPageWorld, async () => {}, 'Execution succeeded', testConsole);
     const staleHelpers9G = loadSuccessHelpers9G({ querySelectorAll: () => [staleMessage9G] });
     const staleResult9G = await staleHelpers9G.waitForNewACToggleExecutionSuccessInPageWorld(
-      new Set([staleMessage9G]), 0, 0, 0
+      new Set([staleMessage9G]), 0, () => ''
     );
     const freshHelpers9G = loadSuccessHelpers9G({ querySelectorAll: () => [staleMessage9G, freshMessage9G] });
     const freshResult9G = await freshHelpers9G.waitForNewACToggleExecutionSuccessInPageWorld(
-      new Set([staleMessage9G]), 0, 0, 0
+      new Set([staleMessage9G]), 0, () => ''
     );
     const rejectedHelpers9G = loadSuccessHelpers9G({
       querySelectorAll: () => [wrongTextMessage9G, wrongSemanticMessage9G]
@@ -2694,7 +2757,7 @@ async function runTests() {
       })
     );
     const delayedTargetResult9G = delayedTargetHelpers9G.waitForTargetACStateInPageWorld
-      ? await delayedTargetHelpers9G.waitForTargetACStateInPageWorld(true, 25, 0, 0)
+      ? await delayedTargetHelpers9G.waitForTargetACStateInPageWorld(true, 25, () => '')
       : null;
     successHelperBehavior9G = {
       staleResult9G,
