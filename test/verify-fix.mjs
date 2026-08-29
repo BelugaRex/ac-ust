@@ -6506,6 +6506,12 @@ return { reapplySmartSensitivityNow };`
       && extractionGuardMessage.includes('missing-start'),
     '13H: 源码区段提取在标记漂移时 fail fast，并报告具体区段与标记');
 
+  const setNextTriggerSource13 = extractSourceSection(
+    backgroundSource,
+    'function setNextTriggerAt(nextTriggerAt, options = {}) {',
+    '\nasync function executePwmLifecycleRecoveryFallback',
+    'durable smart clock origin facade'
+  );
   const originNow13 = new Date(2026, 7, 27, 18, 56, 0, 17).getTime();
   const originTarget13 = new Date(2026, 7, 27, 19, 0, 0, 0).getTime();
   const originSchedule13 = {
@@ -6513,13 +6519,16 @@ return { reapplySmartSensitivityNow };`
     smartClockPlannedAt: 0,
     alarmCreatedAt: 0
   };
-  const setNextTriggerAt13 = (nextTriggerAt, options = {}) => {
-    scheduleMutations.setScheduleNextTrigger(originSchedule13, nextTriggerAt, {
-      plannedAt: options?.plannedAt,
-      toleranceMs: 1500,
-      readNow: () => originNow13
-    });
-  };
+  let originNowReads13 = 0;
+  const setNextTriggerAt13 = new Function(
+    'schedule', 'Date', 'setScheduleNextTrigger',
+    `const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+    ${setNextTriggerSource13}; return setNextTriggerAt;`
+  )(
+    originSchedule13,
+    { now: () => { originNowReads13 += 1; return originNow13; } },
+    scheduleMutations.setScheduleNextTrigger
+  );
   setNextTriggerAt13(originTarget13);
   const firstOrigin13 = originSchedule13.smartClockPlannedAt;
   setNextTriggerAt13(originTarget13 + 500.5);
@@ -6533,7 +6542,7 @@ return { reapplySmartSensitivityNow };`
       && adoptedOrigin13 === remoteOrigin13
       && originSchedule13.nextTriggerAt === 0
       && originSchedule13.smartClockPlannedAt === 0
-      && backgroundSource.includes('setScheduleNextTrigger(schedule, nextTriggerAt, {'),
+      && originNowReads13 === 1,
     '13H-1: 新时钟认领 immutable origin；同钟 verify 漂移不刷新；远端来源显式继承；清钟同步清来源');
 
   const resetDisabledPwmRuntimeSource = extractSourceSection(
