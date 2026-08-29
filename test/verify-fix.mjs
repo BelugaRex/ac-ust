@@ -1889,6 +1889,18 @@ async function runTests() {
     ? backgroundSource.slice(setTimerStart, setTimerEnd)
     : '';
 
+  const serializedPageTimerStart = backgroundSource.indexOf(
+    'function sendSerializedPageTimerMessage('
+  );
+  const serializedPageTimerEnd = backgroundSource.indexOf(
+    '\n// 提取（Fowler Extract Function）：只在已锁定的精确 home tab 写入 picker。',
+    serializedPageTimerStart
+  );
+  const serializedPageTimerBody = serializedPageTimerStart >= 0
+      && serializedPageTimerEnd > serializedPageTimerStart
+    ? backgroundSource.slice(serializedPageTimerStart, serializedPageTimerEnd)
+    : '';
+
   const toggleOnceStart = backgroundSource.indexOf('async function toggleACOnce(action, options = {})');
   const toggleOnceEnd = backgroundSource.indexOf('\nasync function _toggleOnExistingTab', toggleOnceStart);
   const toggleOnceBody = toggleOnceStart >= 0 && toggleOnceEnd > toggleOnceStart
@@ -4748,8 +4760,12 @@ async function runTests() {
   const verifyBody = verifyStart >= 0 && verifyEnd > verifyStart
     ? backgroundSource.slice(verifyStart, verifyEnd)
     : '';
-  const retryStart = backgroundSource.indexOf('async function schedulePageTimerRetry(');
-  const retryEnd = backgroundSource.indexOf('\n// ----- 设置页面自带定时器', retryStart);
+  const retryIntentStart = backgroundSource.indexOf('function createPageTimerRetryIntent(');
+  const retryStart = backgroundSource.indexOf('async function schedulePageTimerRetry(', retryIntentStart);
+  const retryEnd = backgroundSource.indexOf('\nlet pageTimerMessageWriteChain', retryStart);
+  const retryIntentBody = retryIntentStart >= 0 && retryStart > retryIntentStart
+    ? backgroundSource.slice(retryIntentStart, retryStart)
+    : '';
   const retryBody = retryStart >= 0 && retryEnd > retryStart
     ? backgroundSource.slice(retryStart, retryEnd)
     : '';
@@ -4792,6 +4808,17 @@ async function runTests() {
       && verifyBody.includes('await chrome.tabs.remove(verifierTabId);'),
     '11B-2: 每次验证尝试都会在 finally 中回收临时隐藏页');
   const verificationCallIdx = setTimerBody.indexOf('verifyPageTimerPersistence(expectedValue');
+  const failureHelperStartIdx11D = setTimerBody.indexOf(
+    'const finishFailure = async (failure, reason) => {'
+  );
+  const failureHelperEndIdx11D = setTimerBody.indexOf(
+    '\n\n  // 提取（Fowler Extract Function）：页面定时器成功后的证明记录',
+    failureHelperStartIdx11D
+  );
+  const failureHelperSource11D = failureHelperStartIdx11D >= 0
+      && failureHelperEndIdx11D > failureHelperStartIdx11D
+    ? setTimerBody.slice(failureHelperStartIdx11D, failureHelperEndIdx11D)
+    : '';
   const proofHelperStartIdx11C = setTimerBody.indexOf(
     'const recordPageTimerProof = async (result, minutes, verification) => {'
   );
@@ -4822,7 +4849,7 @@ async function runTests() {
     proofWriteIdx11C
   );
   const proofCommitCallIdx11C = setTimerBody.indexOf(
-    'return await recordPageTimerProof(result, minutes, verification);'
+    'return recordPageTimerProof(result, minutes, verification);'
   );
   assertPass(verificationCallIdx > 0
       && proofCommitCallIdx11C > verificationCallIdx
@@ -4935,11 +4962,473 @@ async function runTests() {
       && pageProofSwapHarness11C.calls.join(',')
         === 'clear:ac-page-timer-retry,set:ac_schedule',
     '11C-1: alarm await 换对象后完整 proof 原子持久化；success 不再读取 live PWM 或偷改 owner clock');
-  assertPass(retryBody.includes('schedule.pageTimerRetryMinutes = retryMinutes')
-      && retryBody.includes("createAlarm('ac-page-timer-retry'")
-      && backgroundSource.includes('schedule.pageTimerRetryMinutes')
+  assertPass(retryIntentBody.includes('return Object.freeze({')
+      && retryIntentBody.includes('retryAt: Date.now() + 60 * 1000')
+      && countOccurrences(retryIntentBody, 'Date.now()') === 1
+      && retryBody.includes('const retryAt = retryState.retryAt;')
+      && retryBody.includes("createAlarm('ac-page-timer-retry', { when: retryAt })")
+      && retryBody.includes('if (!isCurrent()) return staleResult();')
+      && retryBody.includes('return { stale: false, retryMinutes, retryAt, alarmCreated };')
+      && !retryBody.includes('Date.now()')
+      && !retryBody.includes('schedule.')
       && backgroundSource.includes("if (alarm.name === 'ac-page-timer-retry')"),
-    '11D: 非 PWM 的关机请求失败会保存分钟数并由 ac-page-timer-retry 持续重试');
+    '11D: page retry intent 只读一次时间并冻结；alarm adapter 不跨 await 回读/写入全局 schedule');
+  const failureInitialCommitIdx11D = failureHelperSource11D.indexOf(
+    'recordSchedulePageTimerFailureState(schedule, pageTimerError, retryState);'
+  );
+  const failureRetryAwaitIdx11D = failureHelperSource11D.indexOf(
+    'const retryResult = await schedulePageTimerRetry('
+  );
+  const failureFinalCommitIdx11D = failureHelperSource11D.indexOf(
+    'recordSchedulePageTimerFailureState(schedule, pageTimerError, retryState);',
+    failureInitialCommitIdx11D + 1
+  );
+  assertPass(failureHelperSource11D.includes('schedulePageTimerRetry(')
+      && failureHelperSource11D.includes('automationWriteIsCurrent')
+      && failureHelperSource11D.includes('const failureStateIsCurrent = () => automationWriteIsCurrent()')
+      && failureInitialCommitIdx11D > 0
+      && failureInitialCommitIdx11D < failureRetryAwaitIdx11D
+      && failureFinalCommitIdx11D > failureRetryAwaitIdx11D
+      && failureHelperSource11D.includes('syncFromLiveAlarm: false')
+      && !/\bschedule\.pageTimerMinutes\s*=(?!=)/.test(failureHelperSource11D)
+      && !/\bschedule\.pageTimerTargetAt\s*=(?!=)/.test(failureHelperSource11D)
+      && !/\bschedule\.pageTimerRetryAt\s*=(?!=)/.test(failureHelperSource11D)
+      && !/\bschedule\.pageTimerRetryMinutes\s*=(?!=)/.test(failureHelperSource11D)
+      && setTimerBody.includes('let pageTimerWriteOwner = 0;')
+      && setTimerBody.includes('const runtimeOwnerRevision = pwmRuntimeRevision;')
+      && setTimerBody.includes('pwmRuntimeRevision === runtimeOwnerRevision')
+      && setTimerBody.includes('isPageTimerWriteOwnerCurrent(pageTimerWriteOwner)')
+      && setTimerBody.includes('pageTimerWriteOwner = claimPageTimerWriteOwner(lifecycleWriteIsCurrent);')
+      && setTimerBody.includes('if (pageTimerWriteOwner <= 0) return staleAutomationResult();')
+      && setTimerBody.includes('shutdownRevision,\n      pageTimerWriteOwner')
+      && setTimerBody.includes('if (result?.pageTimerStale')
+      && serializedPageTimerBody.includes('pageTimerWriteOwner = 0')
+      && countOccurrences(serializedPageTimerBody, 'if (!pageTimerWriteIsCurrent())') === 2
+      && serializedPageTimerBody.includes('pageTimerStale: true')
+      && backgroundSource.includes('function clearPageTimerProofState() {\n  invalidatePageTimerWriteOwner();')
+      && !setTimerBody.includes('return await finishFailure(')
+      && !setTimerBody.includes('return await recordPageTimerProof('),
+    '11D-0: failure 先同步失效旧 proof，真实消息前后复核同代 owner；alarm await 后只向当前 owner 重放五字段');
+
+  const pageTimerOwnerSource11D = extractSourceSection(
+    backgroundSource,
+    'let pageTimerWriteGeneration = 0;',
+    '\n\nfunction sendSerializedPageTimerMessage(',
+    'page timer write owner admission'
+  );
+  const pageTimerOwnerHarness11D = new Function(
+    `${pageTimerOwnerSource11D}
+    return {
+      claimPageTimerWriteOwner,
+      invalidatePageTimerWriteOwner,
+      isPageTimerWriteOwnerCurrent
+    };`
+  )();
+  const pageTimerOwnerA11D = pageTimerOwnerHarness11D.claimPageTimerWriteOwner(() => true);
+  const rejectedPageTimerOwner11D = pageTimerOwnerHarness11D.claimPageTimerWriteOwner(
+    () => false
+  );
+  const ownerASurvivedRejectedClaim11D = pageTimerOwnerHarness11D
+    .isPageTimerWriteOwnerCurrent(pageTimerOwnerA11D);
+  const pageTimerOwnerC11D = pageTimerOwnerHarness11D.claimPageTimerWriteOwner(() => true);
+  const ownerCWasCurrent11D = pageTimerOwnerHarness11D
+    .isPageTimerWriteOwnerCurrent(pageTimerOwnerC11D);
+  const invalidatedPageTimerGeneration11D = pageTimerOwnerHarness11D
+    .invalidatePageTimerWriteOwner();
+  assertPass(pageTimerOwnerA11D === 1
+      && rejectedPageTimerOwner11D === 0
+      && ownerASurvivedRejectedClaim11D === true
+      && pageTimerOwnerC11D === 2
+      && !pageTimerOwnerHarness11D.isPageTimerWriteOwnerCurrent(pageTimerOwnerA11D)
+      && ownerCWasCurrent11D === true
+      && invalidatedPageTimerGeneration11D === 3
+      && !pageTimerOwnerHarness11D.isPageTimerWriteOwnerCurrent(pageTimerOwnerC11D),
+    '11D-0A: stale contender 不抢占；获准 writer 才 last-writer-wins，显式 proof clear 可另行失效当前 writer');
+
+  const loadPageTimerFailureHarness11D = new Function(
+    'initialSchedule', 'replacementSchedule', 'harnessOptions',
+    'recordSchedulePageTimerFailureState', 'Date', 'console',
+    `let schedule = initialSchedule;
+    let current = true;
+    let retryOnFailure = harnessOptions.retryOnFailure !== false;
+    const minutes = harnessOptions.minutes ?? 19.9;
+    const automationRevision = harnessOptions.nullLifecycleOwner ? null : 1;
+    const shutdownRevision = null;
+    let persistedSchedule = null;
+    let scheduleLoadBlockedRevision = null;
+    let pwmRuntimeRevision = 1;
+    const calls = [];
+    const STORAGE_KEY = 'ac_schedule';
+    const SYNC_PENDING_PUBLISH_KEY = 'ac_sync_pending_publish';
+    const automationWriteIsCurrent = () => current;
+    const staleAutomationResult = () => ({ success: false, automationStale: true });
+    const t = () => 'fallback page timer failure';
+    const sanitizeMinutes = (value, fallback) => {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) && parsed >= 1 ? parsed : fallback;
+    };
+    const chrome = {
+      alarms: {
+        async clear(name) {
+          calls.push('clear:' + name);
+          if (harnessOptions.swapOnClear) schedule = replacementSchedule;
+          if (harnessOptions.staleOnClear) current = false;
+        },
+        async get(name) {
+          calls.push('get:' + name);
+          return { name, scheduledTime: Date.now() + 60_000 };
+        }
+      },
+      storage: { local: { async set(value) {
+        calls.push('set:ac_schedule');
+        persistedSchedule = { ...value[STORAGE_KEY] };
+      } } }
+    };
+    async function createAlarm(name, info) {
+      calls.push('create:' + name + ':' + info.when);
+      if (harnessOptions.swapOnCreate) schedule = replacementSchedule;
+      if (harnessOptions.staleOnCreate) current = false;
+      return harnessOptions.alarmCreated !== false;
+    }
+    const isAutomationAllowed = () => true;
+    const isAutomationOperationCurrent = () => true;
+    const reconcilePwmTrigger = () => ({ kind: 'noop' });
+    const applyPwmPlanState = () => {};
+    const clearPwmRetryState = () => {};
+    ${pageTimerPersistSource11C}
+    ${retryIntentBody}
+    ${retryBody}
+    ${failureHelperSource11D}
+    return {
+      run: (failure, reason = 'failed') => finishFailure(failure, reason),
+      current: () => schedule,
+      persisted: () => persistedSchedule,
+      calls
+    };`
+  );
+  const fixedRetryNow11D = 1_787_990_000_000;
+  const RetryDate11D = { now: () => fixedRetryNow11D };
+  const makeFailureSchedules11D = () => ({
+    initial: {
+      pageTimerMinutes: 7,
+      pageTimerTargetAt: 111,
+      pageTimerError: 'old failure',
+      pageTimerRetryAt: 222,
+      pageTimerRetryMinutes: 2,
+      smartMode: { enabled: true }
+    },
+    replacement: {
+      pageTimerMinutes: 9,
+      pageTimerTargetAt: 333,
+      pageTimerError: 'replacement owner',
+      pageTimerRetryAt: 444,
+      pageTimerRetryMinutes: 4,
+      nextTriggerAt: 555,
+      smartClockPlannedAt: 666,
+      alarmCreatedAt: 777,
+      alarmDelayMinutes: 8,
+      smartMode: { enabled: true }
+    }
+  });
+  const currentFailureSchedules11D = makeFailureSchedules11D();
+  const currentFailureHarness11D = loadPageTimerFailureHarness11D(
+    currentFailureSchedules11D.initial,
+    currentFailureSchedules11D.replacement,
+    { swapOnClear: true, minutes: 19.9 },
+    scheduleMutations.recordSchedulePageTimerFailureState,
+    RetryDate11D,
+    testConsole
+  );
+  const currentFailure11D = Object.freeze({ success: false, error: 'fresh failure' });
+  const currentFailureResult11D = await currentFailureHarness11D.run(
+    currentFailure11D,
+    'synthetic'
+  );
+  assertPass(currentFailureResult11D === currentFailure11D
+      && currentFailureHarness11D.current() === currentFailureSchedules11D.replacement
+      && currentFailureSchedules11D.initial.pageTimerMinutes === null
+      && currentFailureSchedules11D.initial.pageTimerTargetAt === 0
+      && currentFailureSchedules11D.initial.pageTimerError === 'fresh failure'
+      && currentFailureSchedules11D.initial.pageTimerRetryAt
+        === fixedRetryNow11D + 60_000
+      && currentFailureSchedules11D.initial.pageTimerRetryMinutes === 19
+      && currentFailureSchedules11D.replacement.pageTimerMinutes === null
+      && currentFailureSchedules11D.replacement.pageTimerTargetAt === 0
+      && currentFailureSchedules11D.replacement.pageTimerError === 'fresh failure'
+      && currentFailureSchedules11D.replacement.pageTimerRetryAt
+        === fixedRetryNow11D + 60_000
+      && currentFailureSchedules11D.replacement.pageTimerRetryMinutes === 19
+      && currentFailureHarness11D.persisted()?.pageTimerError === 'fresh failure'
+      && currentFailureHarness11D.persisted()?.nextTriggerAt === 555
+      && currentFailureHarness11D.persisted()?.smartClockPlannedAt === 666
+      && currentFailureHarness11D.persisted()?.alarmCreatedAt === 777
+      && currentFailureHarness11D.persisted()?.alarmDelayMinutes === 8
+      && currentFailureHarness11D.calls.join(',')
+        === `clear:ac-page-timer-retry,create:ac-page-timer-retry:${fixedRetryNow11D + 60_000},set:ac_schedule`,
+    '11D-1: clear await 换对象后，local retryAt 建钟且完整 failure 只提交到当前 owner，不读取/污染 PWM clock');
+
+  const createSwapSchedules11D = makeFailureSchedules11D();
+  const createSwapHarness11D = loadPageTimerFailureHarness11D(
+    createSwapSchedules11D.initial,
+    createSwapSchedules11D.replacement,
+    { swapOnCreate: true },
+    scheduleMutations.recordSchedulePageTimerFailureState,
+    RetryDate11D,
+    testConsole
+  );
+  await createSwapHarness11D.run(currentFailure11D, 'create-swap');
+  assertPass(createSwapSchedules11D.replacement.pageTimerMinutes === null
+      && createSwapSchedules11D.replacement.pageTimerTargetAt === 0
+      && createSwapSchedules11D.replacement.pageTimerError === 'fresh failure'
+      && createSwapSchedules11D.replacement.pageTimerRetryAt
+        === fixedRetryNow11D + 60_000
+      && createSwapHarness11D.persisted()?.pageTimerRetryAt
+        === fixedRetryNow11D + 60_000,
+    '11D-1A: create verify await 换对象后，最终 failure intent 重放到当前 lifecycle owner');
+
+  const createStaleSchedules11D = makeFailureSchedules11D();
+  const createStaleHarness11D = loadPageTimerFailureHarness11D(
+    createStaleSchedules11D.initial,
+    createStaleSchedules11D.replacement,
+    { swapOnCreate: true, staleOnCreate: true },
+    scheduleMutations.recordSchedulePageTimerFailureState,
+    RetryDate11D,
+    testConsole
+  );
+  const createStaleResult11D = await createStaleHarness11D.run(currentFailure11D);
+  assertPass(createStaleResult11D.automationStale === true
+      && createStaleSchedules11D.initial.pageTimerMinutes === null
+      && createStaleSchedules11D.replacement.pageTimerMinutes === 9
+      && createStaleSchedules11D.replacement.pageTimerError === 'replacement owner'
+      && createStaleHarness11D.persisted() === null
+      && createStaleHarness11D.calls.join(',')
+        === `clear:ac-page-timer-retry,create:ac-page-timer-retry:${fixedRetryNow11D + 60_000}`,
+    '11D-1B: create verify 期间 owner 失效后不重放、不持久化 replacement');
+
+  const staleFailureSchedules11D = makeFailureSchedules11D();
+  const staleFailureHarness11D = loadPageTimerFailureHarness11D(
+    staleFailureSchedules11D.initial,
+    staleFailureSchedules11D.replacement,
+    { swapOnClear: true, staleOnClear: true },
+    scheduleMutations.recordSchedulePageTimerFailureState,
+    RetryDate11D,
+    testConsole
+  );
+  const staleFailureResult11D = await staleFailureHarness11D.run(currentFailure11D);
+  assertPass(staleFailureResult11D.automationStale === true
+      && staleFailureSchedules11D.initial.pageTimerMinutes === null
+      && staleFailureSchedules11D.initial.pageTimerTargetAt === 0
+      && staleFailureSchedules11D.initial.pageTimerError === 'fresh failure'
+      && staleFailureSchedules11D.initial.pageTimerRetryAt
+        === fixedRetryNow11D + 60_000
+      && staleFailureSchedules11D.replacement.pageTimerMinutes === 9
+      && staleFailureSchedules11D.replacement.pageTimerTargetAt === 333
+      && staleFailureSchedules11D.replacement.pageTimerError === 'replacement owner'
+      && staleFailureSchedules11D.replacement.pageTimerRetryAt === 444
+      && staleFailureHarness11D.persisted() === null
+      && staleFailureHarness11D.calls.join(',') === 'clear:ac-page-timer-retry',
+    '11D-2: clear 期间 owner 失效后不建钟、不 patch、不持久化新 owner');
+
+  const nullOwnerSchedules11D = makeFailureSchedules11D();
+  const nullOwnerHarness11D = loadPageTimerFailureHarness11D(
+    nullOwnerSchedules11D.initial,
+    nullOwnerSchedules11D.replacement,
+    { nullLifecycleOwner: true, swapOnClear: true },
+    scheduleMutations.recordSchedulePageTimerFailureState,
+    RetryDate11D,
+    testConsole
+  );
+  const nullOwnerResult11D = await nullOwnerHarness11D.run(currentFailure11D);
+  assertPass(nullOwnerResult11D.automationStale === true
+      && nullOwnerSchedules11D.initial.pageTimerMinutes === null
+      && nullOwnerSchedules11D.initial.pageTimerError === 'fresh failure'
+      && nullOwnerSchedules11D.replacement.pageTimerMinutes === 9
+      && nullOwnerSchedules11D.replacement.pageTimerTargetAt === 333
+      && nullOwnerSchedules11D.replacement.pageTimerError === 'replacement owner'
+      && nullOwnerSchedules11D.replacement.pageTimerRetryAt === 444
+      && nullOwnerHarness11D.persisted() === null
+      && nullOwnerHarness11D.calls.join(',') === 'clear:ac-page-timer-retry',
+    '11D-2A: null lifecycle owner 的 tuple 在 await 中被替换后，不建钟、不反向污染/持久化新 owner');
+
+  const sameTupleNullOwnerSchedules11D = makeFailureSchedules11D();
+  Object.assign(sameTupleNullOwnerSchedules11D.replacement, {
+    pageTimerMinutes: null,
+    pageTimerTargetAt: 0,
+    pageTimerError: 'fresh failure',
+    pageTimerRetryAt: fixedRetryNow11D + 60_000,
+    pageTimerRetryMinutes: 19
+  });
+  const sameTupleNullOwnerHarness11D = loadPageTimerFailureHarness11D(
+    sameTupleNullOwnerSchedules11D.initial,
+    sameTupleNullOwnerSchedules11D.replacement,
+    { nullLifecycleOwner: true, swapOnClear: true },
+    scheduleMutations.recordSchedulePageTimerFailureState,
+    RetryDate11D,
+    testConsole
+  );
+  await sameTupleNullOwnerHarness11D.run(currentFailure11D);
+  assertPass(sameTupleNullOwnerHarness11D.persisted()?.pageTimerError === 'fresh failure'
+      && sameTupleNullOwnerHarness11D.persisted()?.pageTimerRetryAt
+        === fixedRetryNow11D + 60_000
+      && sameTupleNullOwnerHarness11D.calls.join(',')
+        === `clear:ac-page-timer-retry,create:ac-page-timer-retry:${fixedRetryNow11D + 60_000},set:ac_schedule`,
+    '11D-2B: null owner 仅换对象但五字段 tuple 未变时，允许同一 failure intent 收口');
+
+  const oldTupleNullOwnerSchedules11D = makeFailureSchedules11D();
+  Object.assign(oldTupleNullOwnerSchedules11D.replacement, {
+    pageTimerMinutes: 7,
+    pageTimerTargetAt: 111,
+    pageTimerError: 'old failure',
+    pageTimerRetryAt: 222,
+    pageTimerRetryMinutes: 2
+  });
+  const oldTupleNullOwnerHarness11D = loadPageTimerFailureHarness11D(
+    oldTupleNullOwnerSchedules11D.initial,
+    oldTupleNullOwnerSchedules11D.replacement,
+    { nullLifecycleOwner: true, swapOnClear: true },
+    scheduleMutations.recordSchedulePageTimerFailureState,
+    RetryDate11D,
+    testConsole
+  );
+  await oldTupleNullOwnerHarness11D.run(currentFailure11D);
+  assertPass(oldTupleNullOwnerSchedules11D.replacement.pageTimerMinutes === null
+      && oldTupleNullOwnerSchedules11D.replacement.pageTimerTargetAt === 0
+      && oldTupleNullOwnerSchedules11D.replacement.pageTimerError === 'fresh failure'
+      && oldTupleNullOwnerSchedules11D.replacement.pageTimerRetryAt
+        === fixedRetryNow11D + 60_000
+      && oldTupleNullOwnerHarness11D.persisted()?.pageTimerError === 'fresh failure',
+    '11D-2C: null owner await 中 harmless onChanged 回灌入场前 tuple 时，仍重放并持久化本次 failure');
+
+  const noRetrySchedules11D = makeFailureSchedules11D();
+  const noRetryHarness11D = loadPageTimerFailureHarness11D(
+    noRetrySchedules11D.initial,
+    noRetrySchedules11D.replacement,
+    { retryOnFailure: false, swapOnClear: true },
+    scheduleMutations.recordSchedulePageTimerFailureState,
+    RetryDate11D,
+    testConsole
+  );
+  await noRetryHarness11D.run(currentFailure11D, 'no-retry');
+  assertPass(noRetrySchedules11D.initial.pageTimerMinutes === null
+      && noRetrySchedules11D.initial.pageTimerTargetAt === 0
+      && noRetrySchedules11D.initial.pageTimerRetryAt === 0
+      && noRetrySchedules11D.replacement.pageTimerMinutes === null
+      && noRetrySchedules11D.replacement.pageTimerTargetAt === 0
+      && noRetrySchedules11D.replacement.pageTimerError === 'fresh failure'
+      && noRetrySchedules11D.replacement.pageTimerRetryAt === 0
+      && noRetrySchedules11D.replacement.pageTimerRetryMinutes === 0
+      && noRetryHarness11D.persisted()?.pageTimerRetryAt === 0
+      && noRetryHarness11D.calls.join(',')
+        === 'clear:ac-page-timer-retry,set:ac_schedule',
+    '11D-3: retry=false 的 clear await 换对象后仍向当前 owner 原子提交 failure+零 retry');
+
+  const falseAlarmSchedules11D = makeFailureSchedules11D();
+  const falseAlarmHarness11D = loadPageTimerFailureHarness11D(
+    falseAlarmSchedules11D.initial,
+    falseAlarmSchedules11D.replacement,
+    { swapOnClear: true, alarmCreated: false },
+    scheduleMutations.recordSchedulePageTimerFailureState,
+    RetryDate11D,
+    testConsole
+  );
+  await falseAlarmHarness11D.run(currentFailure11D, 'alarm-false');
+  assertPass(falseAlarmSchedules11D.replacement.pageTimerRetryAt
+        === fixedRetryNow11D + 60_000
+      && falseAlarmSchedules11D.replacement.pageTimerRetryMinutes === 19
+      && falseAlarmHarness11D.persisted()?.pageTimerRetryAt
+        === fixedRetryNow11D + 60_000,
+    '11D-4: retry alarm create=false 时仍持久化 durable intent，供 startup/watchdog 恢复');
+
+  const clearSupersededSource11D = extractSourceSection(
+    backgroundSource,
+    'async function clearSupersededTimerBasedShutdownRetry() {',
+    '\nfunction canReusePageTimerProof(',
+    'clear superseded timer-based shutdown retry'
+  );
+  const loadClearSupersededHarness11D = new Function(
+    'initialSchedule', 'replacementSchedule', 'claimNewOwnerDuringClear',
+    'replaceSchedulePageTimerRetryState',
+    `let schedule = initialSchedule;
+    let timerBasedShutdownRevision = 0;
+    let persistedSchedule = null;
+    const calls = [];
+    const invalidateTimerBasedShutdown = () => {
+      timerBasedShutdownRevision += 1;
+      return timerBasedShutdownRevision;
+    };
+    const isTimerBasedShutdownCurrent = revision => (
+      revision === timerBasedShutdownRevision
+    );
+    const chrome = { alarms: { async clear(name) {
+      calls.push('clear:' + name);
+      schedule = replacementSchedule;
+      if (claimNewOwnerDuringClear) timerBasedShutdownRevision += 1;
+    } } };
+    const persistSchedule = async (reason, options) => {
+      calls.push('persist:' + reason + ':' + options.syncFromLiveAlarm);
+      persistedSchedule = { ...schedule };
+    };
+    ${clearSupersededSource11D}
+    return {
+      run: clearSupersededTimerBasedShutdownRetry,
+      current: () => schedule,
+      persisted: () => persistedSchedule,
+      calls
+    };`
+  );
+  const oldSupersededSchedule11D = {
+    pageTimerMinutes: 12,
+    pageTimerTargetAt: 1234,
+    pageTimerError: 'keep diagnostic',
+    pageTimerRetryAt: 2222,
+    pageTimerRetryMinutes: 1
+  };
+  const replacementSupersededSchedule11D = {
+    pageTimerMinutes: 12,
+    pageTimerTargetAt: 1234,
+    pageTimerError: 'keep diagnostic',
+    pageTimerRetryAt: 3333,
+    pageTimerRetryMinutes: 2
+  };
+  const clearSupersededHarness11D = loadClearSupersededHarness11D(
+    oldSupersededSchedule11D,
+    replacementSupersededSchedule11D,
+    false,
+    scheduleMutations.replaceSchedulePageTimerRetryState
+  );
+  const clearedSuperseded11D = await clearSupersededHarness11D.run();
+  assertPass(clearedSuperseded11D === true
+      && oldSupersededSchedule11D.pageTimerRetryAt === 0
+      && replacementSupersededSchedule11D.pageTimerRetryAt === 0
+      && replacementSupersededSchedule11D.pageTimerRetryMinutes === 0
+      && replacementSupersededSchedule11D.pageTimerMinutes === 12
+      && replacementSupersededSchedule11D.pageTimerTargetAt === 1234
+      && replacementSupersededSchedule11D.pageTimerError === 'keep diagnostic'
+      && clearSupersededHarness11D.persisted()?.pageTimerRetryAt === 0
+      && clearSupersededHarness11D.calls.join(',')
+        === 'clear:ac-page-timer-retry,persist:clear-superseded-timer-based-shutdown-retry:false',
+    '11D-5: superseded clear 换对象后按 revision 向当前 owner 重清 retry，保留 proof/error 并 persist(false)');
+
+  const staleSupersededReplacement11D = {
+    pageTimerMinutes: 15,
+    pageTimerTargetAt: 5678,
+    pageTimerError: 'new shutdown owner',
+    pageTimerRetryAt: 4444,
+    pageTimerRetryMinutes: 3
+  };
+  const staleSupersededHarness11D = loadClearSupersededHarness11D(
+    { pageTimerRetryAt: 2222, pageTimerRetryMinutes: 1 },
+    staleSupersededReplacement11D,
+    true,
+    scheduleMutations.replaceSchedulePageTimerRetryState
+  );
+  const staleSupersededResult11D = await staleSupersededHarness11D.run();
+  assertPass(staleSupersededResult11D === false
+      && staleSupersededReplacement11D.pageTimerRetryAt === 4444
+      && staleSupersededReplacement11D.pageTimerRetryMinutes === 3
+      && staleSupersededHarness11D.persisted() === null
+      && staleSupersededHarness11D.calls.join(',') === 'clear:ac-page-timer-retry',
+    '11D-6: superseded clear await 期间新 shutdown owner 接管后，不清新 retry、不持久化旧事务');
   const repairTimerIdx = repairBody.indexOf('await setPageTimer(timerMinutes');
   const repairOffIdx = repairBody.indexOf("schedule.pwmState = currentOn ? 'off' : 'on';");
   assertPass(repairTimerIdx > 0
@@ -5442,6 +5931,7 @@ return { reapplySmartSensitivityNow };`
     'clearPwmRetryState',
     'setSmartOnPwmRetryState',
     'clearPageTimerProofState',
+    'replaceSchedulePageTimerRetryState',
     'halfHourBoundaryAtOrBefore',
     'syncScheduleToSync',
     'clearPwmAlarm',
@@ -5578,6 +6068,7 @@ return { reapplySmartSensitivityNow };`
         repairSchedule.pageTimerRetryAt = 0;
         repairSchedule.pageTimerRetryMinutes = 0;
       },
+      scheduleMutations.replaceSchedulePageTimerRetryState,
       pwmPhase.halfHourBoundaryAtOrBefore,
       async reason => { syncCalls.push(reason); },
       async () => true,
@@ -6144,18 +6635,24 @@ return { reapplySmartSensitivityNow };`
     pageTimerRetryMinutes: 1,
     pwmState: 'off'
   };
+  let pageTimerOwnerInvalidations11K = 0;
   const clearPageTimerProofState = new Function(
-    'schedule', 'clearSchedulePageTimerProofState',
+    'schedule', 'clearSchedulePageTimerProofState', 'invalidatePageTimerWriteOwner',
     `${clearPageTimerProofSource}; return clearPageTimerProofState;`
-  )(proofState, scheduleMutations.clearSchedulePageTimerProofState);
+  )(
+    proofState,
+    scheduleMutations.clearSchedulePageTimerProofState,
+    () => { pageTimerOwnerInvalidations11K += 1; }
+  );
   clearPageTimerProofState();
   assertPass(proofState.pageTimerMinutes === null
       && proofState.pageTimerTargetAt === 0
       && proofState.pageTimerError === ''
       && proofState.pageTimerRetryAt === 0
       && proofState.pageTimerRetryMinutes === 0
-      && proofState.pwmState === 'off',
-    '11K: 页面定时器证明 helper 只清五个证明字段，不污染 PWM 相位');
+      && proofState.pwmState === 'off'
+      && pageTimerOwnerInvalidations11K === 1,
+    '11K: 页面定时器证明 helper 先失效旧 writer，再只清五个证明字段且不污染 PWM 相位');
   const applyPwmPlanStart = backgroundSource.indexOf('function applyPwmPlanState(plan)');
   const applyPwmPlanEnd = backgroundSource.indexOf('\nasync function syncStoredTriggerFromAlarm', applyPwmPlanStart);
   const applyPwmPlanBody = applyPwmPlanStart >= 0 && applyPwmPlanEnd > applyPwmPlanStart
@@ -6632,9 +7129,76 @@ return { reapplySmartSensitivityNow };`
     '13G: getSwStatus 返回 offscreenAlive 真值与 SW 构建身份');
   assertPass(initBody13.includes('const retryMinutes = Number(schedule.pageTimerRetryMinutes) || 0;')
       && initBody13.includes("createAlarm('ac-page-timer-retry', { when: retryAt })")
-      && initBody13.includes("await schedulePageTimerRetry(retryMinutes, '启动恢复错过的页面定时器重试');")
+      && initBody13.includes('const retryOwnerIsCurrent = () => (')
+      && initBody13.includes('const retryIntent = createPageTimerRetryIntent(retryMinutes);')
+      && initBody13.includes("'启动恢复错过的页面定时器重试',\n          retryOwnerIsCurrent")
+      && initBody13.includes('if (retryState.stale || !retryOwnerIsCurrent()) return;')
+      && initBody13.includes('replaceSchedulePageTimerRetryState(schedule, retryState);')
       && initBody13.includes("persistSchedule('init-recover-overdue-page-timer-retry'"),
-    '13E: 启动会重新排程浏览器关闭期间错过的页面定时器重试');
+    '13E: 启动仅在旧 retry tuple 仍归自己时重新排程并 CAS 提交错过的页面重试');
+
+  const startupRetryStart13E = initBody13.indexOf(
+    'async function recoverPageTimerRetryOnStartup() {'
+  );
+  const startupRetryEnd13E = initBody13.indexOf('\n\n  try {', startupRetryStart13E);
+  const startupRetrySource13E = startupRetryStart13E >= 0
+      && startupRetryEnd13E > startupRetryStart13E
+    ? initBody13.slice(startupRetryStart13E, startupRetryEnd13E)
+    : '';
+  const loadStartupRetryHarness13E = new Function(
+    'initialSchedule', 'replacementSchedule', 'retryState',
+    'replaceSchedulePageTimerRetryState',
+    `let schedule = initialSchedule;
+    const calls = [];
+    const createAlarm = async (name, info) => {
+      calls.push({ type: 'create', name, info: { ...info } });
+      return true;
+    };
+    const schedulePageTimerRetry = async (_minutes, _reason, isCurrent) => {
+      calls.push({ type: 'retry', ownerBeforeSwap: isCurrent() });
+      schedule = replacementSchedule;
+      calls.push({ type: 'owner-after-swap', current: isCurrent() });
+      return { ...retryState };
+    };
+    const persistSchedule = async (reason, options) => {
+      calls.push({ type: 'persist', reason, options: { ...options }, snapshot: { ...schedule } });
+    };
+    const sanitizeMinutes = (value, fallback) => {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) && parsed >= 1 ? parsed : fallback;
+    };
+    ${retryIntentBody}
+    ${startupRetrySource13E}
+    return { run: recoverPageTimerRetryOnStartup, current: () => schedule, calls };`
+  );
+  const staleStartupRetryHarness13E = loadStartupRetryHarness13E(
+    { pageTimerRetryAt: 1, pageTimerRetryMinutes: 3 },
+    { pageTimerRetryAt: 0, pageTimerRetryMinutes: 0, owner: 'comfort' },
+    { stale: false, retryAt: 999, retryMinutes: 3 },
+    scheduleMutations.replaceSchedulePageTimerRetryState
+  );
+  await staleStartupRetryHarness13E.run();
+  assertPass(staleStartupRetryHarness13E.current().owner === 'comfort'
+      && staleStartupRetryHarness13E.current().pageTimerRetryAt === 0
+      && staleStartupRetryHarness13E.current().pageTimerRetryMinutes === 0
+      && staleStartupRetryHarness13E.calls.length === 2
+      && staleStartupRetryHarness13E.calls[0].ownerBeforeSwap === true
+      && staleStartupRetryHarness13E.calls[1].current === false,
+    '13E-1: startup await 期间旧 tuple 被 comfort 清除后，不复活 retry、不持久化新 owner');
+
+  const replacementTupleStartup13E = { pageTimerRetryAt: 1, pageTimerRetryMinutes: 3 };
+  const currentStartupRetryHarness13E = loadStartupRetryHarness13E(
+    { pageTimerRetryAt: 1, pageTimerRetryMinutes: 3 },
+    replacementTupleStartup13E,
+    { stale: false, retryAt: 999, retryMinutes: 3 },
+    scheduleMutations.replaceSchedulePageTimerRetryState
+  );
+  await currentStartupRetryHarness13E.run();
+  assertPass(replacementTupleStartup13E.pageTimerRetryAt === 999
+      && replacementTupleStartup13E.pageTimerRetryMinutes === 3
+      && currentStartupRetryHarness13E.calls.at(-1)?.type === 'persist'
+      && currentStartupRetryHarness13E.calls.at(-1)?.options.syncFromLiveAlarm === false,
+    '13E-2: startup 换对象但旧 tuple 未变时，向当前对象提交新 intent 并无 PWM live read 持久化');
 
   let extractionGuardMessage = '';
   try {
@@ -15045,6 +15609,10 @@ ${alarmPwmCatchBody16}
       schedule.pageTimerRetryAt = 0;
       schedule.pageTimerRetryMinutes = 0;
     }
+    function replaceSchedulePageTimerRetryState(state, retryState = {}) {
+      state.pageTimerRetryAt = retryState.retryAt ?? 0;
+      state.pageTimerRetryMinutes = retryState.retryMinutes ?? 0;
+    }
     async function syncScheduleToSync(reason) {
       calls.push({ type: 'sync', reason });
       return true;
@@ -17753,10 +18321,15 @@ return plan;
     let activeRevision16 = 1;
     let automationAllowedForTimer16 = true;
     let releaseAutomaticTimer16 = null;
+    let releasePageTimerQueueBlocker16 = null;
+    let releaseInFlightPageTimer16 = null;
     const sentTimerMinutes16 = [];
     const pageTimerMessageHarness16 = new Function(
       'isAutomationOperationCurrent', 'sendMessageToExactACHome',
-      `${pageTimerMessageQueueSource16}; return { sendSerializedPageTimerMessage };`
+      `${pageTimerMessageQueueSource16}; return {
+        claimPageTimerWriteOwner,
+        sendSerializedPageTimerMessage
+      };`
     )(
       revision => automationAllowedForTimer16 && revision === activeRevision16,
       async (_tabId, message) => {
@@ -17764,6 +18337,16 @@ return plan;
         if (message.minutes === 30) {
           return new Promise(resolve => {
             releaseAutomaticTimer16 = () => resolve({ success: true, minutes: 30 });
+          });
+        }
+        if (message.minutes === 99) {
+          return new Promise(resolve => {
+            releasePageTimerQueueBlocker16 = () => resolve({ success: true, minutes: 99 });
+          });
+        }
+        if (message.minutes === 25) {
+          return new Promise(resolve => {
+            releaseInFlightPageTimer16 = () => resolve({ success: true, minutes: 25 });
           });
         }
         return { success: true, minutes: message.minutes };
@@ -17792,13 +18375,73 @@ return plan;
         { action: 'setTimer', minutes: 20 },
         1
       );
+
+    const queuedRaceSentStart16 = sentTimerMinutes16.length;
+    const queueBlocker16 = pageTimerMessageHarness16.sendSerializedPageTimerMessage(
+      1,
+      { action: 'setTimer', minutes: 99 }
+    );
+    while (!releasePageTimerQueueBlocker16) await Promise.resolve();
+    const queuedOwnerA16 = pageTimerMessageHarness16.claimPageTimerWriteOwner(() => true);
+    const queuedWriterA16 = pageTimerMessageHarness16.sendSerializedPageTimerMessage(
+      1,
+      { action: 'setTimer', minutes: 45 },
+      null,
+      null,
+      queuedOwnerA16
+    );
+    const queuedOwnerB16 = pageTimerMessageHarness16.claimPageTimerWriteOwner(() => true);
+    const queuedWriterB16 = pageTimerMessageHarness16.sendSerializedPageTimerMessage(
+      1,
+      { action: 'setTimer', minutes: 15 },
+      null,
+      null,
+      queuedOwnerB16
+    );
+    releasePageTimerQueueBlocker16();
+    const [queueBlockerResult16, queuedWriterAResult16, queuedWriterBResult16] =
+      await Promise.all([queueBlocker16, queuedWriterA16, queuedWriterB16]);
+    const queuedOwnerRacePass16 = queueBlockerResult16?.success === true
+      && queuedWriterAResult16?.pageTimerStale === true
+      && queuedWriterBResult16?.success === true
+      && sentTimerMinutes16.slice(queuedRaceSentStart16).join(',') === '99,15';
+
+    const inFlightRaceSentStart16 = sentTimerMinutes16.length;
+    const inFlightOwnerA16 = pageTimerMessageHarness16.claimPageTimerWriteOwner(() => true);
+    const inFlightWriterA16 = pageTimerMessageHarness16.sendSerializedPageTimerMessage(
+      1,
+      { action: 'setTimer', minutes: 25 },
+      null,
+      null,
+      inFlightOwnerA16
+    );
+    while (!releaseInFlightPageTimer16) await Promise.resolve();
+    const inFlightOwnerB16 = pageTimerMessageHarness16.claimPageTimerWriteOwner(() => true);
+    const inFlightWriterB16 = pageTimerMessageHarness16.sendSerializedPageTimerMessage(
+      1,
+      { action: 'setTimer', minutes: 5 },
+      null,
+      null,
+      inFlightOwnerB16
+    );
+    releaseInFlightPageTimer16();
+    const [inFlightWriterAResult16, inFlightWriterBResult16] = await Promise.all([
+      inFlightWriterA16,
+      inFlightWriterB16
+    ]);
+    const inFlightOwnerRacePass16 = inFlightWriterAResult16?.pageTimerStale === true
+      && inFlightWriterBResult16?.success === true
+      && sentTimerMinutes16.slice(inFlightRaceSentStart16).join(',') === '25,5';
+
     pageTimerMessageQueuePass16 = automaticTimerResult16?.automationStale === true
       && safetyTimerResult16?.success === true
       && staleAutomaticTimerResult16?.automationStale === true
-      && sentTimerMinutes16.join(',') === '30,1';
+      && queuedOwnerRacePass16
+      && inFlightOwnerRacePass16
+      && sentTimerMinutes16.slice(0, 2).join(',') === '30,1';
   }
   assertPass(pageTimerMessageQueuePass16,
-    '16I: 页面定时器消息串行，边界安全写最后落地且失效自动 revision 不再发送');
+    '16I: 页面消息串行；旧 owner 排队时不再发送、发送中失效不提交，最终页面由新 owner 落地');
   assertPass(countOccurrences(backgroundSource, "chrome.alarms.create('ac-pwm'") === 0,
     '16J: 所有 ac-pwm 写入统一经过带最终门禁的创建器');
   assertPass(contentSource.includes("if (action === 'off')")
@@ -20163,6 +20806,47 @@ return plan;
     '\n// ===== Active Hours',
     'five-minute comfort lifecycle'
   );
+  const comfortRunSource17 = extractSourceSection(
+    comfortSource17,
+    "async function runComfortStart(reason = 'user-enable') {",
+    '\n\nasync function finishExplicitDisablePreemption',
+    'comfort start transaction'
+  );
+  const comfortRetryReplace17 = 'replaceSchedulePageTimerRetryState(schedule);';
+  const comfortClaimPersist17 = comfortRunSource17.indexOf(
+    'await persistSchedule(`comfort-start-${reason}-claim`'
+  );
+  const comfortClaimInitialClear17 = comfortRunSource17.indexOf(comfortRetryReplace17);
+  const comfortClaimOwnerGate17 = comfortRunSource17.lastIndexOf(
+    'if (!isAutomationOperationCurrent(automationRevision)) {',
+    comfortClaimPersist17
+  );
+  const comfortClaimCurrentClear17 = comfortRunSource17.lastIndexOf(
+    comfortRetryReplace17,
+    comfortClaimPersist17
+  );
+  const comfortCompleteIntent17 = comfortRunSource17.indexOf("schedule.pwmState = 'off';");
+  const comfortCompletePersist17 = comfortRunSource17.indexOf(
+    'await persistSchedule(`comfort-start-${reason}-complete`'
+  );
+  const comfortCompleteOwnerGate17 = comfortRunSource17.lastIndexOf(
+    'if (!isAutomationOperationCurrent(automationRevision)) {',
+    comfortCompletePersist17
+  );
+  const comfortCompleteCurrentClear17 = comfortRunSource17.lastIndexOf(
+    comfortRetryReplace17,
+    comfortCompletePersist17
+  );
+  assertPass(comfortClaimInitialClear17 > 0
+      && comfortClaimInitialClear17 < comfortClaimOwnerGate17
+      && comfortClaimOwnerGate17 < comfortClaimCurrentClear17
+      && comfortClaimCurrentClear17 < comfortClaimPersist17
+      && comfortCompleteIntent17 > comfortClaimPersist17
+      && comfortCompleteIntent17 < comfortCompleteOwnerGate17
+      && comfortCompleteOwnerGate17 < comfortCompleteCurrentClear17
+      && comfortCompleteCurrentClear17 < comfortCompletePersist17
+      && countOccurrences(comfortRunSource17, comfortRetryReplace17) === 4,
+    '17F-0: comfort claim/complete 跨 await 后均在 owner gate 后向当前 schedule 重清 page retry 再持久化');
   assertPass(backgroundSource.includes('comfortStartUntil: 0')
       && comfortSource17.includes('function isComfortStartActive(')
       && comfortSource17.includes('async function runComfortStart(')

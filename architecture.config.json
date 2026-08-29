@@ -160,6 +160,8 @@
           "setScheduleNextTrigger",
           "setSchedulePwmClockIntent",
           "replaceSchedulePwmRetryState",
+          "replaceSchedulePageTimerRetryState",
+          "recordSchedulePageTimerFailureState",
           "clearSchedulePageTimerProofState",
           "recordSchedulePageTimerProofState"
         ]
@@ -171,6 +173,8 @@
             "setScheduleNextTrigger",
             "setSchedulePwmClockIntent",
             "replaceSchedulePwmRetryState",
+            "replaceSchedulePageTimerRetryState",
+            "recordSchedulePageTimerFailureState",
             "clearSchedulePageTimerProofState",
             "recordSchedulePageTimerProofState"
           ]
@@ -432,17 +436,24 @@
       ]
     },
     {
-      "name": "page timer proof commits use schedule mutation primitives",
+      "name": "page timer lifecycle commits use schedule mutation primitives",
       "files": ["background.js"],
       "requirePatterns": [
-        "function\\s+clearPageTimerProofState\\s*\\(",
+        "function\\s+claimPageTimerWriteOwner\\s*\\(",
+        "function\\s+invalidatePageTimerWriteOwner\\s*\\(",
+        "isPageTimerWriteOwnerCurrent\\s*\\(\\s*pageTimerWriteOwner\\s*\\)",
+        "pageTimerStale\\s*:\\s*true",
+        "function\\s+clearPageTimerProofState\\s*\\(\\s*\\)\\s*\\{\\s*invalidatePageTimerWriteOwner\\s*\\(\\s*\\)",
+        "replaceSchedulePageTimerRetryState\\s*\\(\\s*schedule\\s*[,)]",
+        "recordSchedulePageTimerFailureState\\s*\\(\\s*schedule\\s*,",
         "clearSchedulePageTimerProofState\\s*\\(\\s*schedule\\s*\\)",
-        "recordSchedulePageTimerProofState\\s*\\(\\s*schedule\\s*,",
-        "recordSchedulePageTimerProofState\\s*\\(\\s*schedule\\s*,[\\s\\S]{0,240}persistSchedule\\s*\\(\\s*,\\s*\\{\\s*syncFromLiveAlarm\\s*:\\s*false"
+        "recordSchedulePageTimerProofState\\s*\\(\\s*schedule\\s*,"
       ],
       "forbidPatterns": [
-        "\\bschedule\\.pageTimerMinutes\\s*=\\s*result\\.actualDelayMinutes",
-        "\\bschedule\\.pageTimerTargetAt\\s*=\\s*targetAt"
+        "\\bschedule\\.pageTimerMinutes\\s*=(?!=)",
+        "\\bschedule\\.pageTimerTargetAt\\s*=(?!=)",
+        "\\bschedule\\.pageTimerRetryAt\\s*=(?!=)",
+        "\\bschedule\\.pageTimerRetryMinutes\\s*=(?!=)"
       ]
     },
     {

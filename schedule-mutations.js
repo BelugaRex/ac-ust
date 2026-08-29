@@ -49,6 +49,25 @@
     scheduleState.pwmRetryScheduledAt = scheduledAt;
   }
 
+  function replaceSchedulePageTimerRetryState(
+    scheduleState,
+    { retryAt = 0, retryMinutes = 0 } = {}
+  ) {
+    scheduleState.pageTimerRetryAt = retryAt;
+    scheduleState.pageTimerRetryMinutes = retryMinutes;
+  }
+
+  function recordSchedulePageTimerFailureState(
+    scheduleState,
+    error,
+    retryState = {}
+  ) {
+    scheduleState.pageTimerMinutes = null;
+    scheduleState.pageTimerTargetAt = 0;
+    scheduleState.pageTimerError = error;
+    replaceSchedulePageTimerRetryState(scheduleState, retryState);
+  }
+
   function clearSchedulePageTimerProofState(scheduleState) {
     recordSchedulePageTimerProofState(scheduleState, null, 0);
   }
@@ -57,14 +76,15 @@
     scheduleState.pageTimerMinutes = minutes;
     scheduleState.pageTimerTargetAt = targetAt;
     scheduleState.pageTimerError = '';
-    scheduleState.pageTimerRetryAt = 0;
-    scheduleState.pageTimerRetryMinutes = 0;
+    replaceSchedulePageTimerRetryState(scheduleState);
   }
 
   return Object.freeze({
     setScheduleNextTrigger,
     setSchedulePwmClockIntent,
     replaceSchedulePwmRetryState,
+    replaceSchedulePageTimerRetryState,
+    recordSchedulePageTimerFailureState,
     clearSchedulePageTimerProofState,
     recordSchedulePageTimerProofState
   });

@@ -861,8 +861,7 @@ async function runComfortStart(reason = 'user-enable') {
   if (!restoreExistingMinimum) schedule.comfortStartOnConfirmedAt = 0;
   schedule.pwmState = 'on';
   setPwmClockIntent(0);
-  schedule.pageTimerRetryAt = 0;
-  schedule.pageTimerRetryMinutes = 0;
+  replaceSchedulePageTimerRetryState(schedule);
   await cancelAutomaticOnRequests();
   if (activeAcToggleAttempt?.promise) {
     await activeAcToggleAttempt.promise.catch(() => {});
@@ -873,6 +872,7 @@ async function runComfortStart(reason = 'user-enable') {
   if (!isAutomationOperationCurrent(automationRevision)) {
     return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
   }
+  replaceSchedulePageTimerRetryState(schedule);
   await persistSchedule(`comfort-start-${reason}-claim`, { syncFromLiveAlarm: false });
 
   // OFF 页面先读取当前 picker，预置时保留用户已有的更晚关机目标；随后
@@ -955,8 +955,7 @@ async function runComfortStart(reason = 'user-enable') {
 
   schedule.pwmState = 'off';
   schedule.pageTimerError = '';
-  schedule.pageTimerRetryAt = 0;
-  schedule.pageTimerRetryMinutes = 0;
+  replaceSchedulePageTimerRetryState(schedule);
   const alarmCreated = await createPwmAlarmFromPlan(
     { nextTriggerAt: comfortPlan.targetAt },
     'comfort-start-complete',
@@ -975,6 +974,8 @@ async function runComfortStart(reason = 'user-enable') {
   if (!isAutomationOperationCurrent(automationRevision)) {
     return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
   }
+  schedule.pageTimerError = '';
+  replaceSchedulePageTimerRetryState(schedule);
   await persistSchedule(`comfort-start-${reason}-complete`, {
     syncFromLiveAlarm: false
   });
@@ -2448,6 +2449,7 @@ async function reapplySmartSensitivityNow() {
 }
 
 function clearPageTimerProofState() {
+  invalidatePageTimerWriteOwner();
   clearSchedulePageTimerProofState(schedule);
 }
 
@@ -4552,11 +4554,22 @@ async function init() {
     // retry 也必须重新排程，不能因原时间已经过去而静默放弃关机安全网。
     const retryMinutes = Number(schedule.pageTimerRetryMinutes) || 0;
     const retryAt = Number(schedule.pageTimerRetryAt) || 0;
+    const retryOwnerIsCurrent = () => (
+      (Number(schedule.pageTimerRetryMinutes) || 0) === retryMinutes
+      && (Number(schedule.pageTimerRetryAt) || 0) === retryAt
+    );
     if (retryMinutes > 0) {
       if (retryAt > Date.now()) {
         await createAlarm('ac-page-timer-retry', { when: retryAt });
       } else {
-        await schedulePageTimerRetry(retryMinutes, '启动恢复错过的页面定时器重试');
+        const retryIntent = createPageTimerRetryIntent(retryMinutes);
+        const retryState = await schedulePageTimerRetry(
+          retryIntent,
+          '启动恢复错过的页面定时器重试',
+          retryOwnerIsCurrent
+        );
+        if (retryState.stale || !retryOwnerIsCurrent()) return;
+        replaceSchedulePageTimerRetryState(schedule, retryState);
         await persistSchedule('init-recover-overdue-page-timer-retry', { syncFromLiveAlarm: false });
       }
     }
@@ -5803,26 +5816,75 @@ async function verifyPageTimerPersistence(
 // 关机定时器设置失败时，记录明确的目标分钟数并用独立闹钟持续重试。
 // 该路径服务于“关闭 PWM / 退出运行时段 / sync 停用”等已清除 ac-pwm 的场景；
 // 正常 PWM 步骤另有 ac-pwm 1 分钟重试，调用 setPageTimer 时会关闭本重试。
-async function schedulePageTimerRetry(minutes, reason = '') {
-  const retryMinutes = Math.max(1, sanitizeMinutes(minutes, 1));
-  schedule.pageTimerRetryMinutes = retryMinutes;
-  schedule.pageTimerRetryAt = Date.now() + 60 * 1000;
+function createPageTimerRetryIntent(minutes) {
+  return Object.freeze({
+    retryMinutes: Math.max(1, sanitizeMinutes(minutes, 1)),
+    retryAt: Date.now() + 60 * 1000
+  });
+}
+
+async function schedulePageTimerRetry(
+  retryState,
+  reason = '',
+  isCurrent = () => true
+) {
+  const retryMinutes = retryState.retryMinutes;
+  const retryAt = retryState.retryAt;
+  const staleResult = () => ({
+    stale: true,
+    retryMinutes,
+    retryAt,
+    alarmCreated: false
+  });
+  if (!isCurrent()) return staleResult();
   await chrome.alarms.clear('ac-page-timer-retry');
-  await createAlarm('ac-page-timer-retry', { when: schedule.pageTimerRetryAt });
+  if (!isCurrent()) return staleResult();
+  const alarmCreated = await createAlarm('ac-page-timer-retry', { when: retryAt });
+  if (!isCurrent()) return staleResult();
   console.warn(`[AC扩展] 页面定时器将于 1 分钟后重试（${retryMinutes} 分钟，${reason || '未说明原因'}）`);
+  return { stale: false, retryMinutes, retryAt, alarmCreated };
 }
 
 let pageTimerMessageWriteChain = Promise.resolve();
+let pageTimerWriteGeneration = 0;
+
+function claimPageTimerWriteOwner(isLifecycleCurrent) {
+  if (!isLifecycleCurrent()) return 0;
+  pageTimerWriteGeneration += 1;
+  return pageTimerWriteGeneration;
+}
+
+function invalidatePageTimerWriteOwner() {
+  pageTimerWriteGeneration += 1;
+  return pageTimerWriteGeneration;
+}
+
+function isPageTimerWriteOwnerCurrent(owner) {
+  return owner > 0 && owner === pageTimerWriteGeneration;
+}
 
 function sendSerializedPageTimerMessage(
   tabId,
   message,
   automationRevision = null,
-  shutdownRevision = null
+  shutdownRevision = null,
+  pageTimerWriteOwner = 0
 ) {
+  const pageTimerWriteIsCurrent = () => (
+    pageTimerWriteOwner <= 0
+    || isPageTimerWriteOwnerCurrent(pageTimerWriteOwner)
+  );
+  const stalePageTimerResult = () => ({
+    success: false,
+    pageTimerStale: true,
+    error: '页面定时器请求已被后续请求替代'
+  });
   const operation = pageTimerMessageWriteChain
     .catch(() => {})
     .then(async () => {
+      // 必须在串行队列内部复核；旧 writer 可能在等待 tab/content 时被新 writer 抢占，
+      // 随后才排到新 writer 后面。若只在入队前检查，真实页面会被旧 timer 覆盖。
+      if (!pageTimerWriteIsCurrent()) return stalePageTimerResult();
       if (automationRevision !== null
           && !isAutomationOperationCurrent(automationRevision)) {
         return { success: false, automationStale: true, error: '自动控制已暂停' };
@@ -5832,6 +5894,7 @@ function sendSerializedPageTimerMessage(
         return { success: false, shutdownStale: true, error: '关机请求已失效' };
       }
       const result = await sendMessageToExactACHome(tabId, message);
+      if (!pageTimerWriteIsCurrent()) return stalePageTimerResult();
       if (automationRevision !== null
           && !isAutomationOperationCurrent(automationRevision)) {
         return { success: false, automationStale: true, error: '自动控制已暂停' };
@@ -5855,7 +5918,8 @@ async function writePageTimerOnExactHomeTab(
   {
     targetAt = 0,
     automationRevision = null,
-    shutdownRevision = null
+    shutdownRevision = null,
+    pageTimerWriteOwner = 0
   } = {}
 ) {
   const pageReady = await waitForTabReady(tabId, 30000, isACHomePageTab);
@@ -5871,8 +5935,11 @@ async function writePageTimerOnExactHomeTab(
     action: 'setTimer',
     minutes,
     targetAt
-  }, automationRevision, shutdownRevision);
-  if (result?.automationStale || result?.shutdownStale || !result?.success) {
+  }, automationRevision, shutdownRevision, pageTimerWriteOwner);
+  if (result?.pageTimerStale
+      || result?.automationStale
+      || result?.shutdownStale
+      || !result?.success) {
     return result || { success: false, error: t('bgPageTimerFailed') };
   }
   const value = String(result.value || '').trim();
@@ -5894,6 +5961,8 @@ async function setPageTimer(
     shutdownRevision = null
   } = {}
 ) {
+  const runtimeOwnerRevision = pwmRuntimeRevision;
+  let pageTimerWriteOwner = 0;
   let autoCreatedTabId = null;
 
   const staleAutomationResult = () => ({
@@ -5903,31 +5972,75 @@ async function setPageTimer(
     error: shutdownRevision !== null ? '关机请求已失效' : '自动控制已暂停'
   });
 
-  const automationWriteIsCurrent = () => (
+  const lifecycleWriteIsCurrent = () => (
     automationRevision === null
       || isAutomationOperationCurrent(automationRevision)
   ) && (
     shutdownRevision === null
       || isTimerBasedShutdownCurrent(shutdownRevision)
+  ) && (
+    automationRevision !== null
+      || shutdownRevision !== null
+      || pwmRuntimeRevision === runtimeOwnerRevision
+  );
+
+  const automationWriteIsCurrent = () => (
+    isPageTimerWriteOwnerCurrent(pageTimerWriteOwner)
+    && lifecycleWriteIsCurrent()
   );
 
   const finishFailure = async (failure, reason) => {
     if (!automationWriteIsCurrent()) return staleAutomationResult();
-    schedule.pageTimerMinutes = null;
-    schedule.pageTimerTargetAt = 0;
-    schedule.pageTimerError = failure.error || t('bgPageTimerFailed');
+    const pageTimerError = failure.error || t('bgPageTimerFailed');
+    const previousPageTimerState = {
+      minutes: schedule.pageTimerMinutes,
+      targetAt: schedule.pageTimerTargetAt,
+      error: schedule.pageTimerError,
+      retryAt: schedule.pageTimerRetryAt,
+      retryMinutes: schedule.pageTimerRetryMinutes
+    };
+    let retryState = retryOnFailure
+      ? createPageTimerRetryIntent(minutes)
+      : {};
+    // 同步失效旧 proof，避免 alarm await 窗口被其他关机请求误当成新鲜证明复用。
+    recordSchedulePageTimerFailureState(schedule, pageTimerError, retryState);
+    const pageTimerStateMatches = state => (
+      schedule.pageTimerMinutes === state.minutes
+      && schedule.pageTimerTargetAt === state.targetAt
+      && schedule.pageTimerError === state.error
+      && schedule.pageTimerRetryAt === state.retryAt
+      && schedule.pageTimerRetryMinutes === state.retryMinutes
+    );
+    const failureStateIsCurrent = () => automationWriteIsCurrent() && (
+      automationRevision !== null
+      || shutdownRevision !== null
+      || pageTimerStateMatches(previousPageTimerState)
+      || pageTimerStateMatches({
+        minutes: null,
+        targetAt: 0,
+        error: pageTimerError,
+        retryAt: retryState.retryAt ?? 0,
+        retryMinutes: retryState.retryMinutes ?? 0
+      })
+    );
 
     if (retryOnFailure) {
-      await schedulePageTimerRetry(minutes, reason);
+      const retryResult = await schedulePageTimerRetry(
+        retryState,
+        reason,
+        failureStateIsCurrent
+      );
+      if (retryResult.stale) return staleAutomationResult();
+      retryState = retryResult;
     } else {
-      schedule.pageTimerRetryAt = 0;
-      schedule.pageTimerRetryMinutes = 0;
       await chrome.alarms.clear('ac-page-timer-retry');
     }
 
-    if (!automationWriteIsCurrent()) return staleAutomationResult();
-    await persistSchedule(`setPageTimer-${reason}`);
-    console.warn('[AC扩展] 页面定时器设置失败:', schedule.pageTimerError);
+    if (!failureStateIsCurrent()) return staleAutomationResult();
+    recordSchedulePageTimerFailureState(schedule, pageTimerError, retryState);
+    // 页面 failure 只拥有 pageTimer*；PWM 主钟由外围 phase transaction 对账。
+    await persistSchedule(`setPageTimer-${reason}`, { syncFromLiveAlarm: false });
+    console.warn('[AC扩展] 页面定时器设置失败:', pageTimerError);
     return failure;
   };
 
@@ -5956,7 +6069,9 @@ async function setPageTimer(
   };
 
   try {
-    if (!automationWriteIsCurrent()) return staleAutomationResult();
+    // 失效 lifecycle 不得仅凭一次调用就抢占正在运行的有效 page-timer writer。
+    pageTimerWriteOwner = claimPageTimerWriteOwner(lifecycleWriteIsCurrent);
+    if (pageTimerWriteOwner <= 0) return staleAutomationResult();
     let tab = Number.isInteger(preferredTabId)
       ? await getExactACHomeTab(preferredTabId)
       : null;
@@ -5979,16 +6094,19 @@ async function setPageTimer(
     const result = await writePageTimerOnExactHomeTab(tab.id, minutes, {
       targetAt,
       automationRevision,
-      shutdownRevision
+      shutdownRevision,
+      pageTimerWriteOwner
     });
-    if (result?.automationStale || result?.shutdownStale) return result;
+    if (result?.pageTimerStale
+        || result?.automationStale
+        || result?.shutdownStale) return result;
     if (!result?.success) {
-      return await finishFailure(result || { success: false, error: t('bgPageTimerFailed') }, 'failed');
+      return finishFailure(result || { success: false, error: t('bgPageTimerFailed') }, 'failed');
     }
 
     const expectedValue = String(result.value || '').trim();
     if (!expectedValue) {
-      return await finishFailure({ success: false, error: '页面定时器未返回可验证的目标时间' }, 'empty-value');
+      return finishFailure({ success: false, error: '页面定时器未返回可验证的目标时间' }, 'empty-value');
     }
 
     const verification = await verifyPageTimerPersistence(expectedValue, {
@@ -6001,15 +6119,16 @@ async function setPageTimer(
       return staleAutomationResult();
     }
     if (!verification.success) {
-      return await finishFailure({
+      return finishFailure({
         success: false,
         error: verification.error || '页面定时器新鲜页面验证后未确认'
       }, 'persistence-check-failed');
     }
 
-    return await recordPageTimerProof(result, minutes, verification);
+    return recordPageTimerProof(result, minutes, verification);
   } catch (e) {
-    return await finishFailure({ success: false, error: e?.message || String(e) }, 'exception');
+    // bare return：finalizer 自身的 alarm/storage rejection 不再回流到本 catch 二次收口。
+    return finishFailure({ success: false, error: e?.message || String(e) }, 'exception');
   } finally {
     if (autoCreatedTabId) {
       chrome.alarms.create(`ac-close-tab-${autoCreatedTabId}`, { delayInMinutes: 1 });
@@ -6018,14 +6137,16 @@ async function setPageTimer(
 }
 
 async function clearSupersededTimerBasedShutdownRetry() {
-  invalidateTimerBasedShutdown();
-  schedule.pageTimerRetryAt = 0;
-  schedule.pageTimerRetryMinutes = 0;
+  const shutdownRevision = invalidateTimerBasedShutdown();
+  replaceSchedulePageTimerRetryState(schedule);
   await chrome.alarms.clear('ac-page-timer-retry');
+  if (!isTimerBasedShutdownCurrent(shutdownRevision)) return false;
+  replaceSchedulePageTimerRetryState(schedule);
   await persistSchedule(
     'clear-superseded-timer-based-shutdown-retry',
     { syncFromLiveAlarm: false }
   );
+  return true;
 }
 
 function canReusePageTimerProof(state, requestedMinutes, now) {
@@ -7557,8 +7678,7 @@ async function repairScheduleClock(options = {}) {
       return { success: false, reason: schedule.pageTimerError, schedule: { ...schedule, actualStatus: status } };
     }
     schedule.pageTimerError = '';
-    schedule.pageTimerRetryAt = 0;
-    schedule.pageTimerRetryMinutes = 0;
+    replaceSchedulePageTimerRetryState(schedule);
     return null;
   }
 

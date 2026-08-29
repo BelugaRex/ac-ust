@@ -4,6 +4,8 @@ const {
   setScheduleNextTrigger,
   setSchedulePwmClockIntent,
   replaceSchedulePwmRetryState,
+  replaceSchedulePageTimerRetryState,
+  recordSchedulePageTimerFailureState,
   clearSchedulePageTimerProofState,
   recordSchedulePageTimerProofState
 } = scheduleMutations;
@@ -15,6 +17,8 @@ export function runScheduleMutationCases(assertPass) {
         'setScheduleNextTrigger',
         'setSchedulePwmClockIntent',
         'replaceSchedulePwmRetryState',
+        'replaceSchedulePageTimerRetryState',
+        'recordSchedulePageTimerFailureState',
         'clearSchedulePageTimerProofState',
         'recordSchedulePageTimerProofState'
       ].join(',')
@@ -154,6 +158,64 @@ export function runScheduleMutationCases(assertPass) {
       && retrySchedule.pwmRetryScheduledAt === 0
       && retrySchedule.untouched === 'kept',
     '空 retry replacement 只清 retry 三字段'
+  );
+
+  const pageRetrySchedule = {
+    pageTimerMinutes: 8,
+    pageTimerTargetAt: targetAt,
+    pageTimerError: 'kept error',
+    pageTimerRetryAt: 111,
+    pageTimerRetryMinutes: 2,
+    pwmState: 'on'
+  };
+  const fractionalPageRetryAt = targetAt + 0.75;
+  replaceSchedulePageTimerRetryState(pageRetrySchedule, {
+    retryAt: fractionalPageRetryAt,
+    retryMinutes: -2.5
+  });
+  assertPass(
+    pageRetrySchedule.pageTimerRetryAt === fractionalPageRetryAt
+      && pageRetrySchedule.pageTimerRetryMinutes === -2.5
+      && pageRetrySchedule.pageTimerMinutes === 8
+      && pageRetrySchedule.pageTimerTargetAt === targetAt
+      && pageRetrySchedule.pageTimerError === 'kept error'
+      && pageRetrySchedule.pwmState === 'on',
+    '页面 retry primitive 原样替换二字段，不转换值或污染 proof/PWM'
+  );
+
+  replaceSchedulePageTimerRetryState(pageRetrySchedule);
+  assertPass(
+    pageRetrySchedule.pageTimerRetryAt === 0
+      && pageRetrySchedule.pageTimerRetryMinutes === 0
+      && pageRetrySchedule.pageTimerMinutes === 8
+      && pageRetrySchedule.pageTimerError === 'kept error',
+    '空页面 retry replacement 只清 retry 二字段'
+  );
+
+  const failureError = { raw: 'failure' };
+  recordSchedulePageTimerFailureState(pageRetrySchedule, failureError, {
+    retryAt: fractionalPageRetryAt,
+    retryMinutes: 1.25
+  });
+  assertPass(
+    pageRetrySchedule.pageTimerMinutes === null
+      && pageRetrySchedule.pageTimerTargetAt === 0
+      && pageRetrySchedule.pageTimerError === failureError
+      && pageRetrySchedule.pageTimerRetryAt === fractionalPageRetryAt
+      && pageRetrySchedule.pageTimerRetryMinutes === 1.25
+      && pageRetrySchedule.pwmState === 'on',
+    '失败 primitive 同步提交完整五字段，不转换 caller 已决定的值'
+  );
+
+  recordSchedulePageTimerFailureState(pageRetrySchedule, 'no retry');
+  assertPass(
+    pageRetrySchedule.pageTimerMinutes === null
+      && pageRetrySchedule.pageTimerTargetAt === 0
+      && pageRetrySchedule.pageTimerError === 'no retry'
+      && pageRetrySchedule.pageTimerRetryAt === 0
+      && pageRetrySchedule.pageTimerRetryMinutes === 0
+      && pageRetrySchedule.pwmState === 'on',
+    '失败 primitive 省略 retry intent 时同步清 retry 二字段'
   );
 
   const proofSchedule = {
