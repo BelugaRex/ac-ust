@@ -73,7 +73,10 @@
   });
 
   function getPwmRetryDescriptor(value) {
-    return PWM_RETRY_DESCRIPTORS[String(value || '')] || null;
+    const key = String(value || '');
+    return Object.hasOwn(PWM_RETRY_DESCRIPTORS, key)
+      ? PWM_RETRY_DESCRIPTORS[key]
+      : null;
   }
 
   function normalizePwmRetryKind(value, fallback = PWM_RETRY_KINDS.SMART_ON) {

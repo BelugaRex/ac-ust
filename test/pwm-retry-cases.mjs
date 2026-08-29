@@ -52,6 +52,9 @@ export function runPwmRetryCases(assertPass) {
   assertPass(
     getPwmRetryDescriptor('') === null
       && getPwmRetryDescriptor('unknown') === null
+      && getPwmRetryDescriptor('constructor') === null
+      && getPwmRetryDescriptor('toString') === null
+      && getPwmRetryDescriptor('__proto__') === null
       && normalizePwmRetryKind(PWM_RETRY_KINDS.SMART_ON_SAFETY_SKIP)
         === PWM_RETRY_KINDS.SMART_ON_SAFETY_SKIP
       && normalizePwmRetryKind('unknown') === PWM_RETRY_KINDS.SMART_ON
