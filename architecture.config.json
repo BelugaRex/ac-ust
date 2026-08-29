@@ -6,6 +6,7 @@
       "imports": [
         "i18n.js",
         "sync-helpers.js",
+        "schedule-mutations.js",
         "pwm-retry.js",
         "pwm-phase.js",
         "smart-recovery.js",
@@ -118,6 +119,19 @@
             "computePageTimerAdoption",
             "planComfortStart"
           ]
+        }
+      ]
+    },
+    {
+      "name": "schedule clock mutations",
+      "provider": {
+        "file": "schedule-mutations.js",
+        "symbols": ["setScheduleNextTrigger"]
+      },
+      "consumers": [
+        {
+          "file": "background.js",
+          "symbols": ["setScheduleNextTrigger"]
         }
       ]
     },
@@ -290,6 +304,7 @@
       "i18n.js",
       "billing-helpers.js",
       "sync-helpers.js",
+      "schedule-mutations.js",
       "pwm-retry.js",
       "pwm-phase.js",
       "smart-recovery.js",
@@ -323,6 +338,18 @@
         "\\bwindow\\s*\\.",
         "\\blocalStorage\\b",
         "\\bfetch\\s*\\("
+      ]
+    },
+    {
+      "name": "schedule clock mutations remain browser independent",
+      "files": ["schedule-mutations.js"],
+      "forbidPatterns": [
+        "\\bchrome\\s*\\.",
+        "\\bdocument\\s*\\.",
+        "\\bwindow\\s*\\.",
+        "\\blocalStorage\\b",
+        "\\bfetch\\s*\\(",
+        "\\bimportScripts\\s*\\("
       ]
     },
     {

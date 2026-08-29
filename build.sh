@@ -22,6 +22,7 @@ RUNTIME_FILES=(
   i18n.js
   billing-helpers.js
   sync-helpers.js
+  schedule-mutations.js
   pwm-retry.js
   pwm-phase.js
   smart-recovery.js

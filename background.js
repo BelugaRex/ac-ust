@@ -5,6 +5,7 @@
 // i18n 辅助函数 — 使用 fetch-based I18n 模块（绕过 chrome.i18n 不可靠性）
 importScripts('i18n.js');
 importScripts('sync-helpers.js');  // 跨设备同步的纯函数（composeSyncPayload / computePhaseAdoption）
+importScripts('schedule-mutations.js');  // schedule 时钟字段的受控 mutation primitive
 importScripts('pwm-retry.js');  // PWM retry kind 的唯一语义目录（纯决策）
 importScripts('pwm-phase.js');  // PWM 阶段推进、恢复与 live alarm 对齐的纯决策
 importScripts('smart-recovery.js');  // 智能当前周期恢复策略（纯决策）
@@ -1718,24 +1719,11 @@ function getStoredAlarmEndMs() {
 }
 
 function setNextTriggerAt(nextTriggerAt, options = {}) {
-  const previousAt = Number(schedule.nextTriggerAt) || 0;
-  const normalizedAt = Number(nextTriggerAt) > 0 ? Number(nextTriggerAt) : 0;
-  const requestedPlannedAt = Number(options?.plannedAt);
-  const existingPlannedAt = Number(schedule.smartClockPlannedAt) || 0;
-  const legacyPlannedAt = Number(schedule.alarmCreatedAt) || 0;
-  const sameClock = previousAt > 0
-    && normalizedAt > 0
-    && Math.abs(previousAt - normalizedAt) <= PWM_RETRY_ALARM_TOLERANCE_MS;
-  schedule.nextTriggerAt = normalizedAt;
-  if (normalizedAt <= 0) {
-    schedule.smartClockPlannedAt = 0;
-  } else if (Number.isFinite(requestedPlannedAt) && requestedPlannedAt > 0) {
-    schedule.smartClockPlannedAt = requestedPlannedAt;
-  } else if (!sameClock || existingPlannedAt <= 0) {
-    schedule.smartClockPlannedAt = sameClock && legacyPlannedAt > 0
-      ? legacyPlannedAt
-      : Date.now();
-  }
+  setScheduleNextTrigger(schedule, nextTriggerAt, {
+    plannedAt: options?.plannedAt,
+    toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+    readNow: () => Date.now()
+  });
 }
 
 async function executePwmLifecycleRecoveryFallback(action, context) {

@@ -5,12 +5,14 @@ import path from 'node:path';
 import url from 'node:url';
 import syncHelpers from '../sync-helpers.js';
 import billingHelpers from '../billing-helpers.js';
+import scheduleMutations from '../schedule-mutations.js';
 import pwmRetry from '../pwm-retry.js';
 import pwmPhase from '../pwm-phase.js';
 import smartMode from '../smart-mode.js';
 import recoveryCoordinator from '../recovery-coordinator.js';
 import { runPwmPhaseCases } from './pwm-phase-cases.mjs';
 import { runPwmRetryCases } from './pwm-retry-cases.mjs';
+import { runScheduleMutationCases } from './schedule-mutation-cases.mjs';
 import { runSmartModeCases } from './smart-mode-cases.mjs';
 import { runRecoveryPolicyCases } from './recovery-policy-cases.mjs';
 
@@ -67,6 +69,9 @@ async function runTests() {
 
   beginSuite('PWM retry 纯决策', '\n\n=== PWM retry kind 纯决策接口 ===\n');
   runPwmRetryCases(assertPass);
+
+  beginSuite('Schedule mutation 纯接口', '\n\n=== Schedule mutation 纯接口 ===\n');
+  runScheduleMutationCases(assertPass);
 
   beginSuite('智能控制纯决策', '\n\n=== 智能控制纯决策接口 (v0.8.0) ===\n');
   runSmartModeCases(assertPass);
@@ -6438,12 +6443,6 @@ return { reapplySmartSensitivityNow };`
       && extractionGuardMessage.includes('missing-start'),
     '13H: 源码区段提取在标记漂移时 fail fast，并报告具体区段与标记');
 
-  const setNextTriggerSource13 = extractSourceSection(
-    backgroundSource,
-    'function setNextTriggerAt(nextTriggerAt, options = {}) {',
-    '\nasync function executePwmLifecycleRecoveryFallback',
-    'durable smart clock origin'
-  );
   const originNow13 = new Date(2026, 7, 27, 18, 56, 0, 17).getTime();
   const originTarget13 = new Date(2026, 7, 27, 19, 0, 0, 0).getTime();
   const originSchedule13 = {
@@ -6451,14 +6450,13 @@ return { reapplySmartSensitivityNow };`
     smartClockPlannedAt: 0,
     alarmCreatedAt: 0
   };
-  const setNextTriggerAt13 = new Function(
-    'schedule', 'Date',
-    `const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
-    ${setNextTriggerSource13}; return setNextTriggerAt;`
-  )(
-    originSchedule13,
-    { now: () => originNow13 }
-  );
+  const setNextTriggerAt13 = (nextTriggerAt, options = {}) => {
+    scheduleMutations.setScheduleNextTrigger(originSchedule13, nextTriggerAt, {
+      plannedAt: options?.plannedAt,
+      toleranceMs: 1500,
+      readNow: () => originNow13
+    });
+  };
   setNextTriggerAt13(originTarget13);
   const firstOrigin13 = originSchedule13.smartClockPlannedAt;
   setNextTriggerAt13(originTarget13 + 500.5);
@@ -6471,7 +6469,8 @@ return { reapplySmartSensitivityNow };`
       && verifiedOrigin13 === originNow13
       && adoptedOrigin13 === remoteOrigin13
       && originSchedule13.nextTriggerAt === 0
-      && originSchedule13.smartClockPlannedAt === 0,
+      && originSchedule13.smartClockPlannedAt === 0
+      && backgroundSource.includes('setScheduleNextTrigger(schedule, nextTriggerAt, {'),
     '13H-1: 新时钟认领 immutable origin；同钟 verify 漂移不刷新；远端来源显式继承；清钟同步清来源');
 
   const resetDisabledPwmRuntimeSource = extractSourceSection(
@@ -11890,6 +11889,7 @@ return { reapplySmartSensitivityNow };`
     harnessOptions = {}
   ) => new Function(
     'initialSchedule', 'initialLiveAt', 'initialWatermark', 'harnessOptions',
+    'setScheduleNextTrigger',
     'getPwmRetryDescriptor', 'normalizePwmRetryKind',
     'classifySmartOnClock',
     'computeConfigDiff', 'protectSmartOnRetryConfigDiff',
@@ -12306,6 +12306,7 @@ return { reapplySmartSensitivityNow };`
     initialLiveAt,
     initialWatermark,
     harnessOptions,
+    scheduleMutations.setScheduleNextTrigger,
     pwmRetry.getPwmRetryDescriptor,
     pwmRetry.normalizePwmRetryKind,
     pwmPhase.classifySmartOnClock,
