@@ -5,6 +5,7 @@
 // i18n 辅助函数 — 使用 fetch-based I18n 模块（绕过 chrome.i18n 不可靠性）
 importScripts('i18n.js');
 importScripts('sync-helpers.js');  // 跨设备同步的纯函数（composeSyncPayload / computePhaseAdoption）
+importScripts('pwm-retry.js');  // PWM retry kind 的唯一语义目录（纯决策）
 importScripts('pwm-phase.js');  // PWM 阶段推进、恢复与 live alarm 对齐的纯决策
 importScripts('smart-recovery.js');  // 智能当前周期恢复策略（纯决策）
 importScripts('interval-recovery.js');  // 普通循环 alarm/storage 恢复策略（纯决策）
@@ -2478,11 +2479,8 @@ function clearPwmRetryState() {
 function setSmartOnPwmRetryState(targetAction, retryScheduledAt, options = {}) {
   clearPwmRetryState();
   const requestedKind = String(options?.kind || '');
-  const retryKind = requestedKind === 'smart-on-safe-delay'
-      || requestedKind === 'smart-on-safety-skip'
-      || requestedKind === 'smart-on-safety-timer'
-    ? requestedKind
-    : 'smart-on';
+  const retryKind = normalizePwmRetryKind(requestedKind);
+  const retryDescriptor = getPwmRetryDescriptor(retryKind);
   const boundaryAt = Number.isFinite(Number(options?.boundaryAt))
     ? Number(options.boundaryAt)
     : Number(schedule.smartOnBoundaryAt);
@@ -2492,7 +2490,7 @@ function setSmartOnPwmRetryState(targetAction, retryScheduledAt, options = {}) {
     && (boundaryDate.getMinutes() === 0 || boundaryDate.getMinutes() === 30)
     && boundaryDate.getSeconds() === 0
     && boundaryDate.getMilliseconds() === 0;
-  const boundaryOptionalRetry = retryKind === 'smart-on-safety-timer';
+  const boundaryOptionalRetry = retryDescriptor?.boundaryRequired === false;
   if (!schedule.smartMode?.enabled
       || targetAction !== 'on'
       || (!boundaryOptionalRetry && (!exactHalfHour || boundaryAt <= 0))
@@ -2514,9 +2512,8 @@ function getSmartOnPwmRetryContext(scheduleSnapshot, scheduledTime, options = {}
     && boundaryDate.getSeconds() === 0
     && boundaryDate.getMilliseconds() === 0;
   const retryKind = String(scheduleSnapshot?.pwmRetryKind || '');
-  const hasStoredSmartOnRetry = retryKind === 'smart-on'
-    || retryKind === 'smart-on-safe-delay'
-    || retryKind === 'smart-on-safety-timer';
+  const retryDescriptor = getPwmRetryDescriptor(retryKind);
+  const hasStoredSmartOnRetry = retryDescriptor?.storedSmartOnRetry === true;
   const semanticAssessment = typeof classifySmartOnClock === 'function'
     ? classifySmartOnClock(scheduleSnapshot, triggerAt, {
         now: Number.isFinite(Number(options?.now))
@@ -2531,7 +2528,7 @@ function getSmartOnPwmRetryContext(scheduleSnapshot, scheduledTime, options = {}
         requirePlannedAt: true
       })
     : null;
-  const hasTypedSmartOnRetry = hasStoredSmartOnRetry
+  const hasTypedSmartOnRetry = retryDescriptor?.ownsTypedSmartOn === true
     && scheduleSnapshot?.smartMode?.enabled === true
     && scheduleSnapshot?.pwmState === 'on'
     && exactHalfHour
@@ -2543,7 +2540,7 @@ function getSmartOnPwmRetryContext(scheduleSnapshot, scheduledTime, options = {}
     && Math.abs(triggerAt - retryScheduledAt)
       <= PWM_RETRY_ALARM_TOLERANCE_MS
     && (!semanticAssessment || semanticAssessment.kind === 'typed-retry');
-  const hasSafetyTimerRetry = retryKind === 'smart-on-safety-timer'
+  const hasSafetyTimerRetry = retryDescriptor?.repairsSafetyTimer === true
     && scheduleSnapshot?.smartMode?.enabled === true
     && scheduleSnapshot?.pwmState === 'on'
     && Number.isFinite(retryScheduledAt)

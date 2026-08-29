@@ -5,10 +5,12 @@ import path from 'node:path';
 import url from 'node:url';
 import syncHelpers from '../sync-helpers.js';
 import billingHelpers from '../billing-helpers.js';
+import pwmRetry from '../pwm-retry.js';
 import pwmPhase from '../pwm-phase.js';
 import smartMode from '../smart-mode.js';
 import recoveryCoordinator from '../recovery-coordinator.js';
 import { runPwmPhaseCases } from './pwm-phase-cases.mjs';
+import { runPwmRetryCases } from './pwm-retry-cases.mjs';
 import { runSmartModeCases } from './smart-mode-cases.mjs';
 import { runRecoveryPolicyCases } from './recovery-policy-cases.mjs';
 
@@ -62,6 +64,9 @@ async function runTests() {
 
   beginSuite('PWM 纯决策', '\n\n=== PWM phase 纯决策接口 ===\n');
   runPwmPhaseCases(assertPass);
+
+  beginSuite('PWM retry 纯决策', '\n\n=== PWM retry kind 纯决策接口 ===\n');
+  runPwmRetryCases(assertPass);
 
   beginSuite('智能控制纯决策', '\n\n=== 智能控制纯决策接口 (v0.8.0) ===\n');
   runSmartModeCases(assertPass);
@@ -9573,7 +9578,7 @@ return { reapplySmartSensitivityNow };`
     'smart-on retry state helpers'
   );
   const loadRetryStateHarness16 = initialSchedule => new Function(
-    'initialSchedule',
+    'initialSchedule', 'getPwmRetryDescriptor', 'normalizePwmRetryKind',
     `let schedule = initialSchedule;
     const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
     const setNextTriggerAt = value => { schedule.nextTriggerAt = value; };
@@ -9586,7 +9591,11 @@ return { reapplySmartSensitivityNow };`
       prepareFreshStart: prepareFreshPwmStartState,
       snapshot: () => schedule
     };`
-  )(initialSchedule);
+  )(
+    initialSchedule,
+    pwmRetry.getPwmRetryDescriptor,
+    pwmRetry.normalizePwmRetryKind
+  );
   const retryBoundary16 = new Date(2026, 7, 18, 22, 30, 0, 0).getTime();
   const retryScheduled16 = retryBoundary16 + 60_000;
   const initialRetryHarness16 = loadRetryStateHarness16({
@@ -11872,6 +11881,7 @@ return { reapplySmartSensitivityNow };`
     harnessOptions = {}
   ) => new Function(
     'initialSchedule', 'initialLiveAt', 'initialWatermark', 'harnessOptions',
+    'getPwmRetryDescriptor', 'normalizePwmRetryKind',
     'classifySmartOnClock',
     'computeConfigDiff', 'protectSmartOnRetryConfigDiff',
     'computePhaseAdoption', 'PWM_RETRY_ALARM_TOLERANCE_MS', 'console', 'Date',
@@ -12287,6 +12297,8 @@ return { reapplySmartSensitivityNow };`
     initialLiveAt,
     initialWatermark,
     harnessOptions,
+    pwmRetry.getPwmRetryDescriptor,
+    pwmRetry.normalizePwmRetryKind,
     pwmPhase.classifySmartOnClock,
     syncHelpers.computeConfigDiff,
     syncHelpers.protectSmartOnRetryConfigDiff,

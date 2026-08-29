@@ -6,6 +6,7 @@
       "imports": [
         "i18n.js",
         "sync-helpers.js",
+        "pwm-retry.js",
         "pwm-phase.js",
         "smart-recovery.js",
         "interval-recovery.js",
@@ -117,6 +118,23 @@
             "computePageTimerAdoption",
             "planComfortStart"
           ]
+        }
+      ]
+    },
+    {
+      "name": "PWM retry descriptors",
+      "provider": {
+        "file": "pwm-retry.js",
+        "symbols": [
+          "PWM_RETRY_KINDS",
+          "getPwmRetryDescriptor",
+          "normalizePwmRetryKind"
+        ]
+      },
+      "consumers": [
+        {
+          "file": "background.js",
+          "symbols": ["getPwmRetryDescriptor", "normalizePwmRetryKind"]
         }
       ]
     },
@@ -264,6 +282,7 @@
       "i18n.js",
       "billing-helpers.js",
       "sync-helpers.js",
+      "pwm-retry.js",
       "pwm-phase.js",
       "smart-recovery.js",
       "interval-recovery.js",
@@ -296,6 +315,18 @@
         "\\bwindow\\s*\\.",
         "\\blocalStorage\\b",
         "\\bfetch\\s*\\("
+      ]
+    },
+    {
+      "name": "PWM retry descriptors remain browser independent",
+      "files": ["pwm-retry.js"],
+      "forbidPatterns": [
+        "\\bchrome\\s*\\.",
+        "\\bdocument\\s*\\.",
+        "\\bwindow\\s*\\.",
+        "\\blocalStorage\\b",
+        "\\bfetch\\s*\\(",
+        "\\bimportScripts\\s*\\("
       ]
     },
     {
