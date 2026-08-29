@@ -3,13 +3,21 @@ import scheduleMutations from '../schedule-mutations.js';
 const {
   setScheduleNextTrigger,
   setSchedulePwmClockIntent,
-  replaceSchedulePwmRetryState
+  replaceSchedulePwmRetryState,
+  clearSchedulePageTimerProofState,
+  recordSchedulePageTimerProofState
 } = scheduleMutations;
 
 export function runScheduleMutationCases(assertPass) {
   assertPass(
     Object.keys(scheduleMutations).join(',')
-      === 'setScheduleNextTrigger,setSchedulePwmClockIntent,replaceSchedulePwmRetryState'
+      === [
+        'setScheduleNextTrigger',
+        'setSchedulePwmClockIntent',
+        'replaceSchedulePwmRetryState',
+        'clearSchedulePageTimerProofState',
+        'recordSchedulePageTimerProofState'
+      ].join(',')
       && Object.isFrozen(scheduleMutations),
     'schedule mutation module 只导出冻结的复合状态写入 primitives'
   );
@@ -146,5 +154,37 @@ export function runScheduleMutationCases(assertPass) {
       && retrySchedule.pwmRetryScheduledAt === 0
       && retrySchedule.untouched === 'kept',
     '空 retry replacement 只清 retry 三字段'
+  );
+
+  const proofSchedule = {
+    pageTimerMinutes: 7,
+    pageTimerTargetAt: 111,
+    pageTimerError: 'old error',
+    pageTimerRetryAt: 222,
+    pageTimerRetryMinutes: 1,
+    pwmState: 'off'
+  };
+  const proofMinutes = 22.5;
+  const proofTargetAt = targetAt + 0.25;
+  recordSchedulePageTimerProofState(proofSchedule, proofMinutes, proofTargetAt);
+  assertPass(
+    proofSchedule.pageTimerMinutes === proofMinutes
+      && proofSchedule.pageTimerTargetAt === proofTargetAt
+      && proofSchedule.pageTimerError === ''
+      && proofSchedule.pageTimerRetryAt === 0
+      && proofSchedule.pageTimerRetryMinutes === 0
+      && proofSchedule.pwmState === 'off',
+    '成功 proof 同步提交五字段，不转换调用方已经验证的值'
+  );
+
+  clearSchedulePageTimerProofState(proofSchedule);
+  assertPass(
+    proofSchedule.pageTimerMinutes === null
+      && proofSchedule.pageTimerTargetAt === 0
+      && proofSchedule.pageTimerError === ''
+      && proofSchedule.pageTimerRetryAt === 0
+      && proofSchedule.pageTimerRetryMinutes === 0
+      && proofSchedule.pwmState === 'off',
+    '清 proof 同步清五字段且不污染 PWM 相位'
   );
 }

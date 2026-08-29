@@ -4792,14 +4792,149 @@ async function runTests() {
       && verifyBody.includes('await chrome.tabs.remove(verifierTabId);'),
     '11B-2: 每次验证尝试都会在 finally 中回收临时隐藏页');
   const verificationCallIdx = setTimerBody.indexOf('verifyPageTimerPersistence(expectedValue');
-  const proofWriteIdx = setTimerBody.indexOf('schedule.pageTimerMinutes = result.actualDelayMinutes || minutes');
+  const proofHelperStartIdx11C = setTimerBody.indexOf(
+    'const recordPageTimerProof = async (result, minutes, verification) => {'
+  );
+  const proofHelperEndIdx11C = setTimerBody.indexOf('\n\n  try {', proofHelperStartIdx11C);
+  const proofHelperSource11C = proofHelperStartIdx11C >= 0
+      && proofHelperEndIdx11C > proofHelperStartIdx11C
+    ? setTimerBody.slice(proofHelperStartIdx11C, proofHelperEndIdx11C)
+    : '';
+  const proofAlarmClearIdx11C = proofHelperSource11C.indexOf(
+    "await chrome.alarms.clear('ac-page-timer-retry');"
+  );
+  const proofMinutesIdx11C = proofHelperSource11C.indexOf(
+    'const proofMinutes = result.actualDelayMinutes || minutes;'
+  );
+  const proofTargetIdx11C = proofHelperSource11C.indexOf(
+    'const targetAt = Number(result.targetAt);'
+  );
+  const proofCurrentCheckIdx11C = proofHelperSource11C.indexOf(
+    'if (!automationWriteIsCurrent()) return staleAutomationResult();',
+    proofAlarmClearIdx11C
+  );
+  const proofWriteIdx11C = proofHelperSource11C.indexOf(
+    'recordSchedulePageTimerProofState(',
+    proofCurrentCheckIdx11C
+  );
+  const proofPersistIdx11C = proofHelperSource11C.indexOf(
+    "await persistSchedule('setPageTimer-success', { syncFromLiveAlarm: false });",
+    proofWriteIdx11C
+  );
+  const proofCommitCallIdx11C = setTimerBody.indexOf(
+    'return await recordPageTimerProof(result, minutes, verification);'
+  );
   assertPass(verificationCallIdx > 0
-      && proofWriteIdx > verificationCallIdx
+      && proofCommitCallIdx11C > verificationCallIdx
+      && proofMinutesIdx11C > 0
+      && proofMinutesIdx11C < proofAlarmClearIdx11C
+      && proofTargetIdx11C > proofMinutesIdx11C
+      && proofTargetIdx11C < proofAlarmClearIdx11C
+      && proofAlarmClearIdx11C > 0
+      && proofCurrentCheckIdx11C > proofAlarmClearIdx11C
+      && proofWriteIdx11C > proofCurrentCheckIdx11C
+      && proofPersistIdx11C > proofWriteIdx11C
       && setTimerBody.includes('verified: true')
-      && setTimerBody.includes('const targetAt = Number(result.targetAt);')
-      && setTimerBody.includes('schedule.pageTimerTargetAt = targetAt;')
+      && proofHelperSource11C.includes('proofMinutes,\n      targetAt')
       && !setTimerBody.includes('parsePageTimerValue(result.value, Date.now())'),
-    '11C: setPageTimer 仅在新鲜页确认后写证明，并直接采纳写入方绝对 targetAt');
+    '11C: 新鲜页确认后先清 retry alarm、复核 owner，再同步提交完整 proof 并持久化绝对 targetAt');
+
+  const oldProofSchedule11C = {
+    pageTimerMinutes: 7,
+    pageTimerTargetAt: 111,
+    pageTimerError: 'old proof',
+    pageTimerRetryAt: 222,
+    pageTimerRetryMinutes: 1
+  };
+  const replacementProofSchedule11C = {
+    pageTimerMinutes: null,
+    pageTimerTargetAt: 0,
+    pageTimerError: 'replacement pending',
+    pageTimerRetryAt: 333,
+    pageTimerRetryMinutes: 2,
+    nextTriggerAt: 444,
+    smartClockPlannedAt: 333,
+    alarmCreatedAt: 222,
+    alarmDelayMinutes: 4,
+    smartMode: { enabled: true }
+  };
+  const pageTimerPersistSource11C = extractSourceSection(
+    backgroundSource,
+    "async function persistSchedule(reason = '', options = {}) {",
+    '\n// ============================================================\n// 跨设备同步',
+    'page timer success persistence'
+  );
+  const pageProofSwapHarness11C = new Function(
+    'initialSchedule', 'replacementSchedule',
+    'recordSchedulePageTimerProofState', 'console',
+    `let schedule = initialSchedule;
+    let persistedSchedule = null;
+    let scheduleLoadBlockedRevision = null;
+    let pwmRuntimeRevision = 1;
+    const calls = [];
+    const STORAGE_KEY = 'ac_schedule';
+    const SYNC_PENDING_PUBLISH_KEY = 'ac_sync_pending_publish';
+    const automationWriteIsCurrent = () => true;
+    const staleAutomationResult = () => ({ success: false, automationStale: true });
+    const finishFailure = async failure => failure;
+    const chrome = {
+      alarms: {
+        async clear(name) {
+          calls.push(\`clear:\${name}\`);
+          schedule = replacementSchedule;
+        },
+        async get(name) {
+          calls.push(\`get:\${name}\`);
+          return { name, scheduledTime: Date.now() + 60_000 };
+        }
+      },
+      storage: { local: { async set(value) {
+        calls.push('set:ac_schedule');
+        persistedSchedule = { ...value[STORAGE_KEY] };
+      } } }
+    };
+    const isAutomationAllowed = () => true;
+    const isAutomationOperationCurrent = () => true;
+    const reconcilePwmTrigger = () => ({ kind: 'noop' });
+    const clearPwmRetryState = () => {};
+    ${pageTimerPersistSource11C}
+    ${proofHelperSource11C}
+    return {
+      run: recordPageTimerProof,
+      current: () => schedule,
+      persisted: () => persistedSchedule,
+      calls
+    };`
+  )(
+    oldProofSchedule11C,
+    replacementProofSchedule11C,
+    scheduleMutations.recordSchedulePageTimerProofState,
+    testConsole
+  );
+  const pageProofTargetAt11C = Date.now() + 23 * 60_000;
+  const pageProofSwapResult11C = await pageProofSwapHarness11C.run(
+    { success: true, targetAt: pageProofTargetAt11C, actualDelayMinutes: 23 },
+    30,
+    { success: true, value: '12:34' }
+  );
+  assertPass(pageProofSwapResult11C.verified === true
+      && pageProofSwapHarness11C.current() === replacementProofSchedule11C
+      && oldProofSchedule11C.pageTimerMinutes === 7
+      && oldProofSchedule11C.pageTimerTargetAt === 111
+      && oldProofSchedule11C.pageTimerError === 'old proof'
+      && replacementProofSchedule11C.pageTimerMinutes === 23
+      && replacementProofSchedule11C.pageTimerTargetAt === pageProofTargetAt11C
+      && replacementProofSchedule11C.pageTimerError === ''
+      && replacementProofSchedule11C.pageTimerRetryAt === 0
+      && replacementProofSchedule11C.pageTimerRetryMinutes === 0
+      && pageProofSwapHarness11C.persisted()?.pageTimerTargetAt === pageProofTargetAt11C
+      && pageProofSwapHarness11C.persisted()?.nextTriggerAt === 444
+      && pageProofSwapHarness11C.persisted()?.smartClockPlannedAt === 333
+      && pageProofSwapHarness11C.persisted()?.alarmCreatedAt === 222
+      && pageProofSwapHarness11C.persisted()?.alarmDelayMinutes === 4
+      && pageProofSwapHarness11C.calls.join(',')
+        === 'clear:ac-page-timer-retry,set:ac_schedule',
+    '11C-1: alarm await 换对象后完整 proof 原子持久化；success 不再读取 live PWM 或偷改 owner clock');
   assertPass(retryBody.includes('schedule.pageTimerRetryMinutes = retryMinutes')
       && retryBody.includes("createAlarm('ac-page-timer-retry'")
       && backgroundSource.includes('schedule.pageTimerRetryMinutes')
@@ -6010,9 +6145,9 @@ return { reapplySmartSensitivityNow };`
     pwmState: 'off'
   };
   const clearPageTimerProofState = new Function(
-    'schedule',
+    'schedule', 'clearSchedulePageTimerProofState',
     `${clearPageTimerProofSource}; return clearPageTimerProofState;`
-  )(proofState);
+  )(proofState, scheduleMutations.clearSchedulePageTimerProofState);
   clearPageTimerProofState();
   assertPass(proofState.pageTimerMinutes === null
       && proofState.pageTimerTargetAt === 0

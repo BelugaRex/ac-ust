@@ -49,9 +49,23 @@
     scheduleState.pwmRetryScheduledAt = scheduledAt;
   }
 
+  function clearSchedulePageTimerProofState(scheduleState) {
+    recordSchedulePageTimerProofState(scheduleState, null, 0);
+  }
+
+  function recordSchedulePageTimerProofState(scheduleState, minutes, targetAt) {
+    scheduleState.pageTimerMinutes = minutes;
+    scheduleState.pageTimerTargetAt = targetAt;
+    scheduleState.pageTimerError = '';
+    scheduleState.pageTimerRetryAt = 0;
+    scheduleState.pageTimerRetryMinutes = 0;
+  }
+
   return Object.freeze({
     setScheduleNextTrigger,
     setSchedulePwmClockIntent,
-    replaceSchedulePwmRetryState
+    replaceSchedulePwmRetryState,
+    clearSchedulePageTimerProofState,
+    recordSchedulePageTimerProofState
   });
 });

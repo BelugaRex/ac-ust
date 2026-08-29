@@ -159,7 +159,9 @@
         "symbols": [
           "setScheduleNextTrigger",
           "setSchedulePwmClockIntent",
-          "replaceSchedulePwmRetryState"
+          "replaceSchedulePwmRetryState",
+          "clearSchedulePageTimerProofState",
+          "recordSchedulePageTimerProofState"
         ]
       },
       "consumers": [
@@ -168,7 +170,9 @@
           "symbols": [
             "setScheduleNextTrigger",
             "setSchedulePwmClockIntent",
-            "replaceSchedulePwmRetryState"
+            "replaceSchedulePwmRetryState",
+            "clearSchedulePageTimerProofState",
+            "recordSchedulePageTimerProofState"
           ]
         }
       ]
@@ -425,6 +429,20 @@
         "\\bschedule\\.pwmRetryKind\\s*=(?!=)",
         "\\bschedule\\.pwmRetryBoundaryAt\\s*=(?!=)",
         "\\bschedule\\.pwmRetryScheduledAt\\s*=(?!=)"
+      ]
+    },
+    {
+      "name": "page timer proof commits use schedule mutation primitives",
+      "files": ["background.js"],
+      "requirePatterns": [
+        "function\\s+clearPageTimerProofState\\s*\\(",
+        "clearSchedulePageTimerProofState\\s*\\(\\s*schedule\\s*\\)",
+        "recordSchedulePageTimerProofState\\s*\\(\\s*schedule\\s*,",
+        "recordSchedulePageTimerProofState\\s*\\(\\s*schedule\\s*,[\\s\\S]{0,240}persistSchedule\\s*\\(\\s*,\\s*\\{\\s*syncFromLiveAlarm\\s*:\\s*false"
+      ],
+      "forbidPatterns": [
+        "\\bschedule\\.pageTimerMinutes\\s*=\\s*result\\.actualDelayMinutes",
+        "\\bschedule\\.pageTimerTargetAt\\s*=\\s*targetAt"
       ]
     },
     {
