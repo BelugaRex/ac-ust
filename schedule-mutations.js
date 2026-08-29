@@ -34,5 +34,14 @@
     }
   }
 
-  return Object.freeze({ setScheduleNextTrigger });
+  function setSchedulePwmClockIntent(scheduleState, nextTriggerAt, options = {}) {
+    setScheduleNextTrigger(scheduleState, nextTriggerAt, options);
+    scheduleState.alarmCreatedAt = 0;
+    scheduleState.alarmDelayMinutes = 0;
+  }
+
+  return Object.freeze({
+    setScheduleNextTrigger,
+    setSchedulePwmClockIntent
+  });
 });

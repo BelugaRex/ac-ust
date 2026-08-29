@@ -5213,7 +5213,7 @@ return { reapplySmartSensitivityNow };`
       'schedule', 'readStoredSmartWeather', 'computeSmartOnMinutes', 'SMART_MODE',
       'persistSchedule', 'getActiveSmartOnPwmRetryContext',
       'smartModePageTimerTargetAt', 'nextSafePageTimerTargetAt', 'clearPwmAlarm',
-      'setNextTriggerAt', 'setPageTimer', 'abortStaleAutomation',
+      'setNextTriggerAt', 'setPwmClockIntent', 'setPageTimer', 'abortStaleAutomation',
       'createPwmAlarmFromPlan', 'createAlarm', 'updateBadge', 'Date',
       `let pwmStepRunning = false;
       let pwmRuntimeRevision = 71;
@@ -5238,6 +5238,11 @@ return { reapplySmartSensitivityNow };`
       pwmPhase.nextSafePageTimerTargetAt,
       async () => true,
       value => { failureSchedule.nextTriggerAt = value > 0 ? value : 0; },
+      value => scheduleMutations.setSchedulePwmClockIntent(
+        failureSchedule,
+        value,
+        { toleranceMs: 1500, readNow: () => nowMs }
+      ),
       async () => {
         if (!timerSucceeds) return { success: false, error: 'synthetic timer failure' };
         failureSchedule.pageTimerTargetAt = timerTargetAt;
@@ -5298,6 +5303,7 @@ return { reapplySmartSensitivityNow };`
     'nextHalfHourBoundary',
     'applyPreparedSmartModeDurations',
     'setNextTriggerAt',
+    'setPwmClockIntent',
     'clearPwmRetryState',
     'setSmartOnPwmRetryState',
     'clearPageTimerProofState',
@@ -5413,6 +5419,11 @@ return { reapplySmartSensitivityNow };`
         return false;
       },
       value => { repairSchedule.nextTriggerAt = value > 0 ? value : 0; },
+      value => scheduleMutations.setSchedulePwmClockIntent(
+        repairSchedule,
+        value,
+        { toleranceMs: 1500, readNow: () => nowMs }
+      ),
       () => {
         repairSchedule.pwmRetryKind = '';
         repairSchedule.pwmRetryBoundaryAt = 0;
@@ -6514,15 +6525,18 @@ return { reapplySmartSensitivityNow };`
     alarmCreatedAt: 0
   };
   let originNowReads13 = 0;
-  const setNextTriggerAt13 = new Function(
-    'schedule', 'Date', 'setScheduleNextTrigger',
+  const clockFacades13 = new Function(
+    'schedule', 'Date', 'setScheduleNextTrigger', 'setSchedulePwmClockIntent',
     `const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
-    ${setNextTriggerSource13}; return setNextTriggerAt;`
+    ${setNextTriggerSource13}; return { setNextTriggerAt, setPwmClockIntent };`
   )(
     originSchedule13,
     { now: () => { originNowReads13 += 1; return originNow13; } },
-    scheduleMutations.setScheduleNextTrigger
+    scheduleMutations.setScheduleNextTrigger,
+    scheduleMutations.setSchedulePwmClockIntent
   );
+  const { setNextTriggerAt: setNextTriggerAt13, setPwmClockIntent: setPwmClockIntent13 }
+    = clockFacades13;
   setNextTriggerAt13(originTarget13);
   const firstOrigin13 = originSchedule13.smartClockPlannedAt;
   setNextTriggerAt13(originTarget13 + 500.5);
@@ -6530,14 +6544,27 @@ return { reapplySmartSensitivityNow };`
   const remoteOrigin13 = originNow13 - 10 * 60_000;
   setNextTriggerAt13(originTarget13 + 500.5, { plannedAt: remoteOrigin13 });
   const adoptedOrigin13 = originSchedule13.smartClockPlannedAt;
-  setNextTriggerAt13(0);
+  const legacyOrigin13 = originNow13 - 1000;
+  Object.assign(originSchedule13, {
+    nextTriggerAt: originTarget13,
+    smartClockPlannedAt: 0,
+    alarmCreatedAt: legacyOrigin13,
+    alarmDelayMinutes: 4
+  });
+  setPwmClockIntent13(originTarget13 + 500.5);
+  const intentOrigin13 = originSchedule13.smartClockPlannedAt;
+  const intentClearedLegacy13 = originSchedule13.alarmCreatedAt === 0
+    && originSchedule13.alarmDelayMinutes === 0;
+  setPwmClockIntent13(0);
   assertPass(firstOrigin13 === originNow13
       && verifiedOrigin13 === originNow13
       && adoptedOrigin13 === remoteOrigin13
+      && intentOrigin13 === legacyOrigin13
+      && intentClearedLegacy13
       && originSchedule13.nextTriggerAt === 0
       && originSchedule13.smartClockPlannedAt === 0
       && originNowReads13 === 1,
-    '13H-1: 新时钟认领 immutable origin；同钟 verify 漂移不刷新；远端来源显式继承；清钟同步清来源');
+    '13H-1: 真实 clock facades 保留 origin；intent 先继承 legacy 来源再清 metadata；撤销同步清来源');
 
   const resetDisabledPwmRuntimeSource = extractSourceSection(
     backgroundSource,
@@ -6548,6 +6575,7 @@ return { reapplySmartSensitivityNow };`
   const loadResetDisabledPwmRuntime = new Function(
     'schedule',
     'setNextTriggerAt',
+    'setPwmClockIntent',
     'chrome',
     'clearPwmAlarm',
     'cancelAutomaticOnRequests',
@@ -6586,6 +6614,14 @@ return { reapplySmartSensitivityNow };`
       resetRuntimeCalls.push(`next:${value}`);
       resetRuntimeSchedule.nextTriggerAt = value;
       if (!(value > 0)) resetRuntimeSchedule.smartClockPlannedAt = 0;
+    },
+    value => {
+      resetRuntimeCalls.push(`next:${value}`);
+      scheduleMutations.setSchedulePwmClockIntent(
+        resetRuntimeSchedule,
+        value,
+        { toleranceMs: 1500, readNow: Date.now }
+      );
     },
     {
       alarms: {
@@ -9653,9 +9689,15 @@ return { reapplySmartSensitivityNow };`
   );
   const loadRetryStateHarness16 = initialSchedule => new Function(
     'initialSchedule', 'getPwmRetryDescriptor', 'normalizePwmRetryKind',
+    'setSchedulePwmClockIntent',
     `let schedule = initialSchedule;
     const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
     const setNextTriggerAt = value => { schedule.nextTriggerAt = value; };
+    const setPwmClockIntent = value => setSchedulePwmClockIntent(
+      schedule,
+      value,
+      { toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS, readNow: Date.now }
+    );
     ${retryStateHelpers16}
     return {
       set: setSmartOnPwmRetryState,
@@ -9668,7 +9710,8 @@ return { reapplySmartSensitivityNow };`
   )(
     initialSchedule,
     pwmRetry.getPwmRetryDescriptor,
-    pwmRetry.normalizePwmRetryKind
+    pwmRetry.normalizePwmRetryKind,
+    scheduleMutations.setSchedulePwmClockIntent
   );
   const retryBoundary16 = new Date(2026, 7, 18, 22, 30, 0, 0).getTime();
   const retryScheduled16 = retryBoundary16 + 60_000;
@@ -11955,7 +11998,7 @@ return { reapplySmartSensitivityNow };`
     harnessOptions = {}
   ) => new Function(
     'initialSchedule', 'initialLiveAt', 'initialWatermark', 'harnessOptions',
-    'setScheduleNextTrigger',
+    'setScheduleNextTrigger', 'setSchedulePwmClockIntent',
     'getPwmRetryDescriptor', 'normalizePwmRetryKind',
     'classifySmartOnClock',
     'computeConfigDiff', 'protectSmartOnRetryConfigDiff',
@@ -12373,6 +12416,7 @@ return { reapplySmartSensitivityNow };`
     initialWatermark,
     harnessOptions,
     scheduleMutations.setScheduleNextTrigger,
+    scheduleMutations.setSchedulePwmClockIntent,
     pwmRetry.getPwmRetryDescriptor,
     pwmRetry.normalizePwmRetryKind,
     pwmPhase.classifySmartOnClock,
@@ -14810,6 +14854,11 @@ ${alarmPwmCatchBody16}
     function setNextTriggerAt(value) {
       schedule.nextTriggerAt = Number(value) > 0 ? Number(value) : 0;
     }
+    function setPwmClockIntent(value) {
+      setNextTriggerAt(value);
+      schedule.alarmCreatedAt = 0;
+      schedule.alarmDelayMinutes = 0;
+    }
     function clearPwmRetryState() {
       schedule.pwmRetryKind = '';
       schedule.pwmRetryBoundaryAt = 0;
@@ -16166,7 +16215,8 @@ ${alarmPwmCatchBody16}
     const alarmPlans = [];
     const recover = new Function(
       'schedule', 'getSmartOnPwmRetryContext', 'planSmartOnRetryExceptionRecovery',
-      'setNextTriggerAt', 'setSmartOnPwmRetryState', 'clearPwmRetryState',
+      'setNextTriggerAt', 'setPwmClockIntent',
+      'setSmartOnPwmRetryState', 'clearPwmRetryState',
       'persistSchedule', 'createPwmAlarmFromPlan', 'isAutomationOperationCurrent',
       'createAlarm',
       `${typedAlarmExceptionRecoveryBody16}; return recoverTypedSmartOnAlarmException;`
@@ -16180,6 +16230,11 @@ ${alarmPwmCatchBody16}
       }),
       pwmPhase.planSmartOnRetryExceptionRecovery,
       value => { testSchedule.nextTriggerAt = value; },
+      value => scheduleMutations.setSchedulePwmClockIntent(
+        testSchedule,
+        value,
+        { toleranceMs: 1500, readNow: Date.now }
+      ),
       (_action, scheduledAt) => {
         testSchedule.pwmRetryKind = 'smart-on';
         testSchedule.pwmRetryBoundaryAt = testSchedule.smartOnBoundaryAt;
@@ -16325,7 +16380,7 @@ ${alarmPwmCatchBody16}
     const alarmPlans = [];
     const recover = new Function(
       'schedule', 'isAutomationOperationCurrent',
-      'planSmartOnRetryExceptionRecovery', 'setNextTriggerAt',
+      'planSmartOnRetryExceptionRecovery', 'setNextTriggerAt', 'setPwmClockIntent',
       'setSmartOnPwmRetryState', 'clearPwmRetryState',
       'persistSchedule', 'createPwmAlarmFromPlan', 'createAlarm',
       `${genericAlarmExceptionRecoveryBody16}; return recoverGenericPwmAlarmException;`
@@ -16334,6 +16389,11 @@ ${alarmPwmCatchBody16}
       typeof revisionCurrent === 'function' ? revisionCurrent : () => revisionCurrent,
       pwmPhase.planSmartOnRetryExceptionRecovery,
       value => { testSchedule.nextTriggerAt = value; },
+      value => scheduleMutations.setSchedulePwmClockIntent(
+        testSchedule,
+        value,
+        { toleranceMs: 1500, readNow: Date.now }
+      ),
       (_action, scheduledAt) => {
         testSchedule.pwmRetryKind = 'smart-on';
         testSchedule.pwmRetryBoundaryAt = testSchedule.smartOnBoundaryAt;
@@ -17629,7 +17689,8 @@ return plan;
   const manualRaceToggle16 = new Function(
     'schedule', 'toggleAC', 'isAutomationAllowed', 'isAutomationOperationCurrent',
     'getCurrentACStatus', 'requestTimerBasedShutdown', 'clearPageTimerProofState',
-    'setNextTriggerAt', 'chrome', 'clearPwmAlarm', 'setPageTimer', 'abortStaleAutomation',
+    'setNextTriggerAt', 'setPwmClockIntent',
+    'chrome', 'clearPwmAlarm', 'setPageTimer', 'abortStaleAutomation',
     'createPwmAlarmWithVerify', 'createAlarm', 'persistSchedule', 'updateBadge',
     'createPwmAlarmFromPlan',
     `let pwmRuntimeRevision = 31;
@@ -17652,6 +17713,14 @@ return plan;
     value => {
       manualRaceCalls16.push(`next:${value}`);
       manualRaceSchedule16.nextTriggerAt = value;
+    },
+    value => {
+      manualRaceCalls16.push(`next:${value}`);
+      scheduleMutations.setSchedulePwmClockIntent(
+        manualRaceSchedule16,
+        value,
+        { toleranceMs: 1500, readNow: Date.now }
+      );
     },
     { alarms: { async clear(name) { manualRaceCalls16.push(`clear:${name}`); } } },
     async () => { manualRaceCalls16.push('clear-pwm'); },
@@ -17694,7 +17763,8 @@ return plan;
     'schedule', 'toggleAC', 'isAutomationAllowed', 'isAutomationOperationCurrent',
     'getCurrentACStatus', 'requestTimerBasedShutdown', 'clearPageTimerProofState',
     'clearPwmRetryState', 'prepareFreshPwmStartState',
-    'setSmartOnPwmRetryState', 'setNextTriggerAt', 'chrome', 'clearPwmAlarm',
+    'setSmartOnPwmRetryState', 'setNextTriggerAt', 'setPwmClockIntent',
+    'chrome', 'clearPwmAlarm',
     'setPageTimer', 'abortStaleAutomation', 'createPwmAlarmWithVerify',
     'createAlarm', 'persistSchedule', 'syncScheduleToSync', 'updateBadge',
     'createPwmAlarmFromPlan',
@@ -17741,6 +17811,14 @@ return plan;
       if (!(manualTimerFailureSchedule16.smartClockPlannedAt > 0)) {
         manualTimerFailureSchedule16.smartClockPlannedAt = Date.now();
       }
+      manualTimerFailureCalls16.push('next');
+    },
+    value => {
+      scheduleMutations.setSchedulePwmClockIntent(
+        manualTimerFailureSchedule16,
+        value,
+        { toleranceMs: 1500, readNow: Date.now }
+      );
       manualTimerFailureCalls16.push('next');
     },
     { alarms: { async clear(name) { manualTimerFailureCalls16.push(`clear:${name}`); } } },
@@ -19942,7 +20020,7 @@ return plan;
     const persisted = [];
     const defer = new Function(
       'schedule', 'COMFORT_START_RETRY_MS', 'COMFORT_START_MINUTES', 'isAutomationOperationCurrent',
-      'setNextTriggerAt', 'persistSchedule', 'createPwmAlarmFromPlan',
+      'setNextTriggerAt', 'setPwmClockIntent', 'persistSchedule', 'createPwmAlarmFromPlan',
       'scheduleComfortStartEndAlarm', 'scheduleComfortRetryFallback',
       'createAlarm', 'updateBadge', 'appendDiagnosticLog',
       `${deferComfortStartSource17}; return deferComfortStart;`
@@ -19952,6 +20030,11 @@ return plan;
       5,
       () => current,
       value => { testSchedule.nextTriggerAt = value; },
+      value => scheduleMutations.setSchedulePwmClockIntent(
+        testSchedule,
+        value,
+        { toleranceMs: 1500, readNow: Date.now }
+      ),
       async reason => {
         order.push(`persist:${reason}`);
         persisted.push(JSON.parse(JSON.stringify(testSchedule)));
@@ -20029,7 +20112,8 @@ return plan;
     const persisted = [];
     const defer = new Function(
       'schedule', 'pwmRuntimeRevision', 'COMFORT_START_RETRY_MS',
-      'isAutomationOperationCurrent', 'setNextTriggerAt', 'persistSchedule',
+      'isAutomationOperationCurrent', 'setNextTriggerAt', 'setPwmClockIntent',
+      'persistSchedule',
       'createPwmAlarmFromPlan', 'scheduleComfortRetryFallback', 'createAlarm',
       'updateBadge', 'appendDiagnosticLog',
       `${deferComfortFinishSource17}; return deferComfortFinish;`
@@ -20039,6 +20123,11 @@ return plan;
       60_000,
       () => current,
       value => { testSchedule.nextTriggerAt = value; },
+      value => scheduleMutations.setSchedulePwmClockIntent(
+        testSchedule,
+        value,
+        { toleranceMs: 1500, readNow: Date.now }
+      ),
       async reason => {
         order.push(`persist:${reason}`);
         if (failAllPersists) throw new Error('synthetic storage unavailable');
@@ -20177,6 +20266,11 @@ return plan;
       return schedule.enabled && schedule.comfortStartUntil > testNow;
     }
     function setNextTriggerAt(value) { schedule.nextTriggerAt = value > 0 ? value : 0; }
+    function setPwmClockIntent(value) {
+      setNextTriggerAt(value);
+      schedule.alarmCreatedAt = 0;
+      schedule.alarmDelayMinutes = 0;
+    }
     async function persistSchedule() {}
     async function createPwmAlarmFromPlan() { pwmCreateCalls += 1; return false; }
     async function scheduleComfortStartEndAlarm() { return true; }

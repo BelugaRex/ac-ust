@@ -576,9 +576,7 @@ async function deferComfortFinish(
   schedule.comfortStartUntil = retryAt;
   schedule.comfortStartOnConfirmedAt = Number(priorConfirmedAt) || 0;
   schedule.pageTimerError = `五分钟舒适启动结束处理失败：${error?.message || String(error)}；1 分钟后重试`;
-  setNextTriggerAt(retryAt);
-  schedule.alarmCreatedAt = 0;
-  schedule.alarmDelayMinutes = 0;
+  setPwmClockIntent(retryAt);
   let intentPersisted = false;
   let recoveryPersistError = null;
   try {
@@ -792,9 +790,7 @@ async function deferComfortStart(error, automationRevision) {
   const retryAt = Math.min(now + COMFORT_START_RETRY_MS, until || (now + COMFORT_START_RETRY_MS));
   schedule.pwmState = 'on';
   schedule.pageTimerError = `五分钟舒适启动未确认：${error || '未知错误'}；1 分钟后重试`;
-  setNextTriggerAt(retryAt > now ? retryAt : 0);
-  schedule.alarmCreatedAt = 0;
-  schedule.alarmDelayMinutes = 0;
+  setPwmClockIntent(retryAt > now ? retryAt : 0);
   // retryAt 是建 live alarm 前的 durable intent；create=false 或 SW 中断后，
   // startup recovery 仍能认领同一舒适事务，不会只剩误导性的文案。
   await persistSchedule('comfort-start-retry-intent', { syncFromLiveAlarm: false });
@@ -864,9 +860,7 @@ async function runComfortStart(reason = 'user-enable') {
   schedule.comfortStartUntil = provisionalPlan.minimumTargetAt;
   if (!restoreExistingMinimum) schedule.comfortStartOnConfirmedAt = 0;
   schedule.pwmState = 'on';
-  setNextTriggerAt(0);
-  schedule.alarmCreatedAt = 0;
-  schedule.alarmDelayMinutes = 0;
+  setPwmClockIntent(0);
   schedule.pageTimerRetryAt = 0;
   schedule.pageTimerRetryMinutes = 0;
   await cancelAutomaticOnRequests();
@@ -1726,6 +1720,14 @@ function setNextTriggerAt(nextTriggerAt, options = {}) {
   });
 }
 
+function setPwmClockIntent(nextTriggerAt, options = {}) {
+  setSchedulePwmClockIntent(schedule, nextTriggerAt, {
+    plannedAt: options?.plannedAt,
+    toleranceMs: PWM_RETRY_ALARM_TOLERANCE_MS,
+    readNow: () => Date.now()
+  });
+}
+
 async function executePwmLifecycleRecoveryFallback(action, context) {
   if (action === 'execute-current') {
     const handled = await executePwmStepWithRecovery({
@@ -2370,9 +2372,7 @@ async function reapplySmartSensitivityNow() {
   // 先清旧 alarm，避免旧关机时刻在慢速新鲜页验证期间抢跑；页面写入方返回
   // 已对齐 UST HH:MM 接口的绝对 targetAt，再用同一值恢复扩展倒计时。
   await clearPwmAlarm(oldPwmRuntimeRevision);
-  setNextTriggerAt(0);
-  schedule.alarmCreatedAt = 0;
-  schedule.alarmDelayMinutes = 0;
+  setPwmClockIntent(0);
   const timerResult = await setPageTimer(minutes, {
     retryOnFailure: false,
     targetAt: smartDeadlineAt,
@@ -2385,9 +2385,7 @@ async function reapplySmartSensitivityNow() {
   if (!timerResult?.success) {
     schedule.pageTimerError = `灵敏度即时应用时页面关机定时器未确认：${timerResult?.error || '未知错误'}；1 分钟后重试`;
     const retryAt = Date.now() + 60000;
-    setNextTriggerAt(retryAt);
-    schedule.alarmCreatedAt = 0;
-    schedule.alarmDelayMinutes = 0;
+    setPwmClockIntent(retryAt);
     await persistSchedule('reapply-smart-sensitivity-pageTimer-retry-intent', {
       syncFromLiveAlarm: false
     });
@@ -2416,9 +2414,7 @@ async function reapplySmartSensitivityNow() {
   }
 
   const reapplyTargetAt = Number(schedule.pageTimerTargetAt) || 0;
-  setNextTriggerAt(reapplyTargetAt);
-  schedule.alarmCreatedAt = 0;
-  schedule.alarmDelayMinutes = 0;
+  setPwmClockIntent(reapplyTargetAt);
   await persistSchedule('reapply-smart-sensitivity-commit-intent', {
     syncFromLiveAlarm: false
   });
@@ -2816,9 +2812,7 @@ async function proveStableDurableLivePwmOwner(
 function prepareFreshPwmStartState() {
   clearPwmRetryState();
   schedule.pwmState = 'on';
-  setNextTriggerAt(0);
-  schedule.alarmCreatedAt = 0;
-  schedule.alarmDelayMinutes = 0;
+  setPwmClockIntent(0);
 }
 
 function applyPwmPlanState(plan) {
@@ -2852,9 +2846,7 @@ async function resetDisabledPwmRuntime() {
   schedule.pwmRetryKind = '';
   schedule.pwmRetryBoundaryAt = 0;
   schedule.pwmRetryScheduledAt = 0;
-  setNextTriggerAt(0);
-  schedule.alarmCreatedAt = 0;
-  schedule.alarmDelayMinutes = 0;
+  setPwmClockIntent(0);
   await clearPwmAlarm(null, true);
   await chrome.alarms.clear('ac-badge-tick');
   await chrome.alarms.clear('ac-watchdog');
@@ -3915,9 +3907,7 @@ async function applySyncedPhase(remote, reason = '') {
               || 0
             : 0;
           clearPwmRetryState();
-          setNextTriggerAt(0);
-          schedule.alarmCreatedAt = 0;
-          schedule.alarmDelayMinutes = 0;
+          setPwmClockIntent(0);
           schedule.pageTimerError = `同步相位重排失败：${e?.message || String(e)}；立即修复主钟`;
           try {
             await persistSchedule('sync-phase-adopt-error', {
@@ -4386,9 +4376,7 @@ async function tryAdoptPageTimer(reason = '') {
       // 读取失败静默返回：先持久化“无可信主钟”，释放 reservation 后立即
       // 走只读 repair；一分钟 watchdog 是 SW 在两步间退出时的 durable 后备。
       clearPwmRetryState();
-      setNextTriggerAt(0);
-      schedule.alarmCreatedAt = 0;
-      schedule.alarmDelayMinutes = 0;
+      setPwmClockIntent(0);
       schedule.pageTimerError = `页面定时器相位采纳未收口：${e?.message || String(e)}；立即修复主钟`;
       try {
         await persistSchedule(`page-timer-adopt-error (${reason})`, {
@@ -5168,9 +5156,7 @@ async function runPwmStep({
         automationRevision,
         'runPwmStep-smart-current-cycle-active-hours-paused'
       )) return;
-      setNextTriggerAt(0);
-      schedule.alarmCreatedAt = 0;
-      schedule.alarmDelayMinutes = 0;
+      setPwmClockIntent(0);
     }
 
     const targetAction = schedule.pwmState === 'on' ? 'on' : 'off';
@@ -5409,9 +5395,7 @@ async function recoverTypedSmartOnAlarmException(
     + `智能开机重试执行异常：${error?.message || String(error)}`
     + (recoveryPlan.kind === 'defer' ? '；本周期安全余量不足，等待下一个半点' : '；1 分钟后重试');
   schedule.pwmState = 'on';
-  setNextTriggerAt(recoveryPlan.nextTriggerAt);
-  schedule.alarmCreatedAt = 0;
-  schedule.alarmDelayMinutes = 0;
+  setPwmClockIntent(recoveryPlan.nextTriggerAt);
 
   if (recoveryPlan.kind === 'retry-smart-on-exception') {
     schedule.smartOnBoundaryAt = retryContext.boundaryAt;
@@ -5488,9 +5472,7 @@ async function recoverGenericPwmAlarmException(
       };
   schedule.pageTimerError = `PWM 步骤执行异常：${error?.message || String(error)}`
     + (recoveryPlan.kind === 'defer' ? '；本周期安全余量不足，等待下一个半点' : '；1 分钟后重试');
-  setNextTriggerAt(recoveryPlan.nextTriggerAt);
-  schedule.alarmCreatedAt = 0;
-  schedule.alarmDelayMinutes = 0;
+  setPwmClockIntent(recoveryPlan.nextTriggerAt);
 
   if (recoveryPlan.kind === 'retry-smart-on-exception') {
     schedule.smartOnBoundaryAt = incomingSmartOnWindow.boundaryAt;
@@ -7531,9 +7513,7 @@ async function repairScheduleClock(options = {}) {
       schedule.pageTimerError = `时钟修复时页面关机定时器未确认：${timerResult?.error || '未知错误'}；保持 on 相位，1 分钟后重试`;
       const retryPlannedAt = Date.now();
       const retryAt = retryPlannedAt + 60000;
-      setNextTriggerAt(retryAt);
-      schedule.alarmCreatedAt = 0;
-      schedule.alarmDelayMinutes = 0;
+      setPwmClockIntent(retryAt);
       const retryBoundaryAt = Number(schedule.smartOnBoundaryAt) || 0;
       const repairRetryKind = 'smart-on-safety-timer';
       setSmartOnPwmRetryState('on', retryAt, {
@@ -7635,9 +7615,7 @@ async function repairScheduleClock(options = {}) {
     // 之间提交另一份 fresh 但仍跳周期的 19:30，并被尾随 restore 当成健康钟。
     schedule.smartOnBoundaryAt = expectedBoundaryAt;
     clearPwmRetryState();
-    setNextTriggerAt(0);
-    schedule.alarmCreatedAt = 0;
-    schedule.alarmDelayMinutes = 0;
+    setPwmClockIntent(0);
     await persistSchedule('smart-on-clock-repair-ownership', {
       syncFromLiveAlarm: false
     });
@@ -7750,9 +7728,7 @@ async function repairScheduleClock(options = {}) {
       boundaryAt: repairLocalExceptionBoundaryAt
     });
   }
-  setNextTriggerAt(repairPlan.nextTriggerAt);
-  schedule.alarmCreatedAt = 0;
-  schedule.alarmDelayMinutes = 0;
+  setPwmClockIntent(repairPlan.nextTriggerAt);
   await persistSchedule('repairScheduleClock-commit-intent', {
     syncFromLiveAlarm: false
   });
@@ -8078,9 +8054,7 @@ async function toggleNowAndSync(action) {
     if (!timerResult?.success) {
       schedule.pageTimerError = `手动开机后页面关机定时器未确认：${timerResult?.error || '未知错误'}；保持 on 相位，1 分钟后重试`;
       const retryAt = Date.now() + 60000;
-      setNextTriggerAt(retryAt);
-      schedule.alarmCreatedAt = 0;
-      schedule.alarmDelayMinutes = 0;
+      setPwmClockIntent(retryAt);
       const retryBoundaryAt = Number(schedule.smartOnBoundaryAt) || 0;
       const safetyTimerRetry = schedule.smartMode?.enabled === true;
       if (safetyTimerRetry) {
@@ -8199,9 +8173,7 @@ async function toggleNowAndSync(action) {
   const togglePlan = currentOn
     ? { nextTriggerAt: schedule.pageTimerTargetAt }
     : { nextTriggerAt: Date.now() + delay * 60000 };
-  setNextTriggerAt(togglePlan.nextTriggerAt);
-  schedule.alarmCreatedAt = 0;
-  schedule.alarmDelayMinutes = 0;
+  setPwmClockIntent(togglePlan.nextTriggerAt);
   await persistSchedule('toggleNowAndSync-commit-intent', {
     syncFromLiveAlarm: false
   });

@@ -156,12 +156,12 @@
       "name": "schedule clock mutations",
       "provider": {
         "file": "schedule-mutations.js",
-        "symbols": ["setScheduleNextTrigger"]
+        "symbols": ["setScheduleNextTrigger", "setSchedulePwmClockIntent"]
       },
       "consumers": [
         {
           "file": "background.js",
-          "symbols": ["setScheduleNextTrigger"]
+          "symbols": ["setScheduleNextTrigger", "setSchedulePwmClockIntent"]
         }
       ]
     },
@@ -393,6 +393,17 @@
         "\\blocalStorage\\b",
         "\\bfetch\\s*\\(",
         "\\bimportScripts\\s*\\("
+      ]
+    },
+    {
+      "name": "legacy PWM alarm metadata clears use the clock intent primitive",
+      "files": ["background.js"],
+      "requirePatterns": [
+        "function\\s+setPwmClockIntent\\s*\\("
+      ],
+      "forbidPatterns": [
+        "\\bschedule\\.alarmCreatedAt\\s*=\\s*0",
+        "\\bschedule\\.alarmDelayMinutes\\s*=\\s*0"
       ]
     },
     {

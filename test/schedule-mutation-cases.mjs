@@ -1,12 +1,13 @@
 import scheduleMutations from '../schedule-mutations.js';
 
-const { setScheduleNextTrigger } = scheduleMutations;
+const { setScheduleNextTrigger, setSchedulePwmClockIntent } = scheduleMutations;
 
 export function runScheduleMutationCases(assertPass) {
   assertPass(
-    Object.keys(scheduleMutations).join(',') === 'setScheduleNextTrigger'
+    Object.keys(scheduleMutations).join(',')
+      === 'setScheduleNextTrigger,setSchedulePwmClockIntent'
       && Object.isFrozen(scheduleMutations),
-    'schedule mutation module 只导出冻结的 next-trigger 写入 primitive'
+    'schedule mutation module 只导出冻结的 clock 写入 primitives'
   );
 
   const originAt = 1_787_983_200_017;
@@ -71,5 +72,46 @@ export function runScheduleMutationCases(assertPass) {
       && schedule.smartClockPlannedAt === 0
       && nowReads === 2,
     '清除时钟同步清除 origin，且不读取当前时间'
+  );
+
+  const intentSchedule = {
+    nextTriggerAt: targetAt,
+    smartClockPlannedAt: 0,
+    alarmCreatedAt: originAt,
+    alarmDelayMinutes: 4,
+    untouched: 'kept'
+  };
+  setSchedulePwmClockIntent(intentSchedule, targetAt + 500, options);
+  assertPass(
+    intentSchedule.nextTriggerAt === targetAt + 500
+      && intentSchedule.smartClockPlannedAt === originAt
+      && intentSchedule.alarmCreatedAt === 0
+      && intentSchedule.alarmDelayMinutes === 0
+      && intentSchedule.untouched === 'kept'
+      && nowReads === 2,
+    'same-clock intent 先继承 legacy origin，再清 verified alarm metadata'
+  );
+
+  setSchedulePwmClockIntent(intentSchedule, targetAt + 3000, {
+    ...options,
+    plannedAt: remoteOriginAt
+  });
+  assertPass(
+    intentSchedule.nextTriggerAt === targetAt + 3000
+      && intentSchedule.smartClockPlannedAt === remoteOriginAt
+      && intentSchedule.alarmCreatedAt === 0
+      && intentSchedule.alarmDelayMinutes === 0
+      && nowReads === 2,
+    '显式 origin 的新 intent 保留来源并声明尚无 verified alarm'
+  );
+
+  setSchedulePwmClockIntent(intentSchedule, 0, options);
+  assertPass(
+    intentSchedule.nextTriggerAt === 0
+      && intentSchedule.smartClockPlannedAt === 0
+      && intentSchedule.alarmCreatedAt === 0
+      && intentSchedule.alarmDelayMinutes === 0
+      && nowReads === 2,
+    '撤销 clock intent 同步清四个时钟字段且不读取当前时间'
   );
 }
