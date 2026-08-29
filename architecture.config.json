@@ -441,9 +441,12 @@
       "requirePatterns": [
         "function\\s+claimPageTimerWriteOwner\\s*\\(",
         "function\\s+invalidatePageTimerWriteOwner\\s*\\(",
+        "let\\s+pageTimerRetryAlarmWriteGeneration\\s*=\\s*0",
+        "function\\s+writePageTimerRetryAlarm\\s*\\(",
+        "function\\s+clearPageTimerRetryAlarmPhysical\\s*\\(",
         "isPageTimerWriteOwnerCurrent\\s*\\(\\s*pageTimerWriteOwner\\s*\\)",
         "pageTimerStale\\s*:\\s*true",
-        "function\\s+clearPageTimerProofState\\s*\\(\\s*\\)\\s*\\{\\s*invalidatePageTimerWriteOwner\\s*\\(\\s*\\)",
+        "function\\s+clearPageTimerProofState\\s*\\(\\s*\\)\\s*\\{\\s*const\\s+pageTimerWriteOwner\\s*=\\s*invalidatePageTimerWriteOwner\\s*\\(\\s*\\)",
         "replaceSchedulePageTimerRetryState\\s*\\(\\s*schedule\\s*[,)]",
         "recordSchedulePageTimerFailureState\\s*\\(\\s*schedule\\s*,",
         "clearSchedulePageTimerProofState\\s*\\(\\s*schedule\\s*\\)",

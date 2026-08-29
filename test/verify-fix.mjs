@@ -4769,6 +4769,21 @@ async function runTests() {
   const retryBody = retryStart >= 0 && retryEnd > retryStart
     ? backgroundSource.slice(retryStart, retryEnd)
     : '';
+  const retryAlarmWriterStart11D = backgroundSource.indexOf(
+    'let pageTimerRetryAlarmWriteChain = Promise.resolve();'
+  );
+  const retryAlarmWriterEnd11D = backgroundSource.indexOf(
+    '\n\nlet pwmAlarmWriteChain = Promise.resolve();',
+    retryAlarmWriterStart11D
+  );
+  const retryAlarmWriterSource11D = retryAlarmWriterStart11D >= 0
+      && retryAlarmWriterEnd11D > retryAlarmWriterStart11D
+    ? backgroundSource.slice(retryAlarmWriterStart11D, retryAlarmWriterEnd11D)
+    : '';
+  const backgroundOutsideRetryAlarmWriter11D = retryAlarmWriterSource11D
+    ? backgroundSource.slice(0, retryAlarmWriterStart11D)
+      + backgroundSource.slice(retryAlarmWriterEnd11D)
+    : backgroundSource;
   const repairStart = backgroundSource.indexOf('async function repairScheduleClock(options = {})');
   const repairEnd = backgroundSource.indexOf('\nasync function getScheduleSnapshot', repairStart);
   const repairBody = repairStart >= 0 && repairEnd > repairStart
@@ -4828,7 +4843,7 @@ async function runTests() {
     ? setTimerBody.slice(proofHelperStartIdx11C, proofHelperEndIdx11C)
     : '';
   const proofAlarmClearIdx11C = proofHelperSource11C.indexOf(
-    "await chrome.alarms.clear('ac-page-timer-retry');"
+    'const retryAlarmClear = await writePageTimerRetryAlarm({'
   );
   const proofMinutesIdx11C = proofHelperSource11C.indexOf(
     'const proofMinutes = result.actualDelayMinutes || minutes;'
@@ -4924,6 +4939,8 @@ async function runTests() {
     const isAutomationOperationCurrent = () => true;
     const reconcilePwmTrigger = () => ({ kind: 'noop' });
     const clearPwmRetryState = () => {};
+    const PAGE_TIMER_RETRY_ALARM = 'ac-page-timer-retry';
+    ${retryAlarmWriterSource11D}
     ${pageTimerPersistSource11C}
     ${proofHelperSource11C}
     return {
@@ -4966,13 +4983,226 @@ async function runTests() {
       && retryIntentBody.includes('retryAt: Date.now() + 60 * 1000')
       && countOccurrences(retryIntentBody, 'Date.now()') === 1
       && retryBody.includes('const retryAt = retryState.retryAt;')
-      && retryBody.includes("createAlarm('ac-page-timer-retry', { when: retryAt })")
-      && retryBody.includes('if (!isCurrent()) return staleResult();')
-      && retryBody.includes('return { stale: false, retryMinutes, retryAt, alarmCreated };')
+      && retryBody.includes("action: 'replace'")
+      && retryBody.includes('when: retryAt')
+      && retryBody.includes('if (retryAlarmWrite.stale) return staleResult();')
+      && retryBody.includes('alarmCreated: retryAlarmWrite.alarmCreated')
       && !retryBody.includes('Date.now()')
       && !retryBody.includes('schedule.')
+      && !backgroundOutsideRetryAlarmWriter11D.includes(
+        "chrome.alarms.clear('ac-page-timer-retry')"
+      )
+      && !backgroundOutsideRetryAlarmWriter11D.includes(
+        "createAlarm('ac-page-timer-retry'"
+      )
+      && !backgroundOutsideRetryAlarmWriter11D.includes(
+        'chrome.alarms.clear(PAGE_TIMER_RETRY_ALARM)'
+      )
+      && !backgroundOutsideRetryAlarmWriter11D.includes(
+        'createAlarm(PAGE_TIMER_RETRY_ALARM'
+      )
+      && !backgroundOutsideRetryAlarmWriter11D.includes(
+        'clearPageTimerRetryAlarmPhysical()'
+      )
       && backgroundSource.includes("if (alarm.name === 'ac-page-timer-retry')"),
-    '11D: page retry intent 只读一次时间并冻结；alarm adapter 不跨 await 回读/写入全局 schedule');
+    '11D: retry intent 只读一次时间；全部物理 clear/create 唯一进入串行 writer，adapter 不回读/写入 schedule');
+
+  const makeRetryAlarmWriterHarness11D = ({
+    delayedCreateWhen = 0,
+    delayedClearOrdinal = 0,
+    rejectDelayedClear = false,
+    falseCreateWhen = 0
+  } = {}) => {
+    const createGate = makeDeferred9G();
+    const clearGate = makeDeferred9G();
+    const calls = [];
+    let liveAlarmAt = 0;
+    let clearCount = 0;
+    let createStarted = false;
+    let clearStarted = false;
+    const chrome = { alarms: { async clear(name) {
+      if (name !== 'ac-page-timer-retry') {
+        throw new Error(`unexpected retry alarm clear target: ${name}`);
+      }
+      clearCount += 1;
+      const ordinal = clearCount;
+      calls.push(`clear:start:${ordinal}`);
+      if (ordinal === delayedClearOrdinal) {
+        clearStarted = true;
+        await clearGate.promise;
+        if (rejectDelayedClear) throw new Error('synthetic clear rejection');
+      }
+      liveAlarmAt = 0;
+      calls.push(`clear:end:${ordinal}`);
+      return true;
+    } } };
+    const createAlarm = async (name, info) => {
+      if (name !== 'ac-page-timer-retry') {
+        throw new Error(`unexpected retry alarm create target: ${name}`);
+      }
+      calls.push(`create:start:${info.when}`);
+      if (info.when === delayedCreateWhen) {
+        createStarted = true;
+        await createGate.promise;
+      }
+      if (info.when === falseCreateWhen) {
+        calls.push(`create:false:${info.when}`);
+        return false;
+      }
+      liveAlarmAt = info.when;
+      calls.push(`create:end:${info.when}`);
+      return true;
+    };
+    const writer = new Function(
+      'chrome', 'createAlarm', 'PAGE_TIMER_RETRY_ALARM',
+      `${retryAlarmWriterSource11D}
+      return { writePageTimerRetryAlarm };`
+    )(chrome, createAlarm, 'ac-page-timer-retry');
+    return {
+      ...writer,
+      calls,
+      liveAlarmAt: () => liveAlarmAt,
+      createStarted: () => createStarted,
+      clearStarted: () => clearStarted,
+      releaseCreate: createGate.resolve,
+      releaseClear: clearGate.resolve,
+      rejectClear: clearGate.reject
+    };
+  };
+
+  let retryAlarmOwner11D = 'A';
+  const replaceRaceHarness11D = makeRetryAlarmWriterHarness11D({
+    delayedCreateWhen: 100
+  });
+  const replaceRaceA11D = replaceRaceHarness11D.writePageTimerRetryAlarm({
+    action: 'create', when: 100, isCurrent: () => retryAlarmOwner11D === 'A'
+  });
+  while (!replaceRaceHarness11D.createStarted()) await Promise.resolve();
+  retryAlarmOwner11D = 'B';
+  const replaceRaceB11D = replaceRaceHarness11D.writePageTimerRetryAlarm({
+    action: 'replace', when: 200, isCurrent: () => retryAlarmOwner11D === 'B'
+  });
+  replaceRaceHarness11D.releaseCreate();
+  const [replaceRaceAResult11D, replaceRaceBResult11D] = await Promise.all([
+    replaceRaceA11D,
+    replaceRaceB11D
+  ]);
+  assertPass(replaceRaceAResult11D.stale === true
+      && replaceRaceBResult11D.stale === false
+      && replaceRaceBResult11D.alarmCreated === true
+      && replaceRaceHarness11D.liveAlarmAt() === 200
+      && replaceRaceHarness11D.calls.indexOf('create:end:100')
+        < replaceRaceHarness11D.calls.indexOf('clear:start:1')
+      && replaceRaceHarness11D.calls.at(-1) === 'create:end:200',
+    '11D-W1: startup 旧 create 迟到时先补清理，再由新 owner replace，最终 live 只等于 B');
+
+  retryAlarmOwner11D = 'A';
+  const clearRaceHarness11D = makeRetryAlarmWriterHarness11D({
+    delayedCreateWhen: 300
+  });
+  const clearRaceA11D = clearRaceHarness11D.writePageTimerRetryAlarm({
+    action: 'create', when: 300, isCurrent: () => retryAlarmOwner11D === 'A'
+  });
+  while (!clearRaceHarness11D.createStarted()) await Promise.resolve();
+  retryAlarmOwner11D = 'B';
+  const clearRaceB11D = clearRaceHarness11D.writePageTimerRetryAlarm({
+    action: 'clear', isCurrent: () => retryAlarmOwner11D === 'B'
+  });
+  clearRaceHarness11D.releaseCreate();
+  const [clearRaceAResult11D, clearRaceBResult11D] = await Promise.all([
+    clearRaceA11D,
+    clearRaceB11D
+  ]);
+  assertPass(clearRaceAResult11D.stale === true
+      && clearRaceBResult11D.stale === false
+      && clearRaceHarness11D.liveAlarmAt() === 0
+      && clearRaceHarness11D.calls.join(',')
+        === 'create:start:300,create:end:300,clear:start:1,clear:end:1,clear:start:2,clear:end:2',
+    '11D-W2: 旧 create 迟到后补清理并放行新 clear，最终无 live retry alarm');
+
+  retryAlarmOwner11D = 'A';
+  const delayedClearHarness11D = makeRetryAlarmWriterHarness11D({
+    delayedClearOrdinal: 1
+  });
+  const delayedClearA11D = delayedClearHarness11D.writePageTimerRetryAlarm({
+    action: 'clear', isCurrent: () => retryAlarmOwner11D === 'A'
+  });
+  while (!delayedClearHarness11D.clearStarted()) await Promise.resolve();
+  retryAlarmOwner11D = 'B';
+  const delayedClearB11D = delayedClearHarness11D.writePageTimerRetryAlarm({
+    action: 'replace', when: 400, isCurrent: () => retryAlarmOwner11D === 'B'
+  });
+  delayedClearHarness11D.releaseClear();
+  const [delayedClearAResult11D, delayedClearBResult11D] = await Promise.all([
+    delayedClearA11D,
+    delayedClearB11D
+  ]);
+  assertPass(delayedClearAResult11D.stale === true
+      && delayedClearBResult11D.stale === false
+      && delayedClearHarness11D.liveAlarmAt() === 400
+      && delayedClearHarness11D.calls.at(-1) === 'create:end:400',
+    '11D-W3: 旧 clear 迟到不能删除新 owner；B 在同链最后 replace 并留下唯一 live alarm');
+
+  retryAlarmOwner11D = 'A';
+  const rejectedClearHarness11D = makeRetryAlarmWriterHarness11D({
+    delayedClearOrdinal: 1,
+    rejectDelayedClear: true
+  });
+  const rejectedClearA11D = rejectedClearHarness11D.writePageTimerRetryAlarm({
+    action: 'clear', isCurrent: () => retryAlarmOwner11D === 'A'
+  });
+  const rejectedClearASettled11D = rejectedClearA11D.then(
+    value => ({ status: 'fulfilled', value }),
+    reason => ({ status: 'rejected', reason })
+  );
+  while (!rejectedClearHarness11D.clearStarted()) await Promise.resolve();
+  retryAlarmOwner11D = 'B';
+  const rejectedClearB11D = rejectedClearHarness11D.writePageTimerRetryAlarm({
+    action: 'replace', when: 500, isCurrent: () => retryAlarmOwner11D === 'B'
+  });
+  rejectedClearHarness11D.releaseClear();
+  const [rejectedClearAResult11D, rejectedClearBResult11D] = await Promise.all([
+    rejectedClearASettled11D,
+    rejectedClearB11D
+  ]);
+  assertPass(rejectedClearAResult11D.status === 'rejected'
+      && rejectedClearBResult11D.stale === false
+      && rejectedClearHarness11D.liveAlarmAt() === 500
+      && rejectedClearHarness11D.calls.at(-1) === 'create:end:500',
+    '11D-W4: 旧物理 clear reject 向 caller 传播，但内部 chain 恢复并允许最新 B 正常落地');
+
+  retryAlarmOwner11D = 'A';
+  const rejectedAdmissionHarness11D = makeRetryAlarmWriterHarness11D({
+    delayedCreateWhen: 600
+  });
+  const admittedA11D = rejectedAdmissionHarness11D.writePageTimerRetryAlarm({
+    action: 'create', when: 600, isCurrent: () => retryAlarmOwner11D === 'A'
+  });
+  while (!rejectedAdmissionHarness11D.createStarted()) await Promise.resolve();
+  const rejectedAdmission11D = await rejectedAdmissionHarness11D.writePageTimerRetryAlarm({
+    action: 'clear', isCurrent: () => false
+  });
+  rejectedAdmissionHarness11D.releaseCreate();
+  const admittedAResult11D = await admittedA11D;
+  assertPass(rejectedAdmission11D.stale === true
+      && admittedAResult11D.stale === false
+      && rejectedAdmissionHarness11D.liveAlarmAt() === 600
+      && !rejectedAdmissionHarness11D.calls.some(call => call.startsWith('clear:')),
+    '11D-W5: stale admission 零 I/O 且不抢 generation，不能让已获准的 A 无故失主');
+
+  retryAlarmOwner11D = 'B';
+  const falseCreateHarness11D = makeRetryAlarmWriterHarness11D({
+    falseCreateWhen: 700
+  });
+  const falseCreateResult11D = await falseCreateHarness11D.writePageTimerRetryAlarm({
+    action: 'create', when: 700, isCurrent: () => retryAlarmOwner11D === 'B'
+  });
+  assertPass(falseCreateResult11D.stale === false
+      && falseCreateResult11D.alarmCreated === false
+      && falseCreateHarness11D.liveAlarmAt() === 0
+      && falseCreateHarness11D.calls.join(',') === 'create:start:700,create:false:700',
+    '11D-W6: create=false 保持 current/non-stale 且不伪造 live alarm，caller 可继续保留 durable intent');
+
   const failureInitialCommitIdx11D = failureHelperSource11D.indexOf(
     'recordSchedulePageTimerFailureState(schedule, pageTimerError, retryState);'
   );
@@ -5005,7 +5235,7 @@ async function runTests() {
       && serializedPageTimerBody.includes('pageTimerWriteOwner = 0')
       && countOccurrences(serializedPageTimerBody, 'if (!pageTimerWriteIsCurrent())') === 2
       && serializedPageTimerBody.includes('pageTimerStale: true')
-      && backgroundSource.includes('function clearPageTimerProofState() {\n  invalidatePageTimerWriteOwner();')
+      && backgroundSource.includes('function clearPageTimerProofState() {\n  const pageTimerWriteOwner = invalidatePageTimerWriteOwner();')
       && !setTimerBody.includes('return await finishFailure(')
       && !setTimerBody.includes('return await recordPageTimerProof('),
     '11D-0: failure 先同步失效旧 proof，真实消息前后复核同代 owner；alarm await 后只向当前 owner 重放五字段');
@@ -5095,7 +5325,9 @@ async function runTests() {
     const reconcilePwmTrigger = () => ({ kind: 'noop' });
     const applyPwmPlanState = () => {};
     const clearPwmRetryState = () => {};
+    const PAGE_TIMER_RETRY_ALARM = 'ac-page-timer-retry';
     ${pageTimerPersistSource11C}
+    ${retryAlarmWriterSource11D}
     ${retryIntentBody}
     ${retryBody}
     ${failureHelperSource11D}
@@ -5202,8 +5434,8 @@ async function runTests() {
       && createStaleSchedules11D.replacement.pageTimerError === 'replacement owner'
       && createStaleHarness11D.persisted() === null
       && createStaleHarness11D.calls.join(',')
-        === `clear:ac-page-timer-retry,create:ac-page-timer-retry:${fixedRetryNow11D + 60_000}`,
-    '11D-1B: create verify 期间 owner 失效后不重放、不持久化 replacement');
+        === `clear:ac-page-timer-retry,create:ac-page-timer-retry:${fixedRetryNow11D + 60_000},clear:ac-page-timer-retry`,
+    '11D-1B: create 期间 owner 失效后队内补清物理钟，且不重放、不持久化 replacement');
 
   const staleFailureSchedules11D = makeFailureSchedules11D();
   const staleFailureHarness11D = loadPageTimerFailureHarness11D(
@@ -5368,6 +5600,8 @@ async function runTests() {
       calls.push('persist:' + reason + ':' + options.syncFromLiveAlarm);
       persistedSchedule = { ...schedule };
     };
+    const PAGE_TIMER_RETRY_ALARM = 'ac-page-timer-retry';
+    ${retryAlarmWriterSource11D}
     ${clearSupersededSource11D}
     return {
       run: clearSupersededTimerBasedShutdownRetry,
@@ -6658,9 +6892,10 @@ return { reapplySmartSensitivityNow };`
   const applyPwmPlanBody = applyPwmPlanStart >= 0 && applyPwmPlanEnd > applyPwmPlanStart
     ? backgroundSource.slice(applyPwmPlanStart, applyPwmPlanEnd)
     : '';
-  assertPass(applyPwmPlanBody.includes("if (plan?.proofAction === 'clear') clearPageTimerProofState();")
-      && countOccurrences(backgroundSource, 'clearPageTimerProofState();') === 4,
-    '11L: planner proofAction 与三条直接失效/新鲜 OFF 路径统一委派给 clearPageTimerProofState');
+  assertPass(applyPwmPlanBody.includes("const pageTimerWriteOwner = plan?.proofAction === 'clear'")
+      && applyPwmPlanBody.includes('? clearPageTimerProofState()')
+      && applyPwmPlanBody.includes('return pageTimerWriteOwner;'),
+    '11L: planner proofAction 委派给真实 proof facade，并把 writer owner 显式返回给异步 caller');
 
   const reconciliationSites = [
     ['persistSchedule', 'async function persistSchedule(', '\nconst _syncOpLock'],
@@ -7128,7 +7363,9 @@ return { reapplySmartSensitivityNow };`
       && backgroundSource.includes('buildTimeEpochMs: BUILD_TIME_EPOCH_MS'),
     '13G: getSwStatus 返回 offscreenAlive 真值与 SW 构建身份');
   assertPass(initBody13.includes('const retryMinutes = Number(schedule.pageTimerRetryMinutes) || 0;')
-      && initBody13.includes("createAlarm('ac-page-timer-retry', { when: retryAt })")
+      && initBody13.includes("action: 'create'")
+      && initBody13.includes('when: retryAt')
+      && initBody13.includes('if (retryAlarmWrite.stale) return;')
       && initBody13.includes('const retryOwnerIsCurrent = () => (')
       && initBody13.includes('const retryIntent = createPageTimerRetryIntent(retryMinutes);')
       && initBody13.includes("'启动恢复错过的页面定时器重试',\n          retryOwnerIsCurrent")
@@ -7146,7 +7383,7 @@ return { reapplySmartSensitivityNow };`
     ? initBody13.slice(startupRetryStart13E, startupRetryEnd13E)
     : '';
   const loadStartupRetryHarness13E = new Function(
-    'initialSchedule', 'replacementSchedule', 'retryState',
+    'initialSchedule', 'replacementSchedule', 'retryState', 'harnessOptions',
     'replaceSchedulePageTimerRetryState',
     `let schedule = initialSchedule;
     const calls = [];
@@ -7163,6 +7400,23 @@ return { reapplySmartSensitivityNow };`
     const persistSchedule = async (reason, options) => {
       calls.push({ type: 'persist', reason, options: { ...options }, snapshot: { ...schedule } });
     };
+    const writePageTimerRetryAlarm = async ({ action, when, isCurrent }) => {
+      const ownerBeforeSwap = isCurrent();
+      if (harnessOptions.swapDuringAlarmWrite) schedule = replacementSchedule;
+      const ownerAfterSwap = isCurrent();
+      calls.push({
+        type: 'alarm-write',
+        action,
+        when,
+        ownerBeforeSwap,
+        ownerAfterSwap
+      });
+      return {
+        stale: !ownerAfterSwap,
+        alarmCreated: harnessOptions.alarmCreated !== false,
+        when
+      };
+    };
     const sanitizeMinutes = (value, fallback) => {
       const parsed = Number.parseInt(value, 10);
       return Number.isFinite(parsed) && parsed >= 1 ? parsed : fallback;
@@ -7175,6 +7429,7 @@ return { reapplySmartSensitivityNow };`
     { pageTimerRetryAt: 1, pageTimerRetryMinutes: 3 },
     { pageTimerRetryAt: 0, pageTimerRetryMinutes: 0, owner: 'comfort' },
     { stale: false, retryAt: 999, retryMinutes: 3 },
+    {},
     scheduleMutations.replaceSchedulePageTimerRetryState
   );
   await staleStartupRetryHarness13E.run();
@@ -7191,6 +7446,7 @@ return { reapplySmartSensitivityNow };`
     { pageTimerRetryAt: 1, pageTimerRetryMinutes: 3 },
     replacementTupleStartup13E,
     { stale: false, retryAt: 999, retryMinutes: 3 },
+    {},
     scheduleMutations.replaceSchedulePageTimerRetryState
   );
   await currentStartupRetryHarness13E.run();
@@ -7199,6 +7455,62 @@ return { reapplySmartSensitivityNow };`
       && currentStartupRetryHarness13E.calls.at(-1)?.type === 'persist'
       && currentStartupRetryHarness13E.calls.at(-1)?.options.syncFromLiveAlarm === false,
     '13E-2: startup 换对象但旧 tuple 未变时，向当前对象提交新 intent 并无 PWM live read 持久化');
+
+  const futureRetryAt13E = Date.now() + 5 * 60_000;
+  const futureStartupRetryHarness13E = loadStartupRetryHarness13E(
+    { pageTimerRetryAt: futureRetryAt13E, pageTimerRetryMinutes: 4 },
+    { pageTimerRetryAt: 0, pageTimerRetryMinutes: 0 },
+    { stale: false, retryAt: 999, retryMinutes: 4 },
+    {},
+    scheduleMutations.replaceSchedulePageTimerRetryState
+  );
+  await futureStartupRetryHarness13E.run();
+  assertPass(futureStartupRetryHarness13E.calls.length === 1
+      && futureStartupRetryHarness13E.calls[0].type === 'alarm-write'
+      && futureStartupRetryHarness13E.calls[0].action === 'create'
+      && futureStartupRetryHarness13E.calls[0].when === futureRetryAt13E
+      && futureStartupRetryHarness13E.calls[0].ownerBeforeSwap === true
+      && futureStartupRetryHarness13E.calls[0].ownerAfterSwap === true,
+    '13E-3: startup future retry 只经统一 writer create 原 durable when，不额外 clear 或 persist');
+
+  const futureReplacementTuple13E = {
+    pageTimerRetryAt: futureRetryAt13E + 60_000,
+    pageTimerRetryMinutes: 5,
+    owner: 'replacement'
+  };
+  const staleFutureStartupRetryHarness13E = loadStartupRetryHarness13E(
+    { pageTimerRetryAt: futureRetryAt13E, pageTimerRetryMinutes: 4 },
+    futureReplacementTuple13E,
+    { stale: false, retryAt: 999, retryMinutes: 4 },
+    { swapDuringAlarmWrite: true },
+    scheduleMutations.replaceSchedulePageTimerRetryState
+  );
+  await staleFutureStartupRetryHarness13E.run();
+  assertPass(staleFutureStartupRetryHarness13E.current() === futureReplacementTuple13E
+      && staleFutureStartupRetryHarness13E.calls.length === 1
+      && staleFutureStartupRetryHarness13E.calls[0].ownerBeforeSwap === true
+      && staleFutureStartupRetryHarness13E.calls[0].ownerAfterSwap === false
+      && futureReplacementTuple13E.owner === 'replacement'
+      && futureReplacementTuple13E.pageTimerRetryMinutes === 5,
+    '13E-4: startup future create await 中 tuple 换主时，真实 caller guard 使旧 create stale 且零 durable mutation');
+
+  const falseFutureTuple13E = {
+    pageTimerRetryAt: futureRetryAt13E,
+    pageTimerRetryMinutes: 4
+  };
+  const falseFutureStartupRetryHarness13E = loadStartupRetryHarness13E(
+    falseFutureTuple13E,
+    falseFutureTuple13E,
+    { stale: false, retryAt: 999, retryMinutes: 4 },
+    { alarmCreated: false },
+    scheduleMutations.replaceSchedulePageTimerRetryState
+  );
+  await falseFutureStartupRetryHarness13E.run();
+  assertPass(falseFutureStartupRetryHarness13E.calls.length === 1
+      && falseFutureStartupRetryHarness13E.calls[0].ownerAfterSwap === true
+      && falseFutureTuple13E.pageTimerRetryAt === futureRetryAt13E
+      && falseFutureTuple13E.pageTimerRetryMinutes === 4,
+    '13E-5: startup future create=false 不伪造 live alarm，也不删除原 durable retry tuple');
 
   let extractionGuardMessage = '';
   try {
@@ -18458,6 +18770,18 @@ return plan;
     '\nasync function ensureDiagnosticAlarms',
     'toggleNowAndSync active-hours behavior'
   );
+  const clearProofFacade16 = extractSourceSection(
+    backgroundSource,
+    'function clearPageTimerProofState() {',
+    '\n\nfunction clearPwmRetryState()',
+    'page timer proof facade'
+  );
+  const clearPwmRetryFacade16 = extractSourceSection(
+    backgroundSource,
+    'function clearPwmRetryState() {',
+    '\n\nfunction setSmartOnPwmRetryState(',
+    'PWM retry clear facade'
+  );
   const automaticOnBody16 = extractSourceSection(
     backgroundSource,
     'async function resolveToggleOnHold(plan, observations) {',
@@ -18499,6 +18823,7 @@ return plan;
   const manualRaceToggle16 = new Function(
     'schedule', 'toggleAC', 'isAutomationAllowed', 'isAutomationOperationCurrent',
     'getCurrentACStatus', 'requestTimerBasedShutdown', 'clearPageTimerProofState',
+    'isPageTimerWriteOwnerCurrent', 'writePageTimerRetryAlarm',
     'setNextTriggerAt', 'setPwmClockIntent',
     'chrome', 'clearPwmAlarm', 'setPageTimer', 'abortStaleAutomation',
     'createPwmAlarmWithVerify', 'createAlarm', 'persistSchedule', 'updateBadge',
@@ -18519,7 +18844,9 @@ return plan;
       return { isOn: true };
     },
     async () => { throw new Error('ON 竞态不应请求关机'); },
-    () => { manualRaceCalls16.push('clear-proof'); },
+    () => { manualRaceCalls16.push('clear-proof'); return 1; },
+    owner => owner === 1,
+    async ({ isCurrent }) => ({ stale: !isCurrent(), alarmCreated: false }),
     value => {
       manualRaceCalls16.push(`next:${value}`);
       manualRaceSchedule16.nextTriggerAt = value;
@@ -18572,6 +18899,7 @@ return plan;
   const manualTimerFailureToggle16 = new Function(
     'schedule', 'toggleAC', 'isAutomationAllowed', 'isAutomationOperationCurrent',
     'getCurrentACStatus', 'requestTimerBasedShutdown', 'clearPageTimerProofState',
+    'isPageTimerWriteOwnerCurrent', 'writePageTimerRetryAlarm',
     'clearPwmRetryState', 'prepareFreshPwmStartState',
     'setSmartOnPwmRetryState', 'setNextTriggerAt', 'setPwmClockIntent',
     'chrome', 'clearPwmAlarm',
@@ -18593,7 +18921,12 @@ return plan;
       return { isOn: true };
     },
     async () => { throw new Error('ON 失败路径不应请求关机'); },
-    () => { manualTimerFailureCalls16.push('clear-proof'); },
+    () => { manualTimerFailureCalls16.push('clear-proof'); return 1; },
+    owner => owner === 1,
+    async ({ isCurrent }) => {
+      manualTimerFailureCalls16.push('clear:ac-page-timer-retry');
+      return { stale: !isCurrent(), alarmCreated: false };
+    },
     () => {
       manualTimerFailureSchedule16.pwmRetryKind = '';
       manualTimerFailureSchedule16.pwmRetryBoundaryAt = 0;
@@ -18660,6 +18993,115 @@ return plan;
       && manualTimerFailureSchedule16.pwmRetryScheduledAt
         === manualTimerFailureSchedule16.nextTriggerAt,
     '16K-2A: actual 手动 ON 的 timer proof 失败只建 safety-timer durable 维修事务，并以明确 OFF sync 公告');
+
+  const manualOnSwapOld16 = {
+    enabled: true,
+    onMinutes: 23,
+    offMinutes: 7,
+    pageTimerMinutes: 23,
+    pageTimerTargetAt: ingressBoundary16 + 23 * 60_000,
+    pageTimerError: 'old page proof',
+    pageTimerRetryAt: ingressBoundary16 + 60_000,
+    pageTimerRetryMinutes: 23,
+    pwmRetryKind: 'smart-on',
+    pwmRetryBoundaryAt: ingressBoundary16,
+    pwmRetryScheduledAt: ingressBoundary16 + 60_000,
+    sentinel: 'old'
+  };
+  const manualOnSwapNew16 = {
+    ...manualOnSwapOld16,
+    pageTimerError: 'replacement page proof',
+    sentinel: 'replacement'
+  };
+  const manualOnSwapHarness16 = new Function(
+    'initialSchedule', 'replacementSchedule',
+    'clearProofMutation', 'replaceRetryMutation',
+    `let schedule = initialSchedule;
+    let pwmRuntimeRevision = 41;
+    let pageTimerWriteGeneration = 0;
+    const calls = [];
+    const persisted = [];
+    const side = state => state === replacementSchedule ? 'new' : 'old';
+    function invalidatePageTimerWriteOwner() {
+      pageTimerWriteGeneration += 1;
+      return pageTimerWriteGeneration;
+    }
+    function isPageTimerWriteOwnerCurrent(owner) {
+      return owner === pageTimerWriteGeneration;
+    }
+    function clearSchedulePageTimerProofState(state) {
+      calls.push('proof:' + side(state));
+      clearProofMutation(state);
+    }
+    function replaceSchedulePwmRetryState(state) {
+      calls.push('pwm:' + side(state));
+      replaceRetryMutation(state);
+    }
+    ${clearProofFacade16}
+    ${clearPwmRetryFacade16}
+    function isAutomationAllowed() { return true; }
+    function isAutomationOperationCurrent(revision) { return revision === 41; }
+    async function writePageTimerRetryAlarm({ action, isCurrent }) {
+      calls.push('writer:' + action + ':' + isCurrent());
+      schedule = replacementSchedule;
+      return { stale: !isCurrent(), alarmCreated: false };
+    }
+    async function persistSchedule(reason, options) {
+      calls.push('persist:' + reason);
+      persisted.push({
+        reason,
+        options: { ...options },
+        ref: schedule,
+        snapshot: { ...schedule }
+      });
+    }
+    async function toggleAC() {
+      calls.push('toggle');
+      return { success: false, error: 'stop-after-intent' };
+    }
+    async function getCurrentACStatus() { return { isOn: false }; }
+    async function requestTimerBasedShutdown() { throw new Error('unexpected shutdown'); }
+    function setNextTriggerAt() {}
+    function setPwmClockIntent() {}
+    const chrome = { alarms: { async clear() {} } };
+    async function clearPwmAlarm() {}
+    async function setPageTimer() { throw new Error('unexpected page timer'); }
+    async function abortStaleAutomation() { return false; }
+    async function createPwmAlarmWithVerify() { return true; }
+    async function createAlarm() { return true; }
+    async function syncScheduleToSync() {}
+    async function updateBadge() {}
+    async function createPwmAlarmFromPlan() { return true; }
+    function prepareFreshPwmStartState() {}
+    function setSmartOnPwmRetryState() {}
+    ${toggleBody16}
+    return { run: toggleNowAndSync, current: () => schedule, calls, persisted };`
+  )(
+    manualOnSwapOld16,
+    manualOnSwapNew16,
+    scheduleMutations.clearSchedulePageTimerProofState,
+    scheduleMutations.replaceSchedulePwmRetryState
+  );
+  const manualOnSwapResult16 = await manualOnSwapHarness16.run('on');
+  const manualOnSwapPersist16 = manualOnSwapHarness16.persisted[0];
+  assertPass(manualOnSwapResult16.success === false
+      && manualOnSwapHarness16.calls.join(',')
+        === 'proof:old,pwm:old,writer:clear:true,proof:new,pwm:new,persist:toggleNowAndSync-on-intent,toggle'
+      && manualOnSwapHarness16.current() === manualOnSwapNew16
+      && manualOnSwapOld16.pageTimerMinutes === null
+      && manualOnSwapOld16.pwmRetryKind === ''
+      && manualOnSwapNew16.pageTimerMinutes === null
+      && manualOnSwapNew16.pageTimerTargetAt === 0
+      && manualOnSwapNew16.pageTimerError === ''
+      && manualOnSwapNew16.pageTimerRetryAt === 0
+      && manualOnSwapNew16.pageTimerRetryMinutes === 0
+      && manualOnSwapNew16.pwmRetryKind === ''
+      && manualOnSwapNew16.pwmRetryBoundaryAt === 0
+      && manualOnSwapNew16.pwmRetryScheduledAt === 0
+      && manualOnSwapPersist16?.ref === manualOnSwapNew16
+      && manualOnSwapPersist16?.snapshot.sentinel === 'replacement'
+      && manualOnSwapPersist16?.options.syncFromLiveAlarm === false,
+    '16K-2B: 手动 ON 的 alarm await 真换 schedule 后，facade 重清 replacement proof/typed retry 再持久化');
 
   const automaticOnDeadlineStart16 = backgroundSource.indexOf(
     'function getAutomaticOnDeadline('
@@ -19708,7 +20150,8 @@ return plan;
     let currentShutdownRevision16 = 0;
     const requestTimerBasedShutdown16 = new Function(
       'schedule', 'isPageTimerProofFresh', 'getCurrentACStatus',
-      'clearPageTimerProofState', 'chrome', 'persistSchedule', 'setPageTimer',
+      'clearPageTimerProofState', 'isPageTimerWriteOwnerCurrent',
+      'writePageTimerRetryAlarm', 'chrome', 'persistSchedule', 'setPageTimer',
       'claimTimerBasedShutdown', 'isTimerBasedShutdownCurrent',
       'sanitizeMinutes', 'Date', 'console',
       `${requestTimerBasedShutdownSource16}; return requestTimerBasedShutdown;`
@@ -19727,7 +20170,10 @@ return plan;
         shutdownSchedule16.pageTimerTargetAt = 0;
         shutdownSchedule16.pageTimerRetryAt = 0;
         shutdownSchedule16.pageTimerRetryMinutes = 0;
+        return 1;
       },
+      owner => owner === 1,
+      async ({ isCurrent }) => ({ stale: !isCurrent(), alarmCreated: false }),
       { alarms: { async clear() { return true; } } },
       async () => {},
       async minutes => {
@@ -19765,6 +20211,294 @@ return plan;
   assertPass(staleShutdown16.result16.shutdownStale === true
       && staleShutdown16.timerCalls16.length === 0,
     '16N-1: 恢复 lifecycle 使关机 revision 失效后，不再发送页面定时器写入');
+
+  const runShutdownSwapCase16 = async (statusIsOn, initialHasProof = true) => {
+    const initialSchedule = {
+      pageTimerMinutes: initialHasProof ? 30 : null,
+      pageTimerTargetAt: initialHasProof ? shutdownNow16 + 20 * 60_000 : 0,
+      pageTimerError: initialHasProof ? 'old stale proof' : '',
+      pageTimerRetryAt: initialHasProof ? shutdownNow16 + 60_000 : 0,
+      pageTimerRetryMinutes: initialHasProof ? 1 : 0,
+      sentinel: 'old'
+    };
+    const replacementSchedule = {
+      pageTimerMinutes: 30,
+      pageTimerTargetAt: shutdownNow16 + 20 * 60_000,
+      pageTimerError: 'replacement stale proof',
+      pageTimerRetryAt: shutdownNow16 + 60_000,
+      pageTimerRetryMinutes: 1,
+      sentinel: 'replacement'
+    };
+    const harness = new Function(
+      'initialSchedule', 'replacementSchedule', 'statusIsOn',
+      'clearProofMutation', 'isPageTimerProofFresh',
+      'sanitizeMinutes', 'Date', 'console',
+      `let schedule = initialSchedule;
+      let timerBasedShutdownRevision = 0;
+      let pageTimerWriteGeneration = 0;
+      const calls = [];
+      const persisted = [];
+      const pageTimerEntries = [];
+      const side = state => state === replacementSchedule ? 'new' : 'old';
+      function invalidatePageTimerWriteOwner() {
+        pageTimerWriteGeneration += 1;
+        return pageTimerWriteGeneration;
+      }
+      function isPageTimerWriteOwnerCurrent(owner) {
+        return owner === pageTimerWriteGeneration;
+      }
+      function clearSchedulePageTimerProofState(state) {
+        calls.push('proof:' + side(state));
+        clearProofMutation(state);
+      }
+      ${clearProofFacade16}
+      function claimTimerBasedShutdown() {
+        timerBasedShutdownRevision += 1;
+        return timerBasedShutdownRevision;
+      }
+      function isTimerBasedShutdownCurrent(revision) {
+        return revision === timerBasedShutdownRevision;
+      }
+      async function writePageTimerRetryAlarm({ action, isCurrent }) {
+        const current = isCurrent();
+        calls.push('writer:' + action + ':' + current);
+        return { stale: !current, alarmCreated: false };
+      }
+      async function getCurrentACStatus() {
+        calls.push('status');
+        schedule = replacementSchedule;
+        return { isOn: statusIsOn };
+      }
+      async function persistSchedule(reason, options) {
+        calls.push('persist:' + reason);
+        persisted.push({
+          reason,
+          options: { ...options },
+          ref: schedule,
+          snapshot: { ...schedule }
+        });
+      }
+      async function setPageTimer() {
+        calls.push('set-page-timer');
+        pageTimerEntries.push({ ref: schedule, snapshot: { ...schedule } });
+        return { success: false, error: 'stop-after-entry' };
+      }
+      ${requestTimerBasedShutdownSource16}
+      return {
+        run: requestTimerBasedShutdown,
+        current: () => schedule,
+        calls,
+        persisted,
+        pageTimerEntries
+      };`
+    )(
+      initialSchedule,
+      replacementSchedule,
+      statusIsOn,
+      scheduleMutations.clearSchedulePageTimerProofState,
+      syncHelpers.isPageTimerProofFresh,
+      (value, fallback) => {
+        const parsed = Number.parseInt(value, 10);
+        return Number.isFinite(parsed) && parsed >= 1 ? parsed : fallback;
+      },
+      { now: () => shutdownNow16 },
+      testConsole
+    );
+    const result = await harness.run('active-hours-test', 1);
+    return { initialSchedule, replacementSchedule, harness, result };
+  };
+  const shutdownSwapOff16 = await runShutdownSwapCase16(false);
+  const shutdownSwapOn16 = await runShutdownSwapCase16(true);
+  const shutdownSwapEmptyOff16 = await runShutdownSwapCase16(false, false);
+  const shutdownSwapPersist16 = shutdownSwapOff16.harness.persisted[0];
+  const shutdownSwapOnEntry16 = shutdownSwapOn16.harness.pageTimerEntries[0];
+  assertPass(shutdownSwapOff16.result.alreadyDone === true
+      && shutdownSwapOff16.harness.calls.join(',')
+        === 'proof:old,writer:clear:true,proof:old,status,proof:new,persist:active-hours-test-clear-stale-page-timer-proof'
+      && shutdownSwapOff16.harness.current() === shutdownSwapOff16.replacementSchedule
+      && shutdownSwapOff16.initialSchedule.pageTimerMinutes === null
+      && shutdownSwapOff16.initialSchedule.pageTimerTargetAt === 0
+      && shutdownSwapOff16.replacementSchedule.pageTimerMinutes === null
+      && shutdownSwapOff16.replacementSchedule.pageTimerTargetAt === 0
+      && shutdownSwapOff16.replacementSchedule.pageTimerError === ''
+      && shutdownSwapOff16.replacementSchedule.pageTimerRetryAt === 0
+      && shutdownSwapOff16.replacementSchedule.pageTimerRetryMinutes === 0
+      && shutdownSwapPersist16?.ref === shutdownSwapOff16.replacementSchedule
+      && shutdownSwapPersist16?.snapshot.sentinel === 'replacement'
+      && shutdownSwapPersist16?.options.syncFromLiveAlarm === false,
+    '16N-2: status await 真换 schedule 后，OFF 收口重清 replacement proof 并 false-sync 持久化');
+  assertPass(shutdownSwapOn16.harness.calls.join(',')
+        === 'proof:old,writer:clear:true,proof:old,status,proof:new,set-page-timer'
+      && shutdownSwapOnEntry16?.ref === shutdownSwapOn16.replacementSchedule
+      && shutdownSwapOnEntry16?.snapshot.sentinel === 'replacement'
+      && shutdownSwapOnEntry16?.snapshot.pageTimerMinutes === null
+      && shutdownSwapOnEntry16?.snapshot.pageTimerTargetAt === 0
+      && shutdownSwapOnEntry16?.snapshot.pageTimerError === ''
+      && shutdownSwapOnEntry16?.snapshot.pageTimerRetryAt === 0
+      && shutdownSwapOnEntry16?.snapshot.pageTimerRetryMinutes === 0,
+    '16N-3: status await 真换 schedule 且仍 ON 时，进入 setPageTimer 前先重清 replacement proof');
+  assertPass(shutdownSwapEmptyOff16.result.alreadyDone === true
+      && shutdownSwapEmptyOff16.harness.calls.join(',')
+        === 'proof:old,writer:clear:true,proof:old,status,proof:new,persist:active-hours-test-clear-stale-page-timer-proof'
+      && shutdownSwapEmptyOff16.harness.current()
+        === shutdownSwapEmptyOff16.replacementSchedule
+      && shutdownSwapEmptyOff16.replacementSchedule.pageTimerMinutes === null
+      && shutdownSwapEmptyOff16.replacementSchedule.pageTimerTargetAt === 0
+      && shutdownSwapEmptyOff16.replacementSchedule.pageTimerError === ''
+      && shutdownSwapEmptyOff16.replacementSchedule.pageTimerRetryAt === 0
+      && shutdownSwapEmptyOff16.replacementSchedule.pageTimerRetryMinutes === 0
+      && shutdownSwapEmptyOff16.harness.persisted[0]?.ref
+        === shutdownSwapEmptyOff16.replacementSchedule
+      && shutdownSwapEmptyOff16.harness.persisted[0]?.options.syncFromLiveAlarm === false,
+    '16N-4: 入场 proof 为空但 status await 回灌 replacement 时，仍由统一 owner 清物理钟与 durable 五字段');
+
+  const expiredCommitSource16 = extractSourceSection(
+    backgroundSource,
+    'async function executeExpiredIntervalRecovery(',
+    '\nasync function restoreIntervalAlarmFromStorage',
+    'expired interval commit transaction'
+  );
+  const expiredTargetAt16 = shutdownNow16 + 30 * 60_000;
+  const expiredFirstNow16 = shutdownNow16 + 1_000;
+  const expiredSecondNow16 = shutdownNow16 + 2_000;
+  let expiredNowReads16 = 0;
+  class ExpiredCommitDate16 extends Date {
+    static now() {
+      expiredNowReads16 += 1;
+      return expiredNowReads16 === 1 ? expiredFirstNow16 : expiredSecondNow16;
+    }
+  }
+  const expiredCommitOld16 = {
+    pwmState: 'on',
+    nextTriggerAt: 0,
+    smartClockPlannedAt: 0,
+    alarmCreatedAt: 0,
+    alarmDelayMinutes: 0,
+    pageTimerMinutes: 18,
+    pageTimerTargetAt: expiredTargetAt16 - 60_000,
+    pageTimerError: 'old proof',
+    pageTimerRetryAt: expiredFirstNow16 + 60_000,
+    pageTimerRetryMinutes: 18,
+    sentinel: 'old'
+  };
+  const expiredCommitNew16 = {
+    ...expiredCommitOld16,
+    pwmState: 'on',
+    nextTriggerAt: 123,
+    smartClockPlannedAt: 456,
+    pageTimerError: 'replacement proof',
+    sentinel: 'replacement'
+  };
+  const expiredCommitPlan16 = {
+    kind: 'commit',
+    proofAction: 'clear',
+    nextTriggerAt: expiredTargetAt16,
+    phasePatch: {
+      pwmState: 'off',
+      nextTriggerAt: expiredTargetAt16,
+      phaseSentinel: 'committed'
+    }
+  };
+  const expiredCommitHarness16 = new Function(
+    'initialSchedule', 'replacementSchedule', 'commitPlan',
+    'clearProofMutation', 'nextTriggerMutation', 'pwmClockMutation',
+    'Date', 'console',
+    `let schedule = initialSchedule;
+    let pwmRuntimeRevision = 71;
+    let pageTimerWriteGeneration = 0;
+    const calls = [];
+    const persisted = [];
+    const side = state => state === replacementSchedule ? 'new' : 'old';
+    function invalidatePageTimerWriteOwner() {
+      pageTimerWriteGeneration += 1;
+      return pageTimerWriteGeneration;
+    }
+    function isPageTimerWriteOwnerCurrent(owner) {
+      return owner === pageTimerWriteGeneration;
+    }
+    function clearSchedulePageTimerProofState(state) {
+      calls.push('proof:' + side(state));
+      clearProofMutation(state);
+    }
+    function setScheduleNextTrigger(state, value, options) {
+      calls.push('clock:' + side(state));
+      return nextTriggerMutation(state, value, options);
+    }
+    function setSchedulePwmClockIntent(state, value, options) {
+      return pwmClockMutation(state, value, options);
+    }
+    const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+    ${clearProofFacade16}
+    ${setNextTriggerAtSource16}
+    ${applyPwmPlanBody}
+    function isAutomationOperationCurrent(revision) {
+      return revision === pwmRuntimeRevision;
+    }
+    function planPwmRecovery() { return commitPlan; }
+    async function getCurrentACStatus() { throw new Error('commit 不应读 status'); }
+    async function setPageTimer() { throw new Error('commit 不应 set timer'); }
+    async function writePageTimerRetryAlarm({ action, isCurrent }) {
+      const current = isCurrent();
+      calls.push('writer:' + action + ':' + current);
+      schedule = replacementSchedule;
+      return { stale: !isCurrent(), alarmCreated: false };
+    }
+    async function persistSchedule(reason, options) {
+      calls.push('persist:' + reason);
+      persisted.push({
+        reason,
+        options: { ...options },
+        ref: schedule,
+        snapshot: { ...schedule }
+      });
+    }
+    async function clearPwmAlarm() { calls.push('clear-pwm'); return true; }
+    async function createPwmAlarmFromPlan(plan) {
+      calls.push('create-pwm:' + plan.nextTriggerAt);
+      return true;
+    }
+    async function createAlarm(name) { calls.push('alarm:' + name); return true; }
+    async function abortStaleAutomation() { return false; }
+    async function updateBadge() { calls.push('badge'); }
+    ${expiredCommitSource16}
+    return {
+      run: expiredAt => executeExpiredIntervalRecovery(expiredAt, 71),
+      current: () => schedule,
+      calls,
+      persisted
+    };`
+  )(
+    expiredCommitOld16,
+    expiredCommitNew16,
+    expiredCommitPlan16,
+    scheduleMutations.clearSchedulePageTimerProofState,
+    scheduleMutations.setScheduleNextTrigger,
+    scheduleMutations.setSchedulePwmClockIntent,
+    ExpiredCommitDate16,
+    testConsole
+  );
+  const expiredCommitResult16 = await expiredCommitHarness16.run(
+    expiredFirstNow16 - 60_000
+  );
+  const expiredCommitIntent16 = expiredCommitHarness16.persisted.find(
+    entry => entry.reason === 'advanceExpiredAlarmToNextBoundary-commit-intent'
+  );
+  assertPass(expiredCommitResult16 === true
+      && expiredCommitHarness16.current() === expiredCommitNew16
+      && expiredCommitIntent16?.ref === expiredCommitNew16
+      && expiredCommitIntent16?.options.syncFromLiveAlarm === false
+      && expiredCommitIntent16?.snapshot.sentinel === 'replacement'
+      && expiredCommitIntent16?.snapshot.phaseSentinel === 'committed'
+      && expiredCommitIntent16?.snapshot.pwmState === 'off'
+      && expiredCommitIntent16?.snapshot.nextTriggerAt === expiredTargetAt16
+      && expiredCommitIntent16?.snapshot.smartClockPlannedAt === expiredFirstNow16
+      && expiredCommitIntent16?.snapshot.pageTimerMinutes === null
+      && expiredCommitIntent16?.snapshot.pageTimerTargetAt === 0
+      && expiredCommitIntent16?.snapshot.pageTimerError === ''
+      && expiredCommitIntent16?.snapshot.pageTimerRetryAt === 0
+      && expiredCommitIntent16?.snapshot.pageTimerRetryMinutes === 0
+      && expiredCommitHarness16.calls.includes(`create-pwm:${expiredTargetAt16}`),
+    '16N-5: expired commit 的 alarm await 真换 schedule 后，完整 plan 与首个 clock origin 重放到 replacement 再建同一 live 钟');
 
   const popupUpdateScheduleSourceF90 = extractSourceSection(
     popupJs,
@@ -20813,16 +21547,21 @@ return plan;
     'comfort start transaction'
   );
   const comfortRetryReplace17 = 'replaceSchedulePageTimerRetryState(schedule);';
+  const comfortClaimApply17 = 'applyComfortStartClaimState(claimState);';
   const comfortClaimPersist17 = comfortRunSource17.indexOf(
     'await persistSchedule(`comfort-start-${reason}-claim`'
   );
-  const comfortClaimInitialClear17 = comfortRunSource17.indexOf(comfortRetryReplace17);
+  const comfortClaimInitialClear17 = comfortRunSource17.indexOf(comfortClaimApply17);
   const comfortClaimOwnerGate17 = comfortRunSource17.lastIndexOf(
-    'if (!isAutomationOperationCurrent(automationRevision)) {',
+    'if (retryAlarmClear.stale',
     comfortClaimPersist17
   );
+  const comfortRetryAlarmClear17 = comfortRunSource17.indexOf(
+    'const retryAlarmClear = await writePageTimerRetryAlarm({',
+    comfortClaimInitialClear17
+  );
   const comfortClaimCurrentClear17 = comfortRunSource17.lastIndexOf(
-    comfortRetryReplace17,
+    comfortClaimApply17,
     comfortClaimPersist17
   );
   const comfortCompleteIntent17 = comfortRunSource17.indexOf("schedule.pwmState = 'off';");
@@ -20838,15 +21577,197 @@ return plan;
     comfortCompletePersist17
   );
   assertPass(comfortClaimInitialClear17 > 0
-      && comfortClaimInitialClear17 < comfortClaimOwnerGate17
+      && comfortClaimInitialClear17 < comfortRetryAlarmClear17
+      && comfortRetryAlarmClear17 < comfortClaimOwnerGate17
       && comfortClaimOwnerGate17 < comfortClaimCurrentClear17
       && comfortClaimCurrentClear17 < comfortClaimPersist17
       && comfortCompleteIntent17 > comfortClaimPersist17
       && comfortCompleteIntent17 < comfortCompleteOwnerGate17
       && comfortCompleteOwnerGate17 < comfortCompleteCurrentClear17
       && comfortCompleteCurrentClear17 < comfortCompletePersist17
-      && countOccurrences(comfortRunSource17, comfortRetryReplace17) === 4,
-    '17F-0: comfort claim/complete 跨 await 后均在 owner gate 后向当前 schedule 重清 page retry 再持久化');
+      && comfortRunSource17.includes("action: 'clear'")
+      && comfortRunSource17.includes('isCurrent: () => isAutomationOperationCurrent(automationRevision)')
+      && countOccurrences(comfortRunSource17, comfortClaimApply17) === 2,
+    '17F-0: comfort 物理 retry clear 经统一 writer，claim 重放冻结 state；complete 在 owner gate 后重清页面 retry');
+
+  const runComfortClaimSwapCase17 = async reason => {
+    const now = new Date(2026, 7, 29, 12, 0, 1, 0).getTime();
+    const restoredUntil = now + 15 * 60_000;
+    const restoredConfirmedAt = now - 60_000;
+    const initialSchedule = {
+      enabled: true,
+      comfortStartUntil: reason === 'retry' ? restoredUntil : 0,
+      comfortStartOnConfirmedAt: reason === 'retry' ? restoredConfirmedAt : 0,
+      pwmState: 'off',
+      nextTriggerAt: now + 30_000,
+      smartClockPlannedAt: now - 1_000,
+      alarmCreatedAt: now - 500,
+      alarmDelayMinutes: 0.5,
+      pwmRetryKind: 'smart-on',
+      pwmRetryBoundaryAt: now - 60_000,
+      pwmRetryScheduledAt: now + 30_000,
+      pageTimerMinutes: 19,
+      pageTimerTargetAt: now + 19 * 60_000,
+      pageTimerError: 'old proof must stay outside claim ownership',
+      pageTimerRetryAt: now + 60_000,
+      pageTimerRetryMinutes: 19,
+      sentinel: 'old'
+    };
+    const replacementSchedule = {
+      ...initialSchedule,
+      comfortStartUntil: now + 45 * 60_000,
+      comfortStartOnConfirmedAt: now - 5 * 60_000,
+      pwmState: 'off',
+      nextTriggerAt: now + 45 * 60_000,
+      smartClockPlannedAt: now - 5_000,
+      alarmCreatedAt: now - 4_000,
+      alarmDelayMinutes: 45,
+      pwmRetryKind: 'smart-on-safety-timer',
+      pwmRetryBoundaryAt: now - 30 * 60_000,
+      pwmRetryScheduledAt: now + 45 * 60_000,
+      pageTimerError: 'replacement proof must stay outside claim ownership',
+      pageTimerRetryAt: now + 2 * 60_000,
+      pageTimerRetryMinutes: 21,
+      sentinel: 'replacement'
+    };
+    const harness = new Function(
+      'initialSchedule', 'replacementSchedule', 'reason',
+      'planComfortStart', 'replaceSchedulePageTimerRetryState',
+      'replaceSchedulePwmRetryState', 'setScheduleNextTrigger',
+      'setSchedulePwmClockIntent', 'Date',
+      `let schedule = initialSchedule;
+      let pwmRuntimeRevision = 80;
+      let activeAcToggleAttempt = null;
+      let keepCurrent = true;
+      const calls = [];
+      const persisted = [];
+      const side = state => state === replacementSchedule ? 'new' : 'old';
+      const COMFORT_START_MINUTES = 5;
+      const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+      const replaceSchedulePwmRetryStateOriginal = replaceSchedulePwmRetryState;
+      const replaceSchedulePageTimerRetryStateOriginal = replaceSchedulePageTimerRetryState;
+      const setScheduleNextTriggerOriginal = setScheduleNextTrigger;
+      const setSchedulePwmClockIntentOriginal = setSchedulePwmClockIntent;
+      function replaceSchedulePwmRetryStateTracked(state, value) {
+        calls.push('pwm:' + side(state));
+        replaceSchedulePwmRetryStateOriginal(state, value);
+      }
+      function replaceSchedulePageTimerRetryStateTracked(state, value) {
+        calls.push('page:' + side(state));
+        replaceSchedulePageTimerRetryStateOriginal(state, value);
+      }
+      function setScheduleNextTriggerTracked(state, value, options) {
+        return setScheduleNextTriggerOriginal(state, value, options);
+      }
+      function setSchedulePwmClockIntentTracked(state, value, options) {
+        calls.push('clock:' + side(state));
+        return setSchedulePwmClockIntentOriginal(state, value, options);
+      }
+      replaceSchedulePwmRetryState = replaceSchedulePwmRetryStateTracked;
+      replaceSchedulePageTimerRetryState = replaceSchedulePageTimerRetryStateTracked;
+      setScheduleNextTrigger = setScheduleNextTriggerTracked;
+      setSchedulePwmClockIntent = setSchedulePwmClockIntentTracked;
+      ${clearPwmRetryFacade16}
+      ${setNextTriggerAtSource16}
+      function invalidateTimerBasedShutdown() { calls.push('invalidate-shutdown'); }
+      function isAutomationOperationCurrent(revision) {
+        return keepCurrent && revision === pwmRuntimeRevision && schedule.enabled === true;
+      }
+      async function cancelAutomaticOnRequests() { calls.push('cancel-on'); }
+      async function clearPwmAlarm() { calls.push('clear-pwm'); return true; }
+      async function writePageTimerRetryAlarm({ action, isCurrent }) {
+        const current = isCurrent();
+        calls.push('writer:' + action + ':' + current);
+        schedule = replacementSchedule;
+        return { stale: !isCurrent(), alarmCreated: false };
+      }
+      const chrome = { alarms: { async clear(name) {
+        calls.push('clear:' + name);
+        return true;
+      } } };
+      async function persistSchedule(persistReason, options) {
+        calls.push('persist:' + persistReason);
+        persisted.push({
+          reason: persistReason,
+          options: { ...options },
+          ref: schedule,
+          snapshot: { ...schedule }
+        });
+        if (persistReason.endsWith('-claim')) keepCurrent = false;
+      }
+      async function getCurrentPageTimer() {
+        calls.push('get-timer');
+        return { found: false };
+      }
+      ${comfortRunSource17}
+      return {
+        run: () => runComfortStart(reason),
+        current: () => schedule,
+        calls,
+        persisted
+      };`
+    )(
+      initialSchedule,
+      replacementSchedule,
+      reason,
+      planComfortStart,
+      scheduleMutations.replaceSchedulePageTimerRetryState,
+      scheduleMutations.replaceSchedulePwmRetryState,
+      scheduleMutations.setScheduleNextTrigger,
+      scheduleMutations.setSchedulePwmClockIntent,
+      { now: () => now }
+    );
+    const result = await harness.run();
+    const claim = harness.persisted.find(entry => entry.reason.endsWith('-claim'));
+    const expected = planComfortStart({}, null, {
+      now,
+      minutes: 5,
+      ...(reason === 'retry' ? { minimumTargetAt: restoredUntil } : {})
+    });
+    return {
+      reason,
+      now,
+      restoredConfirmedAt,
+      initialSchedule,
+      replacementSchedule,
+      harness,
+      result,
+      claim,
+      expected
+    };
+  };
+  const comfortClaimUserSwap17 = await runComfortClaimSwapCase17('user-enable');
+  const comfortClaimRetrySwap17 = await runComfortClaimSwapCase17('retry');
+  const comfortClaimSwapPass17 = [comfortClaimUserSwap17, comfortClaimRetrySwap17].every(
+    testCase => {
+      const snapshot = testCase.claim?.snapshot;
+      const expectedConfirmedAt = testCase.reason === 'retry'
+        ? testCase.restoredConfirmedAt
+        : 0;
+      return testCase.result.cancelled === true
+        && testCase.harness.current() === testCase.replacementSchedule
+        && testCase.claim?.ref === testCase.replacementSchedule
+        && testCase.claim?.options.syncFromLiveAlarm === false
+        && snapshot?.sentinel === 'replacement'
+        && snapshot?.comfortStartUntil === testCase.expected.minimumTargetAt
+        && snapshot?.comfortStartOnConfirmedAt === expectedConfirmedAt
+        && snapshot?.pwmState === 'on'
+        && snapshot?.nextTriggerAt === 0
+        && snapshot?.smartClockPlannedAt === 0
+        && snapshot?.alarmCreatedAt === 0
+        && snapshot?.alarmDelayMinutes === 0
+        && snapshot?.pwmRetryKind === ''
+        && snapshot?.pwmRetryBoundaryAt === 0
+        && snapshot?.pwmRetryScheduledAt === 0
+        && snapshot?.pageTimerRetryAt === 0
+        && snapshot?.pageTimerRetryMinutes === 0
+        && snapshot?.pageTimerMinutes === 19
+        && snapshot?.pageTimerError
+          === 'replacement proof must stay outside claim ownership';
+    }
+  );
+  assertPass(comfortClaimSwapPass17,
+    '17F-0A: comfort user/retry claim 的 writer await 真换 schedule 后，完整冻结 claim 重放到 replacement 且 retry 保留原 floor/confirmed');
   assertPass(backgroundSource.includes('comfortStartUntil: 0')
       && comfortSource17.includes('function isComfortStartActive(')
       && comfortSource17.includes('async function runComfortStart(')
