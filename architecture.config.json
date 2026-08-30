@@ -523,7 +523,7 @@
       "requirePatterns": [
         "function\\s+isAutomationAllowed\\s*\\(",
         "const\\s+AUTOMATION_RUNTIME_ALARMS\\s*=\\s*new\\s+Set",
-        "isAutomationRuntimeAlarm\\s*&&\\s*!isAutomationAllowed\\s*\\(\\s*\\)",
+        "const\\s+runtimeAlarmWriteIsCurrent\\s*=\\s*\\(\\s*\\)\\s*=>\\s*\\{\\s*if\\s*\\(\\s*ensureCurrent\\s*&&\\s*!ensureCurrent\\s*\\(\\s*\\)\\s*\\)\\s*return\\s+false;\\s*return\\s+isAutomationAllowed\\s*\\(\\s*\\)",
         "requireAutomationAllowed\\s*:\\s*true",
         "function\\s+isAutomationOperationCurrent\\s*\\(",
         "async\\s+function\\s+clearAutomationRuntimeAlarmsWhileBlocked\\s*\\("

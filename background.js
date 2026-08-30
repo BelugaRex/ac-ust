@@ -543,11 +543,24 @@ function isComfortStartActive(now = Date.now()) {
     && until > nowMs;
 }
 
-async function scheduleComfortStartEndAlarm() {
-  await chrome.alarms.clear('ac-comfort-end');
-  const until = Number(schedule.comfortStartUntil) || 0;
-  if (!isComfortStartActive() || until <= Date.now()) return false;
-  return createAlarm(COMFORT_START_END_ALARM, { when: until });
+async function scheduleComfortStartEndAlarm(options = {}) {
+  const requestedUntil = Number(options?.until);
+  const hasRequestedUntil = Number.isFinite(requestedUntil) && requestedUntil > 0;
+  const isCurrent = typeof options?.isCurrent === 'function'
+    ? options.isCurrent
+    : null;
+  await chrome.alarms.clear(COMFORT_START_END_ALARM);
+  if (isCurrent && !isCurrent()) return false;
+
+  const until = hasRequestedUntil
+    ? requestedUntil
+    : (Number(schedule.comfortStartUntil) || 0);
+  if (until <= Date.now()) return false;
+  if (!isCurrent && !isComfortStartActive()) return false;
+  return createAlarm(COMFORT_START_END_ALARM, {
+    when: until,
+    ...(isCurrent ? { ensureCurrent: isCurrent } : {})
+  });
 }
 
 // ac-pwm 两次创建都失败时，用独立 comfort alarm 保住同一重试时刻。
@@ -847,6 +860,35 @@ async function runComfortStart(reason = 'user-enable') {
     replaceSchedulePageTimerRetryState(schedule);
   }
 
+  function applyComfortStartCompleteIntent(completeIntent) {
+    schedule.comfortStartUntil = completeIntent.comfortStartUntil;
+    schedule.comfortStartOnConfirmedAt = completeIntent.comfortStartOnConfirmedAt;
+    schedule.pwmState = completeIntent.pwmState;
+    replaceSchedulePwmRetryState(schedule, {
+      kind: completeIntent.pwmRetryKind,
+      boundaryAt: completeIntent.pwmRetryBoundaryAt,
+      scheduledAt: completeIntent.pwmRetryScheduledAt
+    });
+  }
+
+  function applyComfortStartCompleteState(completeState) {
+    applyComfortStartCompleteIntent(completeState);
+    schedule.alarmCreatedAt = completeState.alarmCreatedAt;
+    schedule.alarmDelayMinutes = completeState.alarmDelayMinutes;
+    setNextTriggerAt(completeState.nextTriggerAt, {
+      plannedAt: completeState.smartClockPlannedAt
+    });
+  }
+
+  function replayComfortStartCompleteState(completeState, automationRevision) {
+    // storage.onChanged 可在同一 revision 内把顶层 schedule 换成较早快照。
+    // 先凭 revision 认领，再重放本事务字段；完整门禁随后读取已恢复的
+    // comfort marker，同时仍保留 replacement 的 enabled/config/pageTimer*。
+    if (automationRevision !== pwmRuntimeRevision) return false;
+    applyComfortStartCompleteState(completeState);
+    return isAutomationOperationCurrent(automationRevision);
+  }
+
   if (!schedule.enabled) {
     return { success: false, cancelled: true, error: '自动控制未启用' };
   }
@@ -966,9 +1008,17 @@ async function runComfortStart(reason = 'user-enable') {
     );
   }
 
-  schedule.pwmState = 'off';
-  schedule.pageTimerError = '';
-  replaceSchedulePageTimerRetryState(schedule);
+  const completeIntent = Object.freeze({
+    comfortStartUntil: comfortPlan.minimumTargetAt,
+    comfortStartOnConfirmedAt: reuseConfirmedMinimum
+      ? existingOnConfirmedAt
+      : confirmedAt,
+    pwmState: 'off',
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0
+  });
+  applyComfortStartCompleteIntent(completeIntent);
   const alarmCreated = await createPwmAlarmFromPlan(
     { nextTriggerAt: comfortPlan.targetAt },
     'comfort-start-complete',
@@ -977,21 +1027,55 @@ async function runComfortStart(reason = 'user-enable') {
   if (!alarmCreated) {
     return deferComfortStart('PWM 主闹钟创建失败', automationRevision);
   }
-  await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-  await createAlarm('ac-watchdog', { periodInMinutes: 5 });
-  if (comfortPlan.targetAt > comfortPlan.minimumTargetAt + 1000) {
-    await scheduleComfortStartEndAlarm();
-  } else {
-    await chrome.alarms.clear('ac-comfort-end');
-  }
-  if (!isAutomationOperationCurrent(automationRevision)) {
+  if (automationRevision !== pwmRuntimeRevision) {
     return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
   }
-  schedule.pageTimerError = '';
-  replaceSchedulePageTimerRetryState(schedule);
+  const completeState = Object.freeze({
+    ...completeIntent,
+    nextTriggerAt: Number(schedule.nextTriggerAt) || 0,
+    smartClockPlannedAt: Number(schedule.smartClockPlannedAt) || 0,
+    alarmCreatedAt: Number(schedule.alarmCreatedAt) || 0,
+    alarmDelayMinutes: Number(schedule.alarmDelayMinutes) || 0
+  });
+  const completeStateIsCurrent = () => replayComfortStartCompleteState(
+    completeState,
+    automationRevision
+  );
+  if (!completeStateIsCurrent()) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
+
+  await createAlarm('ac-badge-tick', {
+    delayInMinutes: 1,
+    ensureCurrent: completeStateIsCurrent
+  });
+  if (!completeStateIsCurrent()) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
+  await createAlarm('ac-watchdog', {
+    periodInMinutes: 5,
+    ensureCurrent: completeStateIsCurrent
+  });
+  if (!completeStateIsCurrent()) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
+  if (comfortPlan.targetAt > comfortPlan.minimumTargetAt + 1000) {
+    await scheduleComfortStartEndAlarm({
+      until: completeState.comfortStartUntil,
+      isCurrent: completeStateIsCurrent
+    });
+  } else {
+    await chrome.alarms.clear(COMFORT_START_END_ALARM);
+  }
+  if (!completeStateIsCurrent()) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
   await persistSchedule(`comfort-start-${reason}-complete`, {
     syncFromLiveAlarm: false
   });
+  if (!completeStateIsCurrent()) {
+    return { success: false, cancelled: true, error: '自动控制已关闭或启动请求已失效' };
+  }
   await updateBadge();
   return {
     success: true,
@@ -3241,20 +3325,31 @@ async function restoreIntervalAlarmFromStorage(reason = '按 storage 剩余时�
 async function createAlarm(name, info) {
   try {
     const isAutomationRuntimeAlarm = AUTOMATION_RUNTIME_ALARMS.has(name);
-    if (isAutomationRuntimeAlarm && !isAutomationAllowed()) {
+    const ensureCurrent = typeof info?.ensureCurrent === 'function'
+      ? info.ensureCurrent
+      : null;
+    const runtimeAlarmWriteIsCurrent = () => {
+      if (ensureCurrent && !ensureCurrent()) return false;
+      return isAutomationAllowed();
+    };
+    if (isAutomationRuntimeAlarm && !runtimeAlarmWriteIsCurrent()) {
       await chrome.alarms.clear(name);
       return false;
     }
 
-    const { persistAcrossSessions, ...safeInfo } = info || {};
+    const { persistAcrossSessions, ensureCurrent: _ensureCurrent, ...safeInfo } = info || {};
     await chrome.alarms.create(name, safeInfo);
-    if (isAutomationRuntimeAlarm && !isAutomationAllowed()) {
+    if (isAutomationRuntimeAlarm && !runtimeAlarmWriteIsCurrent()) {
       await chrome.alarms.clear(name);
       return false;
     }
 
     // 验证创建成功
     const verify = await chrome.alarms.get(name);
+    if (isAutomationRuntimeAlarm && !runtimeAlarmWriteIsCurrent()) {
+      await chrome.alarms.clear(name);
+      return false;
+    }
     if (!verify) console.error('[AC扩展] createAlarm 失败: ' + name + ' ' + JSON.stringify(safeInfo));
     return !!verify;
   } catch (e) {

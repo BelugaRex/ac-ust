@@ -18584,13 +18584,15 @@ return plan;
     `${createAlarmSource16}; return createAlarm;`
   );
   const runtimeAlarmCreates16 = [];
+  const runtimeAlarmCreateInfos16 = [];
   const runtimeAlarmClears16 = [];
   let automationAllowed16 = false;
   let closeGateDuringCreate16 = false;
   const runtimeAlarmChrome16 = {
     alarms: {
-      async create(name) {
+      async create(name, info) {
         runtimeAlarmCreates16.push(name);
+        runtimeAlarmCreateInfos16.push({ ...info });
         if (closeGateDuringCreate16) automationAllowed16 = false;
       },
       async get(name) { return { name, scheduledTime: Date.now() + 60_000 }; },
@@ -18616,6 +18618,24 @@ return plan;
       && runtimeAlarmCreates16.join(',') === 'ac-smart-weather,ac-pwm'
       && runtimeAlarmClears16.includes('ac-pwm'),
     '16H: 最终闹钟创建器在创建前后复查门禁，只阻止 PWM/badge/watchdog，不阻止天气预取');
+  let ownedRuntimeGateChecks16 = 0;
+  automationAllowed16 = true;
+  closeGateDuringCreate16 = true;
+  const ownedRuntimeCreated16 = await createRuntimeAlarm16('ac-badge-tick', {
+    delayInMinutes: 1,
+    ensureCurrent: () => {
+      ownedRuntimeGateChecks16 += 1;
+      automationAllowed16 = true;
+      return true;
+    }
+  });
+  const ownedRuntimeInfo16 = runtimeAlarmCreateInfos16.at(-1);
+  assertPass(ownedRuntimeCreated16 === true
+      && ownedRuntimeGateChecks16 >= 3
+      && runtimeAlarmCreates16.at(-1) === 'ac-badge-tick'
+      && ownedRuntimeInfo16?.delayInMinutes === 1
+      && !Object.hasOwn(ownedRuntimeInfo16 || {}, 'ensureCurrent'),
+    '16H-1: 显式 runtime owner 可在 create/get await 后恢复同 revision 状态，内部 guard 不泄漏给 Chrome alarm info');
 
   const pageTimerMessageQueueStart16 = backgroundSource.indexOf(
     'let pageTimerMessageWriteChain = Promise.resolve();'
@@ -21546,6 +21566,18 @@ return plan;
     '\n\nasync function finishExplicitDisablePreemption',
     'comfort start transaction'
   );
+  const comfortActiveSource17 = extractSourceSection(
+    comfortSource17,
+    'function isComfortStartActive(now = Date.now()) {',
+    '\n\nasync function scheduleComfortStartEndAlarm',
+    'comfort active marker'
+  );
+  const comfortEndAlarmSource17 = extractSourceSection(
+    comfortSource17,
+    'async function scheduleComfortStartEndAlarm',
+    '\n\n// ac-pwm 两次创建都失败时',
+    'comfort end alarm writer'
+  );
   const comfortRetryReplace17 = 'replaceSchedulePageTimerRetryState(schedule);';
   const comfortClaimApply17 = 'applyComfortStartClaimState(claimState);';
   const comfortClaimPersist17 = comfortRunSource17.indexOf(
@@ -21564,16 +21596,23 @@ return plan;
     comfortClaimApply17,
     comfortClaimPersist17
   );
-  const comfortCompleteIntent17 = comfortRunSource17.indexOf("schedule.pwmState = 'off';");
+  const comfortCompleteIntent17 = comfortRunSource17.indexOf(
+    'const completeIntent = Object.freeze({',
+    comfortClaimPersist17
+  );
+  const comfortCompleteCreate17 = comfortRunSource17.indexOf(
+    'const alarmCreated = await createPwmAlarmFromPlan(',
+    comfortCompleteIntent17
+  );
+  const comfortCompleteFreeze17 = comfortRunSource17.indexOf(
+    'const completeState = Object.freeze({',
+    comfortCompleteCreate17
+  );
   const comfortCompletePersist17 = comfortRunSource17.indexOf(
     'await persistSchedule(`comfort-start-${reason}-complete`'
   );
   const comfortCompleteOwnerGate17 = comfortRunSource17.lastIndexOf(
-    'if (!isAutomationOperationCurrent(automationRevision)) {',
-    comfortCompletePersist17
-  );
-  const comfortCompleteCurrentClear17 = comfortRunSource17.lastIndexOf(
-    comfortRetryReplace17,
+    'if (!completeStateIsCurrent()) {',
     comfortCompletePersist17
   );
   assertPass(comfortClaimInitialClear17 > 0
@@ -21582,13 +21621,21 @@ return plan;
       && comfortClaimOwnerGate17 < comfortClaimCurrentClear17
       && comfortClaimCurrentClear17 < comfortClaimPersist17
       && comfortCompleteIntent17 > comfortClaimPersist17
-      && comfortCompleteIntent17 < comfortCompleteOwnerGate17
-      && comfortCompleteOwnerGate17 < comfortCompleteCurrentClear17
-      && comfortCompleteCurrentClear17 < comfortCompletePersist17
+      && comfortCompleteIntent17 < comfortCompleteCreate17
+      && comfortCompleteCreate17 < comfortCompleteFreeze17
+      && comfortCompleteFreeze17 < comfortCompleteOwnerGate17
+      && comfortCompleteOwnerGate17 < comfortCompletePersist17
+      && comfortRunSource17.includes('function applyComfortStartCompleteState(')
+      && comfortRunSource17.includes('function replayComfortStartCompleteState(')
+      && countOccurrences(comfortRunSource17, 'completeStateIsCurrent()') >= 5
+      && !comfortRunSource17.slice(
+        comfortCompleteFreeze17,
+        comfortCompletePersist17
+      ).includes(comfortRetryReplace17)
       && comfortRunSource17.includes("action: 'clear'")
       && comfortRunSource17.includes('isCurrent: () => isAutomationOperationCurrent(automationRevision)')
       && countOccurrences(comfortRunSource17, comfortClaimApply17) === 2,
-    '17F-0: comfort 物理 retry clear 经统一 writer，claim 重放冻结 state；complete 在 owner gate 后重清页面 retry');
+    '17F-0: comfort claim 重放冻结 state；complete 在建钟后冻结十字段并跨 await 重放，不越权改 page owner');
 
   const runComfortClaimSwapCase17 = async reason => {
     const now = new Date(2026, 7, 29, 12, 0, 1, 0).getTime();
@@ -21768,6 +21815,368 @@ return plan;
   );
   assertPass(comfortClaimSwapPass17,
     '17F-0A: comfort user/retry claim 的 writer await 真换 schedule 后，完整冻结 claim 重放到 replacement 且 retry 保留原 floor/confirmed');
+
+  const comfortCompleteNow17 = new Date(2026, 7, 29, 12, 0, 0, 0).getTime();
+  const comfortCompleteMinimum17 = comfortCompleteNow17 + 5 * 60_000;
+  const comfortCompleteTarget17 = comfortCompleteMinimum17;
+  const comfortCompleteInitial17 = {
+    enabled: true,
+    comfortStartUntil: 0,
+    comfortStartOnConfirmedAt: 0,
+    pwmState: 'on',
+    nextTriggerAt: 0,
+    smartClockPlannedAt: 0,
+    alarmCreatedAt: 0,
+    alarmDelayMinutes: 0,
+    pwmRetryKind: 'smart-on',
+    pwmRetryBoundaryAt: comfortCompleteNow17 - 60_000,
+    pwmRetryScheduledAt: comfortCompleteNow17 + 30_000,
+    pageTimerMinutes: 5,
+    pageTimerTargetAt: comfortCompleteTarget17,
+    pageTimerError: '',
+    pageTimerRetryAt: 0,
+    pageTimerRetryMinutes: 0,
+    smartMode: { enabled: true, temperature: 23 },
+    sentinel: 'initial'
+  };
+  const comfortCompleteBadgeReplacement17 = {
+    ...comfortCompleteInitial17,
+    comfortStartUntil: 1,
+    comfortStartOnConfirmedAt: 2,
+    pwmState: 'on',
+    nextTriggerAt: 3,
+    smartClockPlannedAt: 4,
+    alarmCreatedAt: 5,
+    alarmDelayMinutes: 6,
+    pwmRetryKind: 'smart-on-safety-timer',
+    pwmRetryBoundaryAt: 7,
+    pwmRetryScheduledAt: 8,
+    pageTimerMinutes: 9,
+    pageTimerTargetAt: 10,
+    pageTimerError: 'badge replacement stale proof',
+    pageTimerRetryAt: 11,
+    pageTimerRetryMinutes: 12,
+    smartMode: { enabled: true, temperature: 24 },
+    sentinel: 'badge-replacement'
+  };
+  const comfortCompleteEndReplacement17 = {
+    ...comfortCompleteBadgeReplacement17,
+    comfortStartUntil: 0,
+    comfortStartOnConfirmedAt: 13,
+    nextTriggerAt: 14,
+    smartClockPlannedAt: 15,
+    alarmCreatedAt: 16,
+    alarmDelayMinutes: 17,
+    pageTimerMinutes: 18,
+    pageTimerTargetAt: 19,
+    pageTimerError: 'end replacement stale proof',
+    pageTimerRetryAt: 20,
+    pageTimerRetryMinutes: 21,
+    smartMode: { enabled: true, temperature: 25 },
+    sentinel: 'end-replacement'
+  };
+  class ComfortCompleteDate17 extends Date {
+    static now() { return comfortCompleteNow17; }
+  }
+  const loadComfortCompleteHarness17 = (
+    initialSchedule,
+    badgeReplacement,
+    endReplacement,
+    { staleAtBadge = false } = {}
+  ) => new Function(
+    'initialSchedule', 'badgeReplacement', 'endReplacement',
+    'planComfortStart', 'replaceSchedulePageTimerRetryState',
+    'recordSchedulePageTimerProofState', 'replaceSchedulePwmRetryState',
+    'setScheduleNextTrigger', 'setSchedulePwmClockIntent', 'Date', 'staleAtBadge',
+    `let schedule = initialSchedule;
+    let pwmRuntimeRevision = 90;
+    let activeAcToggleAttempt = null;
+    let pwmCreated = false;
+    let livePwm = null;
+    const COMFORT_START_MINUTES = 5;
+    const COMFORT_START_END_ALARM = 'ac-comfort-end';
+    const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+    const calls = [];
+    const persisted = [];
+    ${clearPwmRetryFacade16}
+    ${setNextTriggerAtSource16}
+    ${comfortActiveSource17}
+    ${comfortEndAlarmSource17}
+    function invalidateTimerBasedShutdown() { calls.push('invalidate-shutdown'); }
+    function isAutomationOperationCurrent(revision) {
+      return revision === pwmRuntimeRevision && schedule.enabled === true;
+    }
+    async function cancelAutomaticOnRequests() { calls.push('cancel-on'); }
+    async function clearPwmAlarm() { calls.push('clear-pwm'); return true; }
+    async function writePageTimerRetryAlarm({ action, isCurrent }) {
+      calls.push('writer:' + action + ':' + isCurrent());
+      return { stale: !isCurrent(), alarmCreated: false };
+    }
+    const chrome = { alarms: { async clear(name) {
+      calls.push('clear:' + name);
+      if (name === COMFORT_START_END_ALARM && pwmCreated) {
+        schedule = endReplacement;
+        calls.push('swap:end');
+      }
+      return true;
+    } } };
+    async function persistSchedule(reason, options) {
+      calls.push('persist:' + reason);
+      persisted.push({
+        reason,
+        options: { ...options },
+        ref: schedule,
+        snapshot: structuredClone(schedule)
+      });
+    }
+    async function getCurrentPageTimer() {
+      calls.push('get-timer');
+      return { found: false };
+    }
+    async function toggleAC() {
+      calls.push('toggle-on');
+      return { success: true, alreadyDone: true };
+    }
+    async function setPageTimer() {
+      throw new Error('fresh proof should be reused');
+    }
+    async function deferComfortStart() {
+      throw new Error('successful completion must not defer');
+    }
+    async function createPwmAlarmFromPlan(plan, tag, revision) {
+      calls.push('create-pwm:' + plan.nextTriggerAt + ':' + tag);
+      if (!isAutomationOperationCurrent(revision)) return false;
+      schedule.alarmCreatedAt = Date.now();
+      schedule.alarmDelayMinutes = (plan.nextTriggerAt - Date.now()) / 60000;
+      setNextTriggerAt(plan.nextTriggerAt, { plannedAt: Date.now() });
+      livePwm = {
+        targetAt: plan.nextTriggerAt,
+        smartClockPlannedAt: schedule.smartClockPlannedAt,
+        alarmCreatedAt: schedule.alarmCreatedAt,
+        alarmDelayMinutes: schedule.alarmDelayMinutes
+      };
+      pwmCreated = true;
+      return true;
+    }
+    async function createAlarm(name, options) {
+      calls.push('alarm:' + name + ':' + (options?.when || options?.delayInMinutes || options?.periodInMinutes || 0));
+      if (name === 'ac-badge-tick') {
+        await Promise.resolve();
+        schedule = badgeReplacement;
+        calls.push('swap:badge');
+        if (staleAtBadge) {
+          pwmRuntimeRevision += 1;
+          calls.push('stale:badge');
+        }
+      }
+      return true;
+    }
+    async function updateBadge() { calls.push('update-badge'); }
+    ${comfortRunSource17}
+    return {
+      run: () => runComfortStart('user-enable'),
+      current: () => schedule,
+      livePwm: () => livePwm,
+      calls,
+      persisted
+    };`
+  )(
+    initialSchedule,
+    badgeReplacement,
+    endReplacement,
+    planComfortStart,
+    scheduleMutations.replaceSchedulePageTimerRetryState,
+    scheduleMutations.recordSchedulePageTimerProofState,
+    scheduleMutations.replaceSchedulePwmRetryState,
+    scheduleMutations.setScheduleNextTrigger,
+    scheduleMutations.setSchedulePwmClockIntent,
+    ComfortCompleteDate17,
+    staleAtBadge
+  );
+  const comfortCompleteHarness17 = loadComfortCompleteHarness17(
+    comfortCompleteInitial17,
+    comfortCompleteBadgeReplacement17,
+    comfortCompleteEndReplacement17
+  );
+  const comfortCompleteResult17 = await comfortCompleteHarness17.run();
+  const comfortCompletePersist17B = comfortCompleteHarness17.persisted.find(
+    entry => entry.reason === 'comfort-start-user-enable-complete'
+  );
+  const comfortCompleteSnapshot17 = comfortCompletePersist17B?.snapshot;
+  const comfortCompleteLive17 = comfortCompleteHarness17.livePwm();
+  assertPass(comfortCompleteResult17?.success === true
+      && comfortCompleteResult17.targetAt === comfortCompleteTarget17
+      && comfortCompleteResult17.minimumTargetAt === comfortCompleteMinimum17
+      && comfortCompleteHarness17.current() === comfortCompleteEndReplacement17
+      && comfortCompletePersist17B?.ref === comfortCompleteEndReplacement17
+      && comfortCompletePersist17B?.options.syncFromLiveAlarm === false
+      && comfortCompleteSnapshot17?.sentinel === 'end-replacement'
+      && comfortCompleteSnapshot17?.smartMode?.temperature === 25
+      && comfortCompleteSnapshot17?.comfortStartUntil === comfortCompleteMinimum17
+      && comfortCompleteSnapshot17?.comfortStartOnConfirmedAt === comfortCompleteNow17
+      && comfortCompleteSnapshot17?.pwmState === 'off'
+      && comfortCompleteSnapshot17?.pwmRetryKind === ''
+      && comfortCompleteSnapshot17?.pwmRetryBoundaryAt === 0
+      && comfortCompleteSnapshot17?.pwmRetryScheduledAt === 0
+      && comfortCompleteSnapshot17?.pageTimerMinutes === 18
+      && comfortCompleteSnapshot17?.pageTimerTargetAt === 19
+      && comfortCompleteSnapshot17?.pageTimerError === 'end replacement stale proof'
+      && comfortCompleteSnapshot17?.pageTimerRetryAt === 20
+      && comfortCompleteSnapshot17?.pageTimerRetryMinutes === 21
+      && comfortCompleteSnapshot17?.nextTriggerAt === comfortCompleteLive17?.targetAt
+      && comfortCompleteSnapshot17?.smartClockPlannedAt
+        === comfortCompleteLive17?.smartClockPlannedAt
+      && comfortCompleteSnapshot17?.alarmCreatedAt
+        === comfortCompleteLive17?.alarmCreatedAt
+      && comfortCompleteSnapshot17?.alarmDelayMinutes
+        === comfortCompleteLive17?.alarmDelayMinutes
+      && comfortCompleteHarness17.calls.includes('swap:badge')
+      && comfortCompleteHarness17.calls.includes('swap:end')
+      && comfortCompleteHarness17.calls.findIndex(call => call.startsWith('create-pwm:'))
+        < comfortCompleteHarness17.calls.indexOf('swap:badge')
+      && comfortCompleteHarness17.calls.indexOf('swap:badge')
+        < comfortCompleteHarness17.calls.indexOf('swap:end')
+      && comfortCompleteHarness17.calls.indexOf('swap:end')
+        < comfortCompleteHarness17.calls.indexOf('persist:comfort-start-user-enable-complete')
+      && !comfortCompleteHarness17.calls.some(call => call.startsWith('alarm:ac-comfort-end:')),
+    '17F-0B: comfort live PWM 建成后的 badge/final-clear 两次整对象回灌保留新页面 owner/config，仅把 complete phase/clock 重放到最终 replacement');
+
+  const staleComfortCompleteInitial17 = structuredClone(comfortCompleteInitial17);
+  const staleComfortCompleteBadge17 = structuredClone(comfortCompleteBadgeReplacement17);
+  const staleComfortCompleteEnd17 = structuredClone(comfortCompleteEndReplacement17);
+  const staleComfortCompleteBadgeBefore17 = structuredClone(staleComfortCompleteBadge17);
+  const staleComfortCompleteHarness17 = loadComfortCompleteHarness17(
+    staleComfortCompleteInitial17,
+    staleComfortCompleteBadge17,
+    staleComfortCompleteEnd17,
+    { staleAtBadge: true }
+  );
+  const staleComfortCompleteResult17 = await staleComfortCompleteHarness17.run();
+  assertPass(staleComfortCompleteResult17?.cancelled === true
+      && staleComfortCompleteHarness17.current() === staleComfortCompleteBadge17
+      && JSON.stringify(staleComfortCompleteBadge17)
+        === JSON.stringify(staleComfortCompleteBadgeBefore17)
+      && staleComfortCompleteHarness17.calls.includes('stale:badge')
+      && !staleComfortCompleteHarness17.calls.includes('swap:end')
+      && !staleComfortCompleteHarness17.persisted.some(
+        entry => entry.reason === 'comfort-start-user-enable-complete'
+      ),
+    '17F-0C: comfort complete 在 badge await 中失主后不向 replacement 重放旧 phase/clock，也不最终持久化');
+
+  const comfortEndOwnerNow17 = comfortCompleteNow17;
+  const comfortEndOwnerTarget17 = comfortEndOwnerNow17 + 5 * 60_000;
+  const comfortEndOwnerInitial17 = {
+    enabled: true,
+    comfortStartUntil: comfortEndOwnerTarget17,
+    sentinel: 'initial'
+  };
+  const comfortEndOwnerReplacement17 = {
+    enabled: true,
+    comfortStartUntil: 0,
+    sentinel: 'replacement'
+  };
+  const runComfortEndOwnerCase17 = async ({ staleDuringCreate = false } = {}) => {
+    const initialSchedule = structuredClone(comfortEndOwnerInitial17);
+    const replacementSchedule = structuredClone(comfortEndOwnerReplacement17);
+    const harness = new Function(
+      'initialSchedule', 'replacementSchedule', 'Date', 'staleDuringCreate',
+      `let schedule = initialSchedule;
+      let ownerRevision = 7;
+      const expectedRevision = 7;
+      const COMFORT_START_END_ALARM = 'ac-comfort-end';
+      const AUTOMATION_RUNTIME_ALARMS = new Set([COMFORT_START_END_ALARM]);
+      const calls = [];
+      const createInfos = [];
+      let initialClearPending = true;
+      function isCurrentOwner() {
+        calls.push('current-owner');
+        return ownerRevision === expectedRevision;
+      }
+      function isAutomationAllowed() {
+        return schedule.enabled === true;
+      }
+      function appendDiagnosticLog() {}
+      const chrome = { alarms: {
+        async clear(name) {
+          calls.push('clear:' + name);
+          if (initialClearPending) {
+            initialClearPending = false;
+            await Promise.resolve();
+            schedule = replacementSchedule;
+            calls.push('swap:clear');
+          }
+          return true;
+        },
+        async create(name, info) {
+          calls.push('physical-create:' + name + ':' + (info?.when || 0));
+          createInfos.push({ ...info });
+          if (staleDuringCreate) {
+            ownerRevision += 1;
+            calls.push('stale:create');
+          }
+        },
+        async get(name) {
+          calls.push('get:' + name);
+          return { name, scheduledTime: ${comfortEndOwnerTarget17} };
+        }
+      } };
+      ${createAlarmSource16}
+      ${comfortActiveSource17}
+      ${comfortEndAlarmSource17}
+      return {
+        run: () => scheduleComfortStartEndAlarm({
+          until: ${comfortEndOwnerTarget17},
+          isCurrent: isCurrentOwner
+        }),
+        current: () => schedule,
+        calls,
+        createInfos
+      };`
+    )(
+      initialSchedule,
+      replacementSchedule,
+      ComfortCompleteDate17,
+      staleDuringCreate
+    );
+    const result = await harness.run();
+    return { harness, result, initialSchedule, replacementSchedule };
+  };
+  const comfortEndOwnerCurrent17 = await runComfortEndOwnerCase17();
+  assertPass(comfortEndOwnerCurrent17.result === true
+      && comfortEndOwnerCurrent17.harness.current()
+        === comfortEndOwnerCurrent17.replacementSchedule
+      && comfortEndOwnerCurrent17.replacementSchedule.sentinel === 'replacement'
+      && comfortEndOwnerCurrent17.replacementSchedule.comfortStartUntil === 0
+      && comfortEndOwnerCurrent17.harness.calls.indexOf('clear:ac-comfort-end')
+        < comfortEndOwnerCurrent17.harness.calls.indexOf('swap:clear')
+      && comfortEndOwnerCurrent17.harness.calls.indexOf('swap:clear')
+        < comfortEndOwnerCurrent17.harness.calls.indexOf('current-owner')
+      && comfortEndOwnerCurrent17.harness.calls.includes(
+        `physical-create:ac-comfort-end:${comfortEndOwnerTarget17}`
+      )
+      && comfortEndOwnerCurrent17.harness.calls.filter(
+        call => call === 'current-owner'
+      ).length >= 4
+      && comfortEndOwnerCurrent17.harness.createInfos[0]?.when
+        === comfortEndOwnerTarget17
+      && !Object.hasOwn(
+        comfortEndOwnerCurrent17.harness.createInfos[0] || {},
+        'ensureCurrent'
+      ),
+    '17F-0D: comfort-end 真实 createAlarm 在 clear 换对象后只用冻结 until 建钟，owner guard 不泄漏给 Chrome');
+  const comfortEndOwnerStale17 = await runComfortEndOwnerCase17({
+    staleDuringCreate: true
+  });
+  assertPass(comfortEndOwnerStale17.result === false
+      && comfortEndOwnerStale17.harness.current()
+        === comfortEndOwnerStale17.replacementSchedule
+      && comfortEndOwnerStale17.replacementSchedule.comfortStartUntil === 0
+      && comfortEndOwnerStale17.harness.calls.includes('stale:create')
+      && comfortEndOwnerStale17.harness.calls.filter(
+        call => call === 'clear:ac-comfort-end'
+      ).length === 2
+      && !comfortEndOwnerStale17.harness.calls.includes('get:ac-comfort-end'),
+    '17F-0E: comfort-end 真实 createAlarm 在物理 create 后失主会补 clear 并拒绝成功，不继续 get');
   assertPass(backgroundSource.includes('comfortStartUntil: 0')
       && comfortSource17.includes('function isComfortStartActive(')
       && comfortSource17.includes('async function runComfortStart(')
