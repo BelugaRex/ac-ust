@@ -423,6 +423,24 @@
       ]
     },
     {
+      "name": "verified PWM clock commits use one snapshot and replay facade",
+      "files": ["background.js"],
+      "requirePatterns": [
+        "function\\s+snapshotPwmClockIntentState\\s*\\(",
+        "function\\s+replayPwmClockIntentState\\s*\\(",
+        "function\\s+snapshotVerifiedPwmClockState\\s*\\(",
+        "pwmAlarmWriteOwner\\s*:\\s*Number\\(pwmAlarmWriteOwner\\)",
+        "function\\s+replayVerifiedPwmClockState\\s*\\(",
+        "isPwmAlarmWriteOwnerCurrent\\s*\\(\\s*clockState\\?\\.pwmAlarmWriteOwner\\s*\\)",
+        "function\\s+claimPwmAlarmWriteOwner\\s*\\(",
+        "async\\s+function\\s+createPwmAlarmFromPlanWithReceipt\\s*\\(",
+        "const\\s+alarmWriteIsCurrent\\s*=\\s*\\(\\s*\\)\\s*=>",
+        "ensureCurrent\\s*:\\s*\\(\\s*\\)\\s*=>",
+        "async\\s+function\\s+persistOwnedPwmAlarmFailure\\s*\\(",
+        "setNextTriggerAt\\s*\\(\\s*clockState\\.nextTriggerAt\\s*,\\s*\\{\\s*plannedAt\\s*:\\s*clockState\\.smartClockPlannedAt"
+      ]
+    },
+    {
       "name": "PWM retry fields use the atomic replacement primitive",
       "files": ["background.js"],
       "requirePatterns": [

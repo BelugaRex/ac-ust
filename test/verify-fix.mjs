@@ -5871,7 +5871,7 @@ async function runTests() {
   assertPass(repairBody.includes("nextTriggerAt: schedule.pageTimerTargetAt")
       && repairBody.includes("createPwmAlarmFromPlan(")
       && toggleBody.includes("nextTriggerAt: schedule.pageTimerTargetAt")
-      && toggleBody.includes("createPwmAlarmFromPlan(")
+      && toggleBody.includes("createPwmAlarmFromPlanWithReceipt(")
       && reapplyBody.indexOf('await setPageTimer(minutes') >= 0
       && reapplyBody.indexOf('createPwmAlarmFromPlan(') > reapplyBody.indexOf('await setPageTimer(minutes')
       && reapplyBody.includes('const reapplyTargetAt = Number(schedule.pageTimerTargetAt)')
@@ -19123,6 +19123,220 @@ return plan;
       && manualOnSwapPersist16?.options.syncFromLiveAlarm === false,
     '16K-2B: 手动 ON 的 alarm await 真换 schedule 后，facade 重清 replacement proof/typed retry 再持久化');
 
+  const manualCommitTarget16 = ingressBoundary16 + 23 * 60_000;
+  const manualCommitInitial16 = {
+    enabled: true,
+    onMinutes: 23,
+    offMinutes: 7,
+    pwmState: 'on',
+    nextTriggerAt: 0,
+    smartClockPlannedAt: 0,
+    alarmCreatedAt: 0,
+    alarmDelayMinutes: 0,
+    pageTimerMinutes: null,
+    pageTimerTargetAt: 0,
+    pageTimerError: '',
+    pageTimerRetryAt: 0,
+    pageTimerRetryMinutes: 0,
+    pwmRetryKind: 'smart-on',
+    pwmRetryBoundaryAt: ingressBoundary16,
+    pwmRetryScheduledAt: ingressBoundary16 + 60_000,
+    smartMode: { enabled: true, sensitivity: 5 },
+    sentinel: 'manual-commit-initial'
+  };
+  const manualCommitPostCreate16 = {
+    ...manualCommitInitial16,
+    pwmState: 'on',
+    nextTriggerAt: manualCommitTarget16,
+    smartClockPlannedAt: 501,
+    alarmCreatedAt: 502,
+    alarmDelayMinutes: 9,
+    pageTimerMinutes: 29,
+    pageTimerTargetAt: manualCommitTarget16 + 6 * 60_000,
+    pageTimerError: 'new manual page owner',
+    pageTimerRetryAt: manualCommitTarget16 + 60_000,
+    pageTimerRetryMinutes: 29,
+    pwmRetryKind: 'smart-on-safety-timer',
+    pwmRetryBoundaryAt: 503,
+    pwmRetryScheduledAt: 504,
+    smartMode: { enabled: true, sensitivity: 9 },
+    configSentinel: 'keep-manual-config',
+    sentinel: 'manual-post-create'
+  };
+  const manualCommitHarness16 = new Function(
+    'initialSchedule', 'postCreateSchedule', 'targetAt',
+    'clearProofMutation', 'replaceRetryMutation',
+    'nextTriggerMutation', 'pwmClockMutation', 'verifiedCreatedAt',
+    `let schedule = initialSchedule;
+    let pwmRuntimeRevision = 73;
+    let pwmAlarmWriteGeneration = 0;
+    let pageTimerWriteGeneration = 0;
+    const calls = [];
+    const persisted = [];
+    let verifiedClock = null;
+    function invalidatePageTimerWriteOwner() {
+      pageTimerWriteGeneration += 1;
+      return pageTimerWriteGeneration;
+    }
+    function isPageTimerWriteOwnerCurrent(owner) {
+      return owner === pageTimerWriteGeneration;
+    }
+    function claimPwmAlarmWriteOwner() {
+      pwmAlarmWriteGeneration += 1;
+      return pwmAlarmWriteGeneration;
+    }
+    function isPwmAlarmWriteOwnerCurrent(owner) {
+      return owner > 0 && owner === pwmAlarmWriteGeneration;
+    }
+    function clearSchedulePageTimerProofState(state) {
+      clearProofMutation(state);
+    }
+    function replaceSchedulePwmRetryState(state, retryState) {
+      replaceRetryMutation(state, retryState);
+    }
+    function setScheduleNextTrigger(state, value, options) {
+      return nextTriggerMutation(state, value, options);
+    }
+    function setSchedulePwmClockIntent(state, value, options) {
+      return pwmClockMutation(state, value, options);
+    }
+    const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+    ${clearProofFacade16}
+    ${clearPwmRetryFacade16}
+    ${setNextTriggerAtSource16}
+    function prepareFreshPwmStartState() {
+      clearPwmRetryState();
+      schedule.pwmState = 'on';
+      setPwmClockIntent(0);
+    }
+    function setSmartOnPwmRetryState() {
+      throw new Error('normal manual commit must not create smart retry');
+    }
+    function isAutomationAllowed() { return true; }
+    function isAutomationOperationCurrent(revision) {
+      return revision === pwmRuntimeRevision && schedule.enabled === true;
+    }
+    async function writePageTimerRetryAlarm({ isCurrent }) {
+      calls.push('writer:' + isCurrent());
+      return { stale: !isCurrent(), alarmCreated: false };
+    }
+    async function persistSchedule(reason, options) {
+      calls.push('persist:' + reason);
+      persisted.push({
+        reason,
+        options: { ...options },
+        ref: schedule,
+        snapshot: structuredClone(schedule)
+      });
+    }
+    async function toggleAC() {
+      calls.push('toggle-on');
+      schedule.pageTimerMinutes = 23;
+      schedule.pageTimerTargetAt = targetAt;
+      schedule.pageTimerError = '';
+      schedule.pageTimerRetryAt = 0;
+      schedule.pageTimerRetryMinutes = 0;
+      return {
+        success: true,
+        pageTimerResult: {
+          success: true,
+          targetAt,
+          actualDelayMinutes: 23
+        }
+      };
+    }
+    async function getCurrentACStatus() {
+      calls.push('status');
+      return { isOn: true };
+    }
+    async function requestTimerBasedShutdown() {
+      throw new Error('manual ON must not request shutdown');
+    }
+    async function clearPwmAlarm() { calls.push('clear-pwm'); return true; }
+    async function setPageTimer() { throw new Error('prepared page proof must be reused'); }
+    async function abortStaleAutomation() { return false; }
+    async function createPwmAlarmWithVerify() {
+      throw new Error('normal manual commit must use absolute plan');
+    }
+    async function createPwmAlarmFromPlanWithReceipt(plan) {
+      calls.push('create-pwm:' + plan.nextTriggerAt);
+      const writeOwner = claimPwmAlarmWriteOwner();
+      schedule.alarmCreatedAt = verifiedCreatedAt;
+      schedule.alarmDelayMinutes = (plan.nextTriggerAt - verifiedCreatedAt) / 60000;
+      setNextTriggerAt(plan.nextTriggerAt);
+      verifiedClock = {
+        nextTriggerAt: schedule.nextTriggerAt,
+        smartClockPlannedAt: schedule.smartClockPlannedAt,
+        alarmCreatedAt: schedule.alarmCreatedAt,
+        alarmDelayMinutes: schedule.alarmDelayMinutes
+      };
+      return { created: true, writeOwner };
+    }
+    async function createAlarm(name) {
+      calls.push('alarm:' + name);
+      if (name === 'ac-badge-tick') {
+        await Promise.resolve();
+        schedule = postCreateSchedule;
+        calls.push('swap:post-create');
+      }
+      return true;
+    }
+    async function syncScheduleToSync() {}
+    async function updateBadge() { calls.push('badge'); }
+    const chrome = { alarms: { async clear() {} } };
+    ${toggleBody16}
+    return {
+      run: () => toggleNowAndSync('on'),
+      current: () => schedule,
+      verifiedClock: () => verifiedClock,
+      calls,
+      persisted
+    };`
+  )(
+    manualCommitInitial16,
+    manualCommitPostCreate16,
+    manualCommitTarget16,
+    scheduleMutations.clearSchedulePageTimerProofState,
+    scheduleMutations.replaceSchedulePwmRetryState,
+    scheduleMutations.setScheduleNextTrigger,
+    scheduleMutations.setSchedulePwmClockIntent,
+    ingressBoundary16 + 1_000
+  );
+  const manualCommitResult16 = await manualCommitHarness16.run();
+  const manualCommitFinal16 = manualCommitHarness16.persisted.find(
+    entry => entry.reason === 'toggleNowAndSync-interval'
+  );
+  const manualCommitVerifiedClock16 = manualCommitHarness16.verifiedClock();
+  assertPass(manualCommitResult16?.success === true
+      && manualCommitHarness16.current() === manualCommitPostCreate16
+      && manualCommitFinal16?.ref === manualCommitPostCreate16
+      && manualCommitFinal16?.options.syncFromLiveAlarm === false
+      && manualCommitFinal16?.snapshot.sentinel === 'manual-post-create'
+      && manualCommitFinal16?.snapshot.configSentinel === 'keep-manual-config'
+      && manualCommitFinal16?.snapshot.smartMode?.sensitivity === 9
+      && manualCommitFinal16?.snapshot.pwmState === 'off'
+      && manualCommitFinal16?.snapshot.pwmRetryKind === ''
+      && manualCommitFinal16?.snapshot.pwmRetryBoundaryAt === 0
+      && manualCommitFinal16?.snapshot.pwmRetryScheduledAt === 0
+      && manualCommitFinal16?.snapshot.pageTimerMinutes === 29
+      && manualCommitFinal16?.snapshot.pageTimerTargetAt
+        === manualCommitPostCreate16.pageTimerTargetAt
+      && manualCommitFinal16?.snapshot.pageTimerError === 'new manual page owner'
+      && manualCommitFinal16?.snapshot.pageTimerRetryAt
+        === manualCommitPostCreate16.pageTimerRetryAt
+      && manualCommitFinal16?.snapshot.pageTimerRetryMinutes === 29
+      && manualCommitFinal16?.snapshot.nextTriggerAt
+        === manualCommitVerifiedClock16?.nextTriggerAt
+      && manualCommitFinal16?.snapshot.smartClockPlannedAt
+        === manualCommitVerifiedClock16?.smartClockPlannedAt
+      && manualCommitFinal16?.snapshot.alarmCreatedAt
+        === manualCommitVerifiedClock16?.alarmCreatedAt
+      && manualCommitFinal16?.snapshot.alarmDelayMinutes
+        === manualCommitVerifiedClock16?.alarmDelayMinutes
+      && manualCommitHarness16.calls.indexOf(`create-pwm:${manualCommitTarget16}`)
+        < manualCommitHarness16.calls.indexOf('swap:post-create'),
+    '16K-2C: manual ON 建钟后的 replacement 保留 page/config owner，仅重放 OFF/typed-clear/verified clock');
+
   const automaticOnDeadlineStart16 = backgroundSource.indexOf(
     'function getAutomaticOnDeadline('
   );
@@ -20409,6 +20623,21 @@ return plan;
     pageTimerError: 'replacement proof',
     sentinel: 'replacement'
   };
+  const expiredCommitPostCreate16 = {
+    ...expiredCommitOld16,
+    pwmState: 'on',
+    nextTriggerAt: expiredTargetAt16,
+    smartClockPlannedAt: 456,
+    alarmCreatedAt: 789,
+    alarmDelayMinutes: 12,
+    pageTimerMinutes: 27,
+    pageTimerTargetAt: expiredTargetAt16 + 27 * 60_000,
+    pageTimerError: 'post-create replacement proof',
+    pageTimerRetryAt: expiredTargetAt16 + 60_000,
+    pageTimerRetryMinutes: 27,
+    configSentinel: 'keep-post-create-config',
+    sentinel: 'post-create-replacement'
+  };
   const expiredCommitPlan16 = {
     kind: 'commit',
     proofAction: 'clear',
@@ -20419,15 +20648,19 @@ return plan;
       phaseSentinel: 'committed'
     }
   };
+  const expiredCommitOldTemplate16 = structuredClone(expiredCommitOld16);
+  const expiredCommitPostCreateTemplate16 = structuredClone(expiredCommitPostCreate16);
   const expiredCommitHarness16 = new Function(
-    'initialSchedule', 'replacementSchedule', 'commitPlan',
+    'initialSchedule', 'replacementSchedule', 'postCreateSchedule', 'commitPlan',
     'clearProofMutation', 'nextTriggerMutation', 'pwmClockMutation',
-    'Date', 'console',
+    'verifiedCreatedAt', 'Date', 'console',
     `let schedule = initialSchedule;
     let pwmRuntimeRevision = 71;
+    let pwmAlarmWriteGeneration = 0;
     let pageTimerWriteGeneration = 0;
     const calls = [];
     const persisted = [];
+    let verifiedClock = null;
     const side = state => state === replacementSchedule ? 'new' : 'old';
     function invalidatePageTimerWriteOwner() {
       pageTimerWriteGeneration += 1;
@@ -20435,6 +20668,13 @@ return plan;
     }
     function isPageTimerWriteOwnerCurrent(owner) {
       return owner === pageTimerWriteGeneration;
+    }
+    function claimPwmAlarmWriteOwner() {
+      pwmAlarmWriteGeneration += 1;
+      return pwmAlarmWriteGeneration;
+    }
+    function isPwmAlarmWriteOwnerCurrent(owner) {
+      return owner > 0 && owner === pwmAlarmWriteGeneration;
     }
     function clearSchedulePageTimerProofState(state) {
       calls.push('proof:' + side(state));
@@ -20473,27 +20713,48 @@ return plan;
       });
     }
     async function clearPwmAlarm() { calls.push('clear-pwm'); return true; }
-    async function createPwmAlarmFromPlan(plan) {
+    async function createPwmAlarmFromPlanWithReceipt(plan) {
       calls.push('create-pwm:' + plan.nextTriggerAt);
+      const writeOwner = claimPwmAlarmWriteOwner();
+      schedule.alarmCreatedAt = verifiedCreatedAt;
+      schedule.alarmDelayMinutes = (plan.nextTriggerAt - verifiedCreatedAt) / 60000;
+      setNextTriggerAt(plan.nextTriggerAt);
+      verifiedClock = {
+        nextTriggerAt: schedule.nextTriggerAt,
+        smartClockPlannedAt: schedule.smartClockPlannedAt,
+        alarmCreatedAt: schedule.alarmCreatedAt,
+        alarmDelayMinutes: schedule.alarmDelayMinutes
+      };
+      return { created: true, writeOwner };
+    }
+    async function createAlarm(name) {
+      calls.push('alarm:' + name);
+      if (name === 'ac-badge-tick') {
+        await Promise.resolve();
+        schedule = postCreateSchedule;
+        calls.push('swap:post-create');
+      }
       return true;
     }
-    async function createAlarm(name) { calls.push('alarm:' + name); return true; }
     async function abortStaleAutomation() { return false; }
     async function updateBadge() { calls.push('badge'); }
     ${expiredCommitSource16}
     return {
       run: expiredAt => executeExpiredIntervalRecovery(expiredAt, 71),
       current: () => schedule,
+      verifiedClock: () => verifiedClock,
       calls,
       persisted
     };`
   )(
     expiredCommitOld16,
     expiredCommitNew16,
+    expiredCommitPostCreate16,
     expiredCommitPlan16,
     scheduleMutations.clearSchedulePageTimerProofState,
     scheduleMutations.setScheduleNextTrigger,
     scheduleMutations.setSchedulePwmClockIntent,
+    expiredSecondNow16,
     ExpiredCommitDate16,
     testConsole
   );
@@ -20503,8 +20764,12 @@ return plan;
   const expiredCommitIntent16 = expiredCommitHarness16.persisted.find(
     entry => entry.reason === 'advanceExpiredAlarmToNextBoundary-commit-intent'
   );
+  const expiredCommitFinal16 = expiredCommitHarness16.persisted.find(
+    entry => entry.reason === 'advanceExpiredAlarmToNextBoundary'
+  );
+  const expiredCommitVerifiedClock16 = expiredCommitHarness16.verifiedClock();
   assertPass(expiredCommitResult16 === true
-      && expiredCommitHarness16.current() === expiredCommitNew16
+      && expiredCommitHarness16.current() === expiredCommitPostCreate16
       && expiredCommitIntent16?.ref === expiredCommitNew16
       && expiredCommitIntent16?.options.syncFromLiveAlarm === false
       && expiredCommitIntent16?.snapshot.sentinel === 'replacement'
@@ -20517,8 +20782,447 @@ return plan;
       && expiredCommitIntent16?.snapshot.pageTimerError === ''
       && expiredCommitIntent16?.snapshot.pageTimerRetryAt === 0
       && expiredCommitIntent16?.snapshot.pageTimerRetryMinutes === 0
-      && expiredCommitHarness16.calls.includes(`create-pwm:${expiredTargetAt16}`),
-    '16N-5: expired commit 的 alarm await 真换 schedule 后，完整 plan 与首个 clock origin 重放到 replacement 再建同一 live 钟');
+      && expiredCommitFinal16?.ref === expiredCommitPostCreate16
+      && expiredCommitFinal16?.options.syncFromLiveAlarm === false
+      && expiredCommitFinal16?.snapshot.sentinel === 'post-create-replacement'
+      && expiredCommitFinal16?.snapshot.configSentinel === 'keep-post-create-config'
+      && expiredCommitFinal16?.snapshot.phaseSentinel === 'committed'
+      && expiredCommitFinal16?.snapshot.pwmState === 'off'
+      && expiredCommitFinal16?.snapshot.pageTimerMinutes === null
+      && expiredCommitFinal16?.snapshot.pageTimerTargetAt === 0
+      && expiredCommitFinal16?.snapshot.pageTimerError === ''
+      && expiredCommitFinal16?.snapshot.pageTimerRetryAt === 0
+      && expiredCommitFinal16?.snapshot.pageTimerRetryMinutes === 0
+      && expiredCommitFinal16?.snapshot.nextTriggerAt
+        === expiredCommitVerifiedClock16?.nextTriggerAt
+      && expiredCommitFinal16?.snapshot.smartClockPlannedAt
+        === expiredCommitVerifiedClock16?.smartClockPlannedAt
+      && expiredCommitFinal16?.snapshot.alarmCreatedAt
+        === expiredCommitVerifiedClock16?.alarmCreatedAt
+      && expiredCommitFinal16?.snapshot.alarmDelayMinutes
+        === expiredCommitVerifiedClock16?.alarmDelayMinutes
+      && expiredCommitHarness16.calls.indexOf(`create-pwm:${expiredTargetAt16}`)
+        < expiredCommitHarness16.calls.indexOf('swap:post-create'),
+    '16N-5: expired commit 建 live 钟后的 badge replacement 保留新配置，并重放 phase/page owner/verified clock');
+
+  const runExpiredCommitFailureCase16 = async ({
+    invalidatePageOwner = false,
+    invalidatePwmOwner = false,
+    invalidateRevision = false,
+    invalidatePwmOwnerDuringWatchdog = false
+  } = {}) => {
+    const initialSchedule = {
+      ...structuredClone(expiredCommitOldTemplate16),
+      enabled: true,
+      sentinel: 'failure-initial'
+    };
+    const createReplacement = {
+      ...structuredClone(expiredCommitPostCreateTemplate16),
+      enabled: true,
+      pwmState: 'on',
+      phaseSentinel: 'unowned-create-phase',
+      configSentinel: 'keep-create-failure-config',
+      sentinel: 'failure-create-replacement'
+    };
+    const watchdogReplacement = {
+      ...structuredClone(expiredCommitPostCreateTemplate16),
+      enabled: true,
+      pwmState: 'on',
+      phaseSentinel: 'unowned-watchdog-phase',
+      nextTriggerAt: 901,
+      smartClockPlannedAt: 902,
+      alarmCreatedAt: 903,
+      alarmDelayMinutes: 904,
+      pageTimerMinutes: 35,
+      pageTimerTargetAt: expiredTargetAt16 + 35 * 60_000,
+      pageTimerError: 'watchdog replacement proof',
+      pageTimerRetryAt: expiredTargetAt16 + 60_000,
+      pageTimerRetryMinutes: 35,
+      configSentinel: 'keep-watchdog-config',
+      sentinel: 'failure-watchdog-replacement'
+    };
+    const createReplacementBefore = structuredClone(createReplacement);
+    const watchdogReplacementBefore = structuredClone(watchdogReplacement);
+    const harness = new Function(
+      'initialSchedule', 'createReplacement', 'watchdogReplacement', 'commitPlan',
+      'invalidatePageOwnerAtCreate', 'invalidatePwmOwnerAtCreate',
+      'invalidateRevisionAtCreate',
+      'invalidatePwmOwnerAtWatchdog',
+      'clearProofMutation', 'nextTriggerMutation', 'pwmClockMutation',
+      'Date', 'console',
+      `let schedule = initialSchedule;
+      let pwmRuntimeRevision = 81;
+      let pwmAlarmWriteGeneration = 0;
+      let pageTimerWriteGeneration = 0;
+      const calls = [];
+      const persisted = [];
+      function invalidatePageTimerWriteOwner() {
+        pageTimerWriteGeneration += 1;
+        return pageTimerWriteGeneration;
+      }
+      function isPageTimerWriteOwnerCurrent(owner) {
+        return owner > 0 && owner === pageTimerWriteGeneration;
+      }
+      function claimPwmAlarmWriteOwner() {
+        pwmAlarmWriteGeneration += 1;
+        return pwmAlarmWriteGeneration;
+      }
+      function isPwmAlarmWriteOwnerCurrent(owner) {
+        return owner > 0 && owner === pwmAlarmWriteGeneration;
+      }
+      function clearSchedulePageTimerProofState(state) {
+        clearProofMutation(state);
+      }
+      function setScheduleNextTrigger(state, value, options) {
+        return nextTriggerMutation(state, value, options);
+      }
+      function setSchedulePwmClockIntent(state, value, options) {
+        return pwmClockMutation(state, value, options);
+      }
+      const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+      ${clearProofFacade16}
+      ${setNextTriggerAtSource16}
+      ${applyPwmPlanBody}
+      function isAutomationOperationCurrent(revision) {
+        return revision === pwmRuntimeRevision && schedule.enabled === true;
+      }
+      function planPwmRecovery() { return commitPlan; }
+      async function getCurrentACStatus() { throw new Error('commit failure must not read status'); }
+      async function setPageTimer() { throw new Error('commit failure must not set timer'); }
+      async function writePageTimerRetryAlarm({ isCurrent }) {
+        calls.push('writer:' + isCurrent());
+        return { stale: !isCurrent(), alarmCreated: false };
+      }
+      async function persistSchedule(reason, options) {
+        calls.push('persist:' + reason);
+        persisted.push({
+          reason,
+          options: { ...options },
+          ref: schedule,
+          snapshot: structuredClone(schedule)
+        });
+      }
+      async function clearPwmAlarm() { calls.push('clear-pwm'); return true; }
+      async function createPwmAlarmFromPlanWithReceipt(plan) {
+        calls.push('create-pwm:' + plan.nextTriggerAt);
+        const writeOwner = claimPwmAlarmWriteOwner();
+        await Promise.resolve();
+        schedule = createReplacement;
+        calls.push('swap:create-failure');
+        if (invalidatePageOwnerAtCreate) {
+          invalidatePageTimerWriteOwner();
+          calls.push('invalidate:page-owner');
+        }
+        if (invalidatePwmOwnerAtCreate) {
+          claimPwmAlarmWriteOwner();
+          calls.push('invalidate:pwm-owner');
+        }
+        if (invalidateRevisionAtCreate) {
+          pwmRuntimeRevision += 1;
+          calls.push('invalidate:revision');
+        }
+        return { created: false, writeOwner };
+      }
+      async function createAlarm(name) {
+        calls.push('alarm:' + name);
+        if (name === 'ac-watchdog') {
+          await Promise.resolve();
+          schedule = watchdogReplacement;
+          calls.push('swap:watchdog');
+          if (invalidatePwmOwnerAtWatchdog) {
+            claimPwmAlarmWriteOwner();
+            calls.push('invalidate:pwm-owner-watchdog');
+          }
+        }
+        return true;
+      }
+      async function abortStaleAutomation() { return false; }
+      async function updateBadge() { calls.push('badge'); }
+      ${expiredCommitSource16}
+      return {
+        run: expiredAt => executeExpiredIntervalRecovery(expiredAt, 81),
+        current: () => schedule,
+        calls,
+        persisted
+      };`
+    )(
+      initialSchedule,
+      createReplacement,
+      watchdogReplacement,
+      expiredCommitPlan16,
+      invalidatePageOwner,
+      invalidatePwmOwner,
+      invalidateRevision,
+      invalidatePwmOwnerDuringWatchdog,
+      scheduleMutations.clearSchedulePageTimerProofState,
+      scheduleMutations.setScheduleNextTrigger,
+      scheduleMutations.setSchedulePwmClockIntent,
+      class ExpiredCommitFailureDate16 extends Date {
+        static now() { return expiredSecondNow16; }
+      },
+      testConsole
+    );
+    const result = await harness.run(expiredFirstNow16 - 60_000);
+    return {
+      result,
+      harness,
+      createReplacement,
+      createReplacementBefore,
+      watchdogReplacement,
+      watchdogReplacementBefore,
+      failurePersist: harness.persisted.find(entry => (
+        entry.reason === 'advanceExpiredAlarmToNextBoundary-commit-alarm-failed'
+      )),
+      intentPersist: harness.persisted.find(entry => (
+        entry.reason === 'advanceExpiredAlarmToNextBoundary-commit-intent'
+      ))
+    };
+  };
+
+  const expiredCommitPhysicalFailure16 = await runExpiredCommitFailureCase16();
+  const expiredCommitFailureSnapshot16 = expiredCommitPhysicalFailure16.failurePersist?.snapshot;
+  assertPass(expiredCommitPhysicalFailure16.result === false
+      && expiredCommitPhysicalFailure16.harness.current()
+        === expiredCommitPhysicalFailure16.watchdogReplacement
+      && expiredCommitPhysicalFailure16.failurePersist?.ref
+        === expiredCommitPhysicalFailure16.watchdogReplacement
+      && expiredCommitPhysicalFailure16.failurePersist?.options.syncFromLiveAlarm === false
+      && JSON.stringify(expiredCommitPhysicalFailure16.createReplacement)
+        === JSON.stringify(expiredCommitPhysicalFailure16.createReplacementBefore)
+      && expiredCommitFailureSnapshot16?.sentinel === 'failure-watchdog-replacement'
+      && expiredCommitFailureSnapshot16?.configSentinel === 'keep-watchdog-config'
+      && expiredCommitFailureSnapshot16?.phaseSentinel === 'committed'
+      && expiredCommitFailureSnapshot16?.pwmState === 'off'
+      && expiredCommitFailureSnapshot16?.nextTriggerAt === expiredTargetAt16
+      && expiredCommitFailureSnapshot16?.smartClockPlannedAt
+        === expiredCommitPhysicalFailure16.intentPersist?.snapshot.smartClockPlannedAt
+      && expiredCommitFailureSnapshot16?.alarmCreatedAt === 0
+      && expiredCommitFailureSnapshot16?.alarmDelayMinutes === 0
+      && expiredCommitFailureSnapshot16?.pageTimerMinutes === null
+      && expiredCommitFailureSnapshot16?.pageTimerTargetAt === 0
+      && expiredCommitFailureSnapshot16?.pageTimerRetryAt === 0
+      && expiredCommitFailureSnapshot16?.pageTimerRetryMinutes === 0
+      && expiredCommitFailureSnapshot16?.pageTimerError.includes('PWM 闹钟创建失败')
+      && expiredCommitPhysicalFailure16.harness.calls.includes('swap:create-failure')
+      && expiredCommitPhysicalFailure16.harness.calls.includes('swap:watchdog'),
+    '16N-5A: expired commit 建钟失败跨两次 replacement 后重放 phase/intent/page clear，并 false-sync 持久化当前 owner');
+
+  const expiredCommitPageOwnerStale16 = await runExpiredCommitFailureCase16({
+    invalidatePageOwner: true
+  });
+  const expiredCommitPwmOwnerStale16 = await runExpiredCommitFailureCase16({
+    invalidatePwmOwner: true
+  });
+  const expiredCommitRevisionStale16 = await runExpiredCommitFailureCase16({
+    invalidateRevision: true
+  });
+  assertPass([
+    expiredCommitPageOwnerStale16,
+    expiredCommitPwmOwnerStale16,
+    expiredCommitRevisionStale16
+  ].every(
+    testCase => testCase.result === false
+      && testCase.harness.current() === testCase.createReplacement
+      && JSON.stringify(testCase.createReplacement)
+        === JSON.stringify(testCase.createReplacementBefore)
+      && testCase.failurePersist === undefined
+      && !testCase.harness.calls.includes('alarm:ac-watchdog')
+  ),
+  '16N-5B: expired commit 建钟失败后 revision/page/PWM 任一 owner 失效，旧事务零重放、零 watchdog、零 failure persist');
+
+  const expiredCommitWatchdogOwnerStale16 = await runExpiredCommitFailureCase16({
+    invalidatePwmOwnerDuringWatchdog: true
+  });
+  assertPass(expiredCommitWatchdogOwnerStale16.result === false
+      && expiredCommitWatchdogOwnerStale16.harness.current()
+        === expiredCommitWatchdogOwnerStale16.watchdogReplacement
+      && JSON.stringify(expiredCommitWatchdogOwnerStale16.watchdogReplacement)
+        === JSON.stringify(expiredCommitWatchdogOwnerStale16.watchdogReplacementBefore)
+      && JSON.stringify(expiredCommitWatchdogOwnerStale16.createReplacement)
+        === JSON.stringify(expiredCommitWatchdogOwnerStale16.createReplacementBefore)
+      && expiredCommitWatchdogOwnerStale16.failurePersist === undefined
+      && expiredCommitWatchdogOwnerStale16.harness.calls.includes('swap:watchdog')
+      && expiredCommitWatchdogOwnerStale16.harness.calls.includes(
+        'invalidate:pwm-owner-watchdog'
+      ),
+    '16N-5C: watchdog await 内 PWM owner 失效时，旧 failure 事务尚未写 replacement，最终零重放零 persist');
+
+  assertPass(countOccurrences(expiredCommitSource16, 'persistOwnedPwmAlarmFailure({') === 2
+      && countOccurrences(expiredCommitSource16, 'createPwmAlarmFromPlanWithReceipt(') === 2
+      && toggleBody16.includes('persistOwnedPwmAlarmFailure({')
+      && toggleBody16.includes('createPwmAlarmFromPlanWithReceipt('),
+    '16N-5D: expired retry/commit 与 manual ON 共用 receipt-owned 建钟失败收口，不再直接持久化模糊 false');
+
+  const expiredRetryTargetAt16 = expiredTargetAt16 + 60_000;
+  const expiredRetryPlan16 = {
+    kind: 'retry',
+    nextTriggerAt: expiredRetryTargetAt16,
+    phasePatch: {
+      pwmState: 'off',
+      nextTriggerAt: expiredRetryTargetAt16,
+      retryPhaseSentinel: 'owned-retry-phase'
+    }
+  };
+  const expiredRetryInitial16 = {
+    enabled: true,
+    pwmState: 'on',
+    nextTriggerAt: 0,
+    smartClockPlannedAt: 0,
+    alarmCreatedAt: 0,
+    alarmDelayMinutes: 0,
+    pageTimerMinutes: null,
+    pageTimerTargetAt: 0,
+    pageTimerError: 'initial page failure',
+    pageTimerRetryAt: 0,
+    pageTimerRetryMinutes: 0,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0,
+    smartMode: { enabled: true, sensitivity: 5 },
+    sentinel: 'retry-initial'
+  };
+  const expiredRetryPostCreate16 = {
+    ...expiredRetryInitial16,
+    pwmState: 'on',
+    nextTriggerAt: expiredRetryTargetAt16,
+    smartClockPlannedAt: 111,
+    alarmCreatedAt: 222,
+    alarmDelayMinutes: 3,
+    pageTimerMinutes: 31,
+    pageTimerTargetAt: expiredRetryTargetAt16 + 31 * 60_000,
+    pageTimerError: 'new page owner must survive retry replay',
+    pageTimerRetryAt: expiredRetryTargetAt16 + 60_000,
+    pageTimerRetryMinutes: 31,
+    pwmRetryKind: 'smart-on-safety-timer',
+    pwmRetryBoundaryAt: 333,
+    pwmRetryScheduledAt: 444,
+    smartMode: { enabled: true, sensitivity: 9 },
+    configSentinel: 'keep-retry-config',
+    sentinel: 'retry-post-create'
+  };
+  const expiredRetryHarness16 = new Function(
+    'initialSchedule', 'postCreateSchedule', 'retryPlan',
+    'nextTriggerMutation', 'pwmClockMutation', 'verifiedCreatedAt', 'Date',
+    `let schedule = initialSchedule;
+    let pwmRuntimeRevision = 72;
+    let pwmAlarmWriteGeneration = 0;
+    const calls = [];
+    const persisted = [];
+    let verifiedClock = null;
+    function claimPwmAlarmWriteOwner() {
+      pwmAlarmWriteGeneration += 1;
+      return pwmAlarmWriteGeneration;
+    }
+    function isPwmAlarmWriteOwnerCurrent(owner) {
+      return owner > 0 && owner === pwmAlarmWriteGeneration;
+    }
+    function setScheduleNextTrigger(state, value, options) {
+      return nextTriggerMutation(state, value, options);
+    }
+    function setSchedulePwmClockIntent(state, value, options) {
+      return pwmClockMutation(state, value, options);
+    }
+    const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+    ${setNextTriggerAtSource16}
+    function clearPageTimerProofState() {
+      throw new Error('retry plan must not clear page proof');
+    }
+    ${applyPwmPlanBody}
+    function isAutomationOperationCurrent(revision) {
+      return revision === pwmRuntimeRevision && schedule.enabled === true;
+    }
+    function planPwmRecovery() { return retryPlan; }
+    async function getCurrentACStatus() { throw new Error('retry plan must not read status'); }
+    async function setPageTimer() { throw new Error('retry plan must not set timer'); }
+    async function writePageTimerRetryAlarm() { throw new Error('retry plan must not write page retry alarm'); }
+    async function persistSchedule(reason, options) {
+      calls.push('persist:' + reason);
+      persisted.push({
+        reason,
+        options: { ...options },
+        ref: schedule,
+        snapshot: structuredClone(schedule)
+      });
+    }
+    async function clearPwmAlarm() { calls.push('clear-pwm'); return true; }
+    async function createPwmAlarmFromPlanWithReceipt(plan) {
+      calls.push('create-pwm:' + plan.nextTriggerAt);
+      const writeOwner = claimPwmAlarmWriteOwner();
+      schedule.alarmCreatedAt = verifiedCreatedAt;
+      schedule.alarmDelayMinutes = (plan.nextTriggerAt - verifiedCreatedAt) / 60000;
+      setNextTriggerAt(plan.nextTriggerAt);
+      verifiedClock = {
+        nextTriggerAt: schedule.nextTriggerAt,
+        smartClockPlannedAt: schedule.smartClockPlannedAt,
+        alarmCreatedAt: schedule.alarmCreatedAt,
+        alarmDelayMinutes: schedule.alarmDelayMinutes
+      };
+      return { created: true, writeOwner };
+    }
+    async function createAlarm(name) {
+      calls.push('alarm:' + name);
+      if (name === 'ac-badge-tick') {
+        await Promise.resolve();
+        schedule = postCreateSchedule;
+        calls.push('swap:post-create');
+      }
+      return true;
+    }
+    async function abortStaleAutomation() { return false; }
+    async function updateBadge() { calls.push('badge'); }
+    ${expiredCommitSource16}
+    return {
+      run: expiredAt => executeExpiredIntervalRecovery(expiredAt, 72),
+      current: () => schedule,
+      verifiedClock: () => verifiedClock,
+      calls,
+      persisted
+    };`
+  )(
+    expiredRetryInitial16,
+    expiredRetryPostCreate16,
+    expiredRetryPlan16,
+    scheduleMutations.setScheduleNextTrigger,
+    scheduleMutations.setSchedulePwmClockIntent,
+    expiredSecondNow16 + 500,
+    ExpiredCommitDate16
+  );
+  const expiredRetryResult16 = await expiredRetryHarness16.run(
+    expiredFirstNow16 - 60_000
+  );
+  const expiredRetryFinal16 = expiredRetryHarness16.persisted.find(
+    entry => entry.reason === 'advanceExpiredAlarmToNextBoundary-pageTimer-failed'
+  );
+  const expiredRetryVerifiedClock16 = expiredRetryHarness16.verifiedClock();
+  assertPass(expiredRetryResult16 === true
+      && expiredRetryHarness16.current() === expiredRetryPostCreate16
+      && expiredRetryFinal16?.ref === expiredRetryPostCreate16
+      && expiredRetryFinal16?.options.syncFromLiveAlarm === false
+      && expiredRetryFinal16?.snapshot.sentinel === 'retry-post-create'
+      && expiredRetryFinal16?.snapshot.configSentinel === 'keep-retry-config'
+      && expiredRetryFinal16?.snapshot.smartMode?.sensitivity === 9
+      && expiredRetryFinal16?.snapshot.retryPhaseSentinel === 'owned-retry-phase'
+      && expiredRetryFinal16?.snapshot.pwmState === 'off'
+      && expiredRetryFinal16?.snapshot.pageTimerMinutes === 31
+      && expiredRetryFinal16?.snapshot.pageTimerTargetAt
+        === expiredRetryPostCreate16.pageTimerTargetAt
+      && expiredRetryFinal16?.snapshot.pageTimerError
+        === 'new page owner must survive retry replay'
+      && expiredRetryFinal16?.snapshot.pageTimerRetryAt
+        === expiredRetryPostCreate16.pageTimerRetryAt
+      && expiredRetryFinal16?.snapshot.pageTimerRetryMinutes === 31
+      && expiredRetryFinal16?.snapshot.pwmRetryKind === 'smart-on-safety-timer'
+      && expiredRetryFinal16?.snapshot.pwmRetryBoundaryAt === 333
+      && expiredRetryFinal16?.snapshot.pwmRetryScheduledAt === 444
+      && expiredRetryFinal16?.snapshot.nextTriggerAt
+        === expiredRetryVerifiedClock16?.nextTriggerAt
+      && expiredRetryFinal16?.snapshot.smartClockPlannedAt
+        === expiredRetryVerifiedClock16?.smartClockPlannedAt
+      && expiredRetryFinal16?.snapshot.alarmCreatedAt
+        === expiredRetryVerifiedClock16?.alarmCreatedAt
+      && expiredRetryFinal16?.snapshot.alarmDelayMinutes
+        === expiredRetryVerifiedClock16?.alarmDelayMinutes,
+    '16N-6: expired retry 建钟后的 replacement 保留 page/typed/config owner，仅重放 retry phase 与 verified clock');
 
   const popupUpdateScheduleSourceF90 = extractSourceSection(
     popupJs,
@@ -21327,6 +22031,59 @@ return plan;
       && revisionOwnedSchedule16.nextTriggerAt === newPwmTarget16,
     '16U-1: 旧 PWM 创建失效并清理后，新 revision 才串行建 alarm，最终时钟只属于新 lifecycle');
 
+  let guardedPageOwner16 = 1;
+  let guardedPwmLiveAlarm16 = null;
+  let guardedPwmCreateCalls16 = 0;
+  let guardedPwmClearCalls16 = 0;
+  const guardedPwmSchedule16 = {
+    enabled: true,
+    nextTriggerAt: 0,
+    smartClockPlannedAt: 0,
+    alarmCreatedAt: 0,
+    alarmDelayMinutes: 0
+  };
+  const guardedPwmAlarm16 = new Function(
+    'schedule', 'createAlarm', 'chrome', 'isAutomationAllowed',
+    'isAutomationOperationCurrent', 'setNextTriggerAt',
+    `${pwmAlarmCreationBody16}; return { createPwmAlarmFromPlanWithReceipt };`
+  )(
+    guardedPwmSchedule16,
+    async (_name, info) => {
+      guardedPwmCreateCalls16 += 1;
+      guardedPwmLiveAlarm16 = { scheduledTime: Number(info?.when) || 0 };
+      guardedPageOwner16 += 1;
+      return true;
+    },
+    {
+      alarms: {
+        async get() { return guardedPwmLiveAlarm16; },
+        async clear() {
+          guardedPwmClearCalls16 += 1;
+          guardedPwmLiveAlarm16 = null;
+          return true;
+        }
+      }
+    },
+    () => true,
+    revision => revision === 91,
+    value => { guardedPwmSchedule16.nextTriggerAt = value; }
+  );
+  const guardedPwmReceipt16 = await guardedPwmAlarm16.createPwmAlarmFromPlanWithReceipt(
+    { nextTriggerAt: Date.now() + 10 * 60_000 },
+    'page-owner-stale',
+    91,
+    { ensureCurrent: () => guardedPageOwner16 === 1 }
+  );
+  assertPass(guardedPwmReceipt16.created === false
+      && guardedPwmReceipt16.writeOwner > 0
+      && guardedPwmCreateCalls16 === 1
+      && guardedPwmClearCalls16 === 1
+      && guardedPwmLiveAlarm16 === null
+      && guardedPwmSchedule16.nextTriggerAt === 0
+      && guardedPwmSchedule16.alarmCreatedAt === 0
+      && guardedPwmSchedule16.alarmDelayMinutes === 0,
+    '16U-1A: receipt 建钟内部 page owner 失效时，在同一 PWM 队列清掉 stale live alarm 且不提交 verified clock');
+
   let rejectedVerifyCreateCalls16 = 0;
   let rejectedVerifyClearCalls16 = 0;
   const rejectedVerifySchedule16 = {
@@ -21340,7 +22097,8 @@ return plan;
     'isAutomationOperationCurrent', 'setNextTriggerAt',
     `${pwmAlarmCreationBody16}; return {
       createPwmAlarmWithVerify,
-      createPwmAlarmFromPlan
+      createPwmAlarmFromPlan,
+      createPwmAlarmFromPlanWithReceipt
     };`
   )(
     rejectedVerifySchedule16,
@@ -21366,17 +22124,35 @@ return plan;
     1
   );
   const createCallsBeforeExpiredPlan16 = rejectedVerifyCreateCalls16;
-  const rejectedExpiredPlan16 = await rejectedVerifyPwmAlarm16.createPwmAlarmFromPlan(
+  const rejectedExpiredPlanReceipt16 = await rejectedVerifyPwmAlarm16
+    .createPwmAlarmFromPlanWithReceipt(
+      { nextTriggerAt: Date.now() - 1 },
+      'expired-plan',
+      1
+    );
+  const rejectedInvalidPlanReceipt16 = await rejectedVerifyPwmAlarm16
+    .createPwmAlarmFromPlanWithReceipt(
+      { nextTriggerAt: 0 },
+      'invalid-plan',
+      1
+    );
+  const clearCallsBeforeExpiredWrapper16 = rejectedVerifyClearCalls16;
+  const rejectedExpiredWrapper16 = await rejectedVerifyPwmAlarm16.createPwmAlarmFromPlan(
     { nextTriggerAt: Date.now() - 1 },
-    'expired-plan',
+    'expired-wrapper-plan',
     1
   );
   assertPass(rejectedPlanVerify16 === false
       && rejectedDelayVerify16 === false
-      && rejectedExpiredPlan16 === false
+      && rejectedExpiredPlanReceipt16.created === false
+      && rejectedExpiredPlanReceipt16.writeOwner > 0
+      && rejectedInvalidPlanReceipt16.created === false
+      && rejectedInvalidPlanReceipt16.writeOwner === 0
+      && rejectedExpiredWrapper16 === false
       && rejectedVerifyCreateCalls16 === 2
       && rejectedVerifyCreateCalls16 === createCallsBeforeExpiredPlan16
-      && rejectedVerifyClearCalls16 === 2
+      && rejectedVerifyClearCalls16 === 3
+      && rejectedVerifyClearCalls16 === clearCallsBeforeExpiredWrapper16
       && rejectedVerifySchedule16.nextTriggerAt === 0,
     '16U-2: 绝对/延迟建钟的 verify reject 与排队后过期都归一为 false，调用方红灯/watchdog 分支不会被 throw 绕过');
 
@@ -21601,7 +22377,7 @@ return plan;
     comfortClaimPersist17
   );
   const comfortCompleteCreate17 = comfortRunSource17.indexOf(
-    'const alarmCreated = await createPwmAlarmFromPlan(',
+    'const alarmWrite = await createPwmAlarmFromPlanWithReceipt(',
     comfortCompleteIntent17
   );
   const comfortCompleteFreeze17 = comfortRunSource17.indexOf(
@@ -21635,7 +22411,7 @@ return plan;
       && comfortRunSource17.includes("action: 'clear'")
       && comfortRunSource17.includes('isCurrent: () => isAutomationOperationCurrent(automationRevision)')
       && countOccurrences(comfortRunSource17, comfortClaimApply17) === 2,
-    '17F-0: comfort claim 重放冻结 state；complete 在建钟后冻结十字段并跨 await 重放，不越权改 page owner');
+    '17F-0: comfort claim 重放冻结 state；complete 在建钟后冻结 phase/clock/write-owner 并跨 await 重放，不越权改 page owner');
 
   const runComfortClaimSwapCase17 = async reason => {
     const now = new Date(2026, 7, 29, 12, 0, 1, 0).getTime();
@@ -21890,6 +22666,7 @@ return plan;
     'setScheduleNextTrigger', 'setSchedulePwmClockIntent', 'Date', 'staleAtBadge',
     `let schedule = initialSchedule;
     let pwmRuntimeRevision = 90;
+    let pwmAlarmWriteGeneration = 0;
     let activeAcToggleAttempt = null;
     let pwmCreated = false;
     let livePwm = null;
@@ -21898,6 +22675,13 @@ return plan;
     const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
     const calls = [];
     const persisted = [];
+    function claimPwmAlarmWriteOwner() {
+      pwmAlarmWriteGeneration += 1;
+      return pwmAlarmWriteGeneration;
+    }
+    function isPwmAlarmWriteOwnerCurrent(owner) {
+      return owner > 0 && owner === pwmAlarmWriteGeneration;
+    }
     ${clearPwmRetryFacade16}
     ${setNextTriggerAtSource16}
     ${comfortActiveSource17}
@@ -21943,9 +22727,12 @@ return plan;
     async function deferComfortStart() {
       throw new Error('successful completion must not defer');
     }
-    async function createPwmAlarmFromPlan(plan, tag, revision) {
+    async function createPwmAlarmFromPlanWithReceipt(plan, tag, revision) {
       calls.push('create-pwm:' + plan.nextTriggerAt + ':' + tag);
-      if (!isAutomationOperationCurrent(revision)) return false;
+      if (!isAutomationOperationCurrent(revision)) {
+        return { created: false, writeOwner: 0 };
+      }
+      const writeOwner = claimPwmAlarmWriteOwner();
       schedule.alarmCreatedAt = Date.now();
       schedule.alarmDelayMinutes = (plan.nextTriggerAt - Date.now()) / 60000;
       setNextTriggerAt(plan.nextTriggerAt, { plannedAt: Date.now() });
@@ -21956,7 +22743,7 @@ return plan;
         alarmDelayMinutes: schedule.alarmDelayMinutes
       };
       pwmCreated = true;
-      return true;
+      return { created: true, writeOwner };
     }
     async function createAlarm(name, options) {
       calls.push('alarm:' + name + ':' + (options?.when || options?.delayInMinutes || options?.periodInMinutes || 0));
