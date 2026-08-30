@@ -1893,6 +1893,23 @@ async function persistOwnedPwmAlarmFailure({
   return true;
 }
 
+async function persistOwnedVerifiedPwmState({
+  isCurrent,
+  verifiedClockState,
+  replayState,
+  persistReason
+}) {
+  const replayOwnedState = () => {
+    if (!isCurrent()) return false;
+    if (!replayVerifiedPwmClockState(verifiedClockState)) return false;
+    if (replayState() !== true) return false;
+    return isCurrent();
+  };
+  if (!replayOwnedState()) return false;
+  await persistSchedule(persistReason, { syncFromLiveAlarm: false });
+  return replayOwnedState();
+}
+
 async function executePwmLifecycleRecoveryFallback(action, context) {
   if (action === 'execute-current') {
     const handled = await executePwmStepWithRecovery({
@@ -3433,21 +3450,46 @@ async function restoreIntervalAlarmFromStorage(reason = '按 storage 剩余时�
   }
 
   const remainingMinutes = Math.max(1, (targetDueAt - now) / 60000);
+  const restoreClockIntentState = Object.freeze({
+    nextTriggerAt: targetDueAt,
+    smartClockPlannedAt: Number(schedule.smartClockPlannedAt)
+      || Number(schedule.alarmCreatedAt)
+      || now
+  });
   await clearPwmAlarm(automationRevision);
-  const alarmCreated = await createPwmAlarmFromPlan(
+  const alarmWrite = await createPwmAlarmFromPlanWithReceipt(
     { nextTriggerAt: targetDueAt },
     'restore-interval',
-    automationRevision
+    automationRevision,
+    { plannedAt: restoreClockIntentState.smartClockPlannedAt }
   );
-  if (alarmCreated === false) {
-    schedule.pageTimerError = 'storage 时钟恢复时 PWM 闹钟创建失败；等待看门狗继续恢复';
-    await createAlarm('ac-watchdog', { periodInMinutes: 5 });
-    await persistSchedule('restore-interval-alarm-failed', { syncFromLiveAlarm: false });
+  const restoreWriteIsCurrent = () => (
+    isAutomationOperationCurrent(automationRevision)
+    && isPwmAlarmWriteOwnerCurrent(alarmWrite.writeOwner)
+  );
+  if (!alarmWrite.created) {
+    const restoreAlarmFailureError = 'storage 时钟恢复时 PWM 闹钟创建失败；等待看门狗继续恢复';
+    await persistOwnedPwmAlarmFailure({
+      isCurrent: restoreWriteIsCurrent,
+      replayState: () => {
+        replayPwmClockIntentState(restoreClockIntentState);
+        schedule.pageTimerError = restoreAlarmFailureError;
+        return true;
+      },
+      persistReason: 'restore-interval-alarm-failed'
+    });
     return false;
   }
+  const verifiedClockState = snapshotVerifiedPwmClockState(alarmWrite.writeOwner);
+  if (!verifiedClockState) return false;
   await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-  if (!isAutomationOperationCurrent(automationRevision)) return false;
-  await persistSchedule(reason, { syncFromLiveAlarm: false });
+  const restorePersisted = await persistOwnedVerifiedPwmState({
+    isCurrent: restoreWriteIsCurrent,
+    verifiedClockState,
+    replayState: () => true,
+    persistReason: reason
+  });
+  if (!restorePersisted) return false;
 
   await updateBadge();
   console.log(`[AC扩展] ${reason}，剩余 ${remainingMinutes.toFixed(2)} 分钟`);
@@ -3669,6 +3711,9 @@ async function createPwmAlarmFromPlanWithReceipt(
   const ensureCurrent = typeof options?.ensureCurrent === 'function'
     ? options.ensureCurrent
     : null;
+  const requestedPlannedAt = Number(options?.plannedAt);
+  const hasRequestedPlannedAt = Number.isFinite(requestedPlannedAt)
+    && requestedPlannedAt > 0;
   const alarmWriteIsCurrent = () => (
     isPwmAlarmWriteCurrent(automationRevision)
     && (!ensureCurrent || ensureCurrent())
@@ -3708,7 +3753,9 @@ async function createPwmAlarmFromPlanWithReceipt(
 
       schedule.alarmCreatedAt = alarmCreatedAt;
       schedule.alarmDelayMinutes = alarmDelayMinutes;
-      setNextTriggerAt(verify.scheduledTime || nextTriggerAt);
+      setNextTriggerAt(verify.scheduledTime || nextTriggerAt, {
+        ...(hasRequestedPlannedAt ? { plannedAt: requestedPlannedAt } : {})
+      });
       return result(true);
     } catch (error) {
       await failPwmAlarmWrite(logTag, error);

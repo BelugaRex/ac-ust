@@ -6626,10 +6626,63 @@ return { reapplySmartSensitivityNow };`
       'schedule', 'chrome', 'isAutomationAllowed', 'isAutomationOperationCurrent',
       'getLiveAlarmEndMs', 'getStoredAlarmEndMs', 'getActiveSmartOnPwmRetryContext',
       'halfHourBoundaryAtOrBefore', 'nextHalfHourBoundary', 'clearPwmAlarm',
-      'createPwmAlarmFromPlan', 'createAlarm', 'persistSchedule', 'updateBadge',
-      'classifySmartOnClock', 'Date', 'console',
+      'createAlarm', 'persistSchedule', 'updateBadge', 'classifySmartOnClock',
+      'createdPlans', 'Date', 'console',
       `let pwmRuntimeRevision = 81;
+      let pwmAlarmWriteGeneration = 0;
       const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+      function isPwmAlarmWriteOwnerCurrent(owner) {
+        return owner > 0 && owner === pwmAlarmWriteGeneration;
+      }
+      async function createPwmAlarmFromPlanWithReceipt(
+        plan,
+        _tag,
+        _revision,
+        options = {}
+      ) {
+        createdPlans.push({ ...plan });
+        const writeOwner = ++pwmAlarmWriteGeneration;
+        schedule.smartClockPlannedAt = Number(options.plannedAt) || Date.now();
+        schedule.alarmCreatedAt = Date.now();
+        schedule.alarmDelayMinutes = (plan.nextTriggerAt - Date.now()) / 60000;
+        schedule.nextTriggerAt = plan.nextTriggerAt;
+        return { created: true, writeOwner };
+      }
+      function snapshotVerifiedPwmClockState(writeOwner) {
+        return Object.freeze({
+          nextTriggerAt: schedule.nextTriggerAt,
+          smartClockPlannedAt: schedule.smartClockPlannedAt,
+          alarmCreatedAt: schedule.alarmCreatedAt,
+          alarmDelayMinutes: schedule.alarmDelayMinutes,
+          pwmAlarmWriteOwner: writeOwner
+        });
+      }
+      function replayVerifiedPwmClockState(clockState) {
+        if (!isPwmAlarmWriteOwnerCurrent(clockState.pwmAlarmWriteOwner)) return false;
+        Object.assign(schedule, {
+          nextTriggerAt: clockState.nextTriggerAt,
+          smartClockPlannedAt: clockState.smartClockPlannedAt,
+          alarmCreatedAt: clockState.alarmCreatedAt,
+          alarmDelayMinutes: clockState.alarmDelayMinutes
+        });
+        return true;
+      }
+      function replayPwmClockIntentState(clockState) {
+        schedule.nextTriggerAt = clockState.nextTriggerAt;
+        schedule.smartClockPlannedAt = clockState.smartClockPlannedAt;
+        schedule.alarmCreatedAt = 0;
+        schedule.alarmDelayMinutes = 0;
+        return true;
+      }
+      async function persistOwnedPwmAlarmFailure() { return false; }
+      async function persistOwnedVerifiedPwmState({
+        isCurrent, verifiedClockState, replayState, persistReason
+      }) {
+        if (!isCurrent() || !replayVerifiedPwmClockState(verifiedClockState)
+            || replayState() !== true) return false;
+        await persistSchedule(persistReason, { syncFromLiveAlarm: false });
+        return isCurrent();
+      }
       ${restoreIntervalSource11}
       return restoreIntervalAlarmFromStorage;`
     )(
@@ -6643,16 +6696,21 @@ return { reapplySmartSensitivityNow };`
       pwmPhase.halfHourBoundaryAtOrBefore,
       pwmPhase.nextHalfHourBoundary,
       async () => true,
-      async plan => { createdPlans.push({ ...plan }); return true; },
       async () => true,
       async () => {},
       async () => {},
       pwmPhase.classifySmartOnClock,
+      createdPlans,
       RestoreDate11,
       testConsole
     );
     const result = await restore('dynamic drift restore');
-    return { result, createdPlans };
+    return {
+      result,
+      createdPlans,
+      schedule: restoreSchedule,
+      originAt: withOrigin ? boundaryAt - 10 * 60_000 : 0
+    };
   };
   const fractionalStoredRestore11 = await runStoredDriftRestore11(
     new Date(2026, 7, 17, 22, 30, 0, 0).getTime() + 500.5
@@ -6667,11 +6725,277 @@ return { reapplySmartSensitivityNow };`
   assertPass(fractionalStoredRestore11.result === true
       && fractionalStoredRestore11.createdPlans[0]?.nextTriggerAt
         === new Date(2026, 7, 17, 22, 30, 0, 0).getTime() + 500.5
+      && fractionalStoredRestore11.schedule.smartClockPlannedAt
+        === fractionalStoredRestore11.originAt
       && nonBoundaryStoredRestore11.result === false
       && nonBoundaryStoredRestore11.createdPlans.length === 0
       && originlessStoredRestore11.result === false
       && originlessStoredRestore11.createdPlans.length === 0,
     '11F-3B: 缺 live 时仅有 durable origin 的 storage 半点+500.5ms 可恢复；22:50 与无来源半点均拒绝');
+  const runOwnedStoredRestore11 = async ({
+    fail = false,
+    staleRevision = false,
+    invalidatePwmOwnerOnBadge = false,
+    invalidatePwmOwnerOnWatchdog = false
+  } = {}) => {
+    const nowMs = new Date(2026, 7, 17, 21, 10, 0, 0).getTime();
+    const targetDueAt = nowMs + 12 * 60_000;
+    const verifiedCreatedAt = nowMs + 5_000;
+    const initialSchedule = {
+      enabled: true,
+      pwmState: 'off',
+      nextTriggerAt: targetDueAt,
+      smartClockPlannedAt: nowMs,
+      alarmCreatedAt: nowMs,
+      alarmDelayMinutes: 12,
+      pageTimerMinutes: 12,
+      pageTimerTargetAt: targetDueAt,
+      pageTimerError: '',
+      smartMode: { enabled: false, sensitivity: 5 },
+      sentinel: 'restore-initial'
+    };
+    const replacementSchedule = {
+      ...structuredClone(initialSchedule),
+      nextTriggerAt: nowMs + 99 * 60_000,
+      smartClockPlannedAt: nowMs - 99_000,
+      alarmCreatedAt: nowMs - 88_000,
+      alarmDelayMinutes: 99,
+      pageTimerMinutes: 31,
+      pageTimerTargetAt: nowMs + 31 * 60_000,
+      pageTimerError: 'new page owner',
+      smartMode: { enabled: false, sensitivity: 9 },
+      sentinel: 'restore-replacement',
+      configSentinel: 'keep-restore-config'
+    };
+    const replacementBefore = structuredClone(replacementSchedule);
+    const controller = new Function(
+      'initialSchedule', 'replacementSchedule', 'targetDueAt', 'verifiedCreatedAt',
+      'fail', 'staleRevision', 'invalidatePwmOwnerOnBadge',
+      'invalidatePwmOwnerOnWatchdog', 'Date', 'console',
+      `let schedule = initialSchedule;
+      let pwmRuntimeRevision = 91;
+      let pwmAlarmWriteGeneration = 0;
+      let verifiedClockState = null;
+      const persisted = [];
+      const alarms = [];
+      function isAutomationAllowed() { return schedule.enabled === true; }
+      function isAutomationOperationCurrent(revision) {
+        return revision === pwmRuntimeRevision && isAutomationAllowed();
+      }
+      function isPwmAlarmWriteOwnerCurrent(owner) {
+        return owner > 0 && owner === pwmAlarmWriteGeneration;
+      }
+      function getLiveAlarmEndMs(alarm) { return Number(alarm?.scheduledTime) || 0; }
+      function getStoredAlarmEndMs() { return Number(schedule.nextTriggerAt) || 0; }
+      function classifySmartOnClock() { return { applicable: false, valid: true }; }
+      async function clearPwmAlarm() { pwmAlarmWriteGeneration += 1; return true; }
+      function replayPwmClockIntentState(clockState) {
+        schedule.nextTriggerAt = clockState.nextTriggerAt;
+        schedule.smartClockPlannedAt = clockState.smartClockPlannedAt;
+        schedule.alarmCreatedAt = 0;
+        schedule.alarmDelayMinutes = 0;
+        return true;
+      }
+      function snapshotVerifiedPwmClockState(owner) {
+        if (!isPwmAlarmWriteOwnerCurrent(owner)) return null;
+        return Object.freeze({ ...verifiedClockState, pwmAlarmWriteOwner: owner });
+      }
+      function replayVerifiedPwmClockState(clockState) {
+        if (!isPwmAlarmWriteOwnerCurrent(clockState?.pwmAlarmWriteOwner)) return false;
+        schedule.nextTriggerAt = clockState.nextTriggerAt;
+        schedule.smartClockPlannedAt = clockState.smartClockPlannedAt;
+        schedule.alarmCreatedAt = clockState.alarmCreatedAt;
+        schedule.alarmDelayMinutes = clockState.alarmDelayMinutes;
+        return true;
+      }
+      async function createPwmAlarmFromPlanWithReceipt(
+        plan,
+        _tag,
+        _revision,
+        options = {}
+      ) {
+        const writeOwner = ++pwmAlarmWriteGeneration;
+        if (fail) {
+          if (staleRevision) {
+            schedule = replacementSchedule;
+            pwmRuntimeRevision += 1;
+          }
+          return { created: false, writeOwner };
+        }
+        verifiedClockState = {
+          nextTriggerAt: plan.nextTriggerAt,
+          smartClockPlannedAt: Number(options.plannedAt) || verifiedCreatedAt,
+          alarmCreatedAt: verifiedCreatedAt,
+          alarmDelayMinutes: (plan.nextTriggerAt - verifiedCreatedAt) / 60000
+        };
+        Object.assign(schedule, verifiedClockState);
+        return { created: true, writeOwner };
+      }
+      async function createPwmAlarmFromPlan(plan) {
+        return (await createPwmAlarmFromPlanWithReceipt(plan)).created;
+      }
+      async function persistSchedule(reason, options = {}) {
+        persisted.push({
+          reason,
+          options: { ...options },
+          ref: schedule,
+          snapshot: structuredClone(schedule)
+        });
+      }
+      async function persistOwnedPwmAlarmFailure({ isCurrent, replayState, persistReason }) {
+        if (!isCurrent()) return false;
+        await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+        if (!isCurrent() || replayState() !== true) return false;
+        await persistSchedule(persistReason, { syncFromLiveAlarm: false });
+        return isCurrent() && replayState() === true;
+      }
+      async function persistOwnedVerifiedPwmState({
+        isCurrent, verifiedClockState: clockState, replayState, persistReason
+      }) {
+        const replay = () => isCurrent()
+          && replayVerifiedPwmClockState(clockState)
+          && replayState() === true;
+        if (!replay()) return false;
+        await persistSchedule(persistReason, { syncFromLiveAlarm: false });
+        return replay();
+      }
+      async function createAlarm(name) {
+        alarms.push(name);
+        if (name === 'ac-badge-tick') {
+          schedule = replacementSchedule;
+          if (invalidatePwmOwnerOnBadge) pwmAlarmWriteGeneration += 1;
+        }
+        if (name === 'ac-watchdog') {
+          schedule = replacementSchedule;
+          if (invalidatePwmOwnerOnWatchdog) pwmAlarmWriteGeneration += 1;
+        }
+        return true;
+      }
+      async function updateBadge() {}
+      const chrome = { alarms: { async get() { return null; } } };
+      const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+      ${restoreIntervalSource11}
+      return {
+        run: () => restoreIntervalAlarmFromStorage('owned restore'),
+        current: () => schedule,
+        verified: () => verifiedClockState,
+        persisted,
+        alarms
+      };`
+    )(
+      initialSchedule,
+      replacementSchedule,
+      targetDueAt,
+      verifiedCreatedAt,
+      fail,
+      staleRevision,
+      invalidatePwmOwnerOnBadge,
+      invalidatePwmOwnerOnWatchdog,
+      class extends Date { static now() { return nowMs; } },
+      testConsole
+    );
+    const result = await controller.run();
+    return {
+      result,
+      controller,
+      initialSchedule,
+      replacementSchedule,
+      replacementBefore
+    };
+  };
+  const ownedStoredRestoreSuccess11 = await runOwnedStoredRestore11();
+  const ownedStoredRestoreSuccessPersist11 = ownedStoredRestoreSuccess11.controller.persisted
+    .find(entry => entry.reason === 'owned restore');
+  const ownedStoredRestoreClock11 = ownedStoredRestoreSuccess11.controller.verified();
+  assertPass(ownedStoredRestoreSuccess11.result === true
+      && ownedStoredRestoreSuccess11.controller.current()
+        === ownedStoredRestoreSuccess11.replacementSchedule
+      && ownedStoredRestoreSuccessPersist11?.ref
+        === ownedStoredRestoreSuccess11.replacementSchedule
+      && ownedStoredRestoreSuccessPersist11?.options.syncFromLiveAlarm === false
+      && ownedStoredRestoreSuccessPersist11?.snapshot.sentinel === 'restore-replacement'
+      && ownedStoredRestoreSuccessPersist11?.snapshot.configSentinel === 'keep-restore-config'
+      && ownedStoredRestoreSuccessPersist11?.snapshot.smartMode?.sensitivity === 9
+      && ownedStoredRestoreSuccessPersist11?.snapshot.pageTimerMinutes === 31
+      && ownedStoredRestoreSuccessPersist11?.snapshot.pageTimerError === 'new page owner'
+      && ownedStoredRestoreSuccessPersist11?.snapshot.nextTriggerAt
+        === ownedStoredRestoreClock11?.nextTriggerAt
+      && ownedStoredRestoreSuccessPersist11?.snapshot.smartClockPlannedAt
+        === ownedStoredRestoreClock11?.smartClockPlannedAt
+      && ownedStoredRestoreSuccessPersist11?.snapshot.alarmCreatedAt
+        === ownedStoredRestoreClock11?.alarmCreatedAt
+      && ownedStoredRestoreSuccessPersist11?.snapshot.alarmDelayMinutes
+        === ownedStoredRestoreClock11?.alarmDelayMinutes,
+    '11F-3B-1: storage restore badge await 换对象后仅重放 receipt verified clock，保留新 page/config owner 并 false-sync persist');
+  const ownedStoredRestoreStale11 = await runOwnedStoredRestore11({
+    fail: true,
+    staleRevision: true
+  });
+  assertPass(ownedStoredRestoreStale11.result === false
+      && JSON.stringify(ownedStoredRestoreStale11.replacementSchedule)
+        === JSON.stringify(ownedStoredRestoreStale11.replacementBefore)
+      && !ownedStoredRestoreStale11.controller.alarms.includes('ac-watchdog')
+      && !ownedStoredRestoreStale11.controller.persisted.some(
+        entry => entry.reason === 'restore-interval-alarm-failed'
+      ),
+    '11F-3B-2: storage restore 建钟返回前 revision 换主时零旧 error/watchdog/failure persist');
+  const ownedStoredRestorePhysicalFailure11 = await runOwnedStoredRestore11({
+    fail: true
+  });
+  const ownedStoredRestoreFailurePersist11 = ownedStoredRestorePhysicalFailure11
+    .controller.persisted.find(entry => (
+      entry.reason === 'restore-interval-alarm-failed'
+    ));
+  assertPass(ownedStoredRestorePhysicalFailure11.result === false
+      && ownedStoredRestorePhysicalFailure11.controller.current()
+        === ownedStoredRestorePhysicalFailure11.replacementSchedule
+      && ownedStoredRestorePhysicalFailure11.controller.alarms.filter(
+        name => name === 'ac-watchdog'
+      ).length === 1
+      && ownedStoredRestoreFailurePersist11?.ref
+        === ownedStoredRestorePhysicalFailure11.replacementSchedule
+      && ownedStoredRestoreFailurePersist11?.options.syncFromLiveAlarm === false
+      && ownedStoredRestoreFailurePersist11?.snapshot.sentinel === 'restore-replacement'
+      && ownedStoredRestoreFailurePersist11?.snapshot.configSentinel
+        === 'keep-restore-config'
+      && ownedStoredRestoreFailurePersist11?.snapshot.smartMode?.sensitivity === 9
+      && ownedStoredRestoreFailurePersist11?.snapshot.pageTimerMinutes === 31
+      && ownedStoredRestoreFailurePersist11?.snapshot.pageTimerTargetAt
+        === ownedStoredRestorePhysicalFailure11.replacementBefore.pageTimerTargetAt
+      && ownedStoredRestoreFailurePersist11?.snapshot.nextTriggerAt
+        === ownedStoredRestorePhysicalFailure11.initialSchedule.nextTriggerAt
+      && ownedStoredRestoreFailurePersist11?.snapshot.smartClockPlannedAt
+        === ownedStoredRestorePhysicalFailure11.initialSchedule.smartClockPlannedAt
+      && ownedStoredRestoreFailurePersist11?.snapshot.alarmCreatedAt === 0
+      && ownedStoredRestoreFailurePersist11?.snapshot.alarmDelayMinutes === 0
+      && ownedStoredRestoreFailurePersist11?.snapshot.pageTimerError.includes(
+        'PWM 闹钟创建失败'
+      ),
+    '11F-3B-3: storage restore 物理建钟失败时向 watchdog replacement 重放原绝对 intent/error，一次 false-sync persist 且保留 page/config owner');
+  const ownedStoredRestoreBadgeStale11 = await runOwnedStoredRestore11({
+    invalidatePwmOwnerOnBadge: true
+  });
+  assertPass(ownedStoredRestoreBadgeStale11.result === false
+      && JSON.stringify(ownedStoredRestoreBadgeStale11.replacementSchedule)
+        === JSON.stringify(ownedStoredRestoreBadgeStale11.replacementBefore)
+      && !ownedStoredRestoreBadgeStale11.controller.persisted.some(
+        entry => entry.reason === 'owned restore'
+      ),
+    '11F-3B-4: storage restore badge await 被同 revision 新 PWM owner 抢占后零 clock replay/零 final persist');
+  const ownedStoredRestoreWatchdogStale11 = await runOwnedStoredRestore11({
+    fail: true,
+    invalidatePwmOwnerOnWatchdog: true
+  });
+  assertPass(ownedStoredRestoreWatchdogStale11.result === false
+      && JSON.stringify(ownedStoredRestoreWatchdogStale11.replacementSchedule)
+        === JSON.stringify(ownedStoredRestoreWatchdogStale11.replacementBefore)
+      && ownedStoredRestoreWatchdogStale11.controller.alarms.filter(
+        name => name === 'ac-watchdog'
+      ).length === 1
+      && !ownedStoredRestoreWatchdogStale11.controller.persisted.some(
+        entry => entry.reason === 'restore-interval-alarm-failed'
+      ),
+    '11F-3B-5: storage restore failure 的 watchdog await 内 PWM owner 换主后不重放旧 intent/error、不落盘');
   const midMinuteTarget11F = typeof pwmPhase.nextSafePageTimerTargetAt === 'function'
     ? pwmPhase.nextSafePageTimerTargetAt(new Date(2026, 7, 17, 2, 11, 1, 0).getTime())
     : 0;
@@ -18637,6 +18961,111 @@ return plan;
       && !Object.hasOwn(ownedRuntimeInfo16 || {}, 'ensureCurrent'),
     '16H-1: 显式 runtime owner 可在 create/get await 后恢复同 revision 状态，内部 guard 不泄漏给 Chrome alarm info');
 
+  const verifiedPwmPersistSource16 = extractSourceSection(
+    backgroundSource,
+    'async function persistOwnedVerifiedPwmState({',
+    '\nasync function executePwmLifecycleRecoveryFallback',
+    'verified PWM success persist helper'
+  );
+  const loadVerifiedPwmPersist16 = ({ replayClock, persist }) => new Function(
+    'replayVerifiedPwmClockState', 'persistSchedule',
+    `${verifiedPwmPersistSource16}; return persistOwnedVerifiedPwmState;`
+  )(replayClock, persist);
+  const verifiedPwmClock16 = Object.freeze({
+    nextTriggerAt: 710,
+    smartClockPlannedAt: 711,
+    alarmCreatedAt: 712,
+    alarmDelayMinutes: 713,
+    pwmAlarmWriteOwner: 17
+  });
+  let verifiedPwmOwner16 = 17;
+  let verifiedPwmSchedule16 = {
+    sentinel: 'verified-initial',
+    configSentinel: 'initial-config'
+  };
+  const verifiedPwmReplacement16 = {
+    sentinel: 'verified-replacement',
+    configSentinel: 'keep-new-config'
+  };
+  const verifiedPwmPersists16 = [];
+  const persistVerifiedPwm16 = loadVerifiedPwmPersist16({
+    replayClock(clockState) {
+      if (clockState.pwmAlarmWriteOwner !== verifiedPwmOwner16) return false;
+      Object.assign(verifiedPwmSchedule16, {
+        nextTriggerAt: clockState.nextTriggerAt,
+        smartClockPlannedAt: clockState.smartClockPlannedAt,
+        alarmCreatedAt: clockState.alarmCreatedAt,
+        alarmDelayMinutes: clockState.alarmDelayMinutes
+      });
+      return true;
+    },
+    async persist(reason, options) {
+      verifiedPwmPersists16.push({
+        reason,
+        options: { ...options },
+        snapshot: structuredClone(verifiedPwmSchedule16)
+      });
+      verifiedPwmSchedule16 = verifiedPwmReplacement16;
+    }
+  });
+  const verifiedPwmPersisted16 = await persistVerifiedPwm16({
+    isCurrent: () => verifiedPwmOwner16 === 17,
+    verifiedClockState: verifiedPwmClock16,
+    replayState: () => {
+      verifiedPwmSchedule16.phaseSentinel = 'owned-phase';
+      return true;
+    },
+    persistReason: 'verified-success'
+  });
+  assertPass(verifiedPwmPersisted16 === true
+      && verifiedPwmPersists16.length === 1
+      && verifiedPwmPersists16[0]?.reason === 'verified-success'
+      && verifiedPwmPersists16[0]?.options.syncFromLiveAlarm === false
+      && verifiedPwmPersists16[0]?.snapshot.phaseSentinel === 'owned-phase'
+      && verifiedPwmSchedule16 === verifiedPwmReplacement16
+      && verifiedPwmReplacement16.configSentinel === 'keep-new-config'
+      && verifiedPwmReplacement16.phaseSentinel === 'owned-phase'
+      && verifiedPwmReplacement16.nextTriggerAt === verifiedPwmClock16.nextTriggerAt
+      && verifiedPwmReplacement16.smartClockPlannedAt
+        === verifiedPwmClock16.smartClockPlannedAt
+      && verifiedPwmReplacement16.alarmCreatedAt === verifiedPwmClock16.alarmCreatedAt
+      && verifiedPwmReplacement16.alarmDelayMinutes
+        === verifiedPwmClock16.alarmDelayMinutes,
+    '16H-2: verified success helper 在 persist await 换对象后重放 owner clock/phase，保留 replacement config 且禁止 live-sync');
+
+  const staleVerifiedPwmReplacement16 = {
+    sentinel: 'verified-stale-replacement',
+    configSentinel: 'keep-stale-config'
+  };
+  const staleVerifiedPwmBefore16 = structuredClone(staleVerifiedPwmReplacement16);
+  verifiedPwmSchedule16 = { sentinel: 'verified-stale-initial' };
+  verifiedPwmOwner16 = 17;
+  const stalePersistVerifiedPwm16 = loadVerifiedPwmPersist16({
+    replayClock(clockState) {
+      if (clockState.pwmAlarmWriteOwner !== verifiedPwmOwner16) return false;
+      verifiedPwmSchedule16.nextTriggerAt = clockState.nextTriggerAt;
+      return true;
+    },
+    async persist() {
+      verifiedPwmSchedule16 = staleVerifiedPwmReplacement16;
+      verifiedPwmOwner16 = 18;
+    }
+  });
+  const staleVerifiedPwmPersisted16 = await stalePersistVerifiedPwm16({
+    isCurrent: () => verifiedPwmOwner16 === 17,
+    verifiedClockState: verifiedPwmClock16,
+    replayState: () => {
+      verifiedPwmSchedule16.phaseSentinel = 'must-not-replay';
+      return true;
+    },
+    persistReason: 'verified-stale'
+  });
+  assertPass(staleVerifiedPwmPersisted16 === false
+      && verifiedPwmSchedule16 === staleVerifiedPwmReplacement16
+      && JSON.stringify(staleVerifiedPwmReplacement16)
+        === JSON.stringify(staleVerifiedPwmBefore16),
+    '16H-3: verified success helper 在 persist await 被新 PWM owner 抢占后不向 replacement 重放旧 clock/phase');
+
   const pageTimerMessageQueueStart16 = backgroundSource.indexOf(
     'let pageTimerMessageWriteChain = Promise.resolve();'
   );
@@ -21963,6 +22392,7 @@ return plan;
   const revisionOwnedSchedule16 = {
     enabled: true,
     nextTriggerAt: 0,
+    smartClockPlannedAt: 0,
     alarmCreatedAt: 0,
     alarmDelayMinutes: 0
   };
@@ -21995,14 +22425,21 @@ return plan;
   const revisionOwnedPwmAlarm16 = new Function(
     'schedule', 'createAlarm', 'chrome', 'isAutomationAllowed',
     'isAutomationOperationCurrent', 'setNextTriggerAt',
-    `${pwmAlarmCreationBody16}; return { createPwmAlarmFromPlan };`
+    `${pwmAlarmCreationBody16}; return {
+      createPwmAlarmFromPlan,
+      createPwmAlarmFromPlanWithReceipt
+    };`
   )(
     revisionOwnedSchedule16,
     revisionOwnedCreateAlarm16,
     revisionOwnedChrome16,
     () => true,
     revision => revision === pwmAlarmRevision16,
-    value => { revisionOwnedSchedule16.nextTriggerAt = value; }
+    (value, options = {}) => {
+      revisionOwnedSchedule16.nextTriggerAt = value;
+      revisionOwnedSchedule16.smartClockPlannedAt = Number(options.plannedAt)
+        || Date.now();
+    }
   );
   const oldPwmTarget16 = Date.now() + 10 * 60_000;
   const newPwmTarget16 = Date.now() + 20 * 60_000;
@@ -22030,6 +22467,20 @@ return plan;
       && livePwmAlarm16?.scheduledTime === newPwmTarget16
       && revisionOwnedSchedule16.nextTriggerAt === newPwmTarget16,
     '16U-1: 旧 PWM 创建失效并清理后，新 revision 才串行建 alarm，最终时钟只属于新 lifecycle');
+  const durablePwmOrigin16 = Date.now() - 7 * 60_000;
+  const plannedPwmTarget16 = Date.now() + 25 * 60_000;
+  const plannedPwmReceipt16 = await revisionOwnedPwmAlarm16
+    .createPwmAlarmFromPlanWithReceipt(
+      { nextTriggerAt: plannedPwmTarget16 },
+      'durable-origin',
+      2,
+      { plannedAt: durablePwmOrigin16 }
+    );
+  assertPass(plannedPwmReceipt16.created === true
+      && plannedPwmReceipt16.writeOwner > 0
+      && revisionOwnedSchedule16.nextTriggerAt === plannedPwmTarget16
+      && revisionOwnedSchedule16.smartClockPlannedAt === durablePwmOrigin16,
+    '16U-1B: 真实 receipt writer 显式 plannedAt 时保留 durable origin，不用恢复建钟时刻冒充计划来源');
 
   let guardedPageOwner16 = 1;
   let guardedPwmLiveAlarm16 = null;

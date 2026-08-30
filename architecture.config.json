@@ -435,8 +435,12 @@
         "function\\s+claimPwmAlarmWriteOwner\\s*\\(",
         "async\\s+function\\s+createPwmAlarmFromPlanWithReceipt\\s*\\(",
         "const\\s+alarmWriteIsCurrent\\s*=\\s*\\(\\s*\\)\\s*=>",
+        "const\\s+requestedPlannedAt\\s*=\\s*Number\\(options\\?\\.plannedAt\\)",
+        "setNextTriggerAt\\s*\\(\\s*verify\\.scheduledTime\\s*\\|\\|\\s*nextTriggerAt\\s*,\\s*\\{\\s*\\.\\.\\.\\(hasRequestedPlannedAt\\s*\\?\\s*\\{\\s*plannedAt\\s*:\\s*requestedPlannedAt",
+        "plannedAt\\s*:\\s*restoreClockIntentState\\.smartClockPlannedAt",
         "ensureCurrent\\s*:\\s*\\(\\s*\\)\\s*=>",
         "async\\s+function\\s+persistOwnedPwmAlarmFailure\\s*\\(",
+        "async\\s+function\\s+persistOwnedVerifiedPwmState\\s*\\(",
         "setNextTriggerAt\\s*\\(\\s*clockState\\.nextTriggerAt\\s*,\\s*\\{\\s*plannedAt\\s*:\\s*clockState\\.smartClockPlannedAt"
       ]
     },
