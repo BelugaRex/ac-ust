@@ -161,6 +161,7 @@
           "setSchedulePwmClockIntent",
           "replaceSchedulePwmRetryState",
           "replaceSchedulePageTimerRetryState",
+          "replaceSchedulePageTimerState",
           "recordSchedulePageTimerFailureState",
           "clearSchedulePageTimerProofState",
           "recordSchedulePageTimerProofState"
@@ -174,6 +175,7 @@
             "setSchedulePwmClockIntent",
             "replaceSchedulePwmRetryState",
             "replaceSchedulePageTimerRetryState",
+            "replaceSchedulePageTimerState",
             "recordSchedulePageTimerFailureState",
             "clearSchedulePageTimerProofState",
             "recordSchedulePageTimerProofState"
@@ -433,14 +435,20 @@
         "function\\s+replayVerifiedPwmClockState\\s*\\(",
         "isPwmAlarmWriteOwnerCurrent\\s*\\(\\s*clockState\\?\\.pwmAlarmWriteOwner\\s*\\)",
         "function\\s+claimPwmAlarmWriteOwner\\s*\\(",
+        "async\\s+function\\s+clearPwmAlarmWithReceipt\\s*\\(",
         "async\\s+function\\s+createPwmAlarmFromPlanWithReceipt\\s*\\(",
         "const\\s+alarmWriteIsCurrent\\s*=\\s*\\(\\s*\\)\\s*=>",
+        "const\\s+previousWriteOwner\\s*=\\s*Number\\(options\\?\\.previousWriteOwner\\)",
         "const\\s+requestedPlannedAt\\s*=\\s*Number\\(options\\?\\.plannedAt\\)",
         "setNextTriggerAt\\s*\\(\\s*verify\\.scheduledTime\\s*\\|\\|\\s*nextTriggerAt\\s*,\\s*\\{\\s*\\.\\.\\.\\(hasRequestedPlannedAt\\s*\\?\\s*\\{\\s*plannedAt\\s*:\\s*requestedPlannedAt",
         "plannedAt\\s*:\\s*restoreClockIntentState\\.smartClockPlannedAt",
         "ensureCurrent\\s*:\\s*\\(\\s*\\)\\s*=>",
         "async\\s+function\\s+persistOwnedPwmAlarmFailure\\s*\\(",
+        "async\\s+function\\s+persistOwnedPwmAlarmFailure[\\s\\S]{0,700}?await\\s+createAlarm\\s*\\([\\s\\S]{0,350}?if\\s*\\(\\s*!isCurrent\\(\\)\\s*\\|\\|\\s*replayState\\(\\)\\s*!==\\s*true\\s*\\)\\s*return\\s+false[\\s\\S]{0,300}?await\\s+persistSchedule\\s*\\([\\s\\S]{0,250}?syncFromLiveAlarm\\s*:\\s*false[\\s\\S]{0,250}?if\\s*\\(\\s*!isCurrent\\(\\)\\s*\\|\\|\\s*replayState\\(\\)\\s*!==\\s*true\\s*\\)\\s*return\\s+false",
         "async\\s+function\\s+persistOwnedVerifiedPwmState\\s*\\(",
+        "async\\s+function\\s+commitOwnedPwmAlarmPlan\\s*\\(",
+        "const\\s+writeIsCurrent\\s*=\\s*\\(\\s*\\)\\s*=>\\s*\\(\\s*isCurrent\\(\\)\\s*&&\\s*isPwmAlarmWriteOwnerCurrent\\(\\s*alarmWrite\\.writeOwner\\s*\\)\\s*\\)",
+        "return\\s+runSerializedPwmAlarmWrite\\s*\\(\\s*async\\s*\\(\\s*\\)\\s*=>\\s*\\{[\\s\\S]{0,300}?hasPreviousWriteOwner[\\s\\S]{0,180}?!isPwmAlarmWriteOwnerCurrent\\(\\s*previousWriteOwner\\s*\\)[\\s\\S]{0,160}?const\\s+writeOwner\\s*=\\s*claimPwmAlarmWriteOwner\\(\\)",
         "setNextTriggerAt\\s*\\(\\s*clockState\\.nextTriggerAt\\s*,\\s*\\{\\s*plannedAt\\s*:\\s*clockState\\.smartClockPlannedAt"
       ]
     },
@@ -463,22 +471,57 @@
       "requirePatterns": [
         "function\\s+claimPageTimerWriteOwner\\s*\\(",
         "function\\s+invalidatePageTimerWriteOwner\\s*\\(",
+        "function\\s+createOwnedPageTimerStateReceipt\\s*\\(",
+        "function\\s+replayOwnedPageTimerState\\s*\\(",
         "let\\s+pageTimerRetryAlarmWriteGeneration\\s*=\\s*0",
         "function\\s+writePageTimerRetryAlarm\\s*\\(",
         "function\\s+clearPageTimerRetryAlarmPhysical\\s*\\(",
         "isPageTimerWriteOwnerCurrent\\s*\\(\\s*pageTimerWriteOwner\\s*\\)",
+        "const\\s+pageTimerWriteIsCurrent\\s*=\\s*\\(\\s*\\)\\s*=>\\s*\\([\\s\\S]{0,220}?isPageTimerWriteOwnerCurrent\\(\\s*pageTimerWriteOwner\\s*\\)\\s*\\)\\s*&&\\s*\\(\\s*typeof\\s+ensureCurrent\\s*!=[\\s\\S]{0,100}?ensureCurrent\\(\\)",
+        "const\\s+lifecycleWriteIsCurrent\\s*=\\s*\\(\\s*\\)\\s*=>[\\s\\S]{0,650}?pwmRuntimeRevision\\s*===\\s*runtimeOwnerRevision\\s*\\)\\s*&&\\s*\\(\\s*typeof\\s+ensureCurrent\\s*!=[\\s\\S]{0,100}?ensureCurrent\\(\\)",
+        "const\\s+persistenceWriteIsCurrent\\s*=\\s*\\(\\s*\\)\\s*=>[\\s\\S]{0,450}?isTimerBasedShutdownCurrent\\(\\s*shutdownRevision\\s*\\)\\s*\\)\\s*&&\\s*\\(\\s*typeof\\s+ensureCurrent\\s*!=[\\s\\S]{0,100}?ensureCurrent\\(\\)",
+        "sendSerializedPageTimerMessage\\s*\\(\\s*tabId\\s*,\\s*\\{[\\s\\S]*?pageTimerWriteOwner\\s*,\\s*ensureCurrent\\s*\\)",
+        "writePageTimerOnExactHomeTab\\s*\\(\\s*tab\\.id\\s*,\\s*minutes\\s*,\\s*\\{[\\s\\S]{0,350}?pageTimerWriteOwner\\s*,\\s*ensureCurrent",
+        "verifyPageTimerPersistence\\s*\\(\\s*expectedValue\\s*,\\s*\\{[\\s\\S]*?ensureCurrent\\s*:\\s*automationWriteIsCurrent",
+        "const\\s+readback\\s*=\\s*await\\s+sendReadMessageToExactACHome\\s*\\([\\s\\S]{0,250}?if\\s*\\(\\s*!persistenceWriteIsCurrent\\(\\)\\s*\\)",
         "pageTimerStale\\s*:\\s*true",
+        "return\\s*\\{\\s*\\.\\.\\.failure\\s*,\\s*pageTimerWriteOwner\\s*,\\s*pageTimerState\\s*\\}",
+        "verified\\s*:\\s*true[\\s\\S]*?pageTimerWriteOwner\\s*,\\s*pageTimerState",
         "function\\s+clearPageTimerProofState\\s*\\(\\s*\\)\\s*\\{\\s*const\\s+pageTimerWriteOwner\\s*=\\s*invalidatePageTimerWriteOwner\\s*\\(\\s*\\)",
         "replaceSchedulePageTimerRetryState\\s*\\(\\s*schedule\\s*[,)]",
+        "replaceSchedulePageTimerState\\s*\\(\\s*schedule\\s*,",
         "recordSchedulePageTimerFailureState\\s*\\(\\s*schedule\\s*,",
+        "if\\s*\\(\\s*!failureStateIsCurrent\\(\\)\\s*\\)\\s*return\\s+staleAutomationResult\\(\\)\\s*;\\s*recordSchedulePageTimerFailureState\\s*\\(\\s*schedule\\s*,\\s*pageTimerError\\s*,\\s*retryState\\s*\\)",
         "clearSchedulePageTimerProofState\\s*\\(\\s*schedule\\s*\\)",
-        "recordSchedulePageTimerProofState\\s*\\(\\s*schedule\\s*,"
+        "recordSchedulePageTimerProofState\\s*\\(\\s*schedule\\s*,",
+        "const\\s+retryAlarmClear\\s*=\\s*await\\s+writePageTimerRetryAlarm\\s*\\([\\s\\S]{0,350}?if\\s*\\(\\s*!automationWriteIsCurrent\\(\\)\\s*\\)\\s*return\\s+staleAutomationResult\\(\\)\\s*;\\s*recordSchedulePageTimerProofState"
       ],
       "forbidPatterns": [
         "\\bschedule\\.pageTimerMinutes\\s*=(?!=)",
         "\\bschedule\\.pageTimerTargetAt\\s*=(?!=)",
         "\\bschedule\\.pageTimerRetryAt\\s*=(?!=)",
         "\\bschedule\\.pageTimerRetryMinutes\\s*=(?!=)"
+      ]
+    },
+    {
+      "name": "smart sensitivity reapply binds page and PWM write owners",
+      "files": ["background.js"],
+      "requirePatterns": [
+        "function\\s+snapshotSmartReapplyState\\s*\\(\\s*derivedState\\s*,\\s*pageTimerState[\\s\\S]*?onMinutes\\s*:\\s*derivedState\\.onMinutes[\\s\\S]*?pageTimerMinutes\\s*:\\s*pageTimerState\\.pageTimerMinutes",
+        "function\\s+replaySmartReapplyState\\s*\\(",
+        "const\\s+clearAlarmWrite\\s*=\\s*await\\s+clearPwmAlarmWithReceipt\\s*\\(",
+        "const\\s+pageTimerWriteOwner\\s*=\\s*Number\\(timerResult\\?\\.pageTimerWriteOwner\\)",
+        "const\\s+reapplyTargetAt\\s*=\\s*Number\\(timerResult\\.targetAt\\)",
+        "if\\s*\\(\\s*!wasOnPhase\\s*\\)\\s*\\{\\s*await\\s+persistSchedule\\s*\\([^,]+,\\s*\\{\\s*syncFromLiveAlarm\\s*:\\s*false",
+        "const\\s+reapplyDerivedState\\s*=\\s*Object\\.freeze\\s*\\(\\s*\\{[\\s\\S]*?smartOnBoundaryAt\\s*:\\s*activeSmartBoundaryAt",
+        "const\\s+clearAlarmWrite\\s*=\\s*await\\s+clearPwmAlarmWithReceipt[\\s\\S]*?await\\s+abortStaleAutomation\\s*\\(\\s*oldPwmRuntimeRevision[\\s\\S]*?\\|\\|\\s*!reapplyContextIsCurrent\\(\\)[\\s\\S]*?\\|\\|\\s*!isPwmAlarmWriteOwnerCurrent\\(\\s*clearAlarmWrite\\.writeOwner\\s*\\)",
+        "setPageTimer\\s*\\(\\s*minutes\\s*,\\s*\\{[\\s\\S]*?automationRevision\\s*:\\s*oldPwmRuntimeRevision\\s*,[\\s\\S]*?ensureCurrent\\s*:\\s*\\(\\s*\\)\\s*=>\\s*\\(\\s*reapplyContextIsCurrent\\(\\)\\s*&&\\s*isPwmAlarmWriteOwnerCurrent\\(\\s*clearAlarmWrite\\.writeOwner\\s*\\)",
+        "const\\s+reapplyStateIsCurrent\\s*=\\s*\\(\\s*\\)\\s*=>\\s*\\(\\s*reapplyContextIsCurrent\\(\\)\\s*&&\\s*isPageTimerWriteOwnerCurrent\\(\\s*pageTimerWriteOwner\\s*\\)",
+        "if\\s*\\(\\s*!reapplyStateIsCurrent\\(\\)\\s*\\|\\|\\s*!isPwmAlarmWriteOwnerCurrent\\(\\s*clearAlarmWrite\\.writeOwner\\s*\\)\\s*\\)",
+        "snapshotSmartReapplyState\\s*\\(\\s*reapplyDerivedState\\s*,\\s*timerResult\\?\\.pageTimerState",
+        "snapshotSmartReapplyState\\s*\\(\\s*reapplyDerivedState\\s*,\\s*timerResult\\.pageTimerState",
+        "commitOwnedPwmAlarmPlan\\s*\\(\\s*\\{\\s*plan\\s*:\\s*\\{\\s*nextTriggerAt\\s*:\\s*retryAt\\s*\\}[\\s\\S]*?previousWriteOwner\\s*:\\s*clearAlarmWrite\\.writeOwner[\\s\\S]*?plannedAt\\s*:\\s*retryClockIntentState\\.smartClockPlannedAt[\\s\\S]*?isCurrent\\s*:\\s*reapplyStateIsCurrent[\\s\\S]*?replayFailureState\\s*:\\s*\\(\\s*\\)\\s*=>[\\s\\S]*?replayPwmClockIntentState\\s*\\(\\s*retryClockIntentState\\s*\\)[\\s\\S]*?replaySmartReapplyState\\s*\\(\\s*retryAlarmFailureState\\s*\\)[\\s\\S]*?replaySuccessState\\s*:\\s*\\(\\s*\\)\\s*=>\\s*replaySmartReapplyState\\s*\\(\\s*reapplyRetryState\\s*\\)",
+        "commitOwnedPwmAlarmPlan\\s*\\(\\s*\\{\\s*plan\\s*:\\s*reapplyPlan[\\s\\S]*?previousWriteOwner\\s*:\\s*clearAlarmWrite\\.writeOwner[\\s\\S]*?plannedAt\\s*:\\s*reapplyClockIntentState\\.smartClockPlannedAt[\\s\\S]*?isCurrent\\s*:\\s*reapplyStateIsCurrent[\\s\\S]*?replayFailureState\\s*:\\s*\\(\\s*\\)\\s*=>[\\s\\S]*?replayPwmClockIntentState\\s*\\(\\s*reapplyClockIntentState\\s*\\)[\\s\\S]*?replaySmartReapplyState\\s*\\(\\s*reapplyAlarmFailureState\\s*\\)[\\s\\S]*?replaySuccessState\\s*:\\s*\\(\\s*\\)\\s*=>\\s*replaySmartReapplyState\\s*\\(\\s*reapplyCommitState\\s*\\)"
       ]
     },
     {

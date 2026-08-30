@@ -1910,6 +1910,76 @@ async function persistOwnedVerifiedPwmState({
   return replayOwnedState();
 }
 
+async function commitOwnedPwmAlarmPlan({
+  plan,
+  logTag,
+  automationRevision,
+  previousWriteOwner = 0,
+  plannedAt = 0,
+  isCurrent,
+  replayFailureState,
+  replaySuccessState,
+  failurePersistReason,
+  successPersistReason
+}) {
+  if (typeof isCurrent !== 'function'
+      || typeof replayFailureState !== 'function'
+      || typeof replaySuccessState !== 'function') {
+    throw new TypeError('owned PWM alarm commit 缺少 state owner/replay');
+  }
+  const alarmWrite = await createPwmAlarmFromPlanWithReceipt(
+    plan,
+    logTag,
+    automationRevision,
+    {
+      plannedAt,
+      previousWriteOwner,
+      ensureCurrent: isCurrent
+    }
+  );
+  const writeIsCurrent = () => (
+    isCurrent()
+    && isPwmAlarmWriteOwnerCurrent(alarmWrite.writeOwner)
+  );
+  const result = (created, persisted, stale) => Object.freeze({
+    created,
+    persisted,
+    stale,
+    writeOwner: alarmWrite.writeOwner
+  });
+
+  if (!alarmWrite.created) {
+    if (!writeIsCurrent()) return result(false, false, true);
+    const failurePersisted = await persistOwnedPwmAlarmFailure({
+      isCurrent: writeIsCurrent,
+      replayState: replayFailureState,
+      persistReason: failurePersistReason
+    });
+    if (!failurePersisted) return result(false, false, true);
+    await updateBadge();
+    return result(false, true, false);
+  }
+
+  const verifiedClockState = snapshotVerifiedPwmClockState(
+    alarmWrite.writeOwner
+  );
+  if (!verifiedClockState) return result(true, false, true);
+  await createAlarm('ac-badge-tick', {
+    delayInMinutes: 1,
+    ensureCurrent: writeIsCurrent
+  });
+  if (!writeIsCurrent()) return result(true, false, true);
+  const successPersisted = await persistOwnedVerifiedPwmState({
+    isCurrent: writeIsCurrent,
+    verifiedClockState,
+    replayState: replaySuccessState,
+    persistReason: successPersistReason
+  });
+  if (!successPersisted) return result(true, false, true);
+  await updateBadge();
+  return result(true, true, false);
+}
+
 async function executePwmLifecycleRecoveryFallback(action, context) {
   if (action === 'execute-current') {
     const handled = await executePwmStepWithRecovery({
@@ -2455,6 +2525,49 @@ async function applyPreparedSmartModeDurations(options = {}) {
   }
 }
 
+function snapshotSmartReapplyState(derivedState, pageTimerState, options = {}) {
+  if (!isPageTimerWriteOwnerCurrent(pageTimerState?.pageTimerWriteOwner)) {
+    return null;
+  }
+  const hasPageTimerError = Object.prototype.hasOwnProperty.call(
+    options,
+    'pageTimerError'
+  );
+  return Object.freeze({
+    onMinutes: derivedState.onMinutes,
+    offMinutes: derivedState.offMinutes,
+    smartOnBoundaryAt: Number(derivedState.smartOnBoundaryAt) || 0,
+    pageTimerState: Object.freeze({
+      pageTimerMinutes: pageTimerState.pageTimerMinutes ?? null,
+      pageTimerTargetAt: Number(pageTimerState.pageTimerTargetAt) || 0,
+      pageTimerError: hasPageTimerError
+        ? options.pageTimerError
+        : (pageTimerState.pageTimerError ?? ''),
+      pageTimerRetryAt: Number(pageTimerState.pageTimerRetryAt) || 0,
+      pageTimerRetryMinutes: Number(pageTimerState.pageTimerRetryMinutes) || 0,
+      pageTimerWriteOwner: Number(pageTimerState.pageTimerWriteOwner)
+    })
+  });
+}
+
+function replaySmartReapplyState(reapplyState) {
+  if (!replayOwnedPageTimerState(reapplyState?.pageTimerState)) return false;
+  schedule.onMinutes = reapplyState.onMinutes;
+  schedule.offMinutes = reapplyState.offMinutes;
+  schedule.smartOnBoundaryAt = reapplyState.smartOnBoundaryAt;
+  return true;
+}
+
+function withSmartReapplyPageTimerError(reapplyState, pageTimerError) {
+  return Object.freeze({
+    ...reapplyState,
+    pageTimerState: Object.freeze({
+      ...reapplyState.pageTimerState,
+      pageTimerError
+    })
+  });
+}
+
 // 智能模式：滑块松开后立即按新灵敏度重设当前 ON 相位的 Power-off after。
 // 配合 updateSchedule(restart=false)——后者只持久化灵敏度、不打断当前周期；
 // 本函数补上「即时反馈」，让页面关机定时器不再等下一个 30 分钟周期才变化。
@@ -2494,8 +2607,15 @@ async function reapplySmartSensitivityNow() {
       || (Number(schedule.smartOnBoundaryAt) || 0) !== oldSmartBoundaryAt) {
     return { retry: true };
   }
+  const reapplyOwner = Object.freeze({
+    automationRevision: oldPwmRuntimeRevision,
+    pwmState: oldPwmState,
+    mode: schedule.mode,
+    clockMode: !!schedule.clockMode,
+    smartSensitivity: schedule.smartMode.sensitivity
+  });
   const suggested = computeSmartOnMinutes({
-    sensitivity: schedule.smartMode.sensitivity,
+    sensitivity: reapplyOwner.smartSensitivity,
     temperature: weather.temperature,
     dewPoint: weather.dewPoint,
     windSpeedMs: weather.windSpeedMs,
@@ -2509,9 +2629,15 @@ async function reapplySmartSensitivityNow() {
     ? SMART_MODE.CYCLE_MINUTES
     : suggested.onMinutes;
   schedule.offMinutes = Math.max(1, suggested.offMinutes);
+  const reapplyDurations = Object.freeze({
+    onMinutes: schedule.onMinutes,
+    offMinutes: schedule.offMinutes
+  });
 
   if (!wasOnPhase) {
-    await persistSchedule('reapply-smart-sensitivity-off-phase');
+    await persistSchedule('reapply-smart-sensitivity-off-phase', {
+      syncFromLiveAlarm: false
+    });
     return;
   }
 
@@ -2538,6 +2664,12 @@ async function reapplySmartSensitivityNow() {
       ? previousSmartBoundaryAt
       : 0;
   schedule.smartOnBoundaryAt = activeSmartBoundaryAt;
+  // storage.onChanged 可在任意后续 await 中整体替换 schedule；事务字段必须
+  // 在首个 await 前冻结，不能事后从可替换全局对象回读。
+  const reapplyDerivedState = Object.freeze({
+    ...reapplyDurations,
+    smartOnBoundaryAt: activeSmartBoundaryAt
+  });
   const computedSmartDeadlineAt = suggested.onMinutes > 0
     ? smartModePageTimerTargetAt(
       suggested.onMinutes,
@@ -2551,81 +2683,152 @@ async function reapplySmartSensitivityNow() {
     : nextMinuteTargetAt;
   const minutes = Math.max(1, Math.ceil((smartDeadlineAt - nowMs) / 60000));
 
+  const reapplyContextIsCurrent = () => (
+    isAutomationOperationCurrent(reapplyOwner.automationRevision)
+    && !pwmStepRunning
+    && schedule.pwmState === reapplyOwner.pwmState
+    && schedule.mode === reapplyOwner.mode
+    && !!schedule.clockMode === reapplyOwner.clockMode
+    && schedule.smartMode?.enabled === true
+    && schedule.smartMode.sensitivity === reapplyOwner.smartSensitivity
+    && !getActiveSmartOnPwmRetryContext(schedule).hasTypedSmartOnRetry
+  );
+
   // 先清旧 alarm，避免旧关机时刻在慢速新鲜页验证期间抢跑；页面写入方返回
   // 已对齐 UST HH:MM 接口的绝对 targetAt，再用同一值恢复扩展倒计时。
-  await clearPwmAlarm(oldPwmRuntimeRevision);
+  const clearAlarmWrite = await clearPwmAlarmWithReceipt(
+    oldPwmRuntimeRevision
+  );
+  if (!clearAlarmWrite.cleared
+      || await abortStaleAutomation(
+        oldPwmRuntimeRevision,
+        'reapply-smart-clear-active-hours-paused'
+      )
+      || !reapplyContextIsCurrent()
+      || !isPwmAlarmWriteOwnerCurrent(clearAlarmWrite.writeOwner)) {
+    return { retry: true };
+  }
   setPwmClockIntent(0);
   const timerResult = await setPageTimer(minutes, {
     retryOnFailure: false,
     targetAt: smartDeadlineAt,
-    automationRevision: oldPwmRuntimeRevision
+    automationRevision: oldPwmRuntimeRevision,
+    ensureCurrent: () => (
+      reapplyContextIsCurrent()
+      && isPwmAlarmWriteOwnerCurrent(clearAlarmWrite.writeOwner)
+    )
   });
   if (await abortStaleAutomation(
     oldPwmRuntimeRevision,
     'reapply-smart-sensitivity-active-hours-paused'
   )) return;
+  const pageTimerWriteOwner = Number(timerResult?.pageTimerWriteOwner) || 0;
+  const reapplyStateIsCurrent = () => (
+    reapplyContextIsCurrent()
+    && isPageTimerWriteOwnerCurrent(pageTimerWriteOwner)
+  );
+  if (!reapplyStateIsCurrent()
+      || !isPwmAlarmWriteOwnerCurrent(clearAlarmWrite.writeOwner)) {
+    return { retry: true };
+  }
   if (!timerResult?.success) {
-    schedule.pageTimerError = `灵敏度即时应用时页面关机定时器未确认：${timerResult?.error || '未知错误'}；1 分钟后重试`;
+    const pageTimerError = `灵敏度即时应用时页面关机定时器未确认：${timerResult?.error || '未知错误'}；1 分钟后重试`;
+    const reapplyRetryState = snapshotSmartReapplyState(
+      reapplyDerivedState,
+      timerResult?.pageTimerState,
+      { pageTimerError }
+    );
+    if (!reapplyRetryState
+        || !replaySmartReapplyState(reapplyRetryState)) {
+      return { retry: true };
+    }
     const retryAt = Date.now() + 60000;
     setPwmClockIntent(retryAt);
+    const retryClockIntentState = snapshotPwmClockIntentState();
+    const retryAlarmFailureState = withSmartReapplyPageTimerError(
+      reapplyRetryState,
+      `${pageTimerError}；PWM 恢复闹钟创建失败，等待看门狗按 durable intent 恢复`
+    );
     await persistSchedule('reapply-smart-sensitivity-pageTimer-retry-intent', {
       syncFromLiveAlarm: false
     });
-    const alarmCreated = await createPwmAlarmFromPlan(
-      { nextTriggerAt: retryAt },
-      'reapply-smart-pageTimer-failed',
-      oldPwmRuntimeRevision
-    );
-    if (alarmCreated === false) {
-      schedule.pageTimerError += '；PWM 恢复闹钟创建失败，等待看门狗按 durable intent 恢复';
-      await createAlarm('ac-watchdog', { periodInMinutes: 5 });
-      await persistSchedule('reapply-smart-sensitivity-pageTimer-retry-alarm-failed', {
-        syncFromLiveAlarm: false
-      });
-      await updateBadge();
+    if (!reapplyStateIsCurrent()) return { retry: true };
+    const retryCommit = await commitOwnedPwmAlarmPlan({
+      plan: { nextTriggerAt: retryAt },
+      logTag: 'reapply-smart-pageTimer-failed',
+      automationRevision: oldPwmRuntimeRevision,
+      previousWriteOwner: clearAlarmWrite.writeOwner,
+      plannedAt: retryClockIntentState.smartClockPlannedAt,
+      isCurrent: reapplyStateIsCurrent,
+      replayFailureState: () => {
+        replayPwmClockIntentState(retryClockIntentState);
+        return replaySmartReapplyState(retryAlarmFailureState);
+      },
+      replaySuccessState: () => replaySmartReapplyState(reapplyRetryState),
+      failurePersistReason: 'reapply-smart-sensitivity-pageTimer-retry-alarm-failed',
+      successPersistReason: 'reapply-smart-sensitivity-pageTimer-failed'
+    });
+    if (retryCommit.stale) {
+      await abortStaleAutomation(
+        oldPwmRuntimeRevision,
+        'reapply-smart-retry-active-hours-paused'
+      );
+      return { retry: true };
+    }
+    if (!retryCommit.created) {
       return { success: false, deferred: true, alarmCreated: false };
     }
-    await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-    if (await abortStaleAutomation(
-      oldPwmRuntimeRevision,
-      'reapply-smart-retry-active-hours-paused'
-    )) return;
-    await persistSchedule('reapply-smart-sensitivity-pageTimer-failed');
-    await updateBadge();
     return;
   }
 
-  const reapplyTargetAt = Number(schedule.pageTimerTargetAt) || 0;
+  const reapplyTargetAt = Number(timerResult.targetAt) || 0;
+  const reapplyCommitState = snapshotSmartReapplyState(
+    reapplyDerivedState,
+    timerResult.pageTimerState
+  );
+  if (!reapplyCommitState || reapplyTargetAt <= nowMs) {
+    return { retry: true };
+  }
   setPwmClockIntent(reapplyTargetAt);
+  const reapplyClockIntentState = snapshotPwmClockIntentState();
+  const reapplyAlarmFailureState = withSmartReapplyPageTimerError(
+    reapplyCommitState,
+    '灵敏度即时应用已确认页面关机时间，但 PWM 闹钟创建失败；等待看门狗按 durable intent 恢复'
+  );
   await persistSchedule('reapply-smart-sensitivity-commit-intent', {
     syncFromLiveAlarm: false
   });
   const reapplyPlan = { nextTriggerAt: reapplyTargetAt };
-  const alarmCreated = await createPwmAlarmFromPlan(
-    reapplyPlan,
-    'reapply-smart-sensitivity',
-    oldPwmRuntimeRevision
-  );
-  if (alarmCreated === false) {
-    schedule.pageTimerError = '灵敏度即时应用已确认页面关机时间，但 PWM 闹钟创建失败；等待看门狗按 durable intent 恢复';
-    await createAlarm('ac-watchdog', { periodInMinutes: 5 });
-    await persistSchedule('reapply-smart-sensitivity-commit-alarm-failed', {
-      syncFromLiveAlarm: false
-    });
-    await updateBadge();
+  if (!reapplyStateIsCurrent()) return { retry: true };
+  const reapplyCommit = await commitOwnedPwmAlarmPlan({
+    plan: reapplyPlan,
+    logTag: 'reapply-smart-sensitivity',
+    automationRevision: oldPwmRuntimeRevision,
+    previousWriteOwner: clearAlarmWrite.writeOwner,
+    plannedAt: reapplyClockIntentState.smartClockPlannedAt,
+    isCurrent: reapplyStateIsCurrent,
+    replayFailureState: () => {
+      replayPwmClockIntentState(reapplyClockIntentState);
+      return replaySmartReapplyState(reapplyAlarmFailureState);
+    },
+    replaySuccessState: () => replaySmartReapplyState(reapplyCommitState),
+    failurePersistReason: 'reapply-smart-sensitivity-commit-alarm-failed',
+    successPersistReason: 'reapply-smart-sensitivity-on-phase'
+  });
+  if (reapplyCommit.stale) {
+    await abortStaleAutomation(
+      oldPwmRuntimeRevision,
+      'reapply-smart-commit-active-hours-paused'
+    );
+    return { retry: true };
+  }
+  if (!reapplyCommit.created) {
     return { success: false, deferred: true, alarmCreated: false };
   }
-  await createAlarm('ac-badge-tick', { delayInMinutes: 1 });
-  if (await abortStaleAutomation(
-    oldPwmRuntimeRevision,
-    'reapply-smart-commit-active-hours-paused'
-  )) return;
-  await persistSchedule('reapply-smart-sensitivity-on-phase');
-  await updateBadge();
 
   console.log(
-    `[AC扩展] 滑块灵敏度即时应用: sens=${schedule.smartMode.sensitivity}`
-    + ` → on=${suggested.onMinutes}min, 页面目标 ${new Date(schedule.pageTimerTargetAt).toLocaleTimeString()}`
+    `[AC扩展] 滑块灵敏度即时应用: sens=${reapplyOwner.smartSensitivity}`
+    + ` → on=${suggested.onMinutes}min, 页面目标 ${new Date(reapplyTargetAt).toLocaleTimeString()}`
   );
 }
 
@@ -3639,13 +3842,26 @@ async function failPwmAlarmWrite(logTag, error = null) {
   return false;
 }
 
-async function clearPwmAlarm(automationRevision = null, force = false) {
+async function clearPwmAlarmWithReceipt(
+  automationRevision = null,
+  force = false
+) {
   return runSerializedPwmAlarmWrite(async () => {
-    if (!force && !isPwmAlarmWriteCurrent(automationRevision)) return false;
-    claimPwmAlarmWriteOwner();
+    if (!force && !isPwmAlarmWriteCurrent(automationRevision)) {
+      return Object.freeze({ cleared: false, writeOwner: 0 });
+    }
+    const writeOwner = claimPwmAlarmWriteOwner();
     await chrome.alarms.clear('ac-pwm');
-    return force || isPwmAlarmWriteCurrent(automationRevision);
+    return Object.freeze({
+      cleared: force || isPwmAlarmWriteCurrent(automationRevision),
+      writeOwner
+    });
   });
+}
+
+async function clearPwmAlarm(automationRevision = null, force = false) {
+  const result = await clearPwmAlarmWithReceipt(automationRevision, force);
+  return result.cleared;
 }
 
 async function clearAutomationRuntimeAlarmsWhileBlocked(
@@ -3711,6 +3927,9 @@ async function createPwmAlarmFromPlanWithReceipt(
   const ensureCurrent = typeof options?.ensureCurrent === 'function'
     ? options.ensureCurrent
     : null;
+  const previousWriteOwner = Number(options?.previousWriteOwner);
+  const hasPreviousWriteOwner = Number.isSafeInteger(previousWriteOwner)
+    && previousWriteOwner > 0;
   const requestedPlannedAt = Number(options?.plannedAt);
   const hasRequestedPlannedAt = Number.isFinite(requestedPlannedAt)
     && requestedPlannedAt > 0;
@@ -3724,7 +3943,9 @@ async function createPwmAlarmFromPlanWithReceipt(
   }
 
   return runSerializedPwmAlarmWrite(async () => {
-    if (!alarmWriteIsCurrent()) {
+    if (!alarmWriteIsCurrent()
+        || (hasPreviousWriteOwner
+          && !isPwmAlarmWriteOwnerCurrent(previousWriteOwner))) {
       return Object.freeze({ created: false, writeOwner: 0 });
     }
     const writeOwner = claimPwmAlarmWriteOwner();
@@ -6156,7 +6377,11 @@ async function executePwmStepWithRecovery({
 // 的异步提交。每次读回都新建临时隐藏页，按退避窗口等待服务器落盘后再验证。
 async function verifyPageTimerPersistence(
   expectedValue,
-  { automationRevision = null, shutdownRevision = null } = {}
+  {
+    automationRevision = null,
+    shutdownRevision = null,
+    ensureCurrent = null
+  } = {}
 ) {
   let lastActualValue = '';
   let lastFailure = '';
@@ -6166,6 +6391,8 @@ async function verifyPageTimerPersistence(
   ) && (
     shutdownRevision === null
       || isTimerBasedShutdownCurrent(shutdownRevision)
+  ) && (
+    typeof ensureCurrent !== 'function' || ensureCurrent()
   );
 
   // 提取（Fowler Extract Function）：单次新鲜页读回尝试——建临时隐藏页、读回、比对、回收。
@@ -6300,16 +6527,44 @@ function isPageTimerWriteOwnerCurrent(owner) {
   return owner > 0 && owner === pageTimerWriteGeneration;
 }
 
+function createOwnedPageTimerStateReceipt(pageTimerWriteOwner, state) {
+  if (!isPageTimerWriteOwnerCurrent(pageTimerWriteOwner)) return null;
+  return Object.freeze({
+    pageTimerMinutes: state.minutes ?? null,
+    pageTimerTargetAt: Number(state.targetAt) || 0,
+    pageTimerError: state.error ?? '',
+    pageTimerRetryAt: Number(state.retryAt) || 0,
+    pageTimerRetryMinutes: Number(state.retryMinutes) || 0,
+    pageTimerWriteOwner: Number(pageTimerWriteOwner)
+  });
+}
+
+function replayOwnedPageTimerState(pageTimerState) {
+  if (!isPageTimerWriteOwnerCurrent(pageTimerState?.pageTimerWriteOwner)) {
+    return false;
+  }
+  replaceSchedulePageTimerState(schedule, {
+    minutes: pageTimerState.pageTimerMinutes,
+    targetAt: pageTimerState.pageTimerTargetAt,
+    error: pageTimerState.pageTimerError,
+    retryAt: pageTimerState.pageTimerRetryAt,
+    retryMinutes: pageTimerState.pageTimerRetryMinutes
+  });
+  return true;
+}
+
 function sendSerializedPageTimerMessage(
   tabId,
   message,
   automationRevision = null,
   shutdownRevision = null,
-  pageTimerWriteOwner = 0
+  pageTimerWriteOwner = 0,
+  ensureCurrent = null
 ) {
   const pageTimerWriteIsCurrent = () => (
-    pageTimerWriteOwner <= 0
-    || isPageTimerWriteOwnerCurrent(pageTimerWriteOwner)
+    (pageTimerWriteOwner <= 0
+      || isPageTimerWriteOwnerCurrent(pageTimerWriteOwner))
+    && (typeof ensureCurrent !== 'function' || ensureCurrent())
   );
   const stalePageTimerResult = () => ({
     success: false,
@@ -6356,7 +6611,8 @@ async function writePageTimerOnExactHomeTab(
     targetAt = 0,
     automationRevision = null,
     shutdownRevision = null,
-    pageTimerWriteOwner = 0
+    pageTimerWriteOwner = 0,
+    ensureCurrent = null
   } = {}
 ) {
   const pageReady = await waitForTabReady(tabId, 30000, isACHomePageTab);
@@ -6372,7 +6628,7 @@ async function writePageTimerOnExactHomeTab(
     action: 'setTimer',
     minutes,
     targetAt
-  }, automationRevision, shutdownRevision, pageTimerWriteOwner);
+  }, automationRevision, shutdownRevision, pageTimerWriteOwner, ensureCurrent);
   if (result?.pageTimerStale
       || result?.automationStale
       || result?.shutdownStale
@@ -6395,7 +6651,8 @@ async function setPageTimer(
     targetAt = 0,
     preferredTabId = null,
     automationRevision = null,
-    shutdownRevision = null
+    shutdownRevision = null,
+    ensureCurrent = null
   } = {}
 ) {
   const runtimeOwnerRevision = pwmRuntimeRevision;
@@ -6406,7 +6663,8 @@ async function setPageTimer(
     success: false,
     automationStale: true,
     shutdownStale: shutdownRevision !== null,
-    error: shutdownRevision !== null ? '关机请求已失效' : '自动控制已暂停'
+    error: shutdownRevision !== null ? '关机请求已失效' : '自动控制已暂停',
+    pageTimerWriteOwner
   });
 
   const lifecycleWriteIsCurrent = () => (
@@ -6419,6 +6677,8 @@ async function setPageTimer(
     automationRevision !== null
       || shutdownRevision !== null
       || pwmRuntimeRevision === runtimeOwnerRevision
+  ) && (
+    typeof ensureCurrent !== 'function' || ensureCurrent()
   );
 
   const automationWriteIsCurrent = () => (
@@ -6479,10 +6739,21 @@ async function setPageTimer(
 
     if (!failureStateIsCurrent()) return staleAutomationResult();
     recordSchedulePageTimerFailureState(schedule, pageTimerError, retryState);
+    const pageTimerState = createOwnedPageTimerStateReceipt(
+      pageTimerWriteOwner,
+      {
+        minutes: null,
+        targetAt: 0,
+        error: pageTimerError,
+        retryAt: retryState.retryAt,
+        retryMinutes: retryState.retryMinutes
+      }
+    );
+    if (!pageTimerState) return staleAutomationResult();
     // 页面 failure 只拥有 pageTimer*；PWM 主钟由外围 phase transaction 对账。
     await persistSchedule(`setPageTimer-${reason}`, { syncFromLiveAlarm: false });
     console.warn('[AC扩展] 页面定时器设置失败:', pageTimerError);
-    return failure;
+    return { ...failure, pageTimerWriteOwner, pageTimerState };
   };
 
   // 提取（Fowler Extract Function）：页面定时器成功后的证明记录——解析目标时刻、清重试态、持久化并回传验证结果。
@@ -6507,10 +6778,27 @@ async function setPageTimer(
       proofMinutes,
       targetAt
     );
+    const pageTimerState = createOwnedPageTimerStateReceipt(
+      pageTimerWriteOwner,
+      {
+        minutes: proofMinutes,
+        targetAt,
+        error: '',
+        retryAt: 0,
+        retryMinutes: 0
+      }
+    );
+    if (!pageTimerState) return staleAutomationResult();
     // 页面 proof 只拥有 pageTimer*；PWM 主钟由外围 phase transaction 对账。
     await persistSchedule('setPageTimer-success', { syncFromLiveAlarm: false });
     console.log(`[AC扩展] 页面定时器已由新鲜页面确认: ${verification.value} (安全网)`);
-    return { ...result, verified: true, verification };
+    return {
+      ...result,
+      verified: true,
+      verification,
+      pageTimerWriteOwner,
+      pageTimerState
+    };
   };
 
   try {
@@ -6523,9 +6811,11 @@ async function setPageTimer(
     if (Number.isInteger(preferredTabId) && (!tab || tab.discarded)) {
       throw new Error('指定的页面定时器标签已离开精确 home URL');
     }
+    if (!automationWriteIsCurrent()) return staleAutomationResult();
 
     if (!tab) {
       const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
+      if (!automationWriteIsCurrent()) return staleAutomationResult();
       tab = tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded) || null;
     }
 
@@ -6535,16 +6825,18 @@ async function setPageTimer(
       if (!autoCreatedTabId) throw new Error(t('bgPageTimerNoTab'));
       console.log('[AC扩展] 页面定时器：无现有 AC 页面，已创建隐藏标签页');
     }
+    if (!automationWriteIsCurrent()) return staleAutomationResult();
 
     const result = await writePageTimerOnExactHomeTab(tab.id, minutes, {
       targetAt,
       automationRevision,
       shutdownRevision,
-      pageTimerWriteOwner
+      pageTimerWriteOwner,
+      ensureCurrent
     });
     if (result?.pageTimerStale
         || result?.automationStale
-        || result?.shutdownStale) return result;
+        || result?.shutdownStale) return { ...result, pageTimerWriteOwner };
     if (!result?.success) {
       return finishFailure(result || { success: false, error: t('bgPageTimerFailed') }, 'failed');
     }
@@ -6556,7 +6848,8 @@ async function setPageTimer(
 
     const verification = await verifyPageTimerPersistence(expectedValue, {
       automationRevision,
-      shutdownRevision
+      shutdownRevision,
+      ensureCurrent: automationWriteIsCurrent
     });
     if (verification.automationStale
         || verification.shutdownStale

@@ -57,15 +57,35 @@
     scheduleState.pageTimerRetryMinutes = retryMinutes;
   }
 
+  function replaceSchedulePageTimerState(
+    scheduleState,
+    {
+      minutes = null,
+      targetAt = 0,
+      error = '',
+      retryAt = 0,
+      retryMinutes = 0
+    } = {}
+  ) {
+    scheduleState.pageTimerMinutes = minutes;
+    scheduleState.pageTimerTargetAt = targetAt;
+    scheduleState.pageTimerError = error;
+    replaceSchedulePageTimerRetryState(scheduleState, {
+      retryAt,
+      retryMinutes
+    });
+  }
+
   function recordSchedulePageTimerFailureState(
     scheduleState,
     error,
     retryState = {}
   ) {
-    scheduleState.pageTimerMinutes = null;
-    scheduleState.pageTimerTargetAt = 0;
-    scheduleState.pageTimerError = error;
-    replaceSchedulePageTimerRetryState(scheduleState, retryState);
+    replaceSchedulePageTimerState(scheduleState, {
+      error,
+      retryAt: retryState.retryAt,
+      retryMinutes: retryState.retryMinutes
+    });
   }
 
   function clearSchedulePageTimerProofState(scheduleState) {
@@ -73,10 +93,7 @@
   }
 
   function recordSchedulePageTimerProofState(scheduleState, minutes, targetAt) {
-    scheduleState.pageTimerMinutes = minutes;
-    scheduleState.pageTimerTargetAt = targetAt;
-    scheduleState.pageTimerError = '';
-    replaceSchedulePageTimerRetryState(scheduleState);
+    replaceSchedulePageTimerState(scheduleState, { minutes, targetAt });
   }
 
   return Object.freeze({
@@ -84,6 +101,7 @@
     setSchedulePwmClockIntent,
     replaceSchedulePwmRetryState,
     replaceSchedulePageTimerRetryState,
+    replaceSchedulePageTimerState,
     recordSchedulePageTimerFailureState,
     clearSchedulePageTimerProofState,
     recordSchedulePageTimerProofState

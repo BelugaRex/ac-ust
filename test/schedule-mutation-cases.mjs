@@ -5,6 +5,7 @@ const {
   setSchedulePwmClockIntent,
   replaceSchedulePwmRetryState,
   replaceSchedulePageTimerRetryState,
+  replaceSchedulePageTimerState,
   recordSchedulePageTimerFailureState,
   clearSchedulePageTimerProofState,
   recordSchedulePageTimerProofState
@@ -18,12 +19,17 @@ export function runScheduleMutationCases(assertPass) {
         'setSchedulePwmClockIntent',
         'replaceSchedulePwmRetryState',
         'replaceSchedulePageTimerRetryState',
+        'replaceSchedulePageTimerState',
         'recordSchedulePageTimerFailureState',
         'clearSchedulePageTimerProofState',
         'recordSchedulePageTimerProofState'
       ].join(',')
       && Object.isFrozen(scheduleMutations),
     'schedule mutation module 只导出冻结的复合状态写入 primitives'
+  );
+  assertPass(
+    typeof replaceSchedulePageTimerState === 'function',
+    '页面 timer 五字段支持精确 replacement，保留 proof 与错误并存的事务状态'
   );
 
   const originAt = 1_787_983_200_017;
@@ -190,6 +196,32 @@ export function runScheduleMutationCases(assertPass) {
       && pageRetrySchedule.pageTimerMinutes === 8
       && pageRetrySchedule.pageTimerError === 'kept error',
     '空页面 retry replacement 只清 retry 二字段'
+  );
+
+  const exactPageTimerState = {
+    pageTimerMinutes: null,
+    pageTimerTargetAt: 0,
+    pageTimerError: '',
+    pageTimerRetryAt: 0,
+    pageTimerRetryMinutes: 0,
+    configSentinel: 'kept'
+  };
+  const exactError = { raw: 'verified timer but alarm failed' };
+  replaceSchedulePageTimerState(exactPageTimerState, {
+    minutes: 17.5,
+    targetAt: targetAt + 0.125,
+    error: exactError,
+    retryAt: fractionalPageRetryAt,
+    retryMinutes: 2.25
+  });
+  assertPass(
+    exactPageTimerState.pageTimerMinutes === 17.5
+      && exactPageTimerState.pageTimerTargetAt === targetAt + 0.125
+      && exactPageTimerState.pageTimerError === exactError
+      && exactPageTimerState.pageTimerRetryAt === fractionalPageRetryAt
+      && exactPageTimerState.pageTimerRetryMinutes === 2.25
+      && exactPageTimerState.configSentinel === 'kept',
+    '精确页面 timer replacement 原样提交 proof/error/retry 五字段并保留无关配置'
   );
 
   const failureError = { raw: 'failure' };
