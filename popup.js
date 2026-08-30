@@ -252,7 +252,11 @@ automationToggle.addEventListener('change', async () => {
   const pendingMessage = t(enabled ? 'timerEnabling' : 'timerDisabling');
   setModeSwitchBusy(true, pendingMessage);
   try {
-    const result = await updateSchedule(enabled, true);
+    const result = await updateSchedule(
+      enabled,
+      true,
+      enabled ? 'enable' : 'disable'
+    );
     if (!result?.success) currentScheduleEnabled = previousEnabled;
   } finally {
     syncModeUI();
@@ -747,7 +751,7 @@ function validateManualMinutes({ report = false } = {}) {
 }
 
 // ----- 更新定时设置 -----
-async function updateSchedule(enabled, restart = false) {
+async function updateSchedule(enabled, restart = false, automationIntent = '') {
   const manualMinutes = validateManualMinutes({ report: enabled && !currentSmartMode.enabled });
   if (!manualMinutes && enabled && !currentSmartMode.enabled) {
     showStatus(t('minutesInvalid'), 'error');
@@ -762,7 +766,14 @@ async function updateSchedule(enabled, restart = false) {
     offMinutes: manualMinutes?.offMinutes ?? currentManualMinutes.offMinutes,
     activeHours: { ...currentActiveHours },  // 两种自动控制共用的运行时段
     smartMode: { ...currentSmartMode },      // v0.8.0: 智能模式（灵敏度 + 开关）
-    restart
+    restart,
+    // 只有用户点自动控制总开关才携带 authority。普通 enabled=true 的
+    // 时长／模式／灵敏度保存不得抢占正在收口的手动 OFF。
+    automationIntent: automationIntent === 'enable'
+      ? 'enable'
+      : automationIntent === 'disable'
+        ? 'disable'
+        : ''
   };
 
   pendingScheduleUpdates += 1;

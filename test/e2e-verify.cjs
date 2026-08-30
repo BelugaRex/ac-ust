@@ -48,6 +48,23 @@ const LAUNCH_OPTIONS = [
   { headless: false },
   { headless: true }
 ];
+const E2E_SYNC_AUTHORITY_LOCAL_KEYS = [
+  'ac_schedule_sync_publish_pending',
+  'ac_schedule_sync_watermark',
+  'ac_schedule_sync_payload_receipt',
+  'ac_deferred_sync_disable',
+  'ac_manual_off_admission',
+  'ac_local_schedule_mutation_cutoff',
+  'ac_local_terminal_authority'
+];
+const E2E_SYNC_AUTHORITY_ALARM_PREFIXES = [
+  'ac-sync-publish-retry',
+  'ac-sync-adopt-retry',
+  'ac-deferred-sync-disable-retry',
+  'ac-deferred-sync-successor-retry',
+  'ac-schedule-read-retry',
+  'ac-manual-off-admission-retry'
+];
 
 async function launchExtensionContext(preferredOptions = null) {
   let launchError = null;
@@ -128,18 +145,102 @@ async function run() {
     const serviceWorker = launched.serviceWorker
       || await waitForExtensionServiceWorker(context);
 
-    // 等待扩展完成 init(给 SW 时间跑 init 流程,用 evaluate 轮询而非 waitForFunction)
-    const initDeadline = Date.now() + 8000;
+    // ac_schedule 首次出现只是 onInstalled 写默认值的中间点；必须继续等
+    // init、install seed 及其 echo/publish 凭据全部收口。若本机 false seed
+    // 被误判为 remote F，这里明确失败，不能先清 marker 把生产回归藏掉。
+    const initDeadline = Date.now() + 15000;
+    const bootstrapIsQuiescent = state => (
+      state?.initCompleted === true
+      && state.installBootstrapComplete === true
+      && state.scheduleReady === true
+      && state.syncSeeded === true
+      && state.publishPending === false
+      && state.deferredRecordPresent === false
+      && state.authorityAlarmNames?.length === 0
+      && state.localEchoCount === 0
+      && state.syncInboundArrivalGeneration === 0
+      && state.remoteDisableArrivalGeneration === 0
+      && state.phaseAdoptionInFlight === false
+    );
+    let bootstrapState = null;
+    let stableBootstrapObservations = 0;
     while (Date.now() < initDeadline) {
-      const ready = await serviceWorker.evaluate(async () => {
+      bootstrapState = await serviceWorker.evaluate(async ({
+        authorityAlarmPrefixes
+      }) => {
         try {
-          const { ac_schedule } = await chrome.storage.local.get('ac_schedule');
-          return !!ac_schedule;
-        } catch (_) { return false; }
-      }).catch(() => false);
-      if (ready) break;
-      await new Promise(r => setTimeout(r, 300));
+          // runtime.sendMessage 从扩展 Service Worker 发出时不会回送给同一个
+          // Worker 的 onMessage listener。这里本来就在读取 Worker 内部的
+          // generation/echo 状态，因此直接读取 init receipt，避免把浏览器
+          // 的 self-message 语义误报成初始化失败；真实页面消息链在后续
+          // Popup 旅程中单独覆盖。
+          const initCompleted = typeof initCompletedAt === 'number'
+            && initCompletedAt > 0;
+          const [local, sync, alarms] = await Promise.all([
+            chrome.storage.local.get([
+              'ac_schedule',
+              'ac_install_bootstrap_complete',
+              'ac_schedule_sync_publish_pending',
+              'ac_deferred_sync_disable'
+            ]),
+            chrome.storage.sync.get('ac_schedule_sync'),
+            chrome.alarms.getAll()
+          ]);
+          const authorityAlarmNames = alarms
+            .map(alarm => alarm.name)
+            .filter(name => authorityAlarmPrefixes.some(prefix => (
+              name === prefix || name.startsWith(`${prefix}:`)
+            )));
+          return {
+            initCompleted,
+            installBootstrapComplete:
+              local.ac_install_bootstrap_complete === true,
+            scheduleReady: !!local.ac_schedule,
+            syncSeeded: sync.ac_schedule_sync?.enabled === false,
+            publishPending:
+              local.ac_schedule_sync_publish_pending === true,
+            deferredRecordPresent: Object.prototype.hasOwnProperty.call(
+              local,
+              'ac_deferred_sync_disable'
+            ),
+            authorityAlarmNames,
+            localEchoCount:
+              typeof activeLocalSyncEchoIdentities === 'object'
+                ? activeLocalSyncEchoIdentities.size
+                : -1,
+            syncInboundArrivalGeneration:
+              typeof syncInboundArrivalGeneration === 'number'
+                ? syncInboundArrivalGeneration
+                : -1,
+            remoteDisableArrivalGeneration:
+              typeof remoteDisableArrivalGeneration === 'number'
+                ? remoteDisableArrivalGeneration
+                : -1,
+            phaseAdoptionInFlight:
+              typeof isSyncPhaseAdoptionAdmissionBlocked === 'function'
+                ? isSyncPhaseAdoptionAdmissionBlocked()
+                : true
+          };
+        } catch (error) {
+          return { error: error?.message || String(error) };
+        }
+      }, {
+        authorityAlarmPrefixes: E2E_SYNC_AUTHORITY_ALARM_PREFIXES
+      }).catch(error => ({ error: error.message }));
+      stableBootstrapObservations = bootstrapIsQuiescent(bootstrapState)
+        ? stableBootstrapObservations + 1
+        : 0;
+      if (stableBootstrapObservations >= 2) break;
+      await new Promise(resolve => setTimeout(resolve, 100));
     }
+    const bootstrapReady = bootstrapIsQuiescent(bootstrapState)
+      && stableBootstrapObservations >= 2;
+    if (!bootstrapReady) {
+      throw new Error(
+        `fresh 初始化未稳定收口或产生了 deferred authority: ${JSON.stringify(bootstrapState)}`
+      );
+    }
+    console.log('Fresh 初始化已稳定收口:', JSON.stringify(bootstrapState), '\n');
 
     // 提取扩展 ID
     const swUrl = serviceWorker.url();
@@ -154,7 +255,27 @@ async function run() {
     // === 模拟用户报告的场景 ===
     console.log('--- 步骤 1: 设置用户场景 ---');
     const pwmScheduledTime = Date.now() + 5 * 60 * 1000;
-    await serviceWorker.evaluate(async (schedTime) => {
+    const fixtureSetup = await serviceWorker.evaluate(async ({
+      schedTime,
+      authorityLocalKeys,
+      authorityAlarmPrefixes
+    }) => {
+      const authorityAlarmNames = (await chrome.alarms.getAll())
+        .map(alarm => alarm.name)
+        .filter(name => authorityAlarmPrefixes.some(prefix => (
+          name === prefix || name.startsWith(`${prefix}:`)
+        )));
+      await Promise.all([
+        chrome.storage.sync.remove('ac_schedule_sync'),
+        chrome.storage.local.remove(authorityLocalKeys),
+        ...authorityAlarmNames.map(name => chrome.alarms.clear(name))
+      ]);
+      // durable watermark 已清理后同步重置本 Worker 的缓存；否则后续夹具
+      // 仍会继承 install seed 的 Lamport 水位，不再是独立测试场景。
+      lastSyncedAt = 0;
+      syncWatermarkLoaded = false;
+      completedSyncPayloadReceipt = null;
+      activeLocalSyncEchoIdentities.clear();
       // 写入 storage:nextTriggerAt=0(红灯根因)
       await chrome.storage.local.set({
         ac_schedule: {
@@ -174,12 +295,12 @@ async function run() {
           comfortStartOnConfirmedAt: 0
         }
       });
+      const loadedFixture = await loadScheduleFromStorage();
+      if (loadedFixture?.enabled !== true
+          || Number(loadedFixture.nextTriggerAt) !== 0) {
+        throw new Error('raw local fixture 未进入 Service Worker 内存');
+      }
       await chrome.storage.local.remove('ac_balance_cache');
-      await chrome.storage.sync.remove('ac_schedule_sync');
-      await chrome.storage.local.remove([
-        'ac_schedule_sync_publish_pending',
-        'ac_schedule_sync_watermark'
-      ]);
       // 模拟上一个 Service Worker 保存的最近有效余额。当前 Worker 尚未在
       // 模块内存中读取过余额，popup 首次 full 轮询必须从 session 恢复 Est.
       // 并迁移到 local，才能跨越完整浏览器重启。
@@ -187,7 +308,17 @@ async function run() {
       // 创建未来的 ac-pwm 闹钟(模拟"活闹钟在")
       await chrome.alarms.clear('ac-pwm');
       await chrome.alarms.create('ac-pwm', { when: schedTime });
-    }, pwmScheduledTime);
+      return {
+        enabled: loadedFixture.enabled,
+        nextTriggerAt: loadedFixture.nextTriggerAt,
+        clearedAuthorityAlarmNames: authorityAlarmNames
+      };
+    }, {
+      schedTime: pwmScheduledTime,
+      authorityLocalKeys: E2E_SYNC_AUTHORITY_LOCAL_KEYS,
+      authorityAlarmPrefixes: E2E_SYNC_AUTHORITY_ALARM_PREFIXES
+    });
+    console.log('  测试夹具已载入 Worker:', JSON.stringify(fixtureSetup));
 
     // 每次测试使用全新 profile，当前 Worker 尚未执行过生产余额读取；因此
     // popup 首次 full 轮询只能从 storage.session 恢复，而非沿用模块内存。
@@ -1564,8 +1695,13 @@ async function run() {
       await chrome.storage.sync.remove('ac_schedule_sync');
       await chrome.storage.local.remove([
         'ac_schedule_sync_publish_pending',
-        'ac_schedule_sync_watermark'
+        'ac_schedule_sync_watermark',
+        'ac_schedule_sync_payload_receipt'
       ]);
+      lastSyncedAt = 0;
+      syncWatermarkLoaded = false;
+      completedSyncPayloadReceipt = null;
+      activeLocalSyncEchoIdentities.clear();
       await Promise.all([
         'ac-pwm',
         'ac-badge-tick',

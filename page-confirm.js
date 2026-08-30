@@ -76,7 +76,8 @@
           buildTimeEpochMs: PAGE_BUILD_TIME_EPOCH_MS,
           listenerId: PAGE_MAIN_LISTENER_ID,
           channel: MAIN_BRIDGE_CHANNEL,
-          legacyBridgeIsolated
+          legacyBridgeIsolated,
+          automaticOnCancellationRevision
         }
       }
     };
@@ -136,7 +137,12 @@
   addMainBridgeListener(MAIN_BRIDGE_EVENTS.cancel, handleAutomaticOnCancel);
 
   const handleToggleRequest = async (event) => {
-    const { requestId, action, notAfterAt = 0 } = event.detail || {};
+    const {
+      requestId,
+      action,
+      notAfterAt = 0,
+      cancellationRevision
+    } = event.detail || {};
     if (!requestId || action !== 'on') {
       if (requestId) {
         window.dispatchEvent(new CustomEvent(MAIN_BRIDGE_EVENTS.toggleResult, {
@@ -180,7 +186,11 @@
           via: 'main-world-ensureACState'
         };
       } else if (!result) {
-        result = await requestACState(true, notAfterAt);
+        result = await requestACState(
+          true,
+          notAfterAt,
+          cancellationRevision
+        );
       }
     } catch (error) {
       // ensureACState 异常时也必须回包，否则隔离世界会静默等满超时拿到 null，
@@ -286,7 +296,11 @@
     };
   }
 
-  async function requestACState(targetState, notAfterAt = 0) {
+  async function requestACState(
+    targetState,
+    notAfterAt = 0,
+    cancellationRevision = null
+  ) {
     const requestedNotAfterAt = notAfterAt === 0 ? 0 : Number(notAfterAt);
     if (requestedNotAfterAt !== 0 && !Number.isSafeInteger(requestedNotAfterAt)) {
       return {
@@ -296,9 +310,30 @@
         via: 'main-world-ensureACState'
       };
     }
+    const requestedCancellationRevision = Number(cancellationRevision);
+    if (!Number.isSafeInteger(requestedCancellationRevision)
+        || requestedCancellationRevision < 0) {
+      return {
+        success: false,
+        verified: false,
+        error: '自动开启取消版本无效',
+        via: 'main-world-ensureACState'
+      };
+    }
+    if (requestedCancellationRevision !== automaticOnCancellationRevision) {
+      return {
+        success: false,
+        verified: false,
+        cancelled: true,
+        error: '请求已被后台取消',
+        via: 'main-world-ensureACState'
+      };
+    }
     if (activeAcStateRequest) {
       if (activeAcStateRequest.attempt.targetState === targetState
-          && activeAcStateRequest.attempt.notAfterAt === requestedNotAfterAt) {
+          && activeAcStateRequest.attempt.notAfterAt === requestedNotAfterAt
+          && activeAcStateRequest.attempt.cancellationRevision
+            === requestedCancellationRevision) {
         console.log(`[AC扩展] ensureACState: 合并重复的 ${targetState ? 'ON' : 'OFF'} 请求`);
         return activeAcStateRequest.promise;
       }
@@ -321,7 +356,7 @@
     const attempt = Object.freeze({
       targetState,
       notAfterAt: requestedNotAfterAt,
-      cancellationRevision: automaticOnCancellationRevision,
+      cancellationRevision: requestedCancellationRevision,
       ownerGeneration: mainBridgeOwnerGeneration,
       requestId: `${PAGE_MAIN_LISTENER_ID}-${Date.now()}-${Math.random().toString(36).slice(2)}`
     });

@@ -354,6 +354,20 @@ function getACBalanceSnapshot() {
     return { success: false, error: '自动开启窗口截止时间无效' };
   }
 
+  // 在首次 await 页面 DOM 前冻结主世界的取消 revision。dispatchEvent 同步
+  // 往返，因此后台稍后送达 cancelAutomaticOn 时，这个已接纳的 ON 仍携带旧
+  // revision，不能在 waitForSwitch 结束后重新采样成一份“新”请求。
+  const mainRuntimeAtAdmission = await requestMainWorldRuntimeIdentity();
+  const cancellationRevision = Number(
+    mainRuntimeAtAdmission?.runtimeIdentity?.main?.automaticOnCancellationRevision
+  );
+  if (!Number.isSafeInteger(cancellationRevision) || cancellationRevision < 0) {
+    return {
+      success: false,
+      error: mainRuntimeAtAdmission?.error || '主世界取消版本读取失败，拒绝自动开启'
+    };
+  }
+
   // 隔离世界只确认页面已渲染，然后把目标状态交给主世界 ensureACState()。
   // 状态预检、单次 click、页面成功提示与状态复查全部由主世界统一负责。
   const switchEl = await waitForSwitch(10000);
@@ -361,7 +375,12 @@ function getACBalanceSnapshot() {
     return { success: false, error: t('contentTimeout') };
   }
 
-  const mainWorldResult = await requestMainWorldToggle(targetAction, 90000, notAfterAt);
+  const mainWorldResult = await requestMainWorldToggle(
+    targetAction,
+    90000,
+    notAfterAt,
+    cancellationRevision
+  );
 
   if (mainWorldResult?.success) {
     console.log('[AC扩展] 主世界切换成功:', mainWorldResult);
@@ -421,13 +440,19 @@ function requestMainWorldResult({
   });
 }
 
-async function requestMainWorldToggle(targetAction, timeoutMs, notAfterAt = 0) {
+async function requestMainWorldToggle(
+  targetAction,
+  timeoutMs,
+  notAfterAt = 0,
+  cancellationRevision = null
+) {
   return requestMainWorldResult({
     requestIdPrefix: 'ac',
     requestEvent: MAIN_BRIDGE_EVENTS.toggle,
     resultEvent: MAIN_BRIDGE_EVENTS.toggleResult,
     payload: {
       action: targetAction,
+      cancellationRevision,
       ...(notAfterAt !== 0 ? { notAfterAt } : {})
     },
     timeoutMs,

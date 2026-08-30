@@ -20,6 +20,15 @@ import { runRecoveryPolicyCases } from './recovery-policy-cases.mjs';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
+let testSummaryReached = false;
+
+process.once('beforeExit', () => {
+  if (testSummaryReached) return;
+  console.error(
+    '测试执行在到达套件汇总前失去事件句柄；检查未 settle 的 harness Promise'
+  );
+  process.exitCode = 3;
+});
 
 function extractSourceSection(source, startMarker, endMarker, label) {
   const start = source.indexOf(startMarker);
@@ -345,7 +354,7 @@ async function runTests() {
   assertPass(popupJs.includes('const IS_STATIC_PREVIEW = !globalThis.chrome?.runtime?.id;')
       && /const staticPreviewSchedule = \{[\s\S]{0,400}enabled:\s*true,[\s\S]{0,400}actualStatus:\s*\{\s*isOn:\s*true\s*\}/.test(popupJs)
       && /async function refreshStatus\(\) \{[\s\S]{0,160}if \(IS_STATIC_PREVIEW\)/.test(popupJs)
-      && /async function updateSchedule\(enabled, restart = false\) \{[\s\S]{0,1200}if \(IS_STATIC_PREVIEW\)/.test(popupJs)
+      && /async function updateSchedule\(enabled, restart = false, automationIntent = ''\) \{[\s\S]{0,1400}if \(IS_STATIC_PREVIEW\)/.test(popupJs)
       && /if \(IS_STATIC_PREVIEW\)[\s\S]{0,1000}data\.smartMode\.enabled \? 'statusSmartOnOK' : 'statusOnOK'/.test(popupJs),
     '静态网页预览可交互且按当前模式反馈开启状态，不依赖扩展 API');
   assertPass(popupHtml.includes('class="app-shell" id="appShell"')
@@ -829,6 +838,12 @@ async function runTests() {
     path.join(ROOT, 'background.js'),
     'utf8'
   );
+  const syncPayloadIdentitySource6 = extractSourceSection(
+    currentBackgroundSource6,
+    'function normalizeSyncAuthorityTimestamp(value) {',
+    '\n\nlet schedule = {',
+    'sync timestamp and payload identity helpers'
+  );
   const syncWatermarkSource6 = extractSourceSection(
     currentBackgroundSource6,
     'async function loadSyncWatermark() {',
@@ -837,7 +852,7 @@ async function runTests() {
   );
   const syncPendingSource6 = extractSourceSection(
     currentBackgroundSource6,
-    'async function setSyncPublishPending(pending) {',
+    'async function setSyncPublishPending(',
     '\nasync function loadSyncWatermark() {',
     'durable sync pending/retry helpers'
   );
@@ -856,7 +871,7 @@ async function runTests() {
   const explicitDisableClaimSource6 = extractSourceSection(
     currentBackgroundSource6,
     'function preemptAutomaticOnForExplicitDisable() {',
-    '\n\nasync function finishExplicitDisablePreemption() {',
+    '\n\nasync function finishExplicitDisablePreemption(',
     'explicit disable synchronous admission claim'
   );
   const runOutboundSync6 = async syncSchedule => {
@@ -869,6 +884,15 @@ async function runTests() {
       let syncWriteChain = Promise.resolve();
       let syncPublishGeneration = 0;
       let syncWriteOperationsInFlight = 0;
+      let manualOffAutomaticOnBlocked = false;
+      let automaticOnAdmissionBlocked = false;
+      let localScheduleMutationCommittedObservedAt = 0;
+      let deferredSyncDisablePending = false;
+      let deferredSyncDisableSuccessorSnapshot = null;
+      let startupRestoreSupersededByUserIntent = false;
+      function isStartupRestoreSupersededByUserIntent() {
+        return startupRestoreSupersededByUserIntent;
+      }
       const _syncOpLock = {
         busy: false,
         pending: false,
@@ -882,6 +906,30 @@ async function runTests() {
         lastSyncedAt = Math.max(lastSyncedAt, Number(value) || 0);
         return true;
       }
+      const activeLocalSyncEchoIdentities = new Set();
+      function getSyncPayloadIdentity(value) {
+        if (!value || typeof value !== 'object') return '';
+        try { return JSON.stringify(value); } catch (_) { return ''; }
+      }
+      function rememberLocalSyncPayload(value) {
+        const identity = getSyncPayloadIdentity(value);
+        activeLocalSyncEchoIdentities.add(identity);
+        return identity;
+      }
+      function setTimeout(callback) {
+        callback();
+        return 0;
+      }
+      async function rememberLocalSyncPublishAfterRemoteAuthority() {
+        return true;
+      }
+      async function refreshRemoteDisableBeforeLocalRelease() {
+        return true;
+      }
+      async function ensureSyncAuthorityDurableBaselineLoaded() {
+        return true;
+      }
+      function drainDeferredSyncAdoptionAfterManualOffAdmission() {}
       async function setSyncPublishPending() { return true; }
       async function scheduleSyncRetry() { return true; }
       ${syncScheduleSource6}; return syncScheduleToSync;`
@@ -945,6 +993,8 @@ async function runTests() {
     };
     const state = {
       durableWatermark: Number(options.initialWatermark) || 0,
+      durablePayloadReceipt: null,
+      localMutationCutoffObservedAt: 0,
       wallNow: Number(options.wallNow) || 1000,
       incrementWall: options.incrementWall === true,
       watermarkGetsRemaining: Number(options.watermarkGetFailures) || 0,
@@ -954,15 +1004,40 @@ async function runTests() {
       activeSyncSets: 0,
       maxActiveSyncSets: 0,
       pendingPublish: options.initialPendingPublish === true,
+      pendingMarkerSetFailures:
+        Number(options.pendingMarkerSetFailures) || 0,
+      pendingRemoveCalls: 0,
+      publishRetryCreateFailures:
+        Number(options.publishRetryCreateFailures) || 0,
       alarms: new Map(),
       syncStore: null,
       localSchedule: null,
-      disableIntentWrites: []
+      disableIntentWrites: [],
+      preflightCalls: []
     };
     const chrome = {
       storage: {
         local: {
           async get(key) {
+            if (Array.isArray(key)) {
+              if (key.includes('ac_schedule_sync_watermark')
+                  && state.watermarkGetsRemaining > 0) {
+                state.watermarkGetsRemaining -= 1;
+                throw new Error('transient watermark read');
+              }
+              return Object.fromEntries(key.map(name => [
+                name,
+                name === 'ac_schedule_sync_publish_pending'
+                  ? state.pendingPublish
+                  : name === 'ac_schedule_sync_watermark'
+                    ? state.durableWatermark
+                    : name === 'ac_schedule_sync_payload_receipt'
+                      ? state.durablePayloadReceipt
+                      : name === 'ac_local_schedule_mutation_cutoff'
+                        ? state.localMutationCutoffObservedAt
+                        : undefined
+              ]));
+            }
             if (key === 'ac_schedule_sync_publish_pending') {
               return { [key]: state.pendingPublish };
             }
@@ -974,6 +1049,11 @@ async function runTests() {
           },
           async set(value) {
             if (Object.hasOwn(value, 'ac_schedule_sync_publish_pending')) {
+              if (value.ac_schedule_sync_publish_pending === true
+                  && state.pendingMarkerSetFailures > 0) {
+                state.pendingMarkerSetFailures -= 1;
+                throw new Error('synthetic pending marker set failure');
+              }
               state.pendingPublish = value.ac_schedule_sync_publish_pending === true;
               if (value.ac_schedule_test) {
                 state.localSchedule = structuredClone(value.ac_schedule_test);
@@ -987,9 +1067,18 @@ async function runTests() {
             const next = Number(value.ac_schedule_sync_watermark) || 0;
             state.localWrites.push(next);
             state.durableWatermark = next;
+            if (Object.hasOwn(value, 'ac_schedule_sync_payload_receipt')) {
+              state.durablePayloadReceipt = structuredClone(
+                value.ac_schedule_sync_payload_receipt
+              );
+            }
           },
           async remove(key) {
             if (key === 'ac_schedule_sync_publish_pending') {
+              state.pendingRemoveCalls += 1;
+              if (typeof options.onPendingRemove === 'function') {
+                await options.onPendingRemove(state.pendingRemoveCalls, state);
+              }
               state.pendingPublish = false;
             }
           }
@@ -1026,7 +1115,14 @@ async function runTests() {
         }
       },
       alarms: {
-        async create(name, info) { state.alarms.set(name, { name, ...info }); },
+        async create(name, info) {
+          if (name === 'ac-sync-publish-retry'
+              && state.publishRetryCreateFailures > 0) {
+            state.publishRetryCreateFailures -= 1;
+            throw new Error('synthetic publish retry alarm failure');
+          }
+          state.alarms.set(name, { name, ...info });
+        },
         async clear(name) { return state.alarms.delete(name); },
         async get(name) { return state.alarms.get(name); }
       }
@@ -1041,33 +1137,155 @@ async function runTests() {
     const actual = new Function(
       'schedule', 'chrome', 'composeSyncPayload', 'nextHalfHourBoundary',
       'appendDiagnosticLog', 'Date', 'console', 'applySyncedPhase',
-      'getPwmRetryDescriptor',
+      'getPwmRetryDescriptor', 'initialDeferredSyncDisable',
+      'remoteSafetyPreflight',
       `const SYNC_KEY = 'ac_schedule_sync_test';
       const SYNC_WATERMARK_KEY = 'ac_schedule_sync_watermark';
+      const SYNC_PAYLOAD_RECEIPT_KEY = 'ac_schedule_sync_payload_receipt';
+      const SYNC_PAYLOAD_RECEIPT_SCHEMA_VERSION = 1;
       const SYNC_PENDING_PUBLISH_KEY = 'ac_schedule_sync_publish_pending';
+      const LOCAL_SCHEDULE_MUTATION_CUTOFF_KEY =
+        'ac_local_schedule_mutation_cutoff';
       let lastSyncedAt = 0;
       let syncWatermarkLoaded = false;
+      let completedSyncPayloadReceipt = null;
       let syncWriteChain = Promise.resolve();
       let syncWatermarkWriteChain = Promise.resolve();
+      let syncWatermarkWriteGeneration = 0;
+      let syncWatermarkWritesInFlight = 0;
       let syncPublishGeneration = 0;
       let syncWriteOperationsInFlight = 0;
+      let syncPublishRetryAlarmWriteChain = Promise.resolve();
+      let syncPublishRetryAlarmWriteGeneration = 0;
+      let syncPublishRetryAlarmWritesInFlight = 0;
+      let localScheduleMutationCommittedObservedAt = 0;
+      const activeLocalSyncEchoIdentities = new Set();
+      ${syncPayloadIdentitySource6}
+      let criticalLocalStateWriteChain = Promise.resolve();
+      function runSerializedCriticalLocalStateWrite(operation) {
+        const queued = criticalLocalStateWriteChain.catch(() => {}).then(operation);
+        criticalLocalStateWriteChain = queued.catch(() => {});
+        return queued;
+      }
       let automaticDisableAdmissionEpoch = 0;
       let automaticOnAdmissionBlocked = false;
+      let manualOffAutomaticOnBlocked = false;
+      let deferredSyncDisablePending = initialDeferredSyncDisable === true;
+      let deferredSyncDisableEpoch = deferredSyncDisablePending ? 1 : 0;
+      let deferredSyncDisableRemoteSnapshot = deferredSyncDisablePending
+        ? { enabled: false, syncedAt: 0 }
+        : null;
+      let localScheduleAuthorityGeneration = 0;
+      let deferredSyncDisableLocalScheduleAuthorityGeneration = 0;
+      let deferredSyncDisableSuccessorSnapshot = null;
+      let deferredSyncDisableSuccessorLocalAuthorityGeneration = 0;
+      let deferredSyncDisableSuccessorPublishGeneration = 0;
+      let localScheduleMutationGeneration = 0;
+      let deferredSyncDisableLocalMutationGeneration = 0;
+      let deferredSyncDisableSuccessorMutationGeneration = 0;
+      let deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+      let startupRestoreSupersededByUserIntent = false;
+      function isStartupRestoreSupersededByUserIntent() {
+        return startupRestoreSupersededByUserIntent;
+      }
       let pwmRuntimeRevision = 1;
       const _syncOpLock = {
         busy: false,
         pending: false,
         pendingReason: '',
         pendingRemote: null,
+        rereadAfterSafetyDisable: false,
         pendingOutbound: false,
         pendingOutboundReason: ''
       };
+      function queuePendingSyncAdoption(reason = '', explicitRemote = null) {
+        _syncOpLock.pending = true;
+        _syncOpLock.pendingReason = reason || _syncOpLock.pendingReason;
+        if (!explicitRemote || typeof explicitRemote !== 'object') return;
+        if (explicitRemote.enabled === false) {
+          _syncOpLock.pendingRemote = explicitRemote;
+          _syncOpLock.rereadAfterSafetyDisable = false;
+        } else if (deferredSyncDisablePending
+            || _syncOpLock.pendingRemote?.enabled === false) {
+          _syncOpLock.rereadAfterSafetyDisable = true;
+        } else {
+          _syncOpLock.pendingRemote = explicitRemote;
+        }
+      }
+      function deferRemoteSyncDisableWhileManualOffBlocked(remote) {
+        deferredSyncDisablePending = true;
+        deferredSyncDisableEpoch += 1;
+        deferredSyncDisableRemoteSnapshot = remote && typeof remote === 'object'
+          ? { ...remote, enabled: false }
+          : { enabled: false, syncedAt: 0 };
+        deferredSyncDisableLocalScheduleAuthorityGeneration =
+          localScheduleAuthorityGeneration;
+        return Promise.resolve(true);
+      }
+      function rememberRemoteSyncSuccessorAfterDeferredDisable(remote) {
+        deferredSyncDisableSuccessorSnapshot = { ...remote };
+        deferredSyncDisableSuccessorLocalAuthorityGeneration =
+          deferredSyncDisableLocalScheduleAuthorityGeneration;
+        deferredSyncDisableSuccessorPublishGeneration = syncPublishGeneration;
+        deferredSyncDisableSuccessorMutationGeneration =
+          localScheduleMutationGeneration;
+        deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+        _syncOpLock.rereadAfterSafetyDisable = true;
+        return Promise.resolve(true);
+      }
+      function isDeferredSyncDisableSuccessorCandidate(remote) {
+        return !!deferredSyncDisableSuccessorSnapshot
+          && !!remote
+          && remote.enabled !== false
+          && getSyncPayloadIdentity(remote)
+            === getSyncPayloadIdentity(deferredSyncDisableSuccessorSnapshot);
+      }
+      async function rememberLocalSyncPublishAfterRemoteAuthority() {
+        if (deferredSyncDisablePending
+            || deferredSyncDisableSuccessorSnapshot) {
+          deferredSyncDisableLocalPublishAfterRemoteAuthority = true;
+        }
+        return true;
+      }
+      async function refreshRemoteDisableBeforeLocalRelease(
+        ensureCurrent,
+        reason,
+        preflightOptions = {}
+      ) {
+        const receipt = await remoteSafetyPreflight({
+          reason,
+          allowSafeLocalDisablePublish:
+            preflightOptions.allowSafeLocalDisablePublish === true,
+          currentBefore: typeof ensureCurrent !== 'function' || ensureCurrent()
+        });
+        if (receipt?.remote?.enabled === false) {
+          await deferRemoteSyncDisableWhileManualOffBlocked(
+            receipt.remote,
+            reason
+          );
+          return false;
+        }
+        return receipt !== false
+          && (typeof ensureCurrent !== 'function' || ensureCurrent());
+      }
+      async function discardStaleDeferredSyncDisableSuccessor(remote) {
+        if (!isDeferredSyncDisableSuccessorCandidate(remote)) return true;
+        deferredSyncDisableSuccessorSnapshot = null;
+        deferredSyncDisableSuccessorLocalAuthorityGeneration = 0;
+        deferredSyncDisableSuccessorMutationGeneration = 0;
+        deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+        return true;
+      }
       async function createAlarm(name, info) {
         await chrome.alarms.create(name, info);
         return true;
       }
       function invalidateTimerBasedShutdown() {}
       function drainDeferredScheduleRepair() { return false; }
+      function drainDeferredSyncAdoptionAfterManualOffAdmission() {}
+      async function ensureSyncAuthorityDurableBaselineLoaded() {
+        return true;
+      }
       ${explicitDisableClaimSource6}
       async function commitExplicitDisableIntentForTest() {
         const admissionEpoch = preemptAutomaticOnForExplicitDisable();
@@ -1091,7 +1309,16 @@ async function runTests() {
         load: loadSyncWatermark,
         persist: persistSyncWatermark,
         last: () => lastSyncedAt,
-        loaded: () => syncWatermarkLoaded
+        loaded: () => syncWatermarkLoaded,
+        setAutomaticAdmissionBlocked(value) {
+          automaticOnAdmissionBlocked = value === true;
+        },
+        deferred: () => ({
+          pending: deferredSyncDisablePending,
+          remote: deferredSyncDisableRemoteSnapshot
+            ? { ...deferredSyncDisableRemoteSnapshot }
+            : null
+        })
       };`
     )(
       scheduleState,
@@ -1102,7 +1329,23 @@ async function runTests() {
       SyncHarnessDate,
       testConsole,
       options.applySyncedPhase || (async () => false),
-      pwmRetry.getPwmRetryDescriptor
+      pwmRetry.getPwmRetryDescriptor,
+      options.initialDeferredSyncDisable === true,
+      async receipt => {
+        state.preflightCalls.push({
+          ...receipt,
+          physicalSyncAttempts: state.syncAttempts.length
+        });
+        if (typeof options.onPreflight === 'function') {
+          await options.onPreflight(receipt, state);
+        }
+        if (options.preflightGate) await options.preflightGate;
+        if (options.preflightRemote
+            && typeof options.preflightRemote === 'object') {
+          return { remote: structuredClone(options.preflightRemote) };
+        }
+        return options.preflightResult !== false;
+      }
     );
     return { ...actual, state, schedule: scheduleState };
   };
@@ -1114,6 +1357,196 @@ async function runTests() {
     failSyncSet: true
   });
   await failedPublish6.sync();
+  const credentiallessPublish6 = loadActualSyncProtocol6({
+    initialWatermark: 500,
+    wallNow: 1000,
+    pendingMarkerSetFailures: 1,
+    publishRetryCreateFailures: 1
+  });
+  const credentiallessPublishResult6 =
+    await credentiallessPublish6.sync('dual-credential-failure');
+  assertPass(credentiallessPublishResult6 === false
+      && credentiallessPublish6.state.syncAttempts.length === 0
+      && credentiallessPublish6.state.syncWrites.length === 0
+      && credentiallessPublish6.state.activeSyncSets === 0
+      && credentiallessPublish6.state.pendingPublish === false
+      && !credentiallessPublish6.state.alarms.has(
+        'ac-sync-publish-retry'
+      ),
+    '6I-2: sync pending marker 与 fixed publish retry alarm 双失败时，物理 sync.set 前 fail-closed；无凭据旧 T 绝不跨后到 F');
+
+  let releaseCentralPreflight6;
+  let markCentralPreflightStarted6;
+  const centralPreflightGate6 = new Promise(resolve => {
+    releaseCentralPreflight6 = resolve;
+  });
+  const centralPreflightStarted6 = new Promise(resolve => {
+    markCentralPreflightStarted6 = resolve;
+  });
+  const centralPreflightHarness6 = loadActualSyncProtocol6({
+    schedule: {
+      ...baseSchedule,
+      enabled: true,
+      smartMode: { enabled: false, sensitivity: 5 }
+    },
+    preflightGate: centralPreflightGate6,
+    onPreflight() { markCentralPreflightStarted6(); }
+  });
+  const centralPreflightPublish6 = centralPreflightHarness6.sync(
+    'central-preflight-barrier'
+  );
+  await centralPreflightStarted6;
+  const centralPreflightHadZeroPhysicalWrites6 =
+    centralPreflightHarness6.state.syncAttempts.length === 0;
+  releaseCentralPreflight6();
+  const centralPreflightResult6 = await centralPreflightPublish6;
+  assertPass(centralPreflightHadZeroPhysicalWrites6
+      && centralPreflightResult6 === true
+      && centralPreflightHarness6.state.preflightCalls.length === 1
+      && centralPreflightHarness6.state.preflightCalls[0]
+        ?.physicalSyncAttempts === 0
+      && centralPreflightHarness6.state.syncWrites.length === 1,
+    '6I-3: every physical sync.set waits for central stable remote-safety preflight；barrier 未释放时零外发，放行后恰好一次');
+
+  let admissionBlockedDuringPreflightHarness6;
+  admissionBlockedDuringPreflightHarness6 = loadActualSyncProtocol6({
+    schedule: {
+      ...baseSchedule,
+      enabled: true,
+      smartMode: { enabled: false, sensitivity: 5 }
+    },
+    onPreflight() {
+      admissionBlockedDuringPreflightHarness6
+        .setAutomaticAdmissionBlocked(true);
+    }
+  });
+  const admissionBlockedDuringPreflightResult6 =
+    await admissionBlockedDuringPreflightHarness6.sync(
+      'automatic-admission-blocked-during-preflight'
+    );
+  assertPass(admissionBlockedDuringPreflightResult6 === false
+      && admissionBlockedDuringPreflightHarness6.state.syncAttempts.length
+        === 0
+      && admissionBlockedDuringPreflightHarness6.state.syncWrites.length === 0
+      && admissionBlockedDuringPreflightHarness6.state.pendingPublish === true
+      && admissionBlockedDuringPreflightHarness6.state.alarms.has(
+        'ac-sync-publish-retry'
+      ),
+    '6I-3A: enabled=true outbound 在 central preflight await 中被 automatic ON admission 抢占后零 sync.set；pending marker/fixed retry 保留');
+
+  const pendingOutboundRemoteF6 = {
+    enabled: false,
+    syncedAt: 7000,
+    onMinutes: 19,
+    offMinutes: 41
+  };
+  const makePendingOutboundRemoteFHarness6 = reason => {
+    const harness = loadActualSyncProtocol6({
+      initialPendingPublish: true,
+      schedule: {
+        ...baseSchedule,
+        enabled: true,
+        smartMode: { enabled: false, sensitivity: 5 }
+      },
+      preflightRemote: pendingOutboundRemoteF6
+    });
+    return { harness, result: harness.sync(reason) };
+  };
+  const initPendingRemoteF6 = makePendingOutboundRemoteFHarness6(
+    'init-pending-publish'
+  );
+  const retryPendingRemoteF6 = makePendingOutboundRemoteFHarness6(
+    'sync-publish-retry'
+  );
+  const [initPendingRemoteFResult6, retryPendingRemoteFResult6] =
+    await Promise.all([
+      initPendingRemoteF6.result,
+      retryPendingRemoteF6.result
+    ]);
+  const pendingRemoteFWasPreserved6 = ({ harness }, result) =>
+    result === false
+      && harness.state.preflightCalls.length === 1
+      && harness.state.preflightCalls[0]?.physicalSyncAttempts === 0
+      && harness.state.syncAttempts.length === 0
+      && harness.state.syncWrites.length === 0
+      && harness.deferred().pending === true
+      && harness.deferred().remote?.enabled === false
+      && harness.deferred().remote?.syncedAt
+        === pendingOutboundRemoteF6.syncedAt
+      && harness.state.pendingPublish === true
+      && harness.state.alarms.has('ac-sync-publish-retry');
+  assertPass(pendingRemoteFWasPreserved6(
+        initPendingRemoteF6,
+        initPendingRemoteFResult6
+      )
+      && pendingRemoteFWasPreserved6(
+        retryPendingRemoteF6,
+        retryPendingRemoteFResult6
+      ),
+    '6I-4: init/retry pending local true 在 central preflight 读到 remote F 时零物理外发；F 先进入 durable safety mailbox且 publish credential 保留');
+
+  let releaseW1MarkerRemove6;
+  let markW1MarkerRemoveStarted6;
+  const w1MarkerRemoveGate6 = new Promise(resolve => {
+    releaseW1MarkerRemove6 = resolve;
+  });
+  const w1MarkerRemoveStarted6 = new Promise(resolve => {
+    markW1MarkerRemoveStarted6 = resolve;
+  });
+  let releaseW2Preflight6;
+  let markW2PreflightStarted6;
+  const w2PreflightGate6 = new Promise(resolve => {
+    releaseW2Preflight6 = resolve;
+  });
+  const w2PreflightStarted6 = new Promise(resolve => {
+    markW2PreflightStarted6 = resolve;
+  });
+  const publishCleanupAbaHarness6 = loadActualSyncProtocol6({
+    schedule: {
+      ...baseSchedule,
+      enabled: false,
+      smartMode: { enabled: false, sensitivity: 5 }
+    },
+    async onPendingRemove(call) {
+      if (call !== 1) return;
+      markW1MarkerRemoveStarted6();
+      await w1MarkerRemoveGate6;
+    },
+    async onPreflight(_receipt, state) {
+      if (state.preflightCalls.length !== 2) return;
+      markW2PreflightStarted6();
+      await w2PreflightGate6;
+    }
+  });
+  const w1Publish6 = publishCleanupAbaHarness6.sync('publish-cleanup-W1');
+  await w1MarkerRemoveStarted6;
+  // W2 的 marker 故意失败，只剩新 generation 的 fixed alarm credential。
+  // W1 此时仍持有旧 cleanup receipt；它绝不能 clear W2 的同名 alarm。
+  publishCleanupAbaHarness6.state.pendingMarkerSetFailures = 1;
+  const w2Publish6 = publishCleanupAbaHarness6.sync('publish-cleanup-W2');
+  releaseW1MarkerRemove6();
+  await w2PreflightStarted6;
+  const w2CredentialSurvivedOldCleanup6 =
+    (publishCleanupAbaHarness6.state.pendingPublish === true
+      || publishCleanupAbaHarness6.state.alarms.has('ac-sync-publish-retry'))
+    && publishCleanupAbaHarness6.state.alarms.has('ac-sync-publish-retry')
+    && publishCleanupAbaHarness6.state.syncWrites.length === 1
+    && publishCleanupAbaHarness6.state.preflightCalls[1]
+      ?.physicalSyncAttempts === 1;
+  releaseW2Preflight6();
+  const [w1PublishResult6, w2PublishResult6] = await Promise.all([
+    w1Publish6,
+    w2Publish6
+  ]);
+  assertPass(w2CredentialSurvivedOldCleanup6
+      && w1PublishResult6 === true
+      && w2PublishResult6 === true
+      && publishCleanupAbaHarness6.state.syncWrites.length === 2
+      && publishCleanupAbaHarness6.state.pendingPublish === false
+      && publishCleanupAbaHarness6.state.alarms.has(
+        'ac-sync-publish-retry'
+      ),
+    '6I-5: W1 cleanup remove 与 W2 marker/alarm setup 交错时，旧 generation 不清新 fixed credential；W2 marker reject 仍由 alarm 跨 crash 窗存活，发布后 stale cleanup 也不误删它');
   // 快时钟对端的已知水位高于本机墙钟时，本地停用仍必须更新。
   const skewedDisable6 = loadActualSyncProtocol6({
     initialWatermark: 5000,
@@ -1195,6 +1628,30 @@ async function runTests() {
       && durablePublishRetry6.state.durableWatermark
         === durablePublishRetry6.state.syncWrites[0].syncedAt,
     '6I-3: outbound 连续 watermark 读取失败留下 durable pending + retry alarm；alarm 重放显式停用并清凭证');
+
+  const deferredDisableBlocksTrueOutbound6 = loadActualSyncProtocol6({
+    wallNow: 3500,
+    initialDeferredSyncDisable: true,
+    schedule: {
+      ...baseSchedule,
+      enabled: true,
+      smartMode: { enabled: false, sensitivity: 5 },
+      pwmState: 'on',
+      nextTriggerAt: Date.now() + 10 * 60_000
+    }
+  });
+  const deferredDisableOutboundResult6 = await
+    deferredDisableBlocksTrueOutbound6.sync(
+      'must-not-publish-true-after-remote-disable'
+    );
+  assertPass(deferredDisableOutboundResult6 === false
+      && deferredDisableBlocksTrueOutbound6.state.syncAttempts.length === 0
+      && deferredDisableBlocksTrueOutbound6.state.syncWrites.length === 0
+      && deferredDisableBlocksTrueOutbound6.state.pendingPublish === true
+      && deferredDisableBlocksTrueOutbound6.state.alarms.has(
+        'ac-sync-publish-retry')
+      && syncScheduleSource6.includes('|| deferredSyncDisablePending'),
+    '6I-3A: remote disable pending 后即使内存仍残留 enabled=true，outbound 零 true 写并保留 durable publish retry');
 
   // 旧 outbound 已登记后收到 explicit disable：入站先等旧物理写完成，
   // 再停用并重发当前 schedule，最终 sync store 不能停在旧 enabled=true。
@@ -1816,7 +2273,8 @@ async function runTests() {
   const toggleBridgeResult = await toggleBridge.requestMainWorldToggle(
     'on',
     65000,
-    toggleBridgeDeadline
+    toggleBridgeDeadline,
+    7
   );
   assertPass(toggleBridgeResult?.success === true
       && toggleBridgeResult.action === 'on'
@@ -1824,6 +2282,7 @@ async function runTests() {
       && toggleBridge.sentEvents[0]?.type === testMainBridgeEvents.toggle
       && toggleBridge.sentEvents[0]?.detail?.action === 'on'
       && toggleBridge.sentEvents[0]?.detail?.notAfterAt === toggleBridgeDeadline
+      && toggleBridge.sentEvents[0]?.detail?.cancellationRevision === 7
       && /^ac-\d+-/.test(toggleBridge.sentEvents[0]?.detail?.requestId || '')
       && toggleBridge.listeners.size === 0,
     '9Bridge-1: 主世界 toggle 握手保留事件、action、requestId 前缀与完成后监听器清理');
@@ -1984,6 +2443,7 @@ async function runTests() {
        let acToggleInFlightPageTimerMinutes = 0;
        let acToggleInFlightPageTimerTargetAt = 0;
        let activeAcToggleAttempt = null;
+       async function waitForManualOffCancellationToSettle() {}
        ${toggleCoordinatorSource9G}
        return { toggleAC };`
     )(
@@ -2047,6 +2507,7 @@ async function runTests() {
     () => busyToggleDeferred9G.promise
   ]);
   const busyToggleFirst9G = busyToggleHarness9G.toggleAC('on', toggleOptions9G);
+  await Promise.resolve();
   const busyToggleResults9G = await Promise.all([
     busyToggleHarness9G.toggleAC('off'),
     busyToggleHarness9G.toggleAC('on', { ...toggleOptions9G, notAfterAt: toggleDeadline9G + 1 }),
@@ -2060,6 +2521,46 @@ async function runTests() {
     '9G-0C: action、截止、自动控制版本与页面 timer 任一不同都返回 busy，不合并为同一物理动作');
   busyToggleDeferred9G.resolve({ success: true });
   await busyToggleFirst9G;
+
+  const stalePredecessorToggleGate9G = makeDeferred9G();
+  let stalePredecessorCurrent9G = true;
+  const stalePredecessorToggleHarness9G = createToggleCoordinator9G([
+    () => stalePredecessorToggleGate9G.promise,
+    async () => ({ success: true, latestOwner: true })
+  ]);
+  const stalePredecessorToggle9G = stalePredecessorToggleHarness9G.toggleAC(
+    'on',
+    {
+      ...toggleOptions9G,
+      ensureCurrent: () => stalePredecessorCurrent9G
+    }
+  );
+  await Promise.resolve();
+  stalePredecessorCurrent9G = false;
+  const latestOwnerToggle9G = stalePredecessorToggleHarness9G.toggleAC(
+    'off',
+    { ensureCurrent: () => true }
+  );
+  await Promise.resolve();
+  await Promise.resolve();
+  const latestOwnerWaitedForStalePredecessor9G =
+    stalePredecessorToggleHarness9G.calls.length === 1;
+  stalePredecessorToggleGate9G.resolve({
+    success: false,
+    requestStale: true
+  });
+  const [stalePredecessorToggleResult9G, latestOwnerToggleResult9G] =
+    await Promise.all([stalePredecessorToggle9G, latestOwnerToggle9G]);
+  assertPass(latestOwnerWaitedForStalePredecessor9G
+      && stalePredecessorToggleResult9G.requestStale === true
+      && latestOwnerToggleResult9G.success === true
+      && latestOwnerToggleResult9G.latestOwner === true
+      && stalePredecessorToggleHarness9G.calls.length === 2
+      && toggleCoordinatorSource9G.includes(
+        'await predecessor.promise.catch(() => {});')
+      && toggleCoordinatorSource9G.includes(
+        'if (!callerIsCurrent()) {'),
+    '9G-0C-1: 后到 authority 令 active toggle predecessor stale 时，最新请求等待旧 DOM 临界区退出后重新预检并执行，不 busy-return 或复用 stale Promise');
 
   const rejectedToggleHarness9G = createToggleCoordinator9G([
     async () => { throw new Error('synthetic toggle rejection'); },
@@ -2093,11 +2594,14 @@ async function runTests() {
 
   const pageRequestCoordinatorSource9G = extractSourceSection(
     pageConfirmSource,
-    'async function requestACState(targetState, notAfterAt = 0)',
+    'async function requestACState(',
     '\n\n  // 递归状态收敛',
     'page request coordinator'
   );
-  const createPageRequestCoordinator9G = implementations => {
+  const createPageRequestCoordinator9G = (
+    implementations,
+    cancellationRevision = 11
+  ) => {
     const calls = [];
     const queue = [...implementations];
     const lease = {
@@ -2127,7 +2631,7 @@ async function runTests() {
     )(
       ensureACState,
       lease,
-      11,
+      cancellationRevision,
       5,
       'main-listener-test',
       testConsole
@@ -2140,8 +2644,16 @@ async function runTests() {
     () => samePageRequestDeferred9G.promise,
     async () => ({ success: true, generation: 2 })
   ]);
-  const samePageRequestFirst9G = samePageRequestHarness9G.requestACState(true, pageRequestDeadline9G);
-  const samePageRequestSecond9G = samePageRequestHarness9G.requestACState(true, pageRequestDeadline9G);
+  const samePageRequestFirst9G = samePageRequestHarness9G.requestACState(
+    true,
+    pageRequestDeadline9G,
+    11
+  );
+  const samePageRequestSecond9G = samePageRequestHarness9G.requestACState(
+    true,
+    pageRequestDeadline9G,
+    11
+  );
   await Promise.resolve();
   const firstPageAttempt9G = samePageRequestHarness9G.calls[0]?.attempt;
   assertPass(samePageRequestHarness9G.calls.length === 1
@@ -2160,7 +2672,8 @@ async function runTests() {
   ]);
   const afterResolvedPageRequest9G = await samePageRequestHarness9G.requestACState(
     true,
-    pageRequestDeadline9G
+    pageRequestDeadline9G,
+    11
   );
   assertPass(samePageRequestResultA9G.generation === 1
       && samePageRequestResultB9G.generation === 1
@@ -2172,10 +2685,14 @@ async function runTests() {
   const busyPageRequestHarness9G = createPageRequestCoordinator9G([
     () => busyPageRequestDeferred9G.promise
   ]);
-  const busyPageRequestFirst9G = busyPageRequestHarness9G.requestACState(true, pageRequestDeadline9G);
+  const busyPageRequestFirst9G = busyPageRequestHarness9G.requestACState(
+    true,
+    pageRequestDeadline9G,
+    11
+  );
   const busyPageRequestResults9G = await Promise.all([
-    busyPageRequestHarness9G.requestACState(false, pageRequestDeadline9G),
-    busyPageRequestHarness9G.requestACState(true, pageRequestDeadline9G + 1)
+    busyPageRequestHarness9G.requestACState(false, pageRequestDeadline9G, 11),
+    busyPageRequestHarness9G.requestACState(true, pageRequestDeadline9G + 1, 11)
   ]);
   assertPass(busyPageRequestHarness9G.calls.length === 1
       && busyPageRequestResults9G.every(result => result?.success === false && result.busy === true),
@@ -2189,13 +2706,18 @@ async function runTests() {
   ]);
   let rejectedPageRequestError9G = '';
   try {
-    await rejectedPageRequestHarness9G.requestACState(true, pageRequestDeadline9G);
+    await rejectedPageRequestHarness9G.requestACState(
+      true,
+      pageRequestDeadline9G,
+      11
+    );
   } catch (error) {
     rejectedPageRequestError9G = error?.message || String(error);
   }
   const afterRejectedPageRequest9G = await rejectedPageRequestHarness9G.requestACState(
     true,
-    pageRequestDeadline9G
+    pageRequestDeadline9G,
+    11
   );
   assertPass(rejectedPageRequestError9G === 'synthetic page request rejection'
       && afterRejectedPageRequest9G.recovered === true
@@ -2208,17 +2730,86 @@ async function runTests() {
   ]);
   const invalidPageRequestResult9G = await invalidPageRequestHarness9G.requestACState(
     true,
-    Number.NaN
+    Number.NaN,
+    11
   );
+  const missingCancellationPageRequest9G = await invalidPageRequestHarness9G
+    .requestACState(true, pageRequestDeadline9G);
+  const staleCancellationPageRequest9G = await invalidPageRequestHarness9G
+    .requestACState(true, pageRequestDeadline9G, 10);
   const afterInvalidPageRequest9G = await invalidPageRequestHarness9G.requestACState(
     true,
-    pageRequestDeadline9G
+    pageRequestDeadline9G,
+    11
   );
   assertPass(invalidPageRequestResult9G.success === false
       && !invalidPageRequestResult9G.busy
+      && missingCancellationPageRequest9G.cancelled === true
+      && staleCancellationPageRequest9G.cancelled === true
       && afterInvalidPageRequest9G.success === true
       && invalidPageRequestHarness9G.calls.length === 1,
     '9G-0J: 主世界无效 deadline 在认领 request/lease 前失败，不阻塞下一次合法动作');
+
+  const contentToggleCoordinatorSource9G = extractSourceSection(
+    contentSource,
+    '  async function toggleACSwitch(targetAction, notAfterAt = 0) {',
+    '\nfunction requestMainWorldResult(',
+    'content sticky cancellation admission'
+  );
+  let stickyCancellationRevision9G = 7;
+  let releaseStickyWaitForSwitch9G;
+  let markStickyWaitForSwitch9G;
+  const stickyWaitForSwitchGate9G = new Promise(resolve => {
+    releaseStickyWaitForSwitch9G = resolve;
+  });
+  const stickyWaitForSwitchStarted9G = new Promise(resolve => {
+    markStickyWaitForSwitch9G = resolve;
+  });
+  const stickyForwardedRevisions9G = [];
+  let stickyMainRequestHarness9G = null;
+  const runStickyContentToggle9G = new Function(
+    'requestMainWorldRuntimeIdentity', 'waitForSwitch',
+    'requestMainWorldToggle', 't', 'console',
+    `${contentToggleCoordinatorSource9G}; return toggleACSwitch;`
+  )(
+    async () => ({
+      runtimeIdentity: {
+        main: { automaticOnCancellationRevision: stickyCancellationRevision9G }
+      }
+    }),
+    async () => {
+      markStickyWaitForSwitch9G();
+      await stickyWaitForSwitchGate9G;
+      return { id: 'ac-switch' };
+    },
+    async (_action, _timeoutMs, notAfterAt, cancellationRevision) => {
+      stickyForwardedRevisions9G.push(cancellationRevision);
+      stickyMainRequestHarness9G = createPageRequestCoordinator9G(
+        [async () => ({ success: true, clicked: true })],
+        stickyCancellationRevision9G
+      );
+      return stickyMainRequestHarness9G.requestACState(
+        true,
+        notAfterAt,
+        cancellationRevision
+      );
+    },
+    key => key,
+    testConsole
+  );
+  const stickyContentToggle9G = runStickyContentToggle9G(
+    'on',
+    pageRequestDeadline9G
+  );
+  await stickyWaitForSwitchStarted9G;
+  stickyCancellationRevision9G += 1;
+  releaseStickyWaitForSwitch9G();
+  const stickyContentResult9G = await stickyContentToggle9G;
+  assertPass(stickyForwardedRevisions9G.join(',') === '7'
+      && stickyContentResult9G.success === false
+      && stickyContentResult9G.mainWorldResult?.cancelled === true
+      && stickyMainRequestHarness9G?.calls.length === 0,
+    '9G-0K: content 在首次 DOM await 前冻结 cancel revision；waitForSwitch 中 cancel 后旧 ON 到 main 即 cancelled，零 click');
 
   const scopedClickStart = pageConfirmSource.indexOf('function clickElementOnceInPageWorld(element)');
   const scopedClickEnd = pageConfirmSource.indexOf('\n  async function clickConfirmDialogInPageWorld(', scopedClickStart);
@@ -2304,11 +2895,14 @@ async function runTests() {
     '9G-1A: 两个执行世界共用语义唯一定位；歧义或无标签均失败关闭');
   // 主世界 toggle 握手异常也必须回包：否则隔离世界静默等满超时拿到 null，
   // 误触发后台刷新恢复。隔离世界超时也放宽到 90s 容纳慢异步 confirm + 最多 3 次点击。
-  assertPass(pageConfirmSource.includes('result = await requestACState(true, notAfterAt);')
+  assertPass(pageConfirmSource.includes(
+      'result = await requestACState(\n          true,\n          notAfterAt,\n          cancellationRevision\n        );')
       && pageConfirmSource.includes('主世界切换抛异常')
       && pageConfirmSource.includes('detail: { requestId, action, ...result, ...getMainRuntimeIdentity() }'),
     '9G-1A: 主世界 toggle 握手异常时仍回显失败结果，避免隔离世界拿到 null');
-  assertPass(contentSource.includes('requestMainWorldToggle(targetAction, 90000, notAfterAt)')
+  assertPass(contentSource.includes(
+      'targetAction,\n    90000,\n    notAfterAt,\n    cancellationRevision')
+      && contentSource.includes('requestMainWorldRuntimeIdentity()')
       && contentSource.includes('toggleACSwitch(action, msg.notAfterAt)')
       && contentSource.includes('notAfterAt !== 0 && !Number.isSafeInteger(notAfterAt)')
       && contentSource.includes('...(notAfterAt !== 0 ? { notAfterAt } : {})'),
@@ -4250,7 +4844,15 @@ async function runTests() {
     };
     const requestOn = (bridge, requestId) => window.dispatchEvent(new TestCustomEvent(
       `${bridge.channel}_TOGGLE_AC__`,
-      { detail: { requestId, action: 'on', notAfterAt: Date.now() + 10_000 } }
+      {
+        detail: {
+          requestId,
+          action: 'on',
+          notAfterAt: Date.now() + 10_000,
+          cancellationRevision: window.__AC_EXTENSION_MAIN_BRIDGE_LEASE__
+            .cancelRevision
+        }
+      }
     ));
     return {
       window,
@@ -4789,7 +5391,7 @@ async function runTests() {
   const repairBody = repairStart >= 0 && repairEnd > repairStart
     ? backgroundSource.slice(repairStart, repairEnd)
     : '';
-  const toggleStart = backgroundSource.indexOf('async function toggleNowAndSync(action)');
+  const toggleStart = backgroundSource.indexOf('async function toggleNowAndSync(');
   const toggleEnd = backgroundSource.indexOf('\nasync function ensureDiagnosticAlarms', toggleStart);
   const toggleBody = toggleStart >= 0 && toggleEnd > toggleStart
     ? backgroundSource.slice(toggleStart, toggleEnd)
@@ -4864,7 +5466,7 @@ async function runTests() {
     proofWriteIdx11C
   );
   const proofCommitCallIdx11C = setTimerBody.indexOf(
-    'return recordPageTimerProof(result, minutes, verification);'
+    'return await finalizeProof(result, minutes, verification);'
   );
   assertPass(verificationCallIdx > 0
       && proofCommitCallIdx11C > verificationCallIdx
@@ -4909,11 +5511,23 @@ async function runTests() {
   const pageProofSwapHarness11C = new Function(
     'initialSchedule', 'replacementSchedule',
     'recordSchedulePageTimerProofState', 'createOwnedPageTimerStateReceipt',
-    'console',
+    'replaceSchedulePageTimerState', 'console',
     `let schedule = initialSchedule;
     let persistedSchedule = null;
     let scheduleLoadBlockedRevision = null;
     let pwmRuntimeRevision = 1;
+    let schedulePersistenceAuthorityEpoch = 0;
+    let deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+    function hasCommittedLocalMutationAfterDeferredRemoteAuthority() {
+      return false;
+    }
+    function snapshotDeferredSyncDisableMailbox() { return null; }
+    let criticalLocalStateWriteChain = Promise.resolve();
+    function runSerializedCriticalLocalStateWrite(operation) {
+      const queued = criticalLocalStateWriteChain.catch(() => {}).then(operation);
+      criticalLocalStateWriteChain = queued.catch(() => {});
+      return queued;
+    }
     const pageTimerWriteOwner = 37;
     const calls = [];
     const STORAGE_KEY = 'ac_schedule';
@@ -4925,6 +5539,19 @@ async function runTests() {
       pageTimerWriteOwner
     });
     const finishFailure = async failure => failure;
+    function replayOwnedPageTimerState(pageTimerState) {
+      if (pageTimerState?.pageTimerWriteOwner !== pageTimerWriteOwner) {
+        return false;
+      }
+      replaceSchedulePageTimerState(schedule, {
+        minutes: pageTimerState.pageTimerMinutes,
+        targetAt: pageTimerState.pageTimerTargetAt,
+        error: pageTimerState.pageTimerError,
+        retryAt: pageTimerState.pageTimerRetryAt,
+        retryMinutes: pageTimerState.pageTimerRetryMinutes
+      });
+      return true;
+    }
     const chrome = {
       alarms: {
         async clear(name) {
@@ -4967,6 +5594,7 @@ async function runTests() {
       pageTimerRetryMinutes: Number(state.retryMinutes) || 0,
       pageTimerWriteOwner: Number(pageTimerWriteOwner)
     }),
+    scheduleMutations.replaceSchedulePageTimerState,
     testConsole
   );
   const pageProofTargetAt11C = Date.now() + 23 * 60_000;
@@ -5240,26 +5868,42 @@ async function runTests() {
       && !/\bschedule\.pageTimerRetryAt\s*=(?!=)/.test(failureHelperSource11D)
       && !/\bschedule\.pageTimerRetryMinutes\s*=(?!=)/.test(failureHelperSource11D)
       && setTimerBody.includes('let pageTimerWriteOwner = 0;')
+      && setTimerBody.includes('let pageTimerWriteLease = null;')
       && setTimerBody.includes('const runtimeOwnerRevision = pwmRuntimeRevision;')
       && setTimerBody.includes('pwmRuntimeRevision === runtimeOwnerRevision')
       && setTimerBody.includes('isPageTimerWriteOwnerCurrent(pageTimerWriteOwner)')
-      && setTimerBody.includes('pageTimerWriteOwner = claimPageTimerWriteOwner(lifecycleWriteIsCurrent);')
-      && setTimerBody.includes('if (pageTimerWriteOwner <= 0) return staleAutomationResult();')
+      && setTimerBody.includes('pageTimerWriteLease = claimPageTimerWriteLease(lifecycleWriteIsCurrent);')
+      && setTimerBody.includes('if (!pageTimerWriteLease) return staleAutomationResult();')
+      && setTimerBody.includes('pageTimerWriteOwner = pageTimerWriteLease.owner;')
       && setTimerBody.includes('shutdownRevision,\n      pageTimerWriteOwner')
       && setTimerBody.includes('if (result?.pageTimerStale')
       && serializedPageTimerBody.includes('pageTimerWriteOwner = 0')
-      && countOccurrences(serializedPageTimerBody, 'if (!pageTimerWriteIsCurrent())') === 2
+      && countOccurrences(
+        serializedPageTimerBody,
+        'if (!pageTimerWriteIsCurrent())'
+      ) === 3
+      && serializedPageTimerBody.includes(
+        'ensureCurrent: serializedMessageIsCurrent')
       && serializedPageTimerBody.includes('pageTimerStale: true')
       && backgroundSource.includes('function clearPageTimerProofState() {\n  const pageTimerWriteOwner = invalidatePageTimerWriteOwner();')
-      && !setTimerBody.includes('return await finishFailure(')
-      && !setTimerBody.includes('return await recordPageTimerProof('),
-    '11D-0: failure 先同步失效旧 proof，真实消息前后复核同代 owner；alarm await 后只向当前 owner 重放五字段');
+      && setTimerBody.includes('let terminalFinalizerStarted = false;')
+      && setTimerBody.includes('return await finalizeFailure(')
+      && setTimerBody.includes('return await finalizeProof(')
+      && setTimerBody.includes('if (terminalFinalizerStarted) throw e;')
+      && setTimerBody.includes('pageTimerWriteLease?.release();'),
+    '11D-0: failure 先同步失效旧 proof，真实消息前后复核同代 owner；终态 Promise settle 后才释放完整 lifecycle');
 
   const pageTimerOwnerSource11D = extractSourceSection(
     backgroundSource,
     'let pageTimerWriteGeneration = 0;',
     '\n\nfunction sendSerializedPageTimerMessage(',
     'page timer write owner admission'
+  );
+  const ownedPageTimerStateHelpers11D = extractSourceSection(
+    backgroundSource,
+    'function createOwnedPageTimerStateReceipt(',
+    '\n\nfunction sendSerializedPageTimerMessage(',
+    'owned page timer state receipt helpers'
   );
   const pageTimerOwnerHarness11D = new Function(
     `${pageTimerOwnerSource11D}
@@ -5289,6 +5933,249 @@ async function runTests() {
       && invalidatedPageTimerGeneration11D === 3
       && !pageTimerOwnerHarness11D.isPageTimerWriteOwnerCurrent(pageTimerOwnerC11D),
     '11D-0A: stale contender 不抢占；获准 writer 才 last-writer-wins，显式 proof clear 可另行失效当前 writer');
+
+  const terminalReplacementPageState11D = Object.freeze({
+    minutes: 31,
+    targetAt: Date.now() + 31 * 60_000,
+    error: 'replacement writer owns terminal state',
+    retryAt: Date.now() + 60_000,
+    retryMinutes: 4
+  });
+  const makeSetPageTimerTerminalHarness11D = writeSucceeds => {
+    const terminalPersistGate = makeDeferred9G();
+    const terminalPersistStarted = makeDeferred9G();
+    const targetAt = Date.now() + 23 * 60_000;
+    const initialSchedule = {
+      pageTimerMinutes: 7,
+      pageTimerTargetAt: Date.now() + 7 * 60_000,
+      pageTimerError: '',
+      pageTimerRetryAt: 0,
+      pageTimerRetryMinutes: 0
+    };
+    const harness = new Function(
+      'initialSchedule', 'writeSucceeds', 'targetAt',
+      'terminalPersistGate', 'terminalPersistStarted',
+      'recordSchedulePageTimerFailureState',
+      'recordSchedulePageTimerProofState',
+      'replaceSchedulePageTimerState', 'console',
+      `let schedule = structuredClone(initialSchedule);
+      let persistedSchedule = null;
+      let pwmRuntimeRevision = 61;
+      const calls = [];
+      const AC_PAGE = 'https://w5.ab.ust.hk/njggt/app/';
+      const t = key => key;
+      function isAutomationOperationCurrent(revision) {
+        return revision === pwmRuntimeRevision;
+      }
+      function isTimerBasedShutdownCurrent() { return true; }
+      function isACHomePageTab(tab) { return tab?.id === 7; }
+      async function getExactACHomeTab(tabId) {
+        return tabId === 7
+          ? { id: 7, url: AC_PAGE, discarded: false }
+          : null;
+      }
+      async function sendReadMessageToExactACHome() {
+        calls.push('passive-read');
+        return { found: true, value: '19:23' };
+      }
+      ${pageTimerOwnerSource11D}
+      async function writePageTimerOnExactHomeTab(
+        _tabId,
+        requestedMinutes,
+        options
+      ) {
+        calls.push(writeSucceeds ? 'page-write:success' : 'page-write:failure');
+        if (!writeSucceeds) {
+          return { success: false, error: 'synthetic page write failure' };
+        }
+        return {
+          success: true,
+          value: '19:23',
+          actualDelayMinutes: requestedMinutes,
+          targetAt: Number(options.targetAt)
+        };
+      }
+      async function verifyPageTimerPersistence() {
+        calls.push('verify-page-timer');
+        return { success: true, value: '19:23' };
+      }
+      function createPageTimerRetryIntent(minutes) {
+        return { retryMinutes: minutes, retryAt: Date.now() + 60_000 };
+      }
+      async function schedulePageTimerRetry(retryState) {
+        return { ...retryState, stale: false, alarmCreated: true };
+      }
+      async function writePageTimerRetryAlarm() {
+        calls.push('retry-alarm-write');
+        return { stale: false, alarmCreated: false };
+      }
+      async function persistSchedule(reason) {
+        calls.push(\`persist:start:\${reason}\`);
+        terminalPersistStarted.resolve(reason);
+        await terminalPersistGate.promise;
+        persistedSchedule = structuredClone(schedule);
+        calls.push(\`persist:end:\${reason}\`);
+      }
+      const chrome = {
+        tabs: {
+          async query() { return []; },
+          async create() { throw new Error('unexpected tab create'); }
+        },
+        alarms: { create() {} }
+      };
+      ${setTimerBody}
+      return {
+        run: () => setPageTimer(23, {
+          retryOnFailure: false,
+          targetAt,
+          preferredTabId: 7,
+          automationRevision: 61
+        }),
+        read: () => sendSerializedPageTimerRead(
+          7,
+          { action: 'getPageTimer' }
+        ),
+        readIsCurrent: isPageTimerReadReceiptCurrent,
+        writesInFlight: () => pageTimerWritesInFlight,
+        takeOverWithReplacement(replacementState) {
+          const replacementLease = claimPageTimerWriteLease(() => true);
+          if (!replacementLease) throw new Error('replacement writer lease missing');
+          replaceSchedulePageTimerState(schedule, replacementState);
+          const replacementOwner = replacementLease.owner;
+          const released = replacementLease.release();
+          calls.push(\`replacement-owner:\${replacementOwner}:\${released}\`);
+          return { replacementOwner, released };
+        },
+        current: () => structuredClone(schedule),
+        persisted: () => persistedSchedule,
+        calls
+      };`
+    )(
+      initialSchedule,
+      writeSucceeds,
+      targetAt,
+      terminalPersistGate,
+      terminalPersistStarted,
+      scheduleMutations.recordSchedulePageTimerFailureState,
+      scheduleMutations.recordSchedulePageTimerProofState,
+      scheduleMutations.replaceSchedulePageTimerState,
+      testConsole
+    );
+    return {
+      ...harness,
+      targetAt,
+      persistStarted: terminalPersistStarted.promise,
+      releasePersist: terminalPersistGate.resolve
+    };
+  };
+
+  const runSetPageTimerTerminalCase11D = async writeSucceeds => {
+    const harness = makeSetPageTimerTerminalHarness11D(writeSucceeds);
+    const operation = harness.run();
+    const persistReason = await harness.persistStarted;
+    const writesWhilePersistPending = harness.writesInFlight();
+    const pendingReadReceipt = await harness.read();
+    const pendingReadWasRejected = pendingReadReceipt.stale === true
+      && harness.readIsCurrent(pendingReadReceipt) === false
+      && !harness.calls.includes('passive-read');
+    harness.releasePersist();
+    const outcome = await operation;
+    const writesAfterSettle = harness.writesInFlight();
+    const settledReadReceipt = await harness.read();
+    return {
+      writeSucceeds,
+      targetAt: harness.targetAt,
+      persistReason,
+      writesWhilePersistPending,
+      pendingReadWasRejected,
+      outcome,
+      writesAfterSettle,
+      settledReadReceipt,
+      settledReadIsCurrent: harness.readIsCurrent(settledReadReceipt),
+      schedule: harness.current(),
+      persisted: harness.persisted(),
+      calls: harness.calls
+    };
+  };
+  const setPageTimerTerminalResults11D = [
+    await runSetPageTimerTerminalCase11D(true),
+    await runSetPageTimerTerminalCase11D(false)
+  ];
+  const setPageTimerSuccessTerminal11D = setPageTimerTerminalResults11D[0];
+  const setPageTimerFailureTerminal11D = setPageTimerTerminalResults11D[1];
+  assertPass(setPageTimerTerminalResults11D.every(result =>
+    result.writesWhilePersistPending === 1
+      && result.pendingReadWasRejected
+      && result.writesAfterSettle === 0
+      && result.settledReadReceipt.stale === false
+      && result.settledReadIsCurrent === true
+      && result.calls.filter(call => call === 'passive-read').length === 1)
+      && setPageTimerSuccessTerminal11D.persistReason
+        === 'setPageTimer-success'
+      && setPageTimerSuccessTerminal11D.outcome.verified === true
+      && setPageTimerSuccessTerminal11D.schedule.pageTimerTargetAt
+        === setPageTimerSuccessTerminal11D.targetAt
+      && setPageTimerSuccessTerminal11D.persisted?.pageTimerTargetAt
+        === setPageTimerSuccessTerminal11D.targetAt
+      && setPageTimerFailureTerminal11D.persistReason
+        === 'setPageTimer-failed'
+      && setPageTimerFailureTerminal11D.outcome.success === false
+      && setPageTimerFailureTerminal11D.outcome.error
+        === 'synthetic page write failure'
+      && setPageTimerFailureTerminal11D.schedule.pageTimerTargetAt === 0
+      && setPageTimerFailureTerminal11D.persisted?.pageTimerTargetAt === 0,
+    '11D-0B-1: 真实 setPageTimer success/failure finalizer 的 terminal persist settle 前持有 writer admission 并拒绝 passive read；settle 后归零且新 read receipt current');
+
+  const runSetPageTimerTerminalTakeoverCase11D = async writeSucceeds => {
+    const harness = makeSetPageTimerTerminalHarness11D(writeSucceeds);
+    const operation = harness.run();
+    const persistReason = await harness.persistStarted;
+    const writesBeforeTakeover = harness.writesInFlight();
+    const takeover = harness.takeOverWithReplacement(
+      terminalReplacementPageState11D
+    );
+    const writesAfterReplacementRelease = harness.writesInFlight();
+    harness.releasePersist();
+    const outcome = await operation;
+    return {
+      persistReason,
+      writesBeforeTakeover,
+      writesAfterReplacementRelease,
+      takeover,
+      outcome,
+      writesAfterSettle: harness.writesInFlight(),
+      schedule: harness.current(),
+      persisted: harness.persisted()
+    };
+  };
+  const terminalTakeoverResults11D = [
+    await runSetPageTimerTerminalTakeoverCase11D(true),
+    await runSetPageTimerTerminalTakeoverCase11D(false)
+  ];
+  const expectedReplacementPageFields11D = state => (
+    state?.pageTimerMinutes === terminalReplacementPageState11D.minutes
+    && state?.pageTimerTargetAt === terminalReplacementPageState11D.targetAt
+    && state?.pageTimerError === terminalReplacementPageState11D.error
+    && state?.pageTimerRetryAt === terminalReplacementPageState11D.retryAt
+    && state?.pageTimerRetryMinutes
+      === terminalReplacementPageState11D.retryMinutes
+  );
+  assertPass(terminalTakeoverResults11D.every(result =>
+    result.writesBeforeTakeover === 1
+      && result.takeover.replacementOwner === 2
+      && result.takeover.released === true
+      && result.writesAfterReplacementRelease === 1
+      && result.outcome.success === false
+      && result.outcome.automationStale === true
+      && result.outcome.pageTimerWriteOwner === 1
+      && result.writesAfterSettle === 0
+      && expectedReplacementPageFields11D(result.schedule)
+      && expectedReplacementPageFields11D(result.persisted))
+      && terminalTakeoverResults11D[0].persistReason
+        === 'setPageTimer-success'
+      && terminalTakeoverResults11D[1].persistReason
+        === 'setPageTimer-failed',
+    '11D-0B-2: 真实 setPageTimer success/failure 在 terminal persist await 中被后继 owner 接管时，旧结果 stale，后继 page 五字段不回灌且所有 lease 最终归零');
 
   const smartReapplyStateSource11D = extractSourceSection(
     backgroundSource,
@@ -5486,7 +6373,8 @@ async function runTests() {
 
   const loadPageTimerFailureHarness11D = new Function(
     'initialSchedule', 'replacementSchedule', 'harnessOptions',
-    'recordSchedulePageTimerFailureState', 'Date', 'console',
+    'recordSchedulePageTimerFailureState', 'replaceSchedulePageTimerState',
+    'Date', 'console',
     `let schedule = initialSchedule;
     let current = true;
     let retryOnFailure = harnessOptions.retryOnFailure !== false;
@@ -5496,6 +6384,18 @@ async function runTests() {
     let persistedSchedule = null;
     let scheduleLoadBlockedRevision = null;
     let pwmRuntimeRevision = 1;
+    let schedulePersistenceAuthorityEpoch = 0;
+    let deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+    function hasCommittedLocalMutationAfterDeferredRemoteAuthority() {
+      return false;
+    }
+    function snapshotDeferredSyncDisableMailbox() { return null; }
+    let criticalLocalStateWriteChain = Promise.resolve();
+    function runSerializedCriticalLocalStateWrite(operation) {
+      const queued = criticalLocalStateWriteChain.catch(() => {}).then(operation);
+      criticalLocalStateWriteChain = queued.catch(() => {});
+      return queued;
+    }
     const pageTimerWriteOwner = 37;
     const calls = [];
     const STORAGE_KEY = 'ac_schedule';
@@ -5550,6 +6450,20 @@ async function runTests() {
         pageTimerWriteOwner: Number(owner)
       });
     }
+    function replayOwnedPageTimerState(pageTimerState) {
+      if (!current
+          || pageTimerState?.pageTimerWriteOwner !== pageTimerWriteOwner) {
+        return false;
+      }
+      replaceSchedulePageTimerState(schedule, {
+        minutes: pageTimerState.pageTimerMinutes,
+        targetAt: pageTimerState.pageTimerTargetAt,
+        error: pageTimerState.pageTimerError,
+        retryAt: pageTimerState.pageTimerRetryAt,
+        retryMinutes: pageTimerState.pageTimerRetryMinutes
+      });
+      return true;
+    }
     ${pageTimerPersistSource11C}
     ${retryAlarmWriterSource11D}
     ${retryIntentBody}
@@ -5592,6 +6506,7 @@ async function runTests() {
     currentFailureSchedules11D.replacement,
     { swapOnClear: true, minutes: 19.9 },
     scheduleMutations.recordSchedulePageTimerFailureState,
+    scheduleMutations.replaceSchedulePageTimerState,
     RetryDate11D,
     testConsole
   );
@@ -5635,6 +6550,7 @@ async function runTests() {
     createSwapSchedules11D.replacement,
     { swapOnCreate: true },
     scheduleMutations.recordSchedulePageTimerFailureState,
+    scheduleMutations.replaceSchedulePageTimerState,
     RetryDate11D,
     testConsole
   );
@@ -5654,6 +6570,7 @@ async function runTests() {
     createStaleSchedules11D.replacement,
     { swapOnCreate: true, staleOnCreate: true },
     scheduleMutations.recordSchedulePageTimerFailureState,
+    scheduleMutations.replaceSchedulePageTimerState,
     RetryDate11D,
     testConsole
   );
@@ -5673,6 +6590,7 @@ async function runTests() {
     staleFailureSchedules11D.replacement,
     { swapOnClear: true, staleOnClear: true },
     scheduleMutations.recordSchedulePageTimerFailureState,
+    scheduleMutations.replaceSchedulePageTimerState,
     RetryDate11D,
     testConsole
   );
@@ -5697,6 +6615,7 @@ async function runTests() {
     nullOwnerSchedules11D.replacement,
     { nullLifecycleOwner: true, swapOnClear: true },
     scheduleMutations.recordSchedulePageTimerFailureState,
+    scheduleMutations.replaceSchedulePageTimerState,
     RetryDate11D,
     testConsole
   );
@@ -5725,6 +6644,7 @@ async function runTests() {
     sameTupleNullOwnerSchedules11D.replacement,
     { nullLifecycleOwner: true, swapOnClear: true },
     scheduleMutations.recordSchedulePageTimerFailureState,
+    scheduleMutations.replaceSchedulePageTimerState,
     RetryDate11D,
     testConsole
   );
@@ -5749,6 +6669,7 @@ async function runTests() {
     oldTupleNullOwnerSchedules11D.replacement,
     { nullLifecycleOwner: true, swapOnClear: true },
     scheduleMutations.recordSchedulePageTimerFailureState,
+    scheduleMutations.replaceSchedulePageTimerState,
     RetryDate11D,
     testConsole
   );
@@ -5767,6 +6688,7 @@ async function runTests() {
     noRetrySchedules11D.replacement,
     { retryOnFailure: false, swapOnClear: true },
     scheduleMutations.recordSchedulePageTimerFailureState,
+    scheduleMutations.replaceSchedulePageTimerState,
     RetryDate11D,
     testConsole
   );
@@ -5790,6 +6712,7 @@ async function runTests() {
     falseAlarmSchedules11D.replacement,
     { swapOnClear: true, alarmCreated: false },
     scheduleMutations.recordSchedulePageTimerFailureState,
+    scheduleMutations.replaceSchedulePageTimerState,
     RetryDate11D,
     testConsole
   );
@@ -5913,6 +6836,29 @@ async function runTests() {
   const reapplyBody = reapplyStart >= 0 && reapplyEnd > reapplyStart
     ? backgroundSource.slice(reapplyStart, reapplyEnd)
     : '';
+  const reapplyPhaseAdmissionHarnessSource11 = `
+    let syncPhaseAdoptionAdmissionEpoch = 0;
+    let syncPhaseAdoptionAdmissionOwner = 0;
+    function claimSyncPhaseAdoptionAdmission() {
+      if (syncPhaseAdoptionAdmissionOwner > 0) return 0;
+      const admissionEpoch = ++syncPhaseAdoptionAdmissionEpoch;
+      syncPhaseAdoptionAdmissionOwner = admissionEpoch;
+      return admissionEpoch;
+    }
+    function isSyncPhaseAdoptionAdmissionBlocked() {
+      return syncPhaseAdoptionAdmissionOwner > 0;
+    }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(admissionEpoch) {
+      return Number(admissionEpoch) > 0
+        && Number(admissionEpoch) === syncPhaseAdoptionAdmissionOwner;
+    }
+    function releaseSyncPhaseAdoptionAdmission(admissionEpoch) {
+      if (Number(admissionEpoch) !== syncPhaseAdoptionAdmissionOwner) return false;
+      syncPhaseAdoptionAdmissionOwner = 0;
+      return true;
+    }
+    function drainDeferredScheduleRepair() { return false; }
+  `;
   const smartWeatherSchedulerBody = extractSourceSection(
     backgroundSource,
     'async function rescheduleSmartWeatherAlarm() {',
@@ -6151,6 +7097,7 @@ async function runTests() {
     `let pwmStepRunning = false;
 let pwmRuntimeRevision = 0;
 function isComfortStartActive() { return false; }
+${reapplyPhaseAdmissionHarnessSource11}
 ${reapplyBody}
 return {
   reapplySmartSensitivityNow,
@@ -6175,13 +7122,85 @@ return {
   reapplyRaceHarness.completePwmStep();
   releaseReapplyWeather({});
   await reapplyRacePromise;
-    assertPass(reapplyWeatherReadStarted
+  assertPass(reapplyWeatherReadStarted
       && reapplyComputeCalls === 0
       && reapplyRaceSchedule.onMinutes === 25
       && reapplyRaceSchedule.offMinutes === 5
       && reapplyRaceSchedule.nextTriggerAt
         === new Date(2026, 7, 17, 13, 55, 0, 0).getTime(),
     '11F-2A: 等待天气期间 PWM 即使已完成推进，旧灵敏度重设仍放弃且不覆盖新相位');
+  const reservationReapplySchedule11 = structuredClone(reapplyRaceSchedule);
+  let releaseReservationReapplyWeather11;
+  let markReservationReapplyWeather11;
+  const reservationReapplyWeatherGate11 = new Promise(resolve => {
+    releaseReservationReapplyWeather11 = resolve;
+  });
+  const reservationReapplyWeatherStarted11 = new Promise(resolve => {
+    markReservationReapplyWeather11 = resolve;
+  });
+  let reservationReapplyComputes11 = 0;
+  let reservationReapplyPersists11 = 0;
+  const reservationReapplyHarness11 = new Function(
+    'schedule', 'readStoredSmartWeather', 'computeSmartOnMinutes',
+    'SMART_MODE', 'persistSchedule', 'getActiveSmartOnPwmRetryContext',
+    `let pwmStepRunning = false;
+let pwmRuntimeRevision = 0;
+let phaseAdmissionBlocked = false;
+let syncPhaseAdoptionAdmissionEpoch = 0;
+let syncPhaseAdoptionAdmissionOwner = 0;
+function isComfortStartActive() { return false; }
+function isSyncPhaseAdoptionAdmissionBlocked() {
+  return phaseAdmissionBlocked || syncPhaseAdoptionAdmissionOwner > 0;
+}
+function claimSyncPhaseAdoptionAdmission() {
+  if (isSyncPhaseAdoptionAdmissionBlocked()) return 0;
+  const admissionEpoch = ++syncPhaseAdoptionAdmissionEpoch;
+  syncPhaseAdoptionAdmissionOwner = admissionEpoch;
+  return admissionEpoch;
+}
+function isSyncPhaseAdoptionAdmissionOwnerCurrent(admissionEpoch) {
+  return Number(admissionEpoch) > 0
+    && Number(admissionEpoch) === syncPhaseAdoptionAdmissionOwner
+    && !phaseAdmissionBlocked;
+}
+function releaseSyncPhaseAdoptionAdmission(admissionEpoch) {
+  if (Number(admissionEpoch) !== syncPhaseAdoptionAdmissionOwner) return false;
+  syncPhaseAdoptionAdmissionOwner = 0;
+  return true;
+}
+function drainDeferredScheduleRepair() { return false; }
+${reapplyBody}
+return {
+  reapplySmartSensitivityNow,
+  blockPhaseAdmission() { phaseAdmissionBlocked = true; }
+};`
+  )(
+    reservationReapplySchedule11,
+    async () => {
+      markReservationReapplyWeather11();
+      await reservationReapplyWeatherGate11;
+      return {};
+    },
+    () => {
+      reservationReapplyComputes11 += 1;
+      return { valid: true, onMinutes: 10, offMinutes: 20 };
+    },
+    smartMode.SMART_MODE,
+    async () => { reservationReapplyPersists11 += 1; },
+    () => ({ hasTypedSmartOnRetry: false })
+  );
+  const reservationReapplyPromise11 = reservationReapplyHarness11
+    .reapplySmartSensitivityNow();
+  await reservationReapplyWeatherStarted11;
+  reservationReapplyHarness11.blockPhaseAdmission();
+  releaseReservationReapplyWeather11();
+  const reservationReapplyOutcome11 = await reservationReapplyPromise11;
+  assertPass(reservationReapplyOutcome11?.deferred === true
+      && reservationReapplyComputes11 === 0
+      && reservationReapplyPersists11 === 0
+      && reservationReapplySchedule11.onMinutes === reapplyRaceSchedule.onMinutes
+      && reservationReapplySchedule11.offMinutes === reapplyRaceSchedule.offMinutes,
+    '11F-2A-1: 天气 await 中 smart reapply 遇 phase reservation 接管即 deferred，零 planner/persist/旧时长回写');
   const stableReapplySchedule = {
     ...reapplyRaceSchedule,
     pwmState: 'on',
@@ -6195,6 +7214,7 @@ return {
     `let pwmStepRunning = false;
 let pwmRuntimeRevision = 0;
 function isComfortStartActive() { return false; }
+${reapplyPhaseAdmissionHarnessSource11}
 ${reapplyBody}
 return { reapplySmartSensitivityNow };`
   )(
@@ -6228,6 +7248,7 @@ return { reapplySmartSensitivityNow };`
     `let pwmStepRunning = false;
 let pwmRuntimeRevision = 0;
 function isComfortStartActive() { return false; }
+${reapplyPhaseAdmissionHarnessSource11}
 ${reapplyBody}
 return { reapplySmartSensitivityNow };`
   )(
@@ -6260,6 +7281,7 @@ return { reapplySmartSensitivityNow };`
     `let pwmStepRunning = false;
 let pwmRuntimeRevision = 0;
 function isComfortStartActive() { return false; }
+${reapplyPhaseAdmissionHarnessSource11}
 ${reapplyBody}
 return { reapplySmartSensitivityNow };`
   )(
@@ -6317,6 +7339,7 @@ return { reapplySmartSensitivityNow };`
       let commitCalls = 0;
       let pageTimerCalls = 0;
       function isComfortStartActive() { return false; }
+      ${reapplyPhaseAdmissionHarnessSource11}
       function isAutomationAllowed() { return schedule.enabled; }
       function isAutomationOperationCurrent(revision) {
         return revision === pwmRuntimeRevision && isAutomationAllowed();
@@ -6617,6 +7640,7 @@ return { reapplySmartSensitivityNow };`
       const receipts = [];
       const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
       function isComfortStartActive() { return false; }
+      ${reapplyPhaseAdmissionHarnessSource11}
       function isAutomationAllowed() { return schedule.enabled === true; }
       function isAutomationOperationCurrent(revision) {
         return revision === pwmRuntimeRevision && isAutomationAllowed();
@@ -7056,7 +8080,30 @@ return { reapplySmartSensitivityNow };`
     function isCurrentPwmStepRunning() {
       return pwmStepRunning && pwmStepRunningRevision === pwmRuntimeRevision;
     }
-    function isSyncPhaseAdoptionAdmissionBlocked() { return false; }
+    let syncPhaseAdoptionAdmissionEpoch = 0;
+    let syncPhaseAdoptionAdmissionOwner = 0;
+    function claimSyncPhaseAdoptionAdmission() {
+      if (syncPhaseAdoptionAdmissionOwner > 0) return 0;
+      const admissionEpoch = ++syncPhaseAdoptionAdmissionEpoch;
+      syncPhaseAdoptionAdmissionOwner = admissionEpoch;
+      return admissionEpoch;
+    }
+    function releaseSyncPhaseAdoptionAdmission(admissionEpoch) {
+      if (syncPhaseAdoptionAdmissionOwner !== admissionEpoch) return false;
+      syncPhaseAdoptionAdmissionOwner = 0;
+      return true;
+    }
+    function isSyncPhaseAdoptionAdmissionBlocked() {
+      return syncPhaseAdoptionAdmissionOwner > 0;
+    }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(admissionEpoch) {
+      return Number(admissionEpoch) > 0
+        && Number(admissionEpoch) === syncPhaseAdoptionAdmissionOwner;
+    }
+    function isSyncPhaseAdoptionAdmissionBlockedFor(admissionEpoch = 0) {
+      return syncPhaseAdoptionAdmissionOwner > 0
+        && syncPhaseAdoptionAdmissionOwner !== Number(admissionEpoch);
+    }
     function getActiveSmartOnPwmRetryContext(snapshot) {
       return { boundaryAt: Number(snapshot?.pwmRetryBoundaryAt) || 0 };
     }
@@ -7077,6 +8124,12 @@ return { reapplySmartSensitivityNow };`
     repairScheduleClock.__setRuntimeRevision = value => {
       pwmRuntimeRevision = Number(value) || 0;
     };
+    repairScheduleClock.__claimPhaseAdmission =
+      claimSyncPhaseAdoptionAdmission;
+    repairScheduleClock.__releasePhaseAdmission =
+      releaseSyncPhaseAdoptionAdmission;
+    repairScheduleClock.__phaseAdmissionIsBlocked =
+      isSyncPhaseAdoptionAdmissionBlocked;
     return repairScheduleClock;`
   );
   const runRepairCase = async (
@@ -7334,15 +8387,23 @@ return { reapplySmartSensitivityNow };`
     statusGate: coalescedRepairGate11,
     onStatusStart: markCoalescedRepairStarted11
   });
-  const firstCoalescedRepair11 = coalescedRepairHarness11.repairScheduleClock();
+  const coalescedRepairPhaseEpoch11 = coalescedRepairHarness11
+    .repairScheduleClock.__claimPhaseAdmission();
+  const firstCoalescedRepair11 = coalescedRepairHarness11.repairScheduleClock({
+    phaseAdmissionEpoch: coalescedRepairPhaseEpoch11
+  });
   await coalescedRepairStarted11;
-  const sameContextRepair11 = coalescedRepairHarness11.repairScheduleClock();
+  const sameContextRepair11 = coalescedRepairHarness11.repairScheduleClock({
+    phaseAdmissionEpoch: coalescedRepairPhaseEpoch11
+  });
   coalescedRepairHarness11.repairScheduleClock.__setRuntimeRevision(1);
   const supersededBoundaryRepair11 = coalescedRepairHarness11.repairScheduleClock({
-    smartOnExpectedBoundaryAt: coalescedRepairBoundary11 - 30 * 60_000
+    smartOnExpectedBoundaryAt: coalescedRepairBoundary11 - 30 * 60_000,
+    phaseAdmissionEpoch: coalescedRepairPhaseEpoch11
   });
   const latestBoundaryRepair11 = coalescedRepairHarness11.repairScheduleClock({
-    smartOnExpectedBoundaryAt: coalescedRepairBoundary11
+    smartOnExpectedBoundaryAt: coalescedRepairBoundary11,
+    phaseAdmissionEpoch: coalescedRepairPhaseEpoch11
   });
   await Promise.resolve();
   const coalescedBeforeRelease11 = coalescedRepairHarness11.statusCalls() === 1
@@ -7355,7 +8416,10 @@ return { reapplySmartSensitivityNow };`
     supersededBoundaryRepair11,
     latestBoundaryRepair11
   ]);
-  assertPass(coalescedBeforeRelease11
+  const coalescedRepairPhaseReleased11 = coalescedRepairHarness11
+    .repairScheduleClock.__releasePhaseAdmission(coalescedRepairPhaseEpoch11);
+  assertPass(coalescedRepairPhaseEpoch11 === 1
+      && coalescedBeforeRelease11
       && firstRepairResult11?.success === false
       && sameRepairResult11?.success === false
       && supersededBoundaryResult11?.success === true
@@ -7368,7 +8432,10 @@ return { reapplySmartSensitivityNow };`
       && coalescedRepairHarness11.schedule.pwmRetryBoundaryAt
         === coalescedRepairBoundary11
       && coalescedRepairHarness11.schedule.nextTriggerAt
-      === coalescedRepairNow11 + 5 * 60_000,
+      === coalescedRepairNow11 + 5 * 60_000
+      && coalescedRepairPhaseReleased11 === true
+      && coalescedRepairHarness11.repairScheduleClock
+        .__phaseAdmissionIsBlocked() === false,
     '11F-3B: repair 同 revision/边界共享单次页面 I/O；revision/边界换主只合并一次 trailing，并采用最后 context');
   const typedTrailingBoundary11 = new Date(2026, 7, 17, 19, 0, 0, 0).getTime();
   const typedTrailingNow11 = typedTrailingBoundary11;
@@ -7404,17 +8471,25 @@ return { reapplySmartSensitivityNow };`
       { isOn: false }
     ]
   });
+  const typedTrailingPhaseEpoch11 = typedTrailingHarness11
+    .repairScheduleClock.__claimPhaseAdmission();
   const typedActiveRepair11 = typedTrailingHarness11.repairScheduleClock({
-    smartOnExpectedBoundaryAt: typedTrailingBoundary11
+    smartOnExpectedBoundaryAt: typedTrailingBoundary11,
+    phaseAdmissionEpoch: typedTrailingPhaseEpoch11
   });
   await typedTrailingStatusStarted11;
-  const genericTrailingRepair11 = typedTrailingHarness11.repairScheduleClock({});
+  const genericTrailingRepair11 = typedTrailingHarness11.repairScheduleClock({
+    phaseAdmissionEpoch: typedTrailingPhaseEpoch11
+  });
   releaseTypedTrailingStatus11();
   const [typedActiveResult11, genericTrailingResult11] = await Promise.all([
     typedActiveRepair11,
     genericTrailingRepair11
   ]);
-  assertPass(typedActiveResult11?.success === false
+  const typedTrailingPhaseReleased11 = typedTrailingHarness11
+    .repairScheduleClock.__releasePhaseAdmission(typedTrailingPhaseEpoch11);
+  assertPass(typedTrailingPhaseEpoch11 === 1
+      && typedActiveResult11?.success === false
       && genericTrailingResult11?.success === true
       && typedTrailingHarness11.statusCalls() === 2
       && typedTrailingHarness11.timerCalls.length === 0
@@ -7426,7 +8501,10 @@ return { reapplySmartSensitivityNow };`
       && typedTrailingHarness11.schedule.pwmRetryBoundaryAt
         === typedTrailingBoundary11
       && typedTrailingHarness11.schedule.nextTriggerAt
-        === typedTrailingBoundary11 + 5 * 60_000,
+        === typedTrailingBoundary11 + 5 * 60_000
+      && typedTrailingPhaseReleased11 === true
+      && typedTrailingHarness11.repairScheduleClock
+        .__phaseAdmissionIsBlocked() === false,
     '11F-3C: typed 19:00 repair 首次状态未知时，后到 generic trailing 不擦边界；第二次 OFF 只排 19:05 safe-delay，绝不回 19:30');
   assertPass(activeSmartRepair.timerCalls[0]?.minutes === 10
       && activeSmartRepair.timerCalls[0]?.options.targetAt
@@ -8129,8 +9207,13 @@ return { reapplySmartSensitivityNow };`
   beginSuite('用例 12：审计回归',
     '\n\n=== 用例 12: 审计修复回归（只读轮询、HIG、发布与安装） ===\n');
 
-  const snapshotStart = backgroundSource.indexOf('// 弹窗 est（Est. until）依赖 full 轮询带回的页面余额。');
-  const snapshotEnd = backgroundSource.indexOf('\nasync function toggleNowAndSync', snapshotStart);
+  const snapshotStart = backgroundSource.indexOf(
+    '// 弹窗 est（Est. until）依赖 full 轮询带回的页面余额。'
+  );
+  const snapshotEnd = backgroundSource.indexOf(
+    '\nasync function settleDeferredSyncDisable',
+    snapshotStart
+  );
   const snapshotBody = snapshotStart >= 0 && snapshotEnd > snapshotStart
     ? backgroundSource.slice(snapshotStart, snapshotEnd)
     : '';
@@ -8535,11 +9618,133 @@ return { reapplySmartSensitivityNow };`
     ? backgroundSource.slice(alarmListenerStart13, alarmListenerEnd13)
     : '';
 
-  assertPass(initBody13.includes('await backfillNextTriggerAt(true);')
+  const backfillNextTriggerSource13 = extractSourceSection(
+    backgroundSource,
+    'async function backfillNextTriggerAt(',
+    '\n// 从已过期的闹钟时间推进到下一个未来周期边界。',
+    'phase-owned init next-trigger backfill'
+  );
+  assertPass(initBody13.includes('await runSerializedSchedulePhaseOperation(')
+      && initBody13.includes('phaseAdmissionEpoch => backfillNextTriggerAt(')
+      && initBody13.includes('true,\n        phaseAdmissionEpoch')
+      && initBody13.includes("'init-backfill-next-trigger'")
       && initBody13.includes("'init-finalSync'")
       && initBody13.includes('PWM_TRIGGER_NEXT_ONLY_OPTIONS,')
       && initBody13.includes('automationRevision'),
-    '13A: Service Worker 初始化会从 legacy/live alarm 回填并持久化 nextTriggerAt');
+    '13A: Service Worker 初始化在 schedule→phase owner 内从 legacy/live alarm 回填并持久化 nextTriggerAt');
+  let releaseInitBackfillLiveRead13;
+  let markInitBackfillLiveReadStarted13;
+  const initBackfillLiveReadGate13 = new Promise(resolve => {
+    releaseInitBackfillLiveRead13 = resolve;
+  });
+  const initBackfillLiveReadStarted13 = new Promise(resolve => {
+    markInitBackfillLiveReadStarted13 = resolve;
+  });
+  const initBackfillOldLiveAt13 = 1_800_000_060_000;
+  const initBackfillSuccessorAt13 = initBackfillOldLiveAt13 + 20 * 60_000;
+  const initBackfillHarness13 = new Function(
+    'oldLiveAt', 'successorAt', 'liveReadGate', 'markLiveReadStarted',
+    `let schedule = {
+      enabled: true,
+      pwmState: 'off',
+      nextTriggerAt: 0,
+      smartClockPlannedAt: 0,
+      alarmCreatedAt: 0,
+      alarmDelayMinutes: 0,
+      smartMode: { enabled: false }
+    };
+    let durableSchedule = structuredClone(schedule);
+    let pwmRuntimeRevision = 9;
+    let syncPhaseAdoptionAdmissionOwner = 1;
+    const calls = [];
+    const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+    const PWM_TRIGGER_NEXT_ONLY_OPTIONS = Object.freeze({
+      nextTriggerToleranceMs: 1500,
+      requireLegacyAlignment: false
+    });
+    function isSyncPhaseAdoptionAdmissionBlocked() {
+      return syncPhaseAdoptionAdmissionOwner > 0;
+    }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) > 0
+        && Number(epoch) === syncPhaseAdoptionAdmissionOwner;
+    }
+    function isAutomationAllowed() { return schedule.enabled === true; }
+    function isAutomationOperationCurrent(revision) {
+      return revision === pwmRuntimeRevision && schedule.enabled === true;
+    }
+    function getLegacyAlarmEndMs() { return 0; }
+    function classifySmartOnClock() {
+      return { applicable: false, valid: false };
+    }
+    function reconcilePwmTrigger() {
+      return {
+        kind: 'sync-live',
+        liveScheduledTime: oldLiveAt,
+        phasePatch: { nextTriggerAt: oldLiveAt }
+      };
+    }
+    function applyPwmPlanState(plan) {
+      calls.push('apply-old');
+      Object.assign(schedule, plan.phasePatch || {});
+    }
+    function setNextTriggerAt(value) {
+      calls.push('set-legacy:' + value);
+      schedule.nextTriggerAt = Number(value) || 0;
+    }
+    async function persistSchedule(reason) {
+      calls.push('persist:' + reason);
+      durableSchedule = structuredClone(schedule);
+    }
+    const chrome = { alarms: {
+      async get(name) {
+        calls.push('live-read:start:' + name);
+        markLiveReadStarted();
+        await liveReadGate;
+        calls.push('live-read:end:' + name);
+        return { name, scheduledTime: oldLiveAt };
+      }
+    } };
+    const Date = { now: () => oldLiveAt - 60_000 };
+    ${backfillNextTriggerSource13}
+    return {
+      run: () => backfillNextTriggerAt(true, 1),
+      takeover() {
+        syncPhaseAdoptionAdmissionOwner = 2;
+        schedule.nextTriggerAt = successorAt;
+        durableSchedule = structuredClone(schedule);
+        calls.push('successor:2:' + successorAt);
+      },
+      calls,
+      snapshot: () => structuredClone(schedule),
+      durable: () => structuredClone(durableSchedule),
+      owner: () => syncPhaseAdoptionAdmissionOwner
+    };`
+  )(
+    initBackfillOldLiveAt13,
+    initBackfillSuccessorAt13,
+    initBackfillLiveReadGate13,
+    markInitBackfillLiveReadStarted13
+  );
+  const initBackfillOldRun13 = initBackfillHarness13.run();
+  await initBackfillLiveReadStarted13;
+  initBackfillHarness13.takeover();
+  releaseInitBackfillLiveRead13();
+  const initBackfillOldResult13 = await initBackfillOldRun13;
+  assertPass(backfillNextTriggerSource13.includes(
+      '? isSyncPhaseAdoptionAdmissionOwnerCurrent(phaseAdmissionEpoch)')
+      && backfillNextTriggerSource13.includes(
+        'if (!isAutomationOperationCurrent(automationRevision)\n        || !backfillIsCurrent()) return 0;')
+      && initBackfillOldResult13 === 0
+      && initBackfillHarness13.owner() === 2
+      && initBackfillHarness13.snapshot().nextTriggerAt
+        === initBackfillSuccessorAt13
+      && initBackfillHarness13.durable().nextTriggerAt
+        === initBackfillSuccessorAt13
+      && !initBackfillHarness13.calls.includes('apply-old')
+      && !initBackfillHarness13.calls.some(call =>
+        call.startsWith('persist:backfillNextTriggerAt')),
+    '13A-1: init backfill live read 后同 revision phase owner 换主时旧 A 零 apply/零 persist，后继 B 保持 durable');
   assertPass(setupBody13.includes("source: 'setupAlarms'")
       && setupBody13.includes("missingClockAction: 'repair-clock'")
       && setupBody13.includes('await recoverPwmLifecycle({'),
@@ -8879,13 +10084,13 @@ return { reapplySmartSensitivityNow };`
 
   const activeBoundaryBody = extractSourceSection(
     backgroundSource,
-    'async function onActiveBoundaryCrossed() {',
+    'async function onActiveBoundaryCrossed(',
     '\nfunction getLegacyAlarmEndMs()',
     'onActiveBoundaryCrossed'
   );
   const applySyncedPhaseBody = extractSourceSection(
     backgroundSource,
-    'async function applySyncedPhase(remote, reason = \'\') {',
+    "async function applySyncedPhase(remote, reason = '', options = {}) {",
     '\n// 从 chrome.storage.sync 拉取并尝试合并。',
     'applySyncedPhase'
   );
@@ -8906,7 +10111,7 @@ return { reapplySmartSensitivityNow };`
     "'updateSchedule-disable-admission-intent'"
   );
   const updateShutdownIndex = updateScheduleBody.indexOf("requestTimerBasedShutdown('schedule-disabled')");
-  assertPass(countOccurrences(backgroundSource, 'await resetDisabledPwmRuntime();') === 4
+  assertPass(countOccurrences(backgroundSource, 'await resetDisabledPwmRuntime();') === 6
       && activeResetIndex >= 0 && activePersistIndex > activeResetIndex && activeShutdownIndex > activePersistIndex
       && syncResetIndex >= 0 && syncPersistIndex > syncResetIndex && syncShutdownIndex > syncPersistIndex
       && updateIntentIndex >= 0 && updateResetIndex > updateIntentIndex
@@ -8925,6 +10130,8 @@ return { reapplySmartSensitivityNow };`
     'reconcilePwmTrigger',
     'applyPwmPlanState',
     'persistSchedule',
+    'isSyncPhaseAdoptionAdmissionBlocked',
+    'isSyncPhaseAdoptionAdmissionOwnerCurrent',
     `${persistReconciledPwmTriggerSource}; return persistReconciledPwmTrigger;`
   );
   const reconcileSchedule13L = { enabled: true, nextTriggerAt: 0 };
@@ -8952,7 +10159,9 @@ return { reapplySmartSensitivityNow };`
     },
     async (reason, options) => {
       reconcileCalls13L.push(`persist:${reason}:${options?.syncFromLiveAlarm}`);
-    }
+    },
+    () => false,
+    epoch => Number(epoch) === 13
   );
   const reconciledPlan13L = await persistReconciledPwmTrigger(
     reconcileAlarm13L,
@@ -8970,7 +10179,9 @@ return { reapplySmartSensitivityNow };`
     { enabled: true },
     () => ({ kind: 'noop', reason: 'aligned' }),
     () => { noopApplyCount13L += 1; },
-    async () => { noopPersistCount13L += 1; }
+    async () => { noopPersistCount13L += 1; },
+    () => false,
+    epoch => Number(epoch) === 13
   );
   const noopPlan13L = await noopReconcile(reconcileAlarm13L, 'noop', reconcileOptions13L);
   assertPass(noopPlan13L === null && noopApplyCount13L === 0 && noopPersistCount13L === 0,
@@ -8982,6 +10193,143 @@ return { reapplySmartSensitivityNow };`
     '\nfunction getLiveAlarmEndMs(',
     'syncStoredTriggerFromAlarm'
   );
+  const loadSyncStoredTriggerFromAlarm = new Function(
+    'persistReconciledPwmTrigger',
+    'hasDurableLivePwmOwner',
+    'isSyncPhaseAdoptionAdmissionOwnerCurrent',
+    'isSyncPhaseAdoptionAdmissionBlocked',
+    'PWM_TRIGGER_STRICT_OPTIONS',
+    `let pwmRuntimeRevision = 31;
+    ${syncStoredTriggerBody}; return syncStoredTriggerFromAlarm;`
+  );
+  const alignedOwnerCalls13L = [];
+  const syncAlignedTrigger13L = loadSyncStoredTriggerFromAlarm(
+    async (...args) => {
+      alignedOwnerCalls13L.push(`reconcile:${args[3]}:${args[4]}`);
+      return null;
+    },
+    async revision => {
+      alignedOwnerCalls13L.push(`prove:${revision}`);
+      return true;
+    },
+    epoch => {
+      alignedOwnerCalls13L.push(`owner:${epoch}`);
+      return epoch === 13;
+    },
+    () => false,
+    reconcileOptions13L
+  );
+  const alignedOwnerAccepted13L = await syncAlignedTrigger13L(
+    reconcileAlarm13L,
+    'aligned-owner',
+    31,
+    13
+  );
+  assertPass(alignedOwnerAccepted13L === true
+      && alignedOwnerCalls13L.join(',')
+        === 'reconcile:31:13,owner:13,prove:31,owner:13',
+    '13L-4: strict planner 已对齐而零写入时，以同一 phase 下 durable+live owner 证明成功收口');
+
+  let alignedOwnerChecks13L = 0;
+  const syncStaleAlignedTrigger13L = loadSyncStoredTriggerFromAlarm(
+    async () => null,
+    async () => true,
+    () => {
+      alignedOwnerChecks13L += 1;
+      return alignedOwnerChecks13L === 1;
+    },
+    () => false,
+    reconcileOptions13L
+  );
+  const staleAlignedOwnerAccepted13L = await syncStaleAlignedTrigger13L(
+    reconcileAlarm13L,
+    'aligned-owner-stale',
+    31,
+    13
+  );
+  assertPass(staleAlignedOwnerAccepted13L === false
+      && alignedOwnerChecks13L === 2,
+    '13L-5: durable owner 证明期间 phase 换主时保持失败关闭，不把旧 live clock 误报为收口');
+
+  let rejectedProofCalls13L = 0;
+  const syncUnprovenAlignedTrigger13L = loadSyncStoredTriggerFromAlarm(
+    async () => null,
+    async () => {
+      rejectedProofCalls13L += 1;
+      return false;
+    },
+    () => true,
+    () => false,
+    reconcileOptions13L
+  );
+  const unprovenAlignedOwnerAccepted13L = await syncUnprovenAlignedTrigger13L(
+    reconcileAlarm13L,
+    'aligned-owner-unproven',
+    31,
+    13
+  );
+  let staleEntryProofCalls13L = 0;
+  const syncStaleEntryTrigger13L = loadSyncStoredTriggerFromAlarm(
+    async () => null,
+    async () => {
+      staleEntryProofCalls13L += 1;
+      return true;
+    },
+    () => false,
+    () => false,
+    reconcileOptions13L
+  );
+  const staleEntryOwnerAccepted13L = await syncStaleEntryTrigger13L(
+    reconcileAlarm13L,
+    'aligned-owner-stale-entry',
+    31,
+    13
+  );
+  const proofReadError13L = new Error('durable live owner read failed');
+  const syncThrowingProofTrigger13L = loadSyncStoredTriggerFromAlarm(
+    async () => null,
+    async () => { throw proofReadError13L; },
+    () => true,
+    () => false,
+    reconcileOptions13L
+  );
+  let observedProofReadError13L = null;
+  try {
+    await syncThrowingProofTrigger13L(
+      reconcileAlarm13L,
+      'aligned-owner-read-error',
+      31,
+      13
+    );
+  } catch (error) {
+    observedProofReadError13L = error;
+  }
+  assertPass(unprovenAlignedOwnerAccepted13L === false
+      && rejectedProofCalls13L === 1
+      && staleEntryOwnerAccepted13L === false
+      && staleEntryProofCalls13L === 0
+      && observedProofReadError13L === proofReadError13L,
+    '13L-6: owner 无法证明、phase 入场已 stale 或 durable 读取异常时均失败关闭');
+
+  let driftProofCalls13L = 0;
+  const syncDriftedTrigger13L = loadSyncStoredTriggerFromAlarm(
+    async () => reconcilePlan13L,
+    async () => {
+      driftProofCalls13L += 1;
+      return false;
+    },
+    () => true,
+    () => false,
+    reconcileOptions13L
+  );
+  const driftedTriggerAccepted13L = await syncDriftedTrigger13L(
+    reconcileAlarm13L,
+    'drifted-owner',
+    31,
+    13
+  );
+  assertPass(driftedTriggerAccepted13L === true && driftProofCalls13L === 0,
+    '13L-7: 已完成 sync-live 校准时直接成功，不重复 durable owner 证明');
   const ensureDiagnosticAlarmsBody = extractSourceSection(
     backgroundSource,
     'function cloneDiagnosticValue(value) {',
@@ -8994,7 +10342,7 @@ return { reapplySmartSensitivityNow };`
     '\n// 跨设备同步 — chrome.storage.sync 集成层',
     'persistSchedule'
   );
-    assertPass(syncStoredTriggerBody.includes('PWM_TRIGGER_STRICT_OPTIONS,')
+  assertPass(syncStoredTriggerBody.includes('PWM_TRIGGER_STRICT_OPTIONS,')
       && syncStoredTriggerBody.includes('automationRevision')
         && watchdogBody13.includes("'watchdogCheck'")
         && initBody13.includes("'init-finalSync'")
@@ -9002,11 +10350,188 @@ return { reapplySmartSensitivityNow };`
         && ensureDiagnosticAlarmsBody.includes("'ensureDiagnosticAlarms'")
         && [initBody13, alarmListenerBody13, ensureDiagnosticAlarmsBody]
           .every(source => source.includes('PWM_TRIGGER_NEXT_ONLY_OPTIONS,')
-            && /(?:automationRevision|diagnosticRevision)/.test(source))
+            && /(?:automationRevision|reconciliationRevision)/.test(source))
+        && alarmListenerBody13.includes(
+          'const phaseAdmissionEpoch = claimSyncPhaseAdoptionAdmission();')
+        && alarmListenerBody13.includes(
+          'releaseSyncPhaseAdoptionAdmission(phaseAdmissionEpoch);')
+        && ensureDiagnosticAlarmsBody.includes(
+          'const phaseAdmissionEpoch = claimSyncPhaseAdoptionAdmission();')
+        && ensureDiagnosticAlarmsBody.includes(
+          'releaseSyncPhaseAdoptionAdmission(phaseAdmissionEpoch);')
         && watchdogBody13.includes("preserveLiveStrategy: 'next-only'")
         && backgroundSource.includes('context.preserveLiveStrategy === \'next-only\'')
         && backgroundSource.includes('PWM_TRIGGER_NEXT_ONLY_OPTIONS,'),
     '13M: strict wrapper 与四条副作用校准路径统一委派持久化 helper，并显式保留各自 profile');
+
+  const badgeTickBranchStart13 = alarmListenerBody13.indexOf(
+    "if (alarm.name === 'ac-badge-tick') {\n    // 每分钟刷新角标"
+  );
+  const badgeTickBranchEnd13 = alarmListenerBody13.indexOf(
+    "\n  if (alarm.name === 'ac-pwm') {",
+    badgeTickBranchStart13
+  );
+  const badgeTickBranch13 = badgeTickBranchStart13 >= 0
+      && badgeTickBranchEnd13 > badgeTickBranchStart13
+    ? alarmListenerBody13.slice(badgeTickBranchStart13, badgeTickBranchEnd13)
+    : '';
+  let releaseBadgeOldLiveRead13;
+  let markBadgeOldLiveReadStarted13;
+  const badgeOldLiveReadGate13 = new Promise(resolve => {
+    releaseBadgeOldLiveRead13 = resolve;
+  });
+  const badgeOldLiveReadStarted13 = new Promise(resolve => {
+    markBadgeOldLiveReadStarted13 = resolve;
+  });
+  const badgeOldLiveAt13 = 1_800_100_060_000;
+  const badgeSuccessorAt13 = badgeOldLiveAt13 + 20 * 60_000;
+  const badgeOldLiveHarness13 = new Function(
+    'oldLiveAt', 'successorAt', 'liveReadGate', 'markLiveReadStarted',
+    `let schedule = { enabled: true, pwmState: 'off', nextTriggerAt: 0 };
+    let durableSchedule = structuredClone(schedule);
+    let pwmRuntimeRevision = 7;
+    let syncPhaseAdoptionAdmissionEpoch = 0;
+    let syncPhaseAdoptionAdmissionOwner = 0;
+    const syncPhaseAdoptionAdmissionWaiters = [];
+    const calls = [];
+    const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+    const PWM_TRIGGER_NEXT_ONLY_OPTIONS = Object.freeze({
+      nextTriggerToleranceMs: 1500,
+      requireLegacyAlignment: false
+    });
+    function claimSyncPhaseAdoptionAdmission() {
+      if (syncPhaseAdoptionAdmissionOwner > 0) return 0;
+      const epoch = ++syncPhaseAdoptionAdmissionEpoch;
+      syncPhaseAdoptionAdmissionOwner = epoch;
+      calls.push('claim:' + epoch);
+      return epoch;
+    }
+    function claimSyncPhaseAdoptionAdmissionWhenAvailable() {
+      const epoch = claimSyncPhaseAdoptionAdmission();
+      if (epoch > 0) return Promise.resolve(epoch);
+      calls.push('wait');
+      return new Promise(resolve => {
+        syncPhaseAdoptionAdmissionWaiters.push(resolve);
+      });
+    }
+    function releaseSyncPhaseAdoptionAdmission(epoch) {
+      calls.push('release:' + epoch);
+      if (syncPhaseAdoptionAdmissionOwner !== epoch) return false;
+      const next = syncPhaseAdoptionAdmissionWaiters.shift();
+      if (next) {
+        const successorEpoch = ++syncPhaseAdoptionAdmissionEpoch;
+        syncPhaseAdoptionAdmissionOwner = successorEpoch;
+        calls.push('handoff:' + epoch + ':' + successorEpoch);
+        next(successorEpoch);
+      } else {
+        syncPhaseAdoptionAdmissionOwner = 0;
+      }
+      return true;
+    }
+    function isSyncPhaseAdoptionAdmissionBlocked() {
+      return syncPhaseAdoptionAdmissionOwner > 0;
+    }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) > 0
+        && Number(epoch) === syncPhaseAdoptionAdmissionOwner;
+    }
+    function isAutomationAllowed() { return schedule.enabled === true; }
+    function isAutomationOperationCurrent(revision) {
+      return revision === pwmRuntimeRevision && isAutomationAllowed();
+    }
+    function reconcilePwmTrigger(state, alarm) {
+      const liveScheduledTime = Number(alarm?.scheduledTime) || 0;
+      return liveScheduledTime > 0 && liveScheduledTime !== state.nextTriggerAt
+        ? { kind: 'sync-live', liveScheduledTime,
+            phasePatch: { nextTriggerAt: liveScheduledTime } }
+        : { kind: 'noop' };
+    }
+    function applyPwmPlanState(plan) {
+      Object.assign(schedule, plan.phasePatch || {});
+    }
+    async function persistSchedule(reason, options = {}) {
+      durableSchedule = structuredClone(schedule);
+      calls.push('persist:' + reason + ':' + schedule.nextTriggerAt
+        + ':' + options.syncFromLiveAlarm);
+    }
+    function drainDeferredScheduleRepair(reason) {
+      calls.push('drain:' + reason);
+      return false;
+    }
+    async function updateBadge() { calls.push('badge'); }
+    async function ensureOffscreen() { calls.push('offscreen'); }
+    async function createAlarm(name) { calls.push('alarm:' + name); return true; }
+    function appendDiagnosticLog() {}
+    const chrome = { alarms: {
+      async get(name) {
+        if (name !== 'ac-pwm') return undefined;
+        calls.push('live-read:start');
+        markLiveReadStarted();
+        await liveReadGate;
+        calls.push('live-read:end');
+        return { name, scheduledTime: oldLiveAt };
+      }
+    } };
+    ${persistReconciledPwmTriggerSource}
+    async function deliverBadge() {
+      const alarm = { name: 'ac-badge-tick' };
+      ${badgeTickBranch13}
+    }
+    async function runSuccessorWriter() {
+      const epoch = await claimSyncPhaseAdoptionAdmissionWhenAvailable();
+      calls.push('successor:start:' + epoch);
+      schedule.nextTriggerAt = successorAt;
+      await persistSchedule('successor-phase', { syncFromLiveAlarm: false });
+      releaseSyncPhaseAdoptionAdmission(epoch);
+      calls.push('successor:end:' + epoch);
+      return epoch;
+    }
+    return {
+      deliverBadge,
+      runSuccessorWriter,
+      calls,
+      snapshot: () => structuredClone(schedule),
+      durable: () => structuredClone(durableSchedule),
+      owner: () => syncPhaseAdoptionAdmissionOwner
+    };`
+  )(
+    badgeOldLiveAt13,
+    badgeSuccessorAt13,
+    badgeOldLiveReadGate13,
+    markBadgeOldLiveReadStarted13
+  );
+  const badgeOldLiveRun13 = badgeOldLiveHarness13.deliverBadge();
+  await badgeOldLiveReadStarted13;
+  const badgeSuccessorRun13 = badgeOldLiveHarness13.runSuccessorWriter();
+  await Promise.resolve();
+  const badgeSuccessorBlocked13 = badgeOldLiveHarness13.calls.includes('wait')
+    && !badgeOldLiveHarness13.calls.some(call =>
+      call.startsWith('successor:start:'));
+  releaseBadgeOldLiveRead13();
+  const [, badgeSuccessorEpoch13] = await Promise.all([
+    badgeOldLiveRun13,
+    badgeSuccessorRun13
+  ]);
+  const badgeOldPersistIndex13 = badgeOldLiveHarness13.calls.indexOf(
+    `persist:badge-tick-sync:${badgeOldLiveAt13}:false`
+  );
+  const badgeSuccessorPersistIndex13 = badgeOldLiveHarness13.calls.indexOf(
+    `persist:successor-phase:${badgeSuccessorAt13}:false`
+  );
+  assertPass(badgeTickBranch13.includes(
+      'const phaseAdmissionEpoch = claimSyncPhaseAdoptionAdmission();')
+      && badgeTickBranch13.includes(
+        'releaseSyncPhaseAdoptionAdmission(phaseAdmissionEpoch);')
+      && badgeTickBranch13.includes(
+        'automationRevision,\n            phaseAdmissionEpoch')
+      && badgeSuccessorBlocked13
+      && badgeSuccessorEpoch13 === 2
+      && badgeOldPersistIndex13 >= 0
+      && badgeSuccessorPersistIndex13 > badgeOldPersistIndex13
+      && badgeOldLiveHarness13.snapshot().nextTriggerAt === badgeSuccessorAt13
+      && badgeOldLiveHarness13.durable().nextTriggerAt === badgeSuccessorAt13
+      && badgeOldLiveHarness13.owner() === 0,
+    '13M-1: badge 读到旧 live 时后继 phase writer 必须 FIFO 接棒；旧校准先结算且最终 durable 只属于后继 owner');
   assertPass(ensureDiagnosticAlarmsBody.includes('schedule.smartMode?.enabled && !smartWeatherAlarm')
       && ensureDiagnosticAlarmsBody.includes('await rescheduleSmartWeatherAlarm();')
       && ensureDiagnosticAlarmsBody.includes('smartWeather: smartWeatherAlarm')
@@ -9345,8 +10870,18 @@ return { reapplySmartSensitivityNow };`
     mutateState: null,
     alarmMissing: true
   });
-  assertPass(ensureScheduleClockBody13.includes('return recoverPwmLifecycle({')
-      && ensureScheduleClockBody13.includes('deferSmartCurrentCycleExecution: options.deferSmartCurrentCycleExecution === true')
+  assertPass(ensureScheduleClockBody13.includes(
+      'const phaseAdmissionEpoch = claimSyncPhaseAdoptionAdmission();')
+      && ensureScheduleClockBody13.includes(
+        'const recovery = await recoverPwmLifecycle({')
+      && ensureScheduleClockBody13.includes('phaseAdmissionEpoch,')
+      && ensureScheduleClockBody13.includes(
+        'onDeferredExecutionStarted: execution => {')
+      && ensureScheduleClockBody13.includes(
+        'releaseSyncPhaseAdoptionAdmission(phaseAdmissionEpoch);')
+      && ensureScheduleClockBody13.includes('deferSmartCurrentCycleExecution:')
+      && ensureScheduleClockBody13.includes(
+        'options.deferSmartCurrentCycleExecution === true')
       && recoveredDiagnosticSmartCycle13.ensureCalls === 1
       && recoveredDiagnosticSmartCycle13.ensureOptions?.deferSmartCurrentCycleExecution === true
       && recoveredDiagnosticSmartCycle13.repairs.includes('smart-current-cycle')
@@ -9357,10 +10892,12 @@ return { reapplySmartSensitivityNow };`
       && !startedDiagnosticSmartCycle13.repairs.includes('smart-current-cycle')
       && missingAlarmDiagnosticSmartCycle13.repairs.includes('smart-current-cycle')
       && missingAlarmDiagnosticSmartCycle13.repairs.includes('pwm-alarm')
-      && ensureDiagnosticAlarmsBody.includes('const triggerPlan = smartCurrentCycleStarted')
-      && ensureDiagnosticAlarmsBody.includes('? null')
-      && ensureDiagnosticAlarmsBody.indexOf('const triggerPlan = smartCurrentCycleStarted')
-        < ensureDiagnosticAlarmsBody.indexOf(': await persistReconciledPwmTrigger('),
+      && ensureDiagnosticAlarmsBody.includes('let triggerPlan = null;')
+      && ensureDiagnosticAlarmsBody.includes('if (!smartCurrentCycleStarted) {')
+      && ensureDiagnosticAlarmsBody.indexOf('if (!smartCurrentCycleStarted) {')
+        < ensureDiagnosticAlarmsBody.indexOf('triggerPlan = await persistReconciledPwmTrigger(')
+      && ensureDiagnosticAlarmsBody.includes(
+        'reconciliationRevision,\n          phaseAdmissionEpoch'),
     '13M-4: 22:31 即使三方未来钟为 23:00，诊断也启动当前周期恢复；in-flight 明示 started 且不把旧 23:00 闹钟回写，on=0 保留未来钟');
   assertPass(persistScheduleBody.includes('reconcilePwmTrigger(schedule, liveAlarm, PWM_TRIGGER_NEXT_ONLY_OPTIONS)')
       && persistScheduleBody.includes('if (!schedule.smartMode?.enabled) {')
@@ -11523,6 +13060,11 @@ return { reapplySmartSensitivityNow };`
   const createActiveHoursPolicy = new Function(
     'schedule',
     `let automaticOnAdmissionBlocked = false;
+    let syncAuthorityDurableBaselineLoaded = true;
+    let manualOffAdmissionLoaded = true;
+    let manualOffAutomaticOnBlocked = false;
+    let deferredSyncDisableLoaded = true;
+    let deferredSyncDisablePending = false;
     ${activeHoursPolicySource}; return {
       isWithinActiveHours,
       isWithinActiveHoursForSchedule,
@@ -11790,7 +13332,7 @@ return { reapplySmartSensitivityNow };`
   );
   const activeBoundaryBody16 = extractSourceSection(
     backgroundSource,
-    'async function onActiveBoundaryCrossed() {',
+    'async function onActiveBoundaryCrossed(',
     '\nfunction getLegacyAlarmEndMs()',
     'active boundary behavior'
   );
@@ -12197,6 +13739,9 @@ return { reapplySmartSensitivityNow };`
     };
     function getNextActiveBoundary() { return Date.now() + 30 * 60_000; }
     ${activeBoundaryPhaseCoordinatorSource16}
+    function captureScheduleReadRequeueReceipt() {
+      return Object.freeze({});
+    }
     async function loadScheduleFromStorage() {
       calls.push({ type: 'storage-load' });
       if (storageGate) {
@@ -12303,7 +13848,7 @@ return { reapplySmartSensitivityNow };`
 
   const activeBoundaryHandlerSource16 = extractSourceSection(
     backgroundSource,
-    'async function onActiveBoundaryCrossed() {',
+    'async function onActiveBoundaryCrossed(',
     '\n\nfunction getLegacyAlarmEndMs()',
     'active boundary owned transaction'
   );
@@ -12346,6 +13891,9 @@ return { reapplySmartSensitivityNow };`
     let activeBoundaryCompletionGeneration = 0;
     let syncPhaseAdoptionAdmissionEpoch = 0;
     let syncPhaseAdoptionAdmissionOwner = 0;
+    const syncPhaseAdoptionAdmissionWaiters = [];
+    let smartReapplyInFlight = false;
+    let smartReapplyPending = false;
     let pwmExecutionWithRecoveryCount = 0;
     let deferredRepairAfterPwmOptions = null;
     let scheduleRepairEpoch = 0;
@@ -12586,6 +14134,21 @@ return { reapplySmartSensitivityNow };`
       calls.push({ type: 'smart-weather' });
     }
     function appendDiagnosticLog() {}
+    const SCHEDULE_READ_RETRY_ALARM = 'ac-schedule-read-retry';
+    async function createScheduleReadRetryWake(alarm, reason = '') {
+      const retryName = [
+        SCHEDULE_READ_RETRY_ALARM,
+        encodeURIComponent(String(alarm?.name || '')),
+        Math.max(1, Number(alarm?.scheduledTime) || Date.now()),
+        Math.max(0, Number(alarm?.periodInMinutes) || 0),
+        'owned-harness'
+      ].join(':');
+      calls.push({ type: 'schedule-read-retry', name: retryName, reason });
+      return createAlarm(retryName, { when: Date.now() + 60_000 });
+    }
+    function captureScheduleReadRequeueReceipt() {
+      return Object.freeze({});
+    }
     ${activeBoundaryHandlerSource16}
     ${activeBoundaryHeartbeatSource16}
     async function loadScheduleFromStorage() {
@@ -12729,15 +14292,19 @@ return { reapplySmartSensitivityNow };`
   const ownedBoundarySetupCall16 = ownedBoundaryHarness16.calls.find(call =>
     call.type === 'setup');
   assertPass(activeBoundaryHandlerSource16.includes(
-      'const phaseAdmissionEpoch = claimSyncPhaseAdoptionAdmission();')
+      'const phaseAdmissionEpoch = ownsExistingAdmission')
       && activeBoundaryHandlerSource16.includes(
         "await armActiveBoundaryRetry('active-boundary 处理')")
       && activeBoundaryHandlerSource16.includes(
         'setupAlarms(true, { phaseAdmissionEpoch })')
-      && setupAlarmsBody16.includes('phaseAdmissionEpoch = Number(options.phaseAdmissionEpoch) || 0')
+      && setupAlarmsBody16.includes(
+        'requestedPhaseAdmissionEpoch = Number(options.phaseAdmissionEpoch) || 0')
+      && setupAlarmsBody16.includes(
+        'ownsBorrowedPhaseAdmission = isSyncPhaseAdoptionAdmissionOwnerCurrent(')
       && setupAlarmsBody16.includes('phaseAdmissionEpoch,')
       && setupAlarmsBody16.includes(
         'return hasDurableLivePwmOwner(pwmRuntimeRevision);')
+      && setupAlarmsBody16.includes('if (!ownsBorrowedPhaseAdmission) {')
       && ownedBoundaryHeldClock16 === ownedBoundaryNow16 + 60_000
       && concurrentSyncClaim16 === 0
       && concurrentPageClaim16 === 0
@@ -13533,21 +15100,35 @@ return { reapplySmartSensitivityNow };`
   await unreadableScheduleDelivery16.deliverScheduleRetry(
     unreadableScheduleRetryAt16
   );
+  const unreadableActionTypedWake16 = [
+    ...unreadableActionDelivery16.alarms.values()
+  ].find(alarm => alarm.name.startsWith('ac-schedule-read-retry:'));
+  const unreadableScheduleTypedWake16 = [
+    ...unreadableScheduleDelivery16.alarms.values()
+  ].find(alarm => alarm.name.startsWith('ac-schedule-read-retry:'));
   assertPass(unreadableActionDelivery16.retryMode() === 'action'
       && unreadableActionDelivery16.alarmAt('ac-active-boundary')
-        === ownedBoundaryNow16 + 60_000
+        === unreadableActionRetryAt16
       && unreadableActionDelivery16.alarmAt(
         'ac-active-boundary-schedule-retry'
       ) === 0
+      && unreadableActionTypedWake16?.scheduledTime
+        === ownedBoundaryNow16 + 60_000
+      && unreadableActionTypedWake16?.name.includes(
+        ':' + unreadableActionRetryAt16 + ':')
       && unreadableScheduleDelivery16.retryMode() === 'schedule'
       && unreadableScheduleDelivery16.alarmAt(
         'ac-active-boundary-schedule-retry'
-      ) === ownedBoundaryNow16 + 60_000
+      ) === unreadableScheduleRetryAt16
       && unreadableScheduleDelivery16.alarmAt('ac-active-boundary') === 0
+      && unreadableScheduleTypedWake16?.scheduledTime
+        === ownedBoundaryNow16 + 60_000
+      && unreadableScheduleTypedWake16?.name.includes(
+        ':' + unreadableScheduleRetryAt16 + ':')
       && ![unreadableActionDelivery16, unreadableScheduleDelivery16].some(
         harness => harness.calls.some(call => call.type === 'setup')
       ),
-    '16F-0B-1E-0D-23: durable mode read 瞬断时不猜 action/schedule；独立 alarm 名保持原类型，各自只延后一分钟且零边界动作');
+    '16F-0B-1E-0D-23: durable mode read 瞬断时不猜 action/schedule；原 owner alarm 不覆盖，独立 typed wake 保留 name/time 并在一分钟后复读，零边界动作');
 
   const failedScheduleMarkerWrite16 = createOwnedActiveBoundaryHarness16(
     ownedBoundaryNow16,
@@ -13874,19 +15455,28 @@ return { reapplySmartSensitivityNow };`
   await unreadScheduleCrossing16.deliverScheduleRetry(
     unreadScheduleR1At16
   );
-  const unreadScheduleR2At16 = unreadScheduleCrossing16.alarmAt(
-    'ac-active-boundary'
-  );
+  const unreadScheduleTypedWake16 = [
+    ...unreadScheduleCrossing16.alarms.values()
+  ].find(alarm => alarm.name.startsWith('ac-schedule-read-retry:'));
+  const unreadScheduleR2At16 = Number(
+    unreadScheduleTypedWake16?.scheduledTime
+  ) || 0;
   const unreadScheduleSetupCountAfterR116 =
     unreadScheduleCrossing16.calls.filter(call => call.type === 'setup').length;
   unreadScheduleCrossing16.setNow(unreadScheduleR2At16);
-  await unreadScheduleCrossing16.deliver(unreadScheduleR2At16);
+  // typed wake 的 listener 会重建原 schedule-retry name/scheduledTime；这里
+  // 直接投递等价重建后的 delivery，不能拿 wakeAt 伪装新 boundary owner。
+  await unreadScheduleCrossing16.deliverScheduleRetry(
+    unreadScheduleR1At16
+  );
   assertPass(unreadScheduleInitialResult16 === true
       && unreadScheduleSetupCountBeforeR116 === 1
       && unreadScheduleR1At16 === unreadScheduleStart16 + 60_000
       && unreadScheduleR1At16 < unreadScheduleBoundary16
       && unreadScheduleR2At16 === unreadScheduleR1At16 + 60_000
       && unreadScheduleR2At16 > unreadScheduleBoundary16
+      && unreadScheduleTypedWake16?.name.includes(
+        ':' + unreadScheduleR1At16 + ':')
       && unreadScheduleSetupCountAfterR116 === 1
       && unreadScheduleCrossing16.calls.filter(call =>
         call.type === 'setup').length === 2
@@ -13898,7 +15488,7 @@ return { reapplySmartSensitivityNow };`
       && unreadScheduleCrossing16.alarmAt(
         'ac-active-boundary-schedule-retry'
       ) === 0,
-    '16F-0B-1E-0D-29: schedule marker 写失败且 R1 owner read 也失败时，从 scheduledTime 反推 B；若下一分钟跨 B 则 R2 升级 typed action 并执行新边界，不 schedule-only 跳过');
+    '16F-0B-1E-0D-29: schedule marker 写失败且 R1 owner read 也失败时，typed wake 保留 R1 原时戳；一分钟后复读若已跨 B 才升级 action 并执行新边界');
 
   const markerlessActionBoundaryAt16 = new Date(
     2026, 7, 29, 19, 0, 0, 0
@@ -14180,8 +15770,8 @@ return { reapplySmartSensitivityNow };`
         === neutralNaturalNextAt16,
     '16F-0B-1E-0D-33: 同刻 neutral N 先重读并排 A2 后，已 dequeue 的真实自然 A 仍凭配置边界证明执行一次 setup；非自然 19:01 迟到 action 仍被 19:30 live 压制');
   const alarmPwmCatchStart16 = backgroundSource.indexOf(
-    "if (alarm.name === 'ac-pwm') {"
-  );
+    "\n  if (alarm.name === 'ac-pwm') {"
+  ) + 1;
   const alarmPwmCatchEnd16 = backgroundSource.indexOf(
     "\n    return;\n  }\n\n  if (alarm.name === 'ac-watchdog')",
     alarmPwmCatchStart16
@@ -14214,6 +15804,268 @@ return { reapplySmartSensitivityNow };`
     '\n\n// 普通循环模式的过期相位执行器。',
     'expired phase adoption continuation'
   );
+  const verifiedPwmClockStateHelpers16 = extractSourceSection(
+    backgroundSource,
+    'function snapshotVerifiedPwmClockState(',
+    '\n\nasync function persistOwnedPwmAlarmFailure(',
+    'verified PWM clock receipt helpers'
+  );
+  const storageOnChangedSource16 = extractSourceSection(
+    backgroundSource,
+    'chrome.storage.onChanged.addListener((changes, areaName) => {',
+    '\n\n// ----- 启动 -----',
+    'storage onChanged ownership boundary'
+  );
+  const localStorageOnChangedEnd16 = storageOnChangedSource16.indexOf(
+    "\n\n  if (areaName === 'sync'"
+  );
+  const localStorageOnChangedBranch16 = localStorageOnChangedEnd16 > 0
+    ? storageOnChangedSource16.slice(0, localStorageOnChangedEnd16)
+    : '';
+  assertPass(localStorageOnChangedBranch16.includes(
+      "areaName === 'local' && changes[STORAGE_KEY]?.newValue"
+    )
+      && localStorageOnChangedBranch16.includes('return;')
+      && !/\bschedule\s*=/.test(localStorageOnChangedBranch16)
+      && !/Object\.assign\(\s*schedule\b/.test(localStorageOnChangedBranch16)
+      && !/replaceSchedule\w*\(\s*schedule\b/.test(
+        localStorageOnChangedBranch16
+      ),
+    '16F-0B-2A-0S: local STORAGE_KEY onChanged 只消费自写通知并 return，不再同 revision 反向替换 schedule');
+
+  const syncPayloadIdentityHelpers16 = extractSourceSection(
+    backgroundSource,
+    'function normalizeSyncAuthorityTimestamp(value) {',
+    '\n\nlet schedule = {',
+    'sync payload identity helpers'
+  );
+  const syncEchoIdentityHarness16 = new Function(
+    'console',
+    `const STORAGE_KEY = 'ac_schedule_echo_test';
+    const SYNC_KEY = 'ac_schedule_sync_echo_test';
+    const SYNC_PAYLOAD_RECEIPT_SCHEMA_VERSION = 1;
+    const activeLocalSyncEchoIdentities = new Set();
+    let syncWatermarkLoaded = false;
+    let lastSyncedAt = 0;
+    let completedSyncPayloadReceipt = null;
+    let localScheduleMutationCommittedObservedAt = 0;
+    let remoteDisableArrivalGeneration = 0;
+    let syncInboundArrivalGeneration = 0;
+    let listener = null;
+    const deferred = [];
+    const adopted = [];
+    const chrome = {
+      storage: {
+        onChanged: {
+          addListener(callback) { listener = callback; }
+        }
+      }
+    };
+    ${syncPayloadIdentityHelpers16}
+    function deferRemoteSyncDisableWhileManualOffBlocked(remote, reason) {
+      deferred.push({ remote: structuredClone(remote), reason });
+      return Promise.resolve(true);
+    }
+    function waitUntil(promise) {
+      void Promise.resolve(promise).catch(() => {});
+      return promise;
+    }
+    async function tryAdoptSyncedState(reason, remote) {
+      adopted.push({ reason, remote: structuredClone(remote) });
+      return true;
+    }
+    ${storageOnChangedSource16}
+    return {
+      remember: rememberLocalSyncPayload,
+      complete(remote, coveredAt, currentMutationAt) {
+        const identity = getSyncPayloadIdentity(remote);
+        syncWatermarkLoaded = true;
+        lastSyncedAt = Math.max(lastSyncedAt, Number(remote?.syncedAt) || 0);
+        completedSyncPayloadReceipt = normalizeSyncPayloadReceipt({
+          schemaVersion: SYNC_PAYLOAD_RECEIPT_SCHEMA_VERSION,
+          syncedAt: remote?.syncedAt,
+          identity,
+          coveredLocalMutationObservedAt: coveredAt
+        });
+        localScheduleMutationCommittedObservedAt = currentMutationAt;
+      },
+      emit(remote) {
+        listener({ [SYNC_KEY]: { newValue: structuredClone(remote) } }, 'sync');
+      },
+      generation: () => remoteDisableArrivalGeneration,
+      inboundGeneration: () => syncInboundArrivalGeneration,
+      active: () => [...activeLocalSyncEchoIdentities],
+      deferred,
+      adopted
+    };`
+  )(testConsole);
+  const localFalseEchoA16 = {
+    enabled: false,
+    syncedAt: 91,
+    pwmState: 'off',
+    nextTriggerAt: 0,
+    onMinutes: 15,
+    offMinutes: 45
+  };
+  const differentRemoteFalseB16 = {
+    ...localFalseEchoA16,
+    offMinutes: 30
+  };
+  const exactLocalFalseEchoC16 = {
+    ...localFalseEchoA16,
+    syncedAt: 92,
+    onMinutes: 20
+  };
+  const exactLocalTrueEchoD16 = {
+    ...localFalseEchoA16,
+    enabled: true,
+    syncedAt: 93,
+    pwmState: 'on',
+    nextTriggerAt: Date.now() + 60_000
+  };
+  const nestedLocalFalseEchoE16 = {
+    enabled: false,
+    syncedAt: 94,
+    activeHours: { enabled: true, start: '08:00', end: '23:00' },
+    smartMode: { enabled: true, sensitivity: 7 },
+    phase: {
+      next: { action: 'off', at: 12345 },
+      flags: { retry: false, kind: 'safe' }
+    }
+  };
+  const reorderedNestedLocalFalseEchoE16 = {
+    phase: {
+      flags: { kind: 'safe', retry: false },
+      next: { at: 12345, action: 'off' }
+    },
+    smartMode: { sensitivity: 7, enabled: true },
+    activeHours: { end: '23:00', start: '08:00', enabled: true },
+    syncedAt: 94,
+    enabled: false
+  };
+  const changedNestedRemoteFalseE16 = {
+    ...structuredClone(reorderedNestedLocalFalseEchoE16),
+    smartMode: { sensitivity: 8, enabled: true }
+  };
+  const localEchoAIdentity16 = syncEchoIdentityHarness16.remember(
+    localFalseEchoA16
+  );
+  syncEchoIdentityHarness16.emit(differentRemoteFalseB16);
+  const differentRemoteDeferredWhileLocalInFlight16 =
+    syncEchoIdentityHarness16.generation() === 1
+    && syncEchoIdentityHarness16.deferred.length === 1
+    && syncEchoIdentityHarness16.active().includes(localEchoAIdentity16);
+  const laterLocalEnableFrozenGeneration16 =
+    syncEchoIdentityHarness16.generation();
+  syncEchoIdentityHarness16.emit(localFalseEchoA16);
+  const delayedExactEchoPreservedLaterEnable16 =
+    syncEchoIdentityHarness16.generation()
+      === laterLocalEnableFrozenGeneration16
+    && syncEchoIdentityHarness16.deferred.length === 1
+    && !syncEchoIdentityHarness16.active().includes(localEchoAIdentity16);
+  const localEchoCIdentity16 = syncEchoIdentityHarness16.remember(
+    exactLocalFalseEchoC16
+  );
+  syncEchoIdentityHarness16.emit(exactLocalFalseEchoC16);
+  const exactSelfEchoSkippedOnce16 =
+    syncEchoIdentityHarness16.generation() === 1
+    && syncEchoIdentityHarness16.deferred.length === 1
+    && !syncEchoIdentityHarness16.active().includes(localEchoCIdentity16);
+  syncEchoIdentityHarness16.emit(exactLocalFalseEchoC16);
+  const localEchoDIdentity16 = syncEchoIdentityHarness16.remember(
+    exactLocalTrueEchoD16
+  );
+  syncEchoIdentityHarness16.emit(exactLocalTrueEchoD16);
+  const exactLocalTrueEchoCannotRevive16 =
+    syncEchoIdentityHarness16.adopted.length === 2
+    && syncEchoIdentityHarness16.generation() === 2
+    && !syncEchoIdentityHarness16.active().includes(localEchoDIdentity16);
+  const nestedEchoIdentityE16 = syncEchoIdentityHarness16.remember(
+    nestedLocalFalseEchoE16
+  );
+  syncEchoIdentityHarness16.emit(reorderedNestedLocalFalseEchoE16);
+  const recursiveKeyReorderStillSelfEcho16 =
+    syncEchoIdentityHarness16.generation() === 2
+    && syncEchoIdentityHarness16.deferred.length === 2
+    && !syncEchoIdentityHarness16.active().includes(nestedEchoIdentityE16);
+  const nestedChangedIdentityE16 = syncEchoIdentityHarness16.remember(
+    nestedLocalFalseEchoE16
+  );
+  syncEchoIdentityHarness16.emit(changedNestedRemoteFalseE16);
+  const nestedFieldChangeRemainsRemote16 =
+    syncEchoIdentityHarness16.generation() === 3
+    && syncEchoIdentityHarness16.inboundGeneration() === 3
+    && syncEchoIdentityHarness16.deferred.length === 3
+    && syncEchoIdentityHarness16.adopted.length === 3
+    && syncEchoIdentityHarness16.active().includes(nestedChangedIdentityE16)
+    && syncEchoIdentityHarness16.deferred[2].remote.smartMode.sensitivity === 8;
+  syncEchoIdentityHarness16.emit(reorderedNestedLocalFalseEchoE16);
+  const reorderedNestedEchoConsumesExactTicket16 =
+    syncEchoIdentityHarness16.generation() === 3
+    && !syncEchoIdentityHarness16.active().includes(nestedChangedIdentityE16);
+  const lateCompletedLocalFalseF16 = {
+    enabled: false,
+    syncedAt: 95,
+    onMinutes: 24,
+    offMinutes: 36
+  };
+  const lateCompletedDifferentFalseF16 = {
+    ...lateCompletedLocalFalseF16,
+    offMinutes: 35
+  };
+  syncEchoIdentityHarness16.complete(
+    lateCompletedLocalFalseF16,
+    120,
+    121
+  );
+  syncEchoIdentityHarness16.emit(lateCompletedLocalFalseF16);
+  const lateExactCompletedPredecessorIgnored16 =
+    syncEchoIdentityHarness16.generation() === 3
+    && syncEchoIdentityHarness16.inboundGeneration() === 3
+    && syncEchoIdentityHarness16.deferred.length === 3
+    && syncEchoIdentityHarness16.adopted.length === 3;
+  syncEchoIdentityHarness16.emit(lateCompletedDifferentFalseF16);
+  const lateDifferentPayloadRemainsRemoteF16 =
+    syncEchoIdentityHarness16.generation() === 4
+    && syncEchoIdentityHarness16.inboundGeneration() === 4
+    && syncEchoIdentityHarness16.deferred.length === 4
+    && syncEchoIdentityHarness16.adopted.length === 4
+    && syncEchoIdentityHarness16.deferred[3].remote.offMinutes === 35;
+  const rememberLocalSyncPayloadIndex16 = syncScheduleSource6.indexOf(
+    'rememberLocalSyncPayload(slim)'
+  );
+  const physicalSyncSetIndex16 = syncScheduleSource6.indexOf(
+    'chrome.storage.sync.set'
+  );
+  await Promise.resolve();
+  assertPass(differentRemoteDeferredWhileLocalInFlight16
+      && delayedExactEchoPreservedLaterEnable16
+      && exactSelfEchoSkippedOnce16
+      && exactLocalTrueEchoCannotRevive16
+      && recursiveKeyReorderStillSelfEcho16
+      && nestedFieldChangeRemainsRemote16
+      && reorderedNestedEchoConsumesExactTicket16
+      && lateExactCompletedPredecessorIgnored16
+      && lateDifferentPayloadRemainsRemoteF16
+      && syncEchoIdentityHarness16.generation() === 4
+      && syncEchoIdentityHarness16.inboundGeneration() === 4
+      && syncEchoIdentityHarness16.deferred.length === 4
+      && syncEchoIdentityHarness16.deferred[0].remote.offMinutes === 30
+      && syncEchoIdentityHarness16.deferred[1].remote.onMinutes === 20
+      && syncEchoIdentityHarness16.deferred[2].remote.smartMode.sensitivity === 8
+      && syncEchoIdentityHarness16.deferred[3].remote.offMinutes === 35
+      && syncEchoIdentityHarness16.adopted.length === 4
+      && syncEchoIdentityHarness16.adopted[0].remote.offMinutes === 30
+      && syncEchoIdentityHarness16.adopted[1].remote.onMinutes === 20
+      && syncEchoIdentityHarness16.adopted[2].remote.smartMode.sensitivity === 8
+      && syncEchoIdentityHarness16.adopted[3].remote.offMinutes === 35
+      && rememberLocalSyncPayloadIndex16 >= 0
+      && physicalSyncSetIndex16 > rememberLocalSyncPayloadIndex16
+      && syncScheduleSource6.includes(
+        'activeLocalSyncEchoIdentities.delete(localEchoIdentity)')
+      && storageOnChangedSource16.includes(
+        'activeLocalSyncEchoIdentities.delete(incomingIdentity)'),
+    '16F-0B-2A-0T: self-echo 与 durable completed predecessor 都按完整 canonical identity；exact late echo 不换代，任一字段变化仍按 remote F 处理');
   const durableLivePwmOwnerSource16 = extractSourceSection(
     backgroundSource,
     'async function hasDurableLivePwmOwner(',
@@ -14232,6 +16084,12 @@ return { reapplySmartSensitivityNow };`
     '\nfunction prepareFreshPwmStartState()',
     'replacement PWM owner alarm admission'
   );
+  const localMutationDerivedBarrierSource16 = extractSourceSection(
+    backgroundSource,
+    'function getEffectiveDeferredRemoteAuthorityObservedAt() {',
+    '\n\nfunction claimLocalScheduleMutationIntent()',
+    'committed local mutation derived remote barrier'
+  );
   const loadActualSyncApply16 = (
     initialSchedule,
     initialLiveAt = 0,
@@ -14240,7 +16098,7 @@ return { reapplySmartSensitivityNow };`
   ) => new Function(
     'initialSchedule', 'initialLiveAt', 'initialWatermark', 'harnessOptions',
     'setScheduleNextTrigger', 'setSchedulePwmClockIntent',
-    'replaceSchedulePwmRetryState',
+    'replaceSchedulePwmRetryState', 'replaceSchedulePageTimerState',
     'getPwmRetryDescriptor', 'normalizePwmRetryKind',
     'classifySmartOnClock',
     'computeConfigDiff', 'protectSmartOnRetryConfigDiff',
@@ -14250,16 +16108,60 @@ return { reapplySmartSensitivityNow };`
     let liveAt = Number(initialLiveAt) || 0;
     let lastSyncedAt = Number(initialWatermark) || 0;
     let durableWatermark = Number(initialWatermark) || 0;
+    let durablePayloadReceipt = null;
     let watermarkGetFailures = Number(harnessOptions.watermarkGetFailures) || 0;
     let schedulePersistFailures = Number(harnessOptions.schedulePersistFailures) || 0;
     let syncWatermarkLoaded = false;
     let syncWatermarkWriteChain = Promise.resolve();
+    let syncWatermarkWriteGeneration = 0;
+    let syncWatermarkWritesInFlight = 0;
+    let completedSyncPayloadReceipt = null;
     let pwmRuntimeRevision = 1;
     let automaticDisableAdmissionEpoch = 0;
     let automaticOnAdmissionBlocked = false;
+    let localScheduleMutationGeneration = 0;
+    let localScheduleMutationCommitPendingGeneration = 0;
+    let localScheduleMutationObservedAt =
+      Number(harnessOptions.initialLocalMutationCutoff) || 0;
+    let localScheduleMutationCommittedObservedAt =
+      Number(harnessOptions.initialLocalMutationCutoff) || 0;
+    let localScheduleAuthorityGeneration = 0;
+    let remoteSyncAuthorityObservedAt =
+      Number(harnessOptions.initialRemoteAuthorityObservedAt) || 0;
+    let localScheduleAuthorityObservedAt = 0;
+    let deferredSyncDisableLoaded = true;
+    let deferredSyncDisablePending = false;
+    let deferredSyncDisableEpoch = 0;
+    let deferredSyncDisableRemoteSnapshot = null;
+    let deferredSyncDisableRemoteSnapshotComplete = false;
+    let deferredSyncDisableSyntheticReadFailure = false;
+    let deferredSyncDisableDurableReceiptEpoch = 0;
+    let deferredSyncDisableDurableReceiptIdentity = '';
+    let deferredSyncDisableObservedAt = 0;
+    let deferredSyncDisableLocalScheduleAuthorityGeneration = 0;
+    let deferredSyncDisableSuccessorSnapshot = null;
+    let deferredSyncDisableSuccessorObservedAt = 0;
+    let deferredSyncDisableAuthorityOrderObservedAt = Number(
+      harnessOptions.initialDeferredAuthorityOrderObservedAt
+    ) || 0;
+    let deferredSyncDisableSuccessorAuthorityOrderObservedAt = Number(
+      harnessOptions.initialDeferredSuccessorOrderObservedAt
+    ) || 0;
+    let deferredSyncSuccessorReleasedThroughObservedAt = 0;
+    let deferredSyncDisableSuccessorLocalAuthorityGeneration = 0;
+    let deferredSyncDisableSuccessorPublishGeneration = 0;
+    let deferredSyncDisableLocalMutationGeneration = 0;
+    let deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
     let syncPublishGeneration = 0;
+    let syncWriteChain = Promise.resolve();
+    let syncWriteOperationsInFlight = 0;
     let syncPhaseAdoptionAdmissionEpoch = 0;
     let syncPhaseAdoptionAdmissionOwner = 0;
+    const syncPhaseAdoptionAdmissionWaiters = [];
+    let smartReapplyInFlight = false;
+    let smartReapplyPending = false;
+    let pwmAlarmWriteGeneration = 0;
+    let pageTimerWriteGeneration = 0;
     let pwmExecutionWithRecoveryCount = 0;
     let deferredRepairAfterPwmOptions = null;
     let scheduleRepairEpoch = 0;
@@ -14270,15 +16172,126 @@ return { reapplySmartSensitivityNow };`
     let cancelGateUsed = false;
     let comfortFinishPersistGateUsed = false;
     let postRecoveryOwnerCommitted = false;
+    let postRecoveryAlarmGetGateUsed = false;
     let expiredRecoveryPersistFailureUsed = false;
     let replacementProofGateUsed = false;
+    let syncIntentPersistGateUsed = false;
+    let completedRepairCount = 0;
+    const repairCompletionWaiters = [];
     const calls = [];
     ${setNextTriggerAtSource16}
+    const activeLocalSyncEchoIdentities = new Set();
+    ${syncPayloadIdentityHelpers16}
+    function isDeferredSyncDisableSuccessorCandidate(remote) {
+      return !!deferredSyncDisableSuccessorSnapshot
+        && !!remote
+        && remote.enabled !== false
+        && getSyncPayloadIdentity(remote)
+          === getSyncPayloadIdentity(deferredSyncDisableSuccessorSnapshot);
+    }
+    async function clearDeferredSyncDisableSuccessorAfterAdoption(remote) {
+      if (!isDeferredSyncDisableSuccessorCandidate(remote)) return true;
+      deferredSyncDisableSuccessorSnapshot = null;
+      deferredSyncDisableSuccessorLocalAuthorityGeneration = 0;
+      deferredSyncDisableSuccessorPublishGeneration = 0;
+      return true;
+    }
     function isAutomationAllowedForSchedule(s) { return s?.enabled === true; }
-    function isAutomationAllowed() { return isAutomationAllowedForSchedule(schedule); }
+    function isAutomationAllowed() {
+      return !deferredSyncDisablePending
+        && !automaticOnAdmissionBlocked
+        && isAutomationAllowedForSchedule(schedule);
+    }
+    function deferRemoteSyncDisableWhileManualOffBlocked(
+      remote,
+      reason = '',
+      scheduleAuthorityGeneration = localScheduleAuthorityGeneration
+    ) {
+      deferredSyncDisableLoaded = true;
+      deferredSyncDisablePending = true;
+      deferredSyncDisableEpoch += 1;
+      deferredSyncDisableRemoteSnapshot = structuredClone(remote);
+      deferredSyncDisableRemoteSnapshotComplete = true;
+      deferredSyncDisableSyntheticReadFailure = false;
+      deferredSyncDisableDurableReceiptEpoch = deferredSyncDisableEpoch;
+      deferredSyncDisableDurableReceiptIdentity =
+        getSyncPayloadIdentity(deferredSyncDisableRemoteSnapshot);
+      deferredSyncDisableObservedAt = Math.max(
+        Date.now(),
+        remoteSyncAuthorityObservedAt + 1
+      );
+      deferredSyncDisableAuthorityOrderObservedAt = Math.max(
+        deferredSyncDisableObservedAt,
+        Number(harnessOptions.initialDeferredAuthorityOrderObservedAt) || 0
+      );
+      remoteSyncAuthorityObservedAt = deferredSyncDisableObservedAt;
+      deferredSyncDisableLocalScheduleAuthorityGeneration =
+        scheduleAuthorityGeneration;
+      deferredSyncDisableLocalMutationGeneration =
+        localScheduleMutationGeneration;
+      deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+      pwmRuntimeRevision += 1;
+      calls.push({
+        type: 'defer-remote-disable',
+        reason,
+        remote: structuredClone(remote),
+        epoch: deferredSyncDisableEpoch
+      });
+      return Promise.resolve(true);
+    }
+    function getDeferredSyncDisableReceiptIdentity() {
+      return getSyncPayloadIdentity(deferredSyncDisableRemoteSnapshot);
+    }
+    function hasCurrentDeferredSyncDisableDurableReceipt() {
+      return deferredSyncDisablePending
+        && deferredSyncDisableRemoteSnapshotComplete
+        && deferredSyncDisableDurableReceiptEpoch === deferredSyncDisableEpoch
+        && deferredSyncDisableDurableReceiptIdentity
+          === getDeferredSyncDisableReceiptIdentity();
+    }
+    ${localMutationDerivedBarrierSource16}
+    async function clearDeferredSyncDisableAfterRemoteAdoption(expectedEpoch) {
+      calls.push({
+        type: 'clear-deferred-disable',
+        expectedEpoch,
+        currentEpoch: deferredSyncDisableEpoch
+      });
+      if (!deferredSyncDisablePending
+          || expectedEpoch !== deferredSyncDisableEpoch) return false;
+      deferredSyncDisablePending = false;
+      deferredSyncDisableEpoch += 1;
+      return true;
+    }
+    async function commitScheduleAuthority({
+      ensureCurrent,
+      reason = ''
+    } = {}) {
+      if (typeof ensureCurrent === 'function' && !ensureCurrent()) return false;
+      await persistSchedule(reason, { syncFromLiveAlarm: false });
+      return typeof ensureCurrent !== 'function' || ensureCurrent();
+    }
     function isAutomationOperationCurrent(r) {
       return r === pwmRuntimeRevision && isAutomationAllowed();
     }
+    function isPwmAlarmWriteOwnerCurrent(owner) {
+      return Number(owner) > 0 && Number(owner) === pwmAlarmWriteGeneration;
+    }
+    function isPwmAlarmWriteGenerationCurrent(generation) {
+      const expected = Number(generation);
+      return Number.isSafeInteger(expected)
+        && expected >= 0
+        && expected === pwmAlarmWriteGeneration;
+    }
+    function claimPageTimerWriteOwner(isCurrent) {
+      if (typeof isCurrent !== 'function' || !isCurrent()) return 0;
+      pageTimerWriteGeneration += 1;
+      return pageTimerWriteGeneration;
+    }
+    function isPageTimerWriteOwnerCurrent(owner) {
+      return Number(owner) > 0 && Number(owner) === pageTimerWriteGeneration;
+    }
+    ${ownedPageTimerStateHelpers11D}
+    ${verifiedPwmClockStateHelpers16}
     function isComfortStartActive() {
       return Number(schedule.comfortStartUntil) > Date.now();
     }
@@ -14288,30 +16301,52 @@ return { reapplySmartSensitivityNow };`
     }
     function waitUntil(promise) { return Promise.resolve(promise); }
     function drainDeferredScheduleRepair() { return false; }
-    async function repairScheduleClock(options = {}) {
-      calls.push({ type: 'repair-clock', options: { ...options } });
-      const repairFutureAt = Number(harnessOptions.repairFutureAt) || 0;
-      if (repairFutureAt > Date.now()) {
-        calls.push({ type: 'fresh-status-repair', isOn: false });
-        schedule.pwmState = 'on';
-        setNextTriggerAt(repairFutureAt);
-        const repairBoundaryAt = Number(options.smartOnExpectedBoundaryAt) || 0;
-        if (repairBoundaryAt > 0) {
-          schedule.smartOnBoundaryAt = repairBoundaryAt;
-          schedule.pwmRetryKind = 'smart-on-safe-delay';
-          schedule.pwmRetryBoundaryAt = repairBoundaryAt;
-          schedule.pwmRetryScheduledAt = repairFutureAt;
-        }
-        schedule.alarmCreatedAt = Date.now();
-        schedule.alarmDelayMinutes = Math.max(
-          1,
-          (repairFutureAt - Date.now()) / 60000
-        );
-        liveAt = repairFutureAt;
-        durableSchedule = structuredClone(schedule);
-        calls.push({ type: 'repair-clock-created', at: repairFutureAt });
+    function waitForRepairCompletion(expectedCount = 1) {
+      const expected = Math.max(1, Number(expectedCount) || 1);
+      if (completedRepairCount >= expected) {
+        return Promise.resolve(completedRepairCount);
       }
-      return { success: true };
+      return new Promise(resolve => {
+        repairCompletionWaiters.push({ expected, resolve });
+      });
+    }
+    function markRepairCompletion() {
+      completedRepairCount += 1;
+      for (let index = repairCompletionWaiters.length - 1; index >= 0; index -= 1) {
+        const waiter = repairCompletionWaiters[index];
+        if (completedRepairCount < waiter.expected) continue;
+        repairCompletionWaiters.splice(index, 1);
+        waiter.resolve(completedRepairCount);
+      }
+    }
+    async function repairScheduleClock(options = {}) {
+      try {
+        calls.push({ type: 'repair-clock', options: { ...options } });
+        const repairFutureAt = Number(harnessOptions.repairFutureAt) || 0;
+        if (repairFutureAt > Date.now()) {
+          calls.push({ type: 'fresh-status-repair', isOn: false });
+          schedule.pwmState = 'on';
+          setNextTriggerAt(repairFutureAt);
+          const repairBoundaryAt = Number(options.smartOnExpectedBoundaryAt) || 0;
+          if (repairBoundaryAt > 0) {
+            schedule.smartOnBoundaryAt = repairBoundaryAt;
+            schedule.pwmRetryKind = 'smart-on-safe-delay';
+            schedule.pwmRetryBoundaryAt = repairBoundaryAt;
+            schedule.pwmRetryScheduledAt = repairFutureAt;
+          }
+          schedule.alarmCreatedAt = Date.now();
+          schedule.alarmDelayMinutes = Math.max(
+            1,
+            (repairFutureAt - Date.now()) / 60000
+          );
+          liveAt = repairFutureAt;
+          durableSchedule = structuredClone(schedule);
+          calls.push({ type: 'repair-clock-created', at: repairFutureAt });
+        }
+        return { success: true };
+      } finally {
+        markRepairCompletion();
+      }
     }
     async function loadScheduleFromStorage() {
       calls.push({ type: 'storage-reload' });
@@ -14327,7 +16362,7 @@ return { reapplySmartSensitivityNow };`
       }
       if (context.source === 'expired-alarm'
           && Number(harnessOptions.expiredRecoveryAt) > Date.now()) {
-        const phaseOwnerAccepted = !isSyncPhaseAdoptionAdmissionBlockedFor(
+        const phaseOwnerAccepted = isSyncPhaseAdoptionAdmissionOwnerCurrent(
           context.phaseAdmissionEpoch
         );
         calls.push({ type: 'expired-recovery-admission', phaseOwnerAccepted,
@@ -14356,18 +16391,56 @@ return { reapplySmartSensitivityNow };`
           1,
           (schedule.nextTriggerAt - Date.now()) / 60000
         );
+        const recoveryPageTimerWriteOwner = claimPageTimerWriteOwner(
+          () => phaseOwnerAccepted
+            && isAutomationOperationCurrent(recoveryRevision)
+        );
+        if (recoveryPageTimerWriteOwner > 0
+            && typeof context.onPageTimerWriteOwnerClaimed === 'function') {
+          context.onPageTimerWriteOwnerClaimed(recoveryPageTimerWriteOwner);
+        }
         await persistSchedule('expired-phase-recovery-intent');
-        const created = await createPwmAlarmFromPlan(
+        const alarmWrite = await createPwmAlarmFromPlanWithReceipt(
           { nextTriggerAt: schedule.nextTriggerAt },
           'expired-phase-recovery',
           recoveryRevision
         );
-        postRecoveryOwnerCommitted = created === true;
+        postRecoveryOwnerCommitted = alarmWrite.created === true;
+        const verifiedClockState = alarmWrite.created === true
+          ? snapshotVerifiedPwmClockState(alarmWrite.writeOwner)
+          : null;
+        const pageTimerState = recoveryPageTimerWriteOwner > 0
+          ? snapshotOwnedPageTimerState(recoveryPageTimerWriteOwner)
+          : null;
+        const phaseState = Object.freeze({
+          pwmState: schedule.pwmState,
+          smartOnBoundaryAt: Number(schedule.smartOnBoundaryAt) || 0,
+          pwmRetryKind: String(schedule.pwmRetryKind || ''),
+          pwmRetryBoundaryAt: Number(schedule.pwmRetryBoundaryAt) || 0,
+          pwmRetryScheduledAt: Number(schedule.pwmRetryScheduledAt) || 0
+        });
         if (harnessOptions.expiredRecoveryClaimsNewRevision) {
           calls.push({ type: 'expired-recovery-new-owner',
             revision: recoveryRevision, at: schedule.nextTriggerAt });
         }
-        return { handled: created === true };
+        return {
+          handled: alarmWrite.created === true,
+          ...(context.returnPwmCommitReceipt === true
+              && alarmWrite.created === true
+            ? {
+                pwmCommitReceipt: Object.freeze({
+                  advanced: true,
+                  persisted: true,
+                  writeOwner: alarmWrite.writeOwner,
+                  nextTriggerAt: Number(schedule.nextTriggerAt),
+                  pageTimerWriteOwner: recoveryPageTimerWriteOwner,
+                  pageTimerState,
+                  verifiedClockState,
+                  phaseState
+                })
+              }
+            : {})
+        };
       }
       return { handled: true };
     }
@@ -14377,10 +16450,24 @@ return { reapplySmartSensitivityNow };`
     ${stableDurableLivePwmOwnerSource16}
     const STORAGE_KEY = 'ac_schedule_test';
     const SYNC_WATERMARK_KEY = 'ac_schedule_sync_watermark';
+    const SYNC_PAYLOAD_RECEIPT_KEY = 'ac_schedule_sync_payload_receipt';
+    const SYNC_PAYLOAD_RECEIPT_SCHEMA_VERSION = 1;
     const SYNC_PENDING_PUBLISH_KEY = 'ac_schedule_sync_publish_pending';
     const chrome = {
       storage: { local: {
         async get(key) {
+          if (Array.isArray(key)
+              && key.includes(SYNC_WATERMARK_KEY)) {
+            if (watermarkGetFailures > 0) {
+              watermarkGetFailures -= 1;
+              throw new Error('transient watermark read');
+            }
+            return {
+              [SYNC_WATERMARK_KEY]: durableWatermark,
+              [SYNC_PAYLOAD_RECEIPT_KEY]:
+                structuredClone(durablePayloadReceipt)
+            };
+          }
           if (key === STORAGE_KEY) {
             const captured = structuredClone(durableSchedule);
             if (harnessOptions.replacementProofGate
@@ -14414,11 +16501,27 @@ return { reapplySmartSensitivityNow };`
             return;
           }
           durableWatermark = Number(value[SYNC_WATERMARK_KEY]) || 0;
+          if (Object.hasOwn(value, SYNC_PAYLOAD_RECEIPT_KEY)) {
+            durablePayloadReceipt = structuredClone(
+              value[SYNC_PAYLOAD_RECEIPT_KEY]
+            );
+          }
           calls.push({ type: 'watermark', at: durableWatermark });
         }
       } },
       alarms: {
         async get(name) {
+          if (name === 'ac-pwm'
+              && postRecoveryOwnerCommitted
+              && harnessOptions.postRecoveryAlarmGetGate
+              && !postRecoveryAlarmGetGateUsed) {
+            postRecoveryAlarmGetGateUsed = true;
+            calls.push({ type: 'post-recovery-alarm-get-start' });
+            if (typeof harnessOptions.onPostRecoveryAlarmGet === 'function') {
+              harnessOptions.onPostRecoveryAlarmGet();
+            }
+            await harnessOptions.postRecoveryAlarmGetGate;
+          }
           if (name === 'ac-pwm'
               && postRecoveryOwnerCommitted
               && harnessOptions.postRecoveryAlarmGetFailure) {
@@ -14449,6 +16552,15 @@ return { reapplySmartSensitivityNow };`
     async function persistSchedule(reason) {
       calls.push({ type: 'persist', reason, enabled: schedule.enabled,
         pwmState: schedule.pwmState, nextTriggerAt: schedule.nextTriggerAt });
+      if (reason === 'sync-phase-adopt-intent'
+          && harnessOptions.syncIntentPersistGate
+          && !syncIntentPersistGateUsed) {
+        syncIntentPersistGateUsed = true;
+        if (typeof harnessOptions.onSyncIntentPersist === 'function') {
+          harnessOptions.onSyncIntentPersist();
+        }
+        await harnessOptions.syncIntentPersistGate;
+      }
       if (String(reason).startsWith('comfort-start-ended-')
           && harnessOptions.comfortFinishPersistGate
           && !comfortFinishPersistGateUsed) {
@@ -14471,26 +16583,128 @@ return { reapplySmartSensitivityNow };`
       }
       durableSchedule = structuredClone(schedule);
     }
-    async function clearPwmAlarm(revision) {
-      calls.push({ type: 'clear-pwm', revision });
+    async function clearPwmAlarmWithReceipt(revision, _force = false, options = {}) {
+      const expected = Number(options.expectedWriteGeneration);
+      if (!isAutomationOperationCurrent(revision)
+          || (typeof options.ensureCurrent === 'function'
+            && !options.ensureCurrent())
+          || (Number.isSafeInteger(expected) && expected >= 0
+            && !isPwmAlarmWriteGenerationCurrent(expected))) {
+        calls.push({ type: 'clear-pwm-stale', revision, expected });
+        return { cleared: false, stale: true, writeOwner: 0 };
+      }
+      const writeOwner = ++pwmAlarmWriteGeneration;
+      calls.push({ type: 'clear-pwm', revision, writeOwner });
+      if (harnessOptions.syncClearFailure === true) {
+        calls.push({ type: 'clear-pwm-failure', revision, writeOwner, liveAt });
+        return { cleared: false, writeOwner, error: 'synthetic sync clear failure' };
+      }
       liveAt = 0;
+      return {
+        cleared: isAutomationOperationCurrent(revision),
+        writeOwner
+      };
     }
-    async function createPwmAlarmFromPlan(plan, tag, revision) {
-      calls.push({ type: 'create-pwm', tag, at: plan.nextTriggerAt, revision });
+    async function clearPwmAlarm(revision) {
+      return (await clearPwmAlarmWithReceipt(revision)).cleared;
+    }
+    async function createPwmAlarmFromPlanWithReceipt(
+      plan,
+      tag,
+      revision,
+      options = {}
+    ) {
+      const previousWriteOwner = Number(options.previousWriteOwner) || 0;
+      const requestedExpectedWriteGeneration = Number(
+        options.expectedWriteGeneration
+      );
+      const expectedWriteGeneration = previousWriteOwner > 0
+        ? previousWriteOwner
+        : requestedExpectedWriteGeneration;
+      const hasExpectedWriteGeneration = Number.isSafeInteger(
+        expectedWriteGeneration
+      ) && expectedWriteGeneration >= 0;
+      const ensureCurrent = typeof options.ensureCurrent === 'function'
+        ? options.ensureCurrent
+        : () => true;
+      if (harnessOptions.beforeSyncAdoptCreateGate
+          && tag === 'sync-phase-adopt') {
+        if (typeof harnessOptions.onBeforeSyncAdoptCreate === 'function') {
+          harnessOptions.onBeforeSyncAdoptCreate();
+        }
+        await harnessOptions.beforeSyncAdoptCreateGate;
+      }
+      if (!isAutomationOperationCurrent(revision)
+          || !ensureCurrent()
+          || (hasExpectedWriteGeneration
+            && !isPwmAlarmWriteGenerationCurrent(expectedWriteGeneration))) {
+        calls.push({ type: 'create-pwm-stale', tag, revision,
+          previousWriteOwner, expectedWriteGeneration });
+        return { created: false, writeOwner: 0 };
+      }
+      const writeOwner = ++pwmAlarmWriteGeneration;
+      calls.push({ type: 'create-pwm', tag, at: plan.nextTriggerAt, revision,
+        writeOwner, previousWriteOwner, expectedWriteGeneration });
+      if (harnessOptions.syncCreateFailure === true
+          && tag === 'sync-phase-adopt') {
+        liveAt = 0;
+        return { created: false, writeOwner };
+      }
       liveAt = plan.nextTriggerAt;
       schedule.alarmCreatedAt = Date.now();
       schedule.alarmDelayMinutes = Math.max(1, (liveAt - Date.now()) / 60000);
-      setNextTriggerAt(liveAt);
+      setNextTriggerAt(liveAt, { plannedAt: options.plannedAt });
+      return { created: true, writeOwner };
+    }
+    async function createPwmAlarmFromPlan(plan, tag, revision) {
+      return (await createPwmAlarmFromPlanWithReceipt(
+        plan,
+        tag,
+        revision
+      )).created;
+    }
+    async function updateBadge() {
+      calls.push({ type: 'badge' });
+      if (harnessOptions.syncBadgeGate) {
+        if (typeof harnessOptions.onSyncBadge === 'function') {
+          harnessOptions.onSyncBadge();
+        }
+        await harnessOptions.syncBadgeGate;
+      }
+    }
+    async function createAlarm(name, info = {}) {
+      calls.push({ type: 'infra', name, info: { ...info } });
+      if (name === 'ac-watchdog'
+          && Number(info.delayInMinutes) === 1
+          && harnessOptions.syncFailureWatchdogGate) {
+        if (typeof harnessOptions.onSyncFailureWatchdog === 'function') {
+          harnessOptions.onSyncFailureWatchdog();
+        }
+        await harnessOptions.syncFailureWatchdogGate;
+      }
+      if (typeof info.ensureCurrent === 'function'
+          && !info.ensureCurrent()) return false;
       return true;
     }
-    async function createAlarm(name) { calls.push({ type: 'infra', name }); return true; }
     async function scheduleSyncRetry(kind = 'publish') {
       return createAlarm(kind === 'adopt'
         ? 'ac-sync-adopt-retry'
         : 'ac-sync-publish-retry');
     }
     ${advanceExpiredAlarmSource16}
-    async function resetDisabledPwmRuntime() { calls.push({ type: 'reset-disabled' }); }
+    async function resetDisabledPwmRuntime() {
+      calls.push({ type: 'reset-disabled' });
+      if (harnessOptions.faithfulDisabledReset === true) {
+        schedule.comfortStartUntil = 0;
+        schedule.pwmState = 'off';
+        schedule.smartOnBoundaryAt = 0;
+        schedule.pwmRetryKind = '';
+        schedule.pwmRetryBoundaryAt = 0;
+        schedule.pwmRetryScheduledAt = 0;
+        setPwmClockIntent(0);
+        liveAt = 0;
+      }
+    }
     async function requestTimerBasedShutdown(reason) {
       calls.push({ type: 'shutdown', reason });
       return { success: true };
@@ -14552,8 +16766,60 @@ return { reapplySmartSensitivityNow };`
       await persistSchedule('old-auto-on');
       return true;
     }
+    function commitSameRevisionOwnerForTest(owner = {}) {
+      pwmAlarmWriteGeneration += 1;
+      const nextTriggerAt = Number(owner.nextTriggerAt) || 0;
+      schedule.pwmState = owner.pwmState === 'off' ? 'off' : 'on';
+      setNextTriggerAt(nextTriggerAt, {
+        plannedAt: Number(owner.smartClockPlannedAt) || Date.now()
+      });
+      schedule.smartOnBoundaryAt = Number(owner.boundaryAt) || 0;
+      schedule.pwmRetryKind = String(owner.pwmRetryKind || '');
+      schedule.pwmRetryBoundaryAt = Number(owner.pwmRetryBoundaryAt) || 0;
+      schedule.pwmRetryScheduledAt = Number(owner.pwmRetryScheduledAt) || 0;
+      schedule.pageTimerError = String(owner.pageTimerError || '');
+      schedule.alarmCreatedAt = Date.now();
+      schedule.alarmDelayMinutes = Math.max(
+        1,
+        (nextTriggerAt - Date.now()) / 60000
+      );
+      liveAt = nextTriggerAt;
+      durableSchedule = structuredClone(schedule);
+      calls.push({ type: 'same-revision-owner-commit',
+        revision: pwmRuntimeRevision, at: nextTriggerAt,
+        pwmState: schedule.pwmState,
+        writeOwner: pwmAlarmWriteGeneration });
+      return pwmAlarmWriteGeneration;
+    }
+    function claimSameRevisionWriteOnlyForTest() {
+      pwmAlarmWriteGeneration += 1;
+      calls.push({ type: 'same-revision-owner-claim-only',
+        revision: pwmRuntimeRevision,
+        writeOwner: pwmAlarmWriteGeneration });
+      return pwmAlarmWriteGeneration;
+    }
+    function replaceSameRevisionPageStateForTest(pageState = {}) {
+      const replacement = structuredClone(schedule);
+      replaceSchedulePageTimerState(replacement, pageState);
+      replacement.configSentinel = String(
+        pageState.configSentinel || 'same-revision-page-replacement'
+      );
+      schedule = replacement;
+      calls.push({
+        type: 'same-revision-page-replacement',
+        revision: pwmRuntimeRevision,
+        pwmWriteOwner: pwmAlarmWriteGeneration,
+        pageWriteOwner: pageTimerWriteGeneration
+      });
+      return {
+        revision: pwmRuntimeRevision,
+        pwmWriteOwner: pwmAlarmWriteGeneration,
+        pageWriteOwner: pageTimerWriteGeneration
+      };
+    }
     function supersedeReplacementOwnerForTest(nextTriggerAt) {
       pwmRuntimeRevision += 1;
+      pwmAlarmWriteGeneration += 1;
       schedule.pwmState = 'on';
       setNextTriggerAt(nextTriggerAt);
       schedule.smartOnBoundaryAt = Number(harnessOptions.supersedingBoundaryAt) || 0;
@@ -14575,6 +16841,7 @@ return { reapplySmartSensitivityNow };`
     }
     function supersedeIncompleteReplacementOwnerForTest(nextTriggerAt) {
       pwmRuntimeRevision += 1;
+      pwmAlarmWriteGeneration += 1;
       schedule.pwmState = 'on';
       setNextTriggerAt(nextTriggerAt);
       schedule.smartOnBoundaryAt = Number(harnessOptions.supersedingBoundaryAt) || 0;
@@ -14606,12 +16873,22 @@ return { reapplySmartSensitivityNow };`
     async function recoverTypedSmartOnAlarmException() { return false; }
     async function recoverGenericPwmAlarmException() { return false; }
     function appendDiagnosticLog() {}
+    function captureScheduleReadRequeueReceipt() {
+      return Object.freeze({});
+    }
+    async function createScheduleReadRetryWake(alarm, reason = '') {
+      calls.push({ type: 'schedule-read-retry', alarm: { ...alarm }, reason });
+      return createAlarm('ac-schedule-read-retry:'
+        + encodeURIComponent(alarm.name) + ':' + alarm.scheduledTime,
+      { delayInMinutes: 1 });
+    }
     ${finishComfortStartSource16}
     ${sharedPwmExecutorSource16}
     const initReady = Promise.resolve();
     async function deliverRejectedOldAlarmForTest(scheduledTime) {
       const alarm = { name: 'ac-pwm', scheduledTime };
       const activeBoundaryActionDelivery = false;
+      const activeBoundaryRetry = {};
       await initReady;
       ${phaseSensitiveAlarmGateBody16}
       ${alarmPwmCatchBody16}
@@ -14629,6 +16906,9 @@ return { reapplySmartSensitivityNow };`
       return { result, deliveredRevision };
     }
     ${retryStateHelpers16}
+    async function ensureSyncAuthorityDurableBaselineLoaded() {
+      return true;
+    }
     ${applySyncedPhaseBody}
     return {
       apply: applySyncedPhase,
@@ -14639,18 +16919,143 @@ return { reapplySmartSensitivityNow };`
       deliverRejectedOldAlarm: deliverRejectedOldAlarmForTest,
       runWatchdog: watchdogCheck,
       drainRepair: drainDeferredScheduleRepair,
+      waitForRepair: waitForRepairCompletion,
+      holdPhaseAdmission: claimSyncPhaseAdoptionAdmission,
+      releasePhaseAdmission: releaseSyncPhaseAdoptionAdmission,
       supersedeReplacementOwner: supersedeReplacementOwnerForTest,
       supersedeIncompleteReplacementOwner:
         supersedeIncompleteReplacementOwnerForTest,
+      commitSameRevisionOwner: commitSameRevisionOwnerForTest,
+      claimSameRevisionWriteOnly: claimSameRevisionWriteOnlyForTest,
+      replaceSameRevisionPageState: replaceSameRevisionPageStateForTest,
+      deferRemoteDisable(remote, reason = 'test-deferred-remote-disable') {
+        return deferRemoteSyncDisableWhileManualOffBlocked(remote, reason);
+      },
+      seedDeferredDisableAuthority(remote, observedAt, authorityOrderObservedAt) {
+        deferredSyncDisableLoaded = true;
+        deferredSyncDisablePending = true;
+        deferredSyncDisableEpoch += 1;
+        deferredSyncDisableRemoteSnapshot = structuredClone(remote);
+        deferredSyncDisableRemoteSnapshotComplete = true;
+        deferredSyncDisableSyntheticReadFailure = false;
+        deferredSyncDisableObservedAt = Number(observedAt) || 0;
+        deferredSyncDisableAuthorityOrderObservedAt =
+          Number(authorityOrderObservedAt) || deferredSyncDisableObservedAt;
+        deferredSyncDisableDurableReceiptEpoch = deferredSyncDisableEpoch;
+        deferredSyncDisableDurableReceiptIdentity = getSyncPayloadIdentity(
+          deferredSyncDisableRemoteSnapshot
+        );
+        deferredSyncDisableLocalScheduleAuthorityGeneration =
+          localScheduleAuthorityGeneration;
+        deferredSyncDisableLocalMutationGeneration =
+          localScheduleMutationGeneration;
+        return deferredSyncDisableEpoch;
+      },
+      seedDeferredSuccessorAuthority(
+        remote,
+        observedAt,
+        authorityOrderObservedAt
+      ) {
+        deferredSyncDisableSuccessorSnapshot = structuredClone(remote);
+        deferredSyncDisableSuccessorObservedAt = Number(observedAt) || 0;
+        deferredSyncDisableSuccessorAuthorityOrderObservedAt =
+          Number(authorityOrderObservedAt)
+          || deferredSyncDisableSuccessorObservedAt;
+        deferredSyncDisableSuccessorLocalAuthorityGeneration =
+          localScheduleAuthorityGeneration;
+        return deferredSyncDisableSuccessorObservedAt;
+      },
+      effectiveDeferredRemoteAuthorityObservedAt() {
+        return getEffectiveDeferredRemoteAuthorityObservedAt();
+      },
+      commitLocalConfigMutation(patch = {}) {
+        localScheduleMutationGeneration += 1;
+        localScheduleMutationObservedAt = Math.max(
+          Date.now(),
+          remoteSyncAuthorityObservedAt + 1
+        );
+        remoteSyncAuthorityObservedAt = localScheduleMutationObservedAt;
+        localScheduleMutationCommittedObservedAt = Math.max(
+          localScheduleMutationCommittedObservedAt,
+          localScheduleMutationObservedAt
+        );
+        schedule = {
+          ...schedule,
+          ...structuredClone(patch),
+          activeHours: patch.activeHours
+            ? structuredClone(patch.activeHours)
+            : structuredClone(schedule.activeHours),
+          smartMode: patch.smartMode
+            ? structuredClone(patch.smartMode)
+            : structuredClone(schedule.smartMode)
+        };
+        durableSchedule = structuredClone(schedule);
+        calls.push({
+          type: 'local-config-mutation',
+          generation: localScheduleMutationGeneration,
+          schedule: structuredClone(schedule)
+        });
+        return localScheduleMutationGeneration;
+      },
+      claimLocalMutationForTest(reason = 'manual-toggle-arrival') {
+        localScheduleMutationGeneration += 1;
+        localScheduleMutationObservedAt = Math.max(
+          Date.now(),
+          remoteSyncAuthorityObservedAt + 1
+        );
+        remoteSyncAuthorityObservedAt = localScheduleMutationObservedAt;
+        localScheduleMutationCommitPendingGeneration =
+          localScheduleMutationGeneration;
+        calls.push({
+          type: 'local-mutation-arrival',
+          reason,
+          generation: localScheduleMutationGeneration
+        });
+        return localScheduleMutationGeneration;
+      },
+      abortClaimedLocalMutationForTest() {
+        localScheduleMutationCommitPendingGeneration = 0;
+        return localScheduleMutationGeneration;
+      },
+      commitClaimedLocalPhaseForTest(patch = {}, reason = 'manual-phase') {
+        schedule = {
+          ...schedule,
+          ...structuredClone(patch),
+          activeHours: patch.activeHours
+            ? structuredClone(patch.activeHours)
+            : structuredClone(schedule.activeHours),
+          smartMode: patch.smartMode
+            ? structuredClone(patch.smartMode)
+            : structuredClone(schedule.smartMode)
+        };
+        if (Number(schedule.nextTriggerAt) > 0) {
+          liveAt = Number(schedule.nextTriggerAt);
+        }
+        durableSchedule = structuredClone(schedule);
+        calls.push({
+          type: 'claimed-local-phase-commit',
+          reason,
+          generation: localScheduleMutationGeneration,
+          schedule: structuredClone(schedule)
+        });
+        return localScheduleMutationGeneration;
+      },
       snapshot: () => structuredClone(schedule),
       durable: () => structuredClone(durableSchedule),
       live: () => liveAt,
       calls,
       revision: () => pwmRuntimeRevision,
+      localMutationGeneration: () => localScheduleMutationGeneration,
+      localMutationCommittedObservedAt: () =>
+        localScheduleMutationCommittedObservedAt,
+      remoteAuthorityObservedAt: () => remoteSyncAuthorityObservedAt,
+      deferredRemoteObservedAt: () => deferredSyncDisableObservedAt,
       phaseAdmissionBlocked: () => isSyncPhaseAdoptionAdmissionBlocked(),
+      phaseWaiterCount: () => syncPhaseAdoptionAdmissionWaiters.length,
       pending: () => pendingPublish,
       lastSyncedAt: () => lastSyncedAt,
-      durableWatermark: () => durableWatermark
+      durableWatermark: () => durableWatermark,
+      durablePayloadReceipt: () => structuredClone(durablePayloadReceipt)
     };`
   )(
     initialSchedule,
@@ -14660,6 +17065,7 @@ return { reapplySmartSensitivityNow };`
     scheduleMutations.setScheduleNextTrigger,
     scheduleMutations.setSchedulePwmClockIntent,
     scheduleMutations.replaceSchedulePwmRetryState,
+    scheduleMutations.replaceSchedulePageTimerState,
     pwmRetry.getPwmRetryDescriptor,
     pwmRetry.normalizePwmRetryKind,
     pwmPhase.classifySmartOnClock,
@@ -14677,6 +17083,19 @@ return { reapplySmartSensitivityNow };`
     testConsole,
     harnessOptions.Date || Date
   );
+
+  const waitForHarnessRepair16 = async (harness, expectedCount = 1) => {
+    let timeoutId = 0;
+    const timeout = new Promise(resolve => {
+      timeoutId = setTimeout(() => resolve(false), 250);
+    });
+    const completed = await Promise.race([
+      harness.waitForRepair(expectedCount).then(() => true),
+      timeout
+    ]);
+    clearTimeout(timeoutId);
+    return completed;
+  };
 
   const syncApplyNow16 = Date.now();
   const localRetryAt16 = syncApplyNow16 + 60_000;
@@ -14699,10 +17118,41 @@ return { reapplySmartSensitivityNow };`
     syncedAt: syncApplyNow16 + 1
   };
 
+  const invalidSyncTimestampHarness16 = loadActualSyncApply16({
+    ...syncCfg16,
+    pwmState: 'off',
+    nextTriggerAt: sentinelAt16,
+    smartClockPlannedAt: syncApplyNow16
+  }, sentinelAt16, 0);
+  const invalidSyncTimestampBefore16 =
+    invalidSyncTimestampHarness16.snapshot();
+  const invalidSyncTimestampApplied16 =
+    await invalidSyncTimestampHarness16.apply({
+      ...sentinelRemote16,
+      enabled: true,
+      onMinutes: 1,
+      offMinutes: 59,
+      syncedAt: 'Infinity'
+    }, 'invalid-infinite-sync-timestamp');
+  const invalidSyncTimestampAfter16 =
+    invalidSyncTimestampHarness16.snapshot();
+  assertPass(invalidSyncTimestampApplied16 === false
+      && JSON.stringify(invalidSyncTimestampAfter16)
+        === JSON.stringify(invalidSyncTimestampBefore16)
+      && invalidSyncTimestampHarness16.live() === sentinelAt16
+      && invalidSyncTimestampHarness16.lastSyncedAt() === 0
+      && invalidSyncTimestampHarness16.durableWatermark() === 0
+      && invalidSyncTimestampHarness16.calls.some(call =>
+        call.type === 'infra' && call.name === 'ac-sync-adopt-retry')
+      && !invalidSyncTimestampHarness16.calls.some(call =>
+        call.type === 'persist'
+        || call.type === 'toggle'
+        || call.type === 'create-pwm'),
+    '16F-0B-2A-0U: 非有限/非安全 syncedAt 的 remote T 零 config/phase/ON apply且零 watermark poisoning，只排 adopt retry');
+
   // 已验权的旧 ac-pwm 在 beforeRun 内结束 comfort marker 时可能横跨一次长
-  // storage persist。sync OFF phase 在这段 await 中换主后，continuation 必须
-  // 沿用 finishComfortStart 入场捕获的旧 revision，绝不能读取新的全局 revision
-  // 后误把旧 alarm 重新授权给 runPwmStep。
+  // storage persist。executor 已持 phase admission，sync OFF 必须在 owner 后排队；
+  // beforeRun 不能反向进入 schedule queue，否则会与等待 phase 的 sync 互等。
   let releaseComfortFinishPersist16;
   let markComfortFinishPersistStarted16;
   const comfortFinishPersistGate16 = new Promise(resolve => {
@@ -14731,13 +17181,30 @@ return { reapplySmartSensitivityNow };`
     .deliverPwmAlarm(comfortFinishOldAlarmAt16);
   await comfortFinishPersistStarted16;
   const comfortFinishCapturedRevision16 = comfortFinishProvenance16.revision();
-  const comfortFinishRemoteOffApplied16 = await comfortFinishProvenance16.apply(
+  let comfortFinishRemoteSettled16 = false;
+  const comfortFinishRemoteOffApply16 = comfortFinishProvenance16.apply(
     sentinelRemote16,
     'test-sync-off-preempts-gated-comfort-finish'
-  );
-  const comfortFinishRemoteOwnerRevision16 = comfortFinishProvenance16.revision();
+  ).finally(() => { comfortFinishRemoteSettled16 = true; });
+  await Promise.resolve();
+  await Promise.resolve();
+  const comfortFinishSyncQueued16 = !comfortFinishRemoteSettled16
+    && comfortFinishProvenance16.revision() === comfortFinishCapturedRevision16
+    && !comfortFinishProvenance16.calls.some(c =>
+      c.type === 'persist' && c.reason === 'sync-phase-adopt-intent');
   releaseComfortFinishPersist16();
-  await oldComfortBoundaryDelivery16;
+  const comfortFinishSettlement16 = await Promise.race([
+    Promise.all([
+      oldComfortBoundaryDelivery16,
+      comfortFinishRemoteOffApply16
+    ]).then(([, applied]) => ({ timedOut: false, applied })),
+    new Promise(resolve => setTimeout(
+      () => resolve({ timedOut: true, applied: false }),
+      250
+    ))
+  ]);
+  const comfortFinishRemoteOffApplied16 = comfortFinishSettlement16.applied;
+  const comfortFinishRemoteOwnerRevision16 = comfortFinishProvenance16.revision();
   const comfortFinishAfter16 = comfortFinishProvenance16.snapshot();
   const comfortFinishCreateCalls16 = comfortFinishProvenance16.calls.filter(c =>
     c.type === 'create-pwm');
@@ -14747,6 +17214,13 @@ return { reapplySmartSensitivityNow };`
         'return { handled: true, automationAllowed: true, automationRevision };')
       && alarmPwmCatchBody16.includes(
         'const alarmAutomationRevision = pwmRuntimeRevision;')
+      && sharedPwmExecutorSource16.includes(
+        'const proceed = await beforeRun({ phaseAdmissionEpoch });')
+      && alarmPwmCatchBody16.includes(
+        'beforeRun: async ({ phaseAdmissionEpoch }) => {')
+      && alarmPwmCatchBody16.includes(
+        'isSyncPhaseAdoptionAdmissionOwnerCurrent(phaseAdmissionEpoch)')
+      && !alarmPwmCatchBody16.includes('runSerializedScheduleUpdate(')
       && alarmPwmCatchBody16.includes(
         'return { automationRevision: comfortEnd.automationRevision };')
       && alarmPwmCatchBody16.includes(
@@ -14754,10 +17228,10 @@ return { reapplySmartSensitivityNow };`
       && !alarmPwmCatchBody16.includes(
         'return { automationRevision: pwmRuntimeRevision };')
       && comfortFinishCapturedRevision16 === 1
+      && comfortFinishSyncQueued16 === true
+      && comfortFinishSettlement16.timedOut === false
       && comfortFinishRemoteOffApplied16 === true
-      && comfortFinishRemoteOwnerRevision16 === 2
-      && !comfortFinishProvenance16.calls.some(c =>
-        c.type === 'old-ac-pwm-claim' || c.type === 'old-ac-pwm-click')
+      && comfortFinishRemoteOwnerRevision16 > comfortFinishCapturedRevision16
       && comfortFinishProvenance16.calls.some(c =>
         c.type === 'persist'
           && c.reason === 'comfort-start-ended-pwm-boundary')
@@ -14774,7 +17248,224 @@ return { reapplySmartSensitivityNow };`
       && comfortFinishAfter16.pwmState === 'off'
       && comfortFinishAfter16.nextTriggerAt === sentinelAt16
       && comfortFinishProvenance16.live() === sentinelAt16,
-    '16F-0B-2A-0: real comfort finish persist 卡住时 sync OFF 换主；旧 alarm continuation 沿用 captured revision，零 claim/click，最终只留远端 OFF alarm');
+    '16F-0B-2A-0: comfort beforeRun 持 phase/persist 时 sync OFF 只排队；同 owner 直接 finish 后释放，双方无互等且最终只留远端 OFF alarm');
+
+  const plainSyncCfg16 = {
+    ...syncCfg16,
+    smartMode: { enabled: false, sensitivity: 5 }
+  };
+  const deferredSyncOldAt16 = syncApplyNow16 + 10 * 60_000;
+  const deferredSyncRemoteAt16 = syncApplyNow16 + 23 * 60_000;
+  const deferredSyncRemote16 = {
+    ...plainSyncCfg16,
+    pwmState: 'off',
+    nextTriggerAt: deferredSyncRemoteAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    syncedAt: syncApplyNow16 + 101
+  };
+  const deferredSyncAdmission16 = loadActualSyncApply16({
+    ...plainSyncCfg16,
+    pwmState: 'on',
+    nextTriggerAt: deferredSyncOldAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    alarmCreatedAt: syncApplyNow16,
+    alarmDelayMinutes: 10,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0
+  }, deferredSyncOldAt16);
+  const heldSyncAdmissionEpoch16 = deferredSyncAdmission16
+    .holdPhaseAdmission();
+  let deferredSyncTakeoverSettled16 = false;
+  const deferredSyncTakeover16 = deferredSyncAdmission16.apply(
+    deferredSyncRemote16,
+    'test-sync-admission-busy'
+  ).finally(() => { deferredSyncTakeoverSettled16 = true; });
+  await Promise.resolve();
+  await Promise.resolve();
+  const deferredSyncQueuedSnapshot16 = deferredSyncAdmission16.snapshot();
+  const deferredSyncQueuedDurable16 = deferredSyncAdmission16.durable();
+  const deferredSyncQueuedCallCount16 = deferredSyncAdmission16.calls.length;
+  const deferredSyncQueuedSafe16 = deferredSyncTakeoverSettled16 === false
+    && deferredSyncAdmission16.phaseAdmissionBlocked() === true
+    && deferredSyncAdmission16.live() === deferredSyncOldAt16
+    && deferredSyncQueuedSnapshot16.nextTriggerAt === deferredSyncOldAt16
+    && deferredSyncQueuedDurable16.nextTriggerAt === deferredSyncOldAt16
+    && deferredSyncAdmission16.lastSyncedAt() === 0
+    && deferredSyncAdmission16.durableWatermark() === 0
+    && deferredSyncAdmission16.calls.filter(call =>
+      call.type === 'infra' && call.name === 'ac-sync-adopt-retry').length === 0
+    && !deferredSyncAdmission16.calls.some(call => call.type === 'watermark');
+  deferredSyncAdmission16.releasePhaseAdmission(heldSyncAdmissionEpoch16);
+  const deferredSyncTakeoverSettlement16 = await Promise.race([
+    deferredSyncTakeover16.then(applied => ({ timedOut: false, applied })),
+    new Promise(resolve => setTimeout(
+      () => resolve({ timedOut: true, applied: false }),
+      250
+    ))
+  ]);
+  const deferredSyncTakeoverCalls16 = deferredSyncAdmission16.calls.slice(
+    deferredSyncQueuedCallCount16
+  );
+  assertPass(applySyncedPhaseBody.includes(
+      'await claimSyncPhaseAdoptionAdmissionWhenAvailable()')
+      && deferredSyncQueuedSafe16
+      && deferredSyncTakeoverSettlement16.timedOut === false
+      && deferredSyncTakeoverSettlement16.applied === true
+      && deferredSyncTakeoverCalls16.filter(call =>
+        call.type === 'watermark'
+          && call.at === deferredSyncRemote16.syncedAt).length === 1
+      && deferredSyncTakeoverCalls16.filter(call =>
+        call.type === 'create-pwm'
+          && call.tag === 'sync-phase-adopt'
+          && call.at === deferredSyncRemoteAt16).length === 1
+      && deferredSyncTakeoverCalls16.filter(call =>
+        call.type === 'persist'
+          && call.reason === 'sync-phase-adopt-intent').length === 1
+      && deferredSyncAdmission16.calls.filter(call =>
+        call.type === 'infra' && call.name === 'ac-sync-adopt-retry').length === 0
+      && deferredSyncAdmission16.lastSyncedAt()
+        === deferredSyncRemote16.syncedAt
+      && deferredSyncAdmission16.durableWatermark()
+        === deferredSyncRemote16.syncedAt
+      && deferredSyncAdmission16.live() === deferredSyncRemoteAt16
+      && deferredSyncAdmission16.snapshot().nextTriggerAt
+        === deferredSyncRemoteAt16
+      && deferredSyncAdmission16.durable().nextTriggerAt
+        === deferredSyncRemoteAt16,
+    '16F-0B-2A-0A: phase reservation 忙时 sync 原调用 FIFO 等待且零半状态；旧 owner 释放后直接接棒并唯一提交，无 retry/replay 窗口');
+
+  let releaseSyncIntentPersist16;
+  let markSyncIntentPersistStarted16;
+  const syncIntentPersistGate16 = new Promise(resolve => {
+    releaseSyncIntentPersist16 = resolve;
+  });
+  const syncIntentPersistStarted16 = new Promise(resolve => {
+    markSyncIntentPersistStarted16 = resolve;
+  });
+  const syncIntentReplacementAt16 = sentinelAt16 + 7 * 60_000;
+  const syncIntentPredecessorRace16 = loadActualSyncApply16({
+    ...syncCfg16,
+    pwmState: 'on',
+    nextTriggerAt: deferredSyncOldAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    alarmCreatedAt: syncApplyNow16,
+    alarmDelayMinutes: 10,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0,
+    pageTimerError: ''
+  }, deferredSyncOldAt16, 0, {
+    syncIntentPersistGate: syncIntentPersistGate16,
+    onSyncIntentPersist: markSyncIntentPersistStarted16
+  });
+  const syncIntentPredecessorApply16 = syncIntentPredecessorRace16.apply(
+    sentinelRemote16,
+    'test-sync-intent-first-clear-predecessor'
+  );
+  await syncIntentPersistStarted16;
+  const syncIntentReplacementOwner16 = syncIntentPredecessorRace16
+    .commitSameRevisionOwner({
+      pwmState: 'on',
+      nextTriggerAt: syncIntentReplacementAt16,
+      smartClockPlannedAt: syncApplyNow16 + 1_000,
+      boundaryAt: sentinelAt16,
+      pwmRetryKind: 'smart-on-safe-delay',
+      pwmRetryBoundaryAt: sentinelAt16,
+      pwmRetryScheduledAt: syncIntentReplacementAt16,
+      pageTimerError: 'NEW-SYNC-INTENT-OWNER'
+    });
+  const syncIntentReplacementIndex16 =
+    syncIntentPredecessorRace16.calls.length - 1;
+  releaseSyncIntentPersist16();
+  const syncIntentPredecessorApplied16 = await syncIntentPredecessorApply16;
+  const syncIntentPredecessorAfter16 = syncIntentPredecessorRace16.snapshot();
+  const syncIntentPredecessorDurable16 = syncIntentPredecessorRace16.durable();
+  const syncIntentPredecessorTail16 = syncIntentPredecessorRace16.calls.slice(
+    syncIntentReplacementIndex16 + 1
+  );
+  assertPass(applySyncedPhaseBody.includes(
+      'phaseAdoptionExpectedWriteGeneration = pwmAlarmWriteGeneration;')
+      && applySyncedPhaseBody.includes(
+        'expectedWriteGeneration: phaseAdoptionExpectedWriteGeneration')
+      && syncIntentPredecessorApplied16 === false
+      && syncIntentReplacementOwner16 > 0
+      && syncIntentPredecessorRace16.revision() === 2
+      && syncIntentPredecessorRace16.lastSyncedAt() === 0
+      && syncIntentPredecessorRace16.durableWatermark() === 0
+      && syncIntentPredecessorRace16.live() === syncIntentReplacementAt16
+      && syncIntentPredecessorAfter16.nextTriggerAt
+        === syncIntentReplacementAt16
+      && syncIntentPredecessorDurable16.nextTriggerAt
+        === syncIntentReplacementAt16
+      && syncIntentPredecessorAfter16.pwmRetryKind
+        === 'smart-on-safe-delay'
+      && syncIntentPredecessorAfter16.pageTimerError
+        === 'NEW-SYNC-INTENT-OWNER'
+      && !syncIntentPredecessorTail16.some(call =>
+        call.type === 'clear-pwm'
+          || call.type === 'chrome-clear'
+          || call.type === 'create-pwm'
+          || call.type === 'persist'
+          || call.type === 'watermark'
+          || call.type === 'repair-clock'),
+    '16F-0B-2A-0A-1: sync durable intent persist 中同 revision PWM writer 换主；首次 clear 以前 predecessor 失效，旧事务零清钟/建钟/水位推进');
+
+  const syncClearFailureRepairAt16 = syncApplyNow16 + 31 * 60_000;
+  const syncClearFailure16 = loadActualSyncApply16({
+    ...plainSyncCfg16,
+    pwmState: 'on',
+    nextTriggerAt: deferredSyncOldAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    alarmCreatedAt: syncApplyNow16,
+    alarmDelayMinutes: 10,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0
+  }, deferredSyncOldAt16, 0, {
+    syncClearFailure: true,
+    repairFutureAt: syncClearFailureRepairAt16
+  });
+  const syncClearFailureApplied16 = await syncClearFailure16.apply(
+    deferredSyncRemote16,
+    'test-sync-clear-rejection-preserves-live'
+  );
+  const syncClearFailureAutoRepairSettled16 = await waitForHarnessRepair16(
+    syncClearFailure16
+  );
+  const syncClearFailurePhysical16 = syncClearFailure16.calls.find(call =>
+    call.type === 'clear-pwm-failure'
+  );
+  const syncClearFailureIntent16 = syncClearFailure16.calls.find(call =>
+    call.type === 'persist' && call.reason === 'sync-phase-adopt-error'
+  );
+  const syncClearFailureUnseen16 = syncClearFailureApplied16 === false
+    && syncClearFailurePhysical16?.liveAt === deferredSyncOldAt16
+    && syncClearFailureIntent16?.nextTriggerAt === 0
+    && syncClearFailure16.lastSyncedAt() === 0
+    && syncClearFailure16.durableWatermark() === 0
+    && !syncClearFailure16.calls.some(call => call.type === 'watermark')
+    && syncClearFailure16.calls.some(call =>
+      call.type === 'infra' && call.name === 'ac-sync-adopt-retry')
+    && syncClearFailure16.calls.some(call =>
+      call.type === 'infra' && call.name === 'ac-watchdog');
+  const syncClearFailureRepairDrained16 = syncClearFailure16.drainRepair(
+    'test-sync-clear-rejection'
+  );
+  assertPass(syncClearFailureUnseen16
+      && applySyncedPhaseBody.includes(
+        "drainDeferredScheduleRepair('apply-synced-phase-complete')")
+      && syncClearFailureAutoRepairSettled16 === true
+      && syncClearFailureRepairDrained16 === false
+      && syncClearFailure16.calls.filter(call =>
+        call.type === 'repair-clock').length === 1
+      && syncClearFailure16.snapshot().nextTriggerAt
+        === syncClearFailureRepairAt16
+      && syncClearFailure16.durable().nextTriggerAt
+        === syncClearFailureRepairAt16
+      && syncClearFailure16.live() === syncClearFailureRepairAt16
+      && !syncClearFailure16.calls.some(call => call.type === 'watermark'),
+    '16F-0B-2A-0B: sync physical clear rejection 保留未知旧 live 且不标 seen；finally 释放 phase 后自动 drain repair，唯一收口三方未来钟');
 
   const expiredRemotePhaseAt16 = Date.now() - 10_000;
   const expiredRemoteRecoveryAt16 = Date.now() + 6 * 60_000;
@@ -14830,6 +17521,165 @@ return { reapplySmartSensitivityNow };`
         call.type === 'infra' && call.name === 'ac-sync-adopt-retry'),
     '16F-0B-2A-1: sync 采纳 60s 内过期 phase 时把 reservation epoch 传入恢复；不会 self-noop，最终 durable/live 均为未来钟');
 
+  let releaseSyncExpiredGet16;
+  let markSyncExpiredGet16;
+  const syncExpiredGetGate16 = new Promise(resolve => {
+    releaseSyncExpiredGet16 = resolve;
+  });
+  const syncExpiredGetStarted16 = new Promise(resolve => {
+    markSyncExpiredGet16 = resolve;
+  });
+  const syncExpiredReceiptRace16 = loadActualSyncApply16({
+    ...plainSyncCfg16,
+    pwmState: 'off',
+    nextTriggerAt: deferredSyncOldAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    alarmCreatedAt: syncApplyNow16,
+    alarmDelayMinutes: 10,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0
+  }, deferredSyncOldAt16, 0, {
+    expiredRecoveryAt: expiredRemoteRecoveryAt16,
+    expiredRecoveryAction: 'off',
+    postRecoveryAlarmGetGate: syncExpiredGetGate16,
+    onPostRecoveryAlarmGet: markSyncExpiredGet16
+  });
+  const syncExpiredReceiptApply16 = syncExpiredReceiptRace16.apply({
+    ...plainSyncCfg16,
+    pwmState: 'off',
+    nextTriggerAt: expiredRemotePhaseAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    syncedAt: syncApplyNow16 + 202
+  }, 'test-sync-expired-exact-receipt-race');
+  await syncExpiredGetStarted16;
+  const syncExpiredCommittedCall16 = syncExpiredReceiptRace16.calls.find(call =>
+    call.type === 'create-pwm' && call.tag === 'expired-phase-recovery'
+  );
+  const syncExpiredClaimOnlyOwner16 = syncExpiredReceiptRace16
+    .claimSameRevisionWriteOnly();
+  const syncExpiredClaimOnlyIndex16 = syncExpiredReceiptRace16.calls.length - 1;
+  releaseSyncExpiredGet16();
+  const syncExpiredReceiptApplied16 = await syncExpiredReceiptApply16;
+  const syncExpiredReceiptTail16 = syncExpiredReceiptRace16.calls.slice(
+    syncExpiredClaimOnlyIndex16 + 1
+  );
+  assertPass(syncExpiredCommittedCall16?.writeOwner > 0
+      && syncExpiredClaimOnlyOwner16 > syncExpiredCommittedCall16.writeOwner
+      && syncExpiredReceiptApplied16 === false
+      && syncExpiredReceiptRace16.lastSyncedAt() === 0
+      && syncExpiredReceiptRace16.durableWatermark() === 0
+      && !syncExpiredReceiptRace16.calls.some(call =>
+        call.type === 'watermark')
+      && syncExpiredReceiptRace16.live() === expiredRemoteRecoveryAt16
+      && syncExpiredReceiptRace16.snapshot().nextTriggerAt
+        === expiredRemoteRecoveryAt16
+      && syncExpiredReceiptRace16.durable().nextTriggerAt
+        === expiredRemoteRecoveryAt16
+      && !syncExpiredReceiptTail16.some(call =>
+        call.type === 'persist'
+          || call.type === 'clear-pwm'
+          || call.type === 'create-pwm')
+      && !applySyncedPhaseBody.includes(
+        'phaseAdoptionWriteOwner = pwmAlarmWriteGeneration'),
+    '16F-0B-2A-1A: expired recovery 的 exact receipt 与 caller continuation 间换主时，旧 sync 不采样全局 generation、不 persist/watermark');
+
+  let releaseSyncExpiredPageReload16;
+  let markSyncExpiredPageReload16;
+  const syncExpiredPageReloadGate16 = new Promise(resolve => {
+    releaseSyncExpiredPageReload16 = resolve;
+  });
+  const syncExpiredPageReloadStarted16 = new Promise(resolve => {
+    markSyncExpiredPageReload16 = resolve;
+  });
+  const ownedExpiredPageTarget16 = expiredRemoteRecoveryAt16 + 18 * 60_000;
+  const syncExpiredPageReload16 = loadActualSyncApply16({
+    ...plainSyncCfg16,
+    pwmState: 'off',
+    nextTriggerAt: deferredSyncOldAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    alarmCreatedAt: syncApplyNow16,
+    alarmDelayMinutes: 10,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0,
+    pageTimerMinutes: 18,
+    pageTimerTargetAt: ownedExpiredPageTarget16,
+    pageTimerError: 'owned expired recovery proof',
+    pageTimerRetryAt: 0,
+    pageTimerRetryMinutes: 0
+  }, deferredSyncOldAt16, 0, {
+    expiredRecoveryAt: expiredRemoteRecoveryAt16,
+    expiredRecoveryAction: 'off',
+    postRecoveryAlarmGetGate: syncExpiredPageReloadGate16,
+    onPostRecoveryAlarmGet: markSyncExpiredPageReload16
+  });
+  const syncExpiredPageReloadApply16 = syncExpiredPageReload16.apply({
+    ...plainSyncCfg16,
+    pwmState: 'off',
+    nextTriggerAt: expiredRemotePhaseAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    syncedAt: syncApplyNow16 + 203
+  }, 'test-sync-expired-page-receipt-reload');
+  await syncExpiredPageReloadStarted16;
+  const syncExpiredOwnedBeforeReload16 = syncExpiredPageReload16.snapshot();
+  const syncExpiredPageOwnerBeforeReload16 = syncExpiredPageReload16
+    .replaceSameRevisionPageState({
+      minutes: 44,
+      targetAt: expiredRemoteRecoveryAt16 + 44 * 60_000,
+      error: 'stale explicit reload page state',
+      retryAt: expiredRemoteRecoveryAt16 + 60_000,
+      retryMinutes: 44,
+      configSentinel: 'keep-explicit-reload-config'
+    });
+  const syncExpiredDuringReload16 = syncExpiredPageReload16.snapshot();
+  releaseSyncExpiredPageReload16();
+  const syncExpiredPageReloadApplied16 = await syncExpiredPageReloadApply16;
+  const syncExpiredAfterPageReload16 = syncExpiredPageReload16.snapshot();
+  const syncExpiredDurablePageReload16 = syncExpiredPageReload16.durable();
+  const pageFieldsMatchOwnedExpiredReceipt16 = state => (
+    state?.pageTimerMinutes
+      === syncExpiredOwnedBeforeReload16.pageTimerMinutes
+    && state?.pageTimerTargetAt
+      === syncExpiredOwnedBeforeReload16.pageTimerTargetAt
+    && state?.pageTimerError
+      === syncExpiredOwnedBeforeReload16.pageTimerError
+    && state?.pageTimerRetryAt
+      === syncExpiredOwnedBeforeReload16.pageTimerRetryAt
+    && state?.pageTimerRetryMinutes
+      === syncExpiredOwnedBeforeReload16.pageTimerRetryMinutes
+  );
+  assertPass(advanceExpiredAlarmSource16.includes(
+      'const commitPageTimerState = commitPageTimerWriteOwner > 0'
+    )
+      && advanceExpiredAlarmSource16.includes(
+        'const replayCommitOwnedState = () => {'
+      )
+      && advanceExpiredAlarmSource16.includes(
+        'replayOwnedPageTimerState(commitPageTimerState)'
+      )
+      && syncExpiredPageOwnerBeforeReload16.pageWriteOwner > 0
+      && syncExpiredPageOwnerBeforeReload16.revision
+        === syncExpiredPageReload16.revision()
+      && syncExpiredPageReloadApplied16 === true
+      && syncExpiredDuringReload16.nextTriggerAt
+        === syncExpiredOwnedBeforeReload16.nextTriggerAt
+      && syncExpiredDuringReload16.smartClockPlannedAt
+        === syncExpiredOwnedBeforeReload16.smartClockPlannedAt
+      && syncExpiredDuringReload16.alarmCreatedAt
+        === syncExpiredOwnedBeforeReload16.alarmCreatedAt
+      && syncExpiredDuringReload16.alarmDelayMinutes
+        === syncExpiredOwnedBeforeReload16.alarmDelayMinutes
+      && syncExpiredDuringReload16.pageTimerMinutes === 44
+      && syncExpiredDuringReload16.pageTimerError
+        === 'stale explicit reload page state'
+      && pageFieldsMatchOwnedExpiredReceipt16(syncExpiredAfterPageReload16)
+      && pageFieldsMatchOwnedExpiredReceipt16(syncExpiredDurablePageReload16)
+      && syncExpiredAfterPageReload16.configSentinel
+        === 'keep-explicit-reload-config'
+      && syncExpiredPageReload16.lastSyncedAt() === syncApplyNow16 + 203,
+    '16F-0B-2A-1B: expired exact receipt 在同 revision/同 clock 的显式 schedule reload 后精确重放 page 五字段，不回滚 replacement config');
+
   const cooldownNow16 = new Date(2026, 7, 28, 19, 0, 3, 0).getTime();
   const cooldownBoundary16 = cooldownNow16 - 3_000;
   const cooldownRepairAt16 = cooldownNow16 + 5 * 60_000;
@@ -14857,21 +17707,34 @@ return { reapplySmartSensitivityNow };`
     smartClockPlannedAt: cooldownBoundary16 - 4 * 60_000,
     syncedAt: cooldownNow16 + 1
   }, 'test-expired-smart-on-during-cooldown');
+  const cooldownAutoRepairSettled16 = await waitForHarnessRepair16(
+    cooldownExpiredPhase16
+  );
   const cooldownRepairDrained16 = cooldownExpiredPhase16.drainRepair(
     'test-expired-smart-on-cooldown'
   );
-  await Promise.resolve();
   const cooldownExpiredAfter16 = cooldownExpiredPhase16.snapshot();
   const cooldownRepairCall16 = cooldownExpiredPhase16.calls.find(call =>
     call.type === 'repair-clock');
   assertPass(pwmBody.includes('Date.now() - lastPwmStepAt < 5000')
-      && advanceExpiredAlarmSource16.includes('if (recovery.handled !== true) return false;')
-      && advanceExpiredAlarmSource16.includes('const durableAt = Number(schedule.nextTriggerAt) || 0;')
+      && advanceExpiredAlarmSource16.includes('returnPwmCommitReceipt: true')
+      && advanceExpiredAlarmSource16.includes('const commitReceipt =')
+      && advanceExpiredAlarmSource16.includes(
+        '!isPwmAlarmWriteOwnerCurrent(commitReceipt.writeOwner)')
+      && advanceExpiredAlarmSource16.includes(
+        'const commitVerifiedClockState = commitReceipt?.verifiedClockState;')
+      && advanceExpiredAlarmSource16.includes(
+        'const commitPhaseState = commitReceipt?.phaseState;')
+      && advanceExpiredAlarmSource16.includes(
+        'replayVerifiedPwmClockState(commitVerifiedClockState)')
       && advanceExpiredAlarmSource16.includes("await chrome.alarms.get('ac-pwm')")
-      && advanceExpiredAlarmSource16.includes('durableAt > now')
-      && advanceExpiredAlarmSource16.includes('liveAt > now')
-      && cooldownExpiredApplied16 === true
-      && cooldownRepairDrained16 === true
+      && advanceExpiredAlarmSource16.includes('if (!replayCommitOwnedState()')
+      && advanceExpiredAlarmSource16.includes(
+        'Number(schedule.nextTriggerAt) <= now')
+      && advanceExpiredAlarmSource16.includes('liveAt <= now')
+      && cooldownExpiredApplied16 === false
+      && cooldownAutoRepairSettled16 === true
+      && cooldownRepairDrained16 === false
       && cooldownExpiredPhase16.calls.filter(call =>
         call.type === 'cooldown-no-clock').length === 1
       && cooldownRepairCall16?.options.smartOnExpectedBoundaryAt
@@ -14898,7 +17761,7 @@ return { reapplySmartSensitivityNow };`
       && cooldownExpiredAfter16.pwmRetryBoundaryAt === cooldownBoundary16
       && cooldownExpiredAfter16.pwmRetryScheduledAt === cooldownRepairAt16
       && cooldownExpiredPhase16.live() === cooldownRepairAt16,
-    '16F-0B-2A-2: stale smart ON 遇 1s cooldown 的 handled 假成功仍被 durable/live 后置证明拒绝；接管转 fresh-status repair，零双击');
+    '16F-0B-2A-2: stale smart ON 遇 1s cooldown 的 handled 假成功仍被 durable/live 后置证明拒绝；finally 自动 drain 为唯一 fresh-status repair，零双击');
 
   const postRecoveryOwnerAt16 = cooldownNow16 + 5 * 60_000;
   const postRecoveryGetFailure16 = loadActualSyncApply16({
@@ -14927,10 +17790,10 @@ return { reapplySmartSensitivityNow };`
   }, 'test-post-recovery-get-failure');
   const postRecoveryGetAfter16 = postRecoveryGetFailure16.snapshot();
   assertPass(applySyncedPhaseBody.includes(
-      'if (!isAutomationOperationCurrent(automationRevision)) {')
+      'const phaseWriteOwnerLost = phaseAdoptionWriteOwner > 0')
       && applySyncedPhaseBody.includes(
         "appendDiagnosticLog('warn', 'sync-phase-adopt-post-owner', e)")
-      && postRecoveryGetApplied16 === true
+      && postRecoveryGetApplied16 === false
       && postRecoveryGetFailure16.revision() === 3
       && postRecoveryGetFailure16.calls.filter(call =>
         call.type === 'post-recovery-get-failure').length === 1
@@ -14974,9 +17837,11 @@ return { reapplySmartSensitivityNow };`
     smartClockPlannedAt: cooldownBoundary16 - 4 * 60_000,
     syncedAt: cooldownNow16 + 3
   }, 'test-incomplete-replacement-owner');
+  const incompleteSyncAutoRepairSettled16 = await waitForHarnessRepair16(
+    incompleteSyncReplacement16
+  );
   const incompleteSyncRepairQueued16 = incompleteSyncReplacement16
     .drainRepair('test-incomplete-replacement-owner');
-  await Promise.resolve();
   const incompleteSyncAfter16 = incompleteSyncReplacement16.snapshot();
   const incompleteSyncDurable16 = incompleteSyncReplacement16.durable();
   const incompleteSyncRepairCall16 = incompleteSyncReplacement16.calls.find(
@@ -14988,14 +17853,15 @@ return { reapplySmartSensitivityNow };`
       && durableLivePwmOwnerSource16.includes(
         'durableSchedule.pwmState !== schedule.pwmState')
       && durableLivePwmOwnerSource16.includes('assessPwmAlarmDelivery(')
-      && incompleteSyncApplied16 === true
+      && incompleteSyncApplied16 === false
       && incompleteSyncReplacement16.revision() === 3
       && incompleteSyncReplacement16.calls.filter(call =>
         call.type === 'expired-recovery-persist-failure').length === 1
       && incompleteSyncReplacement16.calls.filter(call =>
         call.type === 'infra'
           && call.name === 'ac-watchdog').length === 1
-      && incompleteSyncRepairQueued16 === true
+      && incompleteSyncAutoRepairSettled16 === true
+      && incompleteSyncRepairQueued16 === false
       && incompleteSyncRepairCall16?.options.smartOnExpectedBoundaryAt
         === cooldownBoundary16
       && incompleteSyncRepairCall16?.options.revokeInvalidSmartOnClock === true
@@ -15011,7 +17877,7 @@ return { reapplySmartSensitivityNow };`
       && incompleteSyncDurable16.nextTriggerAt === postRecoveryOwnerAt16
       && incompleteSyncDurable16.pwmRetryKind === 'smart-on-safe-delay'
       && incompleteSyncReplacement16.live() === postRecoveryOwnerAt16,
-    '16F-0B-2A-4: sync expired recovery 仅 claim revision 3、intent persist 失败且无 live 时不假保护；沿原 19:00 立即修到 durable/live 19:05 typed safe-delay');
+    '16F-0B-2A-4: sync expired recovery 仅 claim revision 3、intent persist 失败且无 live 时不假保护；finally 自动沿原 19:00 唯一修到 durable/live 19:05 typed safe-delay');
 
   let releaseSyncReplacementProof16;
   let markSyncReplacementProofStarted16;
@@ -15067,7 +17933,7 @@ return { reapplySmartSensitivityNow };`
         'candidateRevision = pwmRuntimeRevision;')
       && applySyncedPhaseBody.includes(
         'const replacementProof = await proveStableDurableLivePwmOwner(')
-      && replacementProofRaceApplied16 === true
+      && replacementProofRaceApplied16 === false
       && supersedingSyncRevision16 === 4
       && replacementProofRace16.revision() === 4
       && replacementProofRaceDrained16 === false
@@ -15123,19 +17989,22 @@ return { reapplySmartSensitivityNow };`
     .supersedeIncompleteReplacementOwner(incompleteSyncProofOwnerAt16);
   releaseIncompleteSyncReplacementProof16();
   const incompleteSyncProofApplied16 = await incompleteSyncProofApply16;
+  const incompleteSyncProofAutoRepairSettled16 = await waitForHarnessRepair16(
+    incompleteSyncProofRace16
+  );
   const incompleteSyncProofDrained16 = incompleteSyncProofRace16.drainRepair(
     'test-incomplete-replacement-proof-owner-race'
   );
-  await Promise.resolve();
   const incompleteSyncProofAfter16 = incompleteSyncProofRace16.snapshot();
   const incompleteSyncProofDurable16 = incompleteSyncProofRace16.durable();
   const incompleteSyncProofRepairCall16 = incompleteSyncProofRace16.calls.find(
     call => call.type === 'repair-clock'
   );
-  assertPass(incompleteSyncProofApplied16 === true
+  assertPass(incompleteSyncProofApplied16 === false
       && incompleteSyncProofRevision16 === 4
       && incompleteSyncProofRace16.revision() === 4
-      && incompleteSyncProofDrained16 === true
+      && incompleteSyncProofAutoRepairSettled16 === true
+      && incompleteSyncProofDrained16 === false
       && incompleteSyncProofRace16.calls.filter(call =>
         call.type === 'infra' && call.name === 'ac-watchdog').length === 1
       && incompleteSyncProofRepairCall16?.options.smartOnExpectedBoundaryAt
@@ -15152,7 +18021,202 @@ return { reapplySmartSensitivityNow };`
         === postRecoveryOwnerAt16
       && incompleteSyncProofDurable16.nextTriggerAt === postRecoveryOwnerAt16
       && incompleteSyncProofRace16.live() === postRecoveryOwnerAt16,
-    '16F-0B-2A-6: replacement proof await 期间换成不完整 revision 4 后重证失败；sync catch 沿原 19:00 收口 durable/live 19:05 typed safe-delay');
+    '16F-0B-2A-6: replacement proof await 期间换成不完整 revision 4 后重证失败；finally 自动沿原 19:00 唯一收口 durable/live 19:05 typed safe-delay');
+
+  let releaseSyncPredecessorCreate16;
+  let markSyncPredecessorCreate16;
+  const syncPredecessorCreateGate16 = new Promise(resolve => {
+    releaseSyncPredecessorCreate16 = resolve;
+  });
+  const syncPredecessorCreateStarted16 = new Promise(resolve => {
+    markSyncPredecessorCreate16 = resolve;
+  });
+  const syncPredecessorOptions16 = {
+    beforeSyncAdoptCreateGate: syncPredecessorCreateGate16,
+    onBeforeSyncAdoptCreate: markSyncPredecessorCreate16
+  };
+  const syncPredecessorOldAt16 = sentinelAt16 + 4 * 60_000;
+  const syncPredecessorReplacementAt16 = sentinelAt16 + 9 * 60_000;
+  const syncPredecessorRace16 = loadActualSyncApply16({
+    ...syncCfg16,
+    pwmState: 'on',
+    nextTriggerAt: syncPredecessorOldAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    alarmCreatedAt: syncApplyNow16,
+    alarmDelayMinutes: 20,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0,
+    pageTimerError: ''
+  }, syncPredecessorOldAt16, 0, syncPredecessorOptions16);
+  const syncPredecessorApply16 = syncPredecessorRace16.apply(
+    sentinelRemote16,
+    'test-sync-clear-create-predecessor-race'
+  );
+  await syncPredecessorCreateStarted16;
+  const syncPredecessorWriteOwner16 = syncPredecessorRace16
+    .commitSameRevisionOwner({
+      pwmState: 'on',
+      nextTriggerAt: syncPredecessorReplacementAt16,
+      smartClockPlannedAt: syncApplyNow16 + 2_000,
+      boundaryAt: sentinelAt16,
+      pwmRetryKind: 'smart-on-safe-delay',
+      pwmRetryBoundaryAt: sentinelAt16,
+      pwmRetryScheduledAt: syncPredecessorReplacementAt16,
+      pageTimerError: 'NEW-SYNC-PREDECESSOR-OWNER'
+    });
+  const syncPredecessorCommitIndex16 = syncPredecessorRace16.calls.length - 1;
+  releaseSyncPredecessorCreate16();
+  const syncPredecessorApplied16 = await syncPredecessorApply16;
+  const syncPredecessorAfter16 = syncPredecessorRace16.snapshot();
+  const syncPredecessorDurable16 = syncPredecessorRace16.durable();
+  const syncPredecessorTail16 = syncPredecessorRace16.calls.slice(
+    syncPredecessorCommitIndex16 + 1
+  );
+  assertPass(syncPredecessorApplied16 === false
+      && syncPredecessorWriteOwner16 > 0
+      && syncPredecessorRace16.live() === syncPredecessorReplacementAt16
+      && syncPredecessorAfter16.nextTriggerAt
+        === syncPredecessorReplacementAt16
+      && syncPredecessorDurable16.nextTriggerAt
+        === syncPredecessorReplacementAt16
+      && syncPredecessorAfter16.pwmRetryKind === 'smart-on-safe-delay'
+      && syncPredecessorAfter16.pageTimerError
+        === 'NEW-SYNC-PREDECESSOR-OWNER'
+      && syncPredecessorTail16.filter(call =>
+        call.type === 'create-pwm-stale').length === 1
+      && !syncPredecessorTail16.some(call =>
+        call.type === 'create-pwm'
+          || call.type === 'clear-pwm'
+          || call.type === 'persist'
+          || call.type === 'watermark'
+          || call.type === 'repair-clock'),
+    '16F-0B-2A-7: sync clear receipt 后同 revision writer 接管；predecessor 在串行 create 入场拒绝旧写，零旧 persist/clear/repair');
+
+  let releaseSyncPostCreateBadge16;
+  let markSyncPostCreateBadge16;
+  const syncPostCreateBadgeGate16 = new Promise(resolve => {
+    releaseSyncPostCreateBadge16 = resolve;
+  });
+  const syncPostCreateBadgeStarted16 = new Promise(resolve => {
+    markSyncPostCreateBadge16 = resolve;
+  });
+  const syncPostCreateOptions16 = {
+    syncBadgeGate: syncPostCreateBadgeGate16,
+    onSyncBadge: markSyncPostCreateBadge16
+  };
+  const syncPostCreateReplacementAt16 = sentinelAt16 + 11 * 60_000;
+  const syncPostCreateRace16 = loadActualSyncApply16({
+    ...syncCfg16,
+    pwmState: 'on',
+    nextTriggerAt: syncPredecessorOldAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    alarmCreatedAt: syncApplyNow16,
+    alarmDelayMinutes: 20,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0,
+    pageTimerError: ''
+  }, syncPredecessorOldAt16, 0, syncPostCreateOptions16);
+  const syncPostCreateApply16 = syncPostCreateRace16.apply(
+    sentinelRemote16,
+    'test-sync-post-create-owner-race'
+  );
+  await syncPostCreateBadgeStarted16;
+  syncPostCreateRace16.commitSameRevisionOwner({
+    pwmState: 'off',
+    nextTriggerAt: syncPostCreateReplacementAt16,
+    smartClockPlannedAt: syncApplyNow16 + 3_000,
+    pageTimerError: 'NEW-SYNC-POST-CREATE-OWNER'
+  });
+  const syncPostCreateCommitIndex16 = syncPostCreateRace16.calls.length - 1;
+  releaseSyncPostCreateBadge16();
+  const syncPostCreateApplied16 = await syncPostCreateApply16;
+  const syncPostCreateAfter16 = syncPostCreateRace16.snapshot();
+  const syncPostCreateDurable16 = syncPostCreateRace16.durable();
+  const syncPostCreateTail16 = syncPostCreateRace16.calls.slice(
+    syncPostCreateCommitIndex16 + 1
+  );
+  assertPass(syncPostCreateApplied16 === false
+      && syncPostCreateRace16.live() === syncPostCreateReplacementAt16
+      && syncPostCreateAfter16.nextTriggerAt
+        === syncPostCreateReplacementAt16
+      && syncPostCreateDurable16.nextTriggerAt
+        === syncPostCreateReplacementAt16
+      && syncPostCreateAfter16.pwmState === 'off'
+      && syncPostCreateAfter16.pageTimerError
+        === 'NEW-SYNC-POST-CREATE-OWNER'
+      && !syncPostCreateTail16.some(call =>
+        call.type === 'persist'
+          || call.type === 'clear-pwm'
+          || call.type === 'watermark'
+          || call.type === 'repair-clock'),
+    '16F-0B-2A-8: sync verified commit 后 badge await 中同 revision 换主；旧 helper 回报 stale，外层零 final persist/watermark');
+
+  let releaseSyncFailureWatchdog16;
+  let markSyncFailureWatchdog16;
+  const syncFailureWatchdogGate16 = new Promise(resolve => {
+    releaseSyncFailureWatchdog16 = resolve;
+  });
+  const syncFailureWatchdogStarted16 = new Promise(resolve => {
+    markSyncFailureWatchdog16 = resolve;
+  });
+  const syncFailureWatchdogOptions16 = {
+    syncCreateFailure: true,
+    syncFailureWatchdogGate: syncFailureWatchdogGate16,
+    onSyncFailureWatchdog: markSyncFailureWatchdog16
+  };
+  const syncFailureReplacementAt16 = sentinelAt16 + 13 * 60_000;
+  const syncFailureWatchdogRace16 = loadActualSyncApply16({
+    ...syncCfg16,
+    pwmState: 'on',
+    nextTriggerAt: syncPredecessorOldAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    alarmCreatedAt: syncApplyNow16,
+    alarmDelayMinutes: 20,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0,
+    pageTimerError: ''
+  }, syncPredecessorOldAt16, 0, syncFailureWatchdogOptions16);
+  const syncFailureWatchdogApply16 = syncFailureWatchdogRace16.apply(
+    sentinelRemote16,
+    'test-sync-failure-watchdog-owner-race'
+  );
+  await syncFailureWatchdogStarted16;
+  syncFailureWatchdogRace16.commitSameRevisionOwner({
+    pwmState: 'off',
+    nextTriggerAt: syncFailureReplacementAt16,
+    smartClockPlannedAt: syncApplyNow16 + 4_000,
+    pageTimerError: 'NEW-SYNC-FAILURE-WATCHDOG-OWNER'
+  });
+  const syncFailureReplacementIndex16 =
+    syncFailureWatchdogRace16.calls.length - 1;
+  releaseSyncFailureWatchdog16();
+  const syncFailureWatchdogApplied16 = await syncFailureWatchdogApply16;
+  const syncFailureWatchdogDrained16 = syncFailureWatchdogRace16.drainRepair(
+    'test-sync-failure-watchdog-owner-race'
+  );
+  const syncFailureWatchdogAfter16 = syncFailureWatchdogRace16.snapshot();
+  const syncFailureWatchdogDurable16 = syncFailureWatchdogRace16.durable();
+  const syncFailureWatchdogTail16 = syncFailureWatchdogRace16.calls.slice(
+    syncFailureReplacementIndex16 + 1
+  );
+  assertPass(syncFailureWatchdogApplied16 === false
+      && syncFailureWatchdogDrained16 === false
+      && syncFailureWatchdogRace16.live() === syncFailureReplacementAt16
+      && syncFailureWatchdogAfter16.nextTriggerAt
+        === syncFailureReplacementAt16
+      && syncFailureWatchdogDurable16.nextTriggerAt
+        === syncFailureReplacementAt16
+      && syncFailureWatchdogAfter16.pageTimerError
+        === 'NEW-SYNC-FAILURE-WATCHDOG-OWNER'
+      && !syncFailureWatchdogTail16.some(call =>
+        call.type === 'repair-clock'
+          || call.type === 'persist'
+          || call.type === 'clear-pwm'
+          || (call.type === 'infra' && call.name === 'ac-sync-adopt-retry')),
+    '16F-0B-2A-9: sync physical create failure 已持久化后，延迟 watchdog await 中换主；旧 failure 不再 queue repair/sync retry');
 
   // 源端重启：自己同步回来的 OFF 哨兵不能覆盖仍由本机持有的安全事务。
   const ownedSync16 = loadActualSyncApply16({
@@ -16115,6 +19179,7 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
   const resolveTimerOnlyRetry16 = new Function(
     'schedule', 'applyPwmPlanState', 'setSmartOnPwmRetryState',
     'persistSchedule', 'createPwmAlarmFromPlan', 'automationRevision',
+    'phaseAdmissionEpoch',
     'isAutomationOperationCurrent', 'createAlarm', 'abortStaleAutomation',
     'updateBadge', 'syncScheduleToSync',
     `${retryPlanSource16}; return resolveRetryPlan;`
@@ -16134,6 +19199,7 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
       return true;
     },
     18,
+    31,
     () => true,
     async name => { timerOnlyRetryOrder16.push(`alarm:${name}`); },
     async () => false,
@@ -16174,6 +19240,7 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
   const resolveRetryPlanRace16 = new Function(
     'schedule', 'applyPwmPlanState', 'setSmartOnPwmRetryState',
     'persistSchedule', 'createPwmAlarmFromPlan', 'automationRevision',
+    'phaseAdmissionEpoch',
     'isAutomationOperationCurrent', 'createAlarm', 'abortStaleAutomation',
     'updateBadge',
     `${retryPlanSource16}; return resolveRetryPlan;`
@@ -16201,6 +19268,7 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
       return false;
     },
     17,
+    32,
     () => retryCreateRaceCurrent16,
     async () => { retryCreateRaceOrder16.push('badge'); },
     async () => false,
@@ -16224,9 +19292,15 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
     '\n// ----- 官方推荐：setInterval heartbeat',
     'page timer adoption retry guard'
   );
+  const pageTimerReadCoordinatorSource16 = extractSourceSection(
+    backgroundSource,
+    'let pageTimerMessageWriteChain = Promise.resolve();',
+    '\n\nfunction createOwnedPageTimerStateReceipt(',
+    'serialized page timer adoption read receipt'
+  );
   const syncedPhaseBody16 = extractSourceSection(
     backgroundSource,
-    'async function applySyncedPhase(remote, reason = \'\') {',
+    "async function applySyncedPhase(remote, reason = '', options = {}) {",
     '\n// 从 chrome.storage.sync 拉取并尝试合并。',
     'sync phase retry guard'
   );
@@ -16238,11 +19312,15 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
       && syncedPhaseBody16.includes('getActiveSmartOnPwmRetryContext(')
       && syncedPhaseBody16.includes('protectSmartOnRetryConfigDiff(')
       && syncedPhaseBody16.indexOf('localRetryBeforeConfig')
-        < syncedPhaseBody16.indexOf('computeConfigDiff(schedule, remote)')
+        < syncedPhaseBody16.indexOf(
+          'computeConfigDiff(schedule, remoteForConfigAndPhase)'
+        )
       && syncedPhaseBody16.includes('const prospectiveSchedule =')
       && syncedPhaseBody16.includes('isAutomationAllowedForSchedule(prospectiveSchedule)')
       && syncedPhaseBody16.includes('? false')
-      && syncedPhaseBody16.includes(': await adoptPhaseAndRearm('),
+      && syncedPhaseBody16.includes(
+        ': await adoptPhaseAndRearm(remoteForConfigAndPhase, automationAllowed)'
+      ),
     '16F-0B-1B: 22:31 durable retry 优先于预置的 22:52 page timer 与远端相位；只有 live/storage 所有权失配后才允许采纳');
   const recoverLifecycleBody16 = extractSourceSection(
     backgroundSource,
@@ -16289,7 +19367,7 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
     )
     : '';
   const runLifecycleRepairBranch16 = new Function(
-    'plan', 'repairScheduleClock', 'automationRevision',
+    'plan', 'repairScheduleClock', 'automationRevision', 'context',
     `return (async () => { ${lifecycleRepairBranch16} })();`
   );
   const lifecycleRepairBoundary16 = new Date(2026, 7, 27, 19, 0, 0, 0).getTime();
@@ -16322,21 +19400,31 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
     onStatusStart: markGenericLifecycleStatusStarted16,
     statusResults: [{ isOn: false }, { isOn: false }]
   });
-  const genericRepairFirst16 = genericVsLifecycleHarness16.repairScheduleClock({});
+  const genericLifecyclePhaseEpoch16 = genericVsLifecycleHarness16
+    .repairScheduleClock.__claimPhaseAdmission();
+  const genericRepairFirst16 = genericVsLifecycleHarness16.repairScheduleClock({
+    phaseAdmissionEpoch: genericLifecyclePhaseEpoch16
+  });
   await genericLifecycleStatusStarted16;
   const invalidLifecycleRepair16 = runLifecycleRepairBranch16({
     kind: 'repair-clock',
     strategy: 'smart',
     reason: 'skipped-nearest-smart-on-boundary',
     expectedAt: lifecycleRepairBoundary16
-  }, genericVsLifecycleHarness16.repairScheduleClock, 0);
+  }, genericVsLifecycleHarness16.repairScheduleClock, 0, {
+    phaseAdmissionEpoch: genericLifecyclePhaseEpoch16
+  });
   await Promise.resolve();
   const genericLifecycleNoPrematureClock16 =
     genericVsLifecycleHarness16.alarmPlans.length === 0;
   releaseGenericLifecycleStatus16();
   const [genericRepairFirstResult16, invalidLifecycleRepairResult16]
     = await Promise.all([genericRepairFirst16, invalidLifecycleRepair16]);
+  const genericLifecyclePhaseReleased16 = genericVsLifecycleHarness16
+    .repairScheduleClock.__releasePhaseAdmission(genericLifecyclePhaseEpoch16);
   assertPass(genericLifecycleNoPrematureClock16
+      && genericLifecyclePhaseEpoch16 === 1
+      && genericLifecyclePhaseReleased16 === true
       && genericRepairFirstResult16?.success === false
       && invalidLifecycleRepairResult16?.handled === true
       && invalidLifecycleRepairResult16?.repair?.success === true
@@ -16586,11 +19674,12 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
   const recoverWithPhaseOwner16 = new Function(
     'schedule', 'isSyncPhaseAdoptionAdmissionBlocked',
     'isSyncPhaseAdoptionAdmissionBlockedFor',
+    'isSyncPhaseAdoptionAdmissionOwnerCurrent',
     'getActiveSmartOnPwmRetryContext', 'snapshotPreparedSmartRuntime',
     'halfHourBoundaryAtOrBefore', 'applyPreparedSmartModeDurations',
     'isAutomationOperationCurrent', 'isSmartPreparationOwnerCurrent',
     'planPwmLifecycleRecovery', 'classifySmartOnClock',
-    'PWM_RETRY_ALARM_TOLERANCE_MS',
+    'PWM_RETRY_ALARM_TOLERANCE_MS', 'abortStaleAutomation',
     `let pwmRuntimeRevision = 61;
     ${recoverLifecycleBody16}
     return recoverPwmLifecycle;`
@@ -16598,6 +19687,7 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
     phaseOwnerSchedule16,
     () => false,
     () => false,
+    epoch => epoch === 37,
     () => ({ hasTypedSmartOnRetry: false }),
     () => ({
       owner: phaseOwnerToken16(),
@@ -16611,7 +19701,8 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
     phaseOwnerCurrent16,
     () => { staleContextPlannerCalls16 += 1; return { kind: 'preserve-live-alarm' }; },
     pwmPhase.classifySmartOnClock,
-    1500
+    1500,
+    async () => true
   );
   const staleContextRecoveryPromise16 = recoverWithPhaseOwner16({
     now: futureClockNow16,
@@ -16619,7 +19710,8 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
     liveAlarmAt: futureHalfHour16,
     storedAlarmAt: futureHalfHour16,
     plannedActionAt: futureHalfHour16,
-    missingClockAction: 'repair-clock'
+    missingClockAction: 'repair-clock',
+    phaseAdmissionEpoch: 37
   });
   phaseOwnerSchedule16.pwmState = 'off';
   phaseOwnerSchedule16.nextTriggerAt = futureHalfHour16 + 30 * 60000;
@@ -16632,6 +19724,262 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
       && phaseOwnerSchedule16.pwmState === 'off'
       && phaseOwnerSchedule16.nextTriggerAt === futureHalfHour16 + 30 * 60000,
     '16F-0B-1D-3: 天气 await 中 sync 认领新 phase/clock 后旧 lifecycle 立即退出，零 planner/rollback/旧钟回写');
+
+  const createCallerOwnedLifecycleHarness16 = ({
+    invalidatePageOwnerInPlanner = false
+  } = {}) => {
+    const ownedSchedule = {
+      enabled: true,
+      mode: 'pwm',
+      clockMode: false,
+      pwmState: 'on',
+      onMinutes: 12,
+      offMinutes: 18,
+      nextTriggerAt: 0,
+      smartClockPlannedAt: 0,
+      alarmCreatedAt: 0,
+      alarmDelayMinutes: 0,
+      smartOnBoundaryAt: 0,
+      pwmRetryKind: '',
+      pwmRetryBoundaryAt: 0,
+      pwmRetryScheduledAt: 0,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: true, sensitivity: 5 }
+    };
+    let pwmWriteGeneration = 7;
+    let pageTimerWriteOwner = 11;
+    let pageReadContext = {
+      onMinutes: ownedSchedule.onMinutes,
+      offMinutes: ownedSchedule.offMinutes
+    };
+    let releasePreparation;
+    let markPreparationStarted;
+    const preparationGate = new Promise(resolve => {
+      releasePreparation = resolve;
+    });
+    const preparationStarted = new Promise(resolve => {
+      markPreparationStarted = resolve;
+    });
+    let preparationOptions = null;
+    let plannerCalls = 0;
+    let ownedRefreshCalls = 0;
+    const abortCalls = [];
+    const pageTimerStateIsCurrent = () => (
+      pageTimerWriteOwner === 11
+      && pageReadContext.onMinutes === ownedSchedule.onMinutes
+      && pageReadContext.offMinutes === ownedSchedule.offMinutes
+    );
+    const recover = new Function(
+      'schedule', 'isSyncPhaseAdoptionAdmissionBlocked',
+      'isSyncPhaseAdoptionAdmissionBlockedFor',
+      'isSyncPhaseAdoptionAdmissionOwnerCurrent',
+      'getActiveSmartOnPwmRetryContext', 'snapshotPreparedSmartRuntime',
+      'halfHourBoundaryAtOrBefore', 'applyPreparedSmartModeDurations',
+      'isAutomationOperationCurrent', 'isSmartPreparationOwnerCurrent',
+      'planPwmLifecycleRecovery', 'classifySmartOnClock',
+      'PWM_RETRY_ALARM_TOLERANCE_MS',
+      'isPwmAlarmWriteGenerationCurrent', 'SMART_MODE',
+      'abortStaleAutomation',
+      `let pwmRuntimeRevision = 61;
+      ${recoverLifecycleBody16}
+      return recoverPwmLifecycle;`
+    )(
+      ownedSchedule,
+      () => false,
+      () => false,
+      epoch => epoch === 37,
+      () => ({
+        hasTypedSmartOnRetry: false,
+        hasSafetyTimerRetry: false,
+        boundaryAt: 0
+      }),
+      () => ({
+        owner: Object.freeze({ revision: 61 }),
+        pwmState: ownedSchedule.pwmState,
+        onMinutes: ownedSchedule.onMinutes,
+        offMinutes: ownedSchedule.offMinutes
+      }),
+      () => futureClockNow16,
+      async options => {
+        preparationOptions = options;
+        markPreparationStarted();
+        await preparationGate;
+        if (!options.ensureCurrent()) return false;
+        ownedSchedule.onMinutes = 24;
+        ownedSchedule.offMinutes = 6;
+        options.onOwnedStateChanged();
+        return true;
+      },
+      revision => revision === 61,
+      () => true,
+      () => {
+        plannerCalls += 1;
+        if (invalidatePageOwnerInPlanner) {
+          pageTimerWriteOwner += 1;
+          return {
+            kind: 'advance-expired-alarm',
+            reason: 'synthetic-expired-owner-race',
+            scheduledTime: futureClockNow16 - 60_000
+          };
+        }
+        return { kind: 'noop', reason: 'owned-duration-refreshed' };
+      },
+      pwmPhase.classifySmartOnClock,
+      1500,
+      generation => generation === pwmWriteGeneration,
+      { ON_MAX: 25 },
+      async (revision, reason, options) => {
+        abortCalls.push({
+          revision,
+          reason,
+          options: structuredClone(options)
+        });
+        return true;
+      }
+    );
+    const context = {
+      now: futureClockNow16,
+      liveAlarmAt: 0,
+      storedAlarmAt: 0,
+      plannedActionAt: 0,
+      missingClockAction: 'noop',
+      automationRevision: 61,
+      phaseAdmissionEpoch: 37,
+      previousWriteOwner: 7,
+      ensureCurrent: () => true,
+      isPageTimerStateCurrent: pageTimerStateIsCurrent,
+      onOwnedPhaseStateChanged: () => {
+        ownedRefreshCalls += 1;
+        pageReadContext = {
+          onMinutes: ownedSchedule.onMinutes,
+          offMinutes: ownedSchedule.offMinutes
+        };
+      }
+    };
+    return {
+      start: () => recover(context),
+      preparationStarted,
+      releasePreparation,
+      invalidatePwmPredecessor: () => { pwmWriteGeneration += 1; },
+      invalidatePageOwner: () => { pageTimerWriteOwner += 1; },
+      plannerCalls: () => plannerCalls,
+      ownedRefreshCalls: () => ownedRefreshCalls,
+      abortCalls: () => structuredClone(abortCalls),
+      preparationOptions: () => preparationOptions,
+      pageTimerStateIsCurrent,
+      schedule: ownedSchedule
+    };
+  };
+  const pwmPredecessorWeatherRace16 = createCallerOwnedLifecycleHarness16();
+  const pageOwnerWeatherRace16 = createCallerOwnedLifecycleHarness16();
+  const ownedDurationRefresh16 = createCallerOwnedLifecycleHarness16();
+  const entryStaleAbort16 = createCallerOwnedLifecycleHarness16();
+  entryStaleAbort16.invalidatePageOwner();
+  const entryStaleAbortResult16 = await entryStaleAbort16.start();
+  const expiredOwnerAbort16 = createCallerOwnedLifecycleHarness16({
+    invalidatePageOwnerInPlanner: true
+  });
+  const pwmPredecessorWeatherRun16 = pwmPredecessorWeatherRace16.start();
+  const pageOwnerWeatherRun16 = pageOwnerWeatherRace16.start();
+  const ownedDurationRefreshRun16 = ownedDurationRefresh16.start();
+  const expiredOwnerAbortRun16 = expiredOwnerAbort16.start();
+  await Promise.all([
+    pwmPredecessorWeatherRace16.preparationStarted,
+    pageOwnerWeatherRace16.preparationStarted,
+    ownedDurationRefresh16.preparationStarted,
+    expiredOwnerAbort16.preparationStarted
+  ]);
+  pwmPredecessorWeatherRace16.invalidatePwmPredecessor();
+  pageOwnerWeatherRace16.invalidatePageOwner();
+  pwmPredecessorWeatherRace16.releasePreparation();
+  pageOwnerWeatherRace16.releasePreparation();
+  ownedDurationRefresh16.releasePreparation();
+  expiredOwnerAbort16.releasePreparation();
+  const [pwmPredecessorWeatherResult16, pageOwnerWeatherResult16,
+    ownedDurationRefreshResult16, expiredOwnerAbortResult16] = await Promise.all([
+    pwmPredecessorWeatherRun16,
+    pageOwnerWeatherRun16,
+    ownedDurationRefreshRun16,
+    expiredOwnerAbortRun16
+  ]);
+  const abortUsedOwnedEpoch16 = (harness, expectedReason) => {
+    const calls = harness.abortCalls();
+    return calls.length === 1
+      && calls[0].revision === 61
+      && calls[0].reason === expectedReason
+      && calls[0].options?.phaseAdmissionEpoch === 37
+      && Object.keys(calls[0].options || {}).length === 1;
+  };
+  assertPass(recoverLifecycleBody16.includes(
+      'const recoveryContextIsCurrent = () => (')
+      && recoverLifecycleBody16.includes(
+        'isPwmAlarmWriteGenerationCurrent(requestedPreviousWriteOwner)')
+      && recoverLifecycleBody16.includes(
+        'ensureCurrent: recoveryContextIsCurrent,')
+      && recoverLifecycleBody16.includes(
+        'onOwnedStateChanged: context.onOwnedPhaseStateChanged')
+      && recoverLifecycleBody16.includes(
+        'previousWriteOwner: context.previousWriteOwner,')
+      && recoverLifecycleBody16.includes(
+        'isPageTimerStateCurrent: context.isPageTimerStateCurrent,')
+      && recoverLifecycleBody16.includes(
+        'onPageTimerWriteOwnerClaimed: context.onPageTimerWriteOwnerClaimed,')
+      && recoverLifecycleBody16.includes(
+        'onOwnedPhaseStateChanged: context.onOwnedPhaseStateChanged')
+      && countOccurrences(
+        recoverLifecycleBody16,
+        '{ phaseAdmissionEpoch: context.phaseAdmissionEpoch }'
+      ) >= 3
+      && recoverLifecycleBody16.includes(
+        "'lifecycle-entry-active-hours-paused'")
+      && recoverLifecycleBody16.includes(
+        "'lifecycle-prepare-active-hours-paused'")
+      && recoverLifecycleBody16.includes(
+        "'lifecycle-expired-active-hours-paused'")
+      && entryStaleAbortResult16.handled === false
+      && entryStaleAbortResult16.plan?.reason === 'automation-stale'
+      && entryStaleAbort16.plannerCalls() === 0
+      && abortUsedOwnedEpoch16(
+        entryStaleAbort16,
+        'lifecycle-entry-active-hours-paused'
+      )
+      && pwmPredecessorWeatherResult16.handled === false
+      && pwmPredecessorWeatherResult16.plan?.reason === 'automation-stale'
+      && pwmPredecessorWeatherRace16.plannerCalls() === 0
+      && pwmPredecessorWeatherRace16.ownedRefreshCalls() === 0
+      && abortUsedOwnedEpoch16(
+        pwmPredecessorWeatherRace16,
+        'lifecycle-prepare-active-hours-paused'
+      )
+      && pageOwnerWeatherResult16.handled === false
+      && pageOwnerWeatherResult16.plan?.reason === 'automation-stale'
+      && pageOwnerWeatherRace16.plannerCalls() === 0
+      && pageOwnerWeatherRace16.ownedRefreshCalls() === 0
+      && abortUsedOwnedEpoch16(
+        pageOwnerWeatherRace16,
+        'lifecycle-prepare-active-hours-paused'
+      )
+      && typeof ownedDurationRefresh16.preparationOptions()?.ensureCurrent
+        === 'function'
+      && typeof ownedDurationRefresh16.preparationOptions()
+        ?.onOwnedStateChanged === 'function'
+      && ownedDurationRefreshResult16.handled === false
+      && ownedDurationRefreshResult16.plan?.reason
+        === 'owned-duration-refreshed'
+      && ownedDurationRefresh16.plannerCalls() === 1
+      && ownedDurationRefresh16.ownedRefreshCalls() === 1
+      && ownedDurationRefresh16.pageTimerStateIsCurrent() === true
+      && ownedDurationRefresh16.schedule.onMinutes === 24
+      && ownedDurationRefresh16.schedule.offMinutes === 6
+      && ownedDurationRefresh16.abortCalls().length === 0
+      && expiredOwnerAbortResult16.handled === false
+      && expiredOwnerAbortResult16.plan?.reason === 'caller-stale'
+      && expiredOwnerAbort16.plannerCalls() === 1
+      && abortUsedOwnedEpoch16(
+        expiredOwnerAbort16,
+        'lifecycle-expired-active-hours-paused'
+      ),
+    '16F-0B-1D-3A: lifecycle 三个 stale guard 均携所有 phase epoch 调 abort；weather await 继承 caller PWM/page owner，自有时长刷新后继续规划');
   const typedAlarmExceptionRecoveryBody16 = extractSourceSection(
     backgroundSource,
     'async function recoverTypedSmartOnAlarmException(',
@@ -16708,7 +20056,23 @@ return { plan, smartLocalExceptionBoundaryAt, smartLocalExceptionKind };`
       'waitForPwmDiagnosticOutcomePersistence',
       `let pwmExecutionWithRecoveryCount = 0;
       let deferredRepairAfterPwmOptions = null;
-      function isSyncPhaseAdoptionAdmissionBlockedFor() { return false; }
+      let syncPhaseAdoptionAdmissionEpoch = 0;
+      let syncPhaseAdoptionAdmissionOwner = 0;
+      function claimSyncPhaseAdoptionAdmission() {
+        const epoch = ++syncPhaseAdoptionAdmissionEpoch;
+        syncPhaseAdoptionAdmissionOwner = epoch;
+        return epoch;
+      }
+      function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+        return Number(epoch) > 0
+          && Number(epoch) === syncPhaseAdoptionAdmissionOwner;
+      }
+      function releaseSyncPhaseAdoptionAdmission(epoch) {
+        if (!isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch)) return false;
+        syncPhaseAdoptionAdmissionOwner = 0;
+        return true;
+      }
+      async function abortStaleAutomation() { return false; }
       function drainDeferredScheduleRepair() { return false; }
       async function repairScheduleClock() { return { success: true }; }
       ${pwmStepWithRecoveryBody16}; return executePwmStepWithRecovery;`
@@ -16961,6 +20325,8 @@ ${alarmPwmCatchBody16}
     'nextHalfHourBoundary', 'halfHourBoundaryAtOrBefore',
     'computePageTimerAdoption', 'smartModePageTimerTargetAt',
     'SMART_MODE', 'Date', 'console',
+    'setScheduleNextTrigger', 'setSchedulePwmClockIntent',
+    'replaceSchedulePwmRetryState', 'replaceSchedulePageTimerState',
     `let schedule = structuredClone(initialSchedule);
     let durableSchedule = structuredClone(initialSchedule);
     let liveAt = Number(initialLiveAt) || 0;
@@ -16971,13 +20337,23 @@ ${alarmPwmCatchBody16}
     let scheduleRepairEpoch = 0;
     let pwmStepRunning = false;
     let pwmStepRunningRevision = null;
+    let manualOffAutomaticOnBlocked = false;
     let syncPhaseAdoptionAdmissionEpoch = 0;
     let syncPhaseAdoptionAdmissionOwner = 0;
+    const syncPhaseAdoptionAdmissionWaiters = [];
+    let smartReapplyInFlight = false;
+    let smartReapplyPending = false;
+    let pwmAlarmWriteGeneration = 0;
+    let activeHoursAllowed = true;
     let statusCalls = 0;
     let phaseGateRepairResult = null;
     let phaseGateRepairEffectsWhileHeld = null;
     let persistGateUsed = false;
     let pageAdoptPersistFailureUsed = false;
+    let pageAdoptPersistFailuresRemaining = Math.max(
+      0,
+      Number(harnessOptions.pageAdoptPersistFailures) || 0
+    );
     let pageAdoptClearFailureUsed = false;
     let pageAdoptCreateFailureUsed = false;
     let expiredPageRecoveryPersistFailureUsed = false;
@@ -16988,13 +20364,29 @@ ${alarmPwmCatchBody16}
     function isCurrentPwmStepRunning() {
       return pwmStepRunning && pwmStepRunningRevision === pwmRuntimeRevision;
     }
-    function isAutomationAllowed() { return schedule.enabled === true; }
+    function isAutomationAllowed() {
+      return schedule.enabled === true && activeHoursAllowed;
+    }
     function isAutomationOperationCurrent(revision) {
       return revision === pwmRuntimeRevision && isAutomationAllowed();
     }
+    function isPwmAlarmWriteOwnerCurrent(owner) {
+      return Number(owner) > 0 && Number(owner) === pwmAlarmWriteGeneration;
+    }
+    function isPwmAlarmWriteGenerationCurrent(generation) {
+      const expected = Number(generation);
+      return Number.isSafeInteger(expected)
+        && expected >= 0
+        && expected === pwmAlarmWriteGeneration;
+    }
     function isComfortStartActive() { return false; }
-    async function abortStaleAutomation(revision) {
-      return !isAutomationOperationCurrent(revision);
+    async function abortStaleAutomation(revision, reason) {
+      const current = isAutomationOperationCurrent(revision);
+      calls.push({ type: 'abort-stale', revision, reason, current });
+      if (!current && schedule.enabled === true && !activeHoursAllowed) {
+        calls.push({ type: 'active-hours-pause', reason });
+      }
+      return !current;
     }
     function waitUntil(promise) {
       const tracked = Promise.resolve(promise);
@@ -17002,6 +20394,15 @@ ${alarmPwmCatchBody16}
       return tracked;
     }
     function appendDiagnosticLog() {}
+    function captureScheduleReadRequeueReceipt() {
+      return Object.freeze({});
+    }
+    async function createScheduleReadRetryWake(alarm, reason = '') {
+      calls.push({ type: 'schedule-read-retry', alarm: { ...alarm }, reason });
+      return createAlarm('ac-schedule-read-retry:'
+        + encodeURIComponent(alarm.name) + ':' + alarm.scheduledTime,
+      { delayInMinutes: 1 });
+    }
     function getActiveSmartOnPwmRetryContext(snapshot, scheduledTime) {
       const markerAt = Number(snapshot?.pwmRetryScheduledAt) || 0;
       const candidateAt = Number(scheduledTime) || 0;
@@ -17041,11 +20442,48 @@ ${alarmPwmCatchBody16}
       }
       return { isOn: physicalOn };
     }
+    ${pageTimerReadCoordinatorSource16}
+    ${ownedPageTimerStateHelpers11D}
     async function setPageTimer(minutes, options = {}) {
-      calls.push({ type: 'page-timer', minutes, options: { ...options } });
-      const targetAt = Number(options.targetAt) || Date.now() + minutes * 60_000;
-      schedule.pageTimerTargetAt = targetAt;
-      return { success: true, targetAt };
+      const pageTimerWriteOwner = claimPageTimerWriteOwner(() => true);
+      pageTimerWritesInFlight += 1;
+      calls.push({ type: 'page-timer', minutes, options: { ...options },
+        pageTimerWriteOwner });
+      try {
+        if (harnessOptions.pageTimerLifecycleGate) {
+          if (typeof harnessOptions.onPageTimerLifecycleClaim === 'function') {
+            harnessOptions.onPageTimerLifecycleClaim(pageTimerWriteOwner);
+          }
+          await harnessOptions.pageTimerLifecycleGate;
+        }
+        const targetAt = Number(options.targetAt)
+          || Date.now() + minutes * 60_000;
+        schedule.pageTimerMinutes = minutes;
+        schedule.pageTimerTargetAt = targetAt;
+        schedule.pageTimerError = '';
+        schedule.pageTimerRetryAt = 0;
+        schedule.pageTimerRetryMinutes = 0;
+        if (harnessOptions.pageTimerLifecyclePersists === true) {
+          durableSchedule = structuredClone(schedule);
+          calls.push({ type: 'page-timer-only-persist', targetAt,
+            pageTimerWriteOwner });
+        }
+        return {
+          success: true,
+          targetAt,
+          pageTimerWriteOwner,
+          pageTimerState: Object.freeze({
+            pageTimerMinutes: minutes,
+            pageTimerTargetAt: targetAt,
+            pageTimerError: '',
+            pageTimerRetryAt: 0,
+            pageTimerRetryMinutes: 0,
+            pageTimerWriteOwner
+          })
+        };
+      } finally {
+        pageTimerWritesInFlight = Math.max(0, pageTimerWritesInFlight - 1);
+      }
     }
     async function createPwmAlarmWithVerify(minutes, tag) {
       calls.push({ type: 'one-minute-alarm', minutes, tag });
@@ -17054,6 +20492,16 @@ ${alarmPwmCatchBody16}
     }
     async function createAlarm(name, info = {}) {
       calls.push({ type: 'infra-alarm', name, info: { ...info } });
+      if (name === 'ac-watchdog'
+          && Number(info.delayInMinutes) === 1
+          && harnessOptions.pageFailureWatchdogGate) {
+        if (typeof harnessOptions.onPageFailureWatchdog === 'function') {
+          harnessOptions.onPageFailureWatchdog();
+        }
+        await harnessOptions.pageFailureWatchdogGate;
+      }
+      if (typeof info.ensureCurrent === 'function'
+          && !info.ensureCurrent()) return false;
       return true;
     }
     async function persistSchedule(reason) {
@@ -17066,6 +20514,12 @@ ${alarmPwmCatchBody16}
           harnessOptions.onPersistStart();
         }
         await harnessOptions.persistGate;
+      }
+      if (pageAdoptPersistFailuresRemaining > 0
+          && String(reason).startsWith('page-timer-adopt')) {
+        pageAdoptPersistFailuresRemaining -= 1;
+        calls.push({ type: 'page-adopt-persist-failure', reason });
+        throw new Error('synthetic repeated page adoption persist failure');
       }
       if (harnessOptions.pageAdoptPersistFailure === true
           && !pageAdoptPersistFailureUsed
@@ -17082,26 +20536,70 @@ ${alarmPwmCatchBody16}
       }
       durableSchedule = structuredClone(schedule);
     }
-    async function createPwmAlarmFromPlan(plan, tag, revision) {
+    async function createPwmAlarmFromPlanWithReceipt(
+      plan,
+      tag,
+      revision,
+      options = {}
+    ) {
+      const previousWriteOwner = Number(options.previousWriteOwner) || 0;
+      const requestedExpectedWriteGeneration = Number(
+        options.expectedWriteGeneration
+      );
+      const expectedWriteGeneration = previousWriteOwner > 0
+        ? previousWriteOwner
+        : requestedExpectedWriteGeneration;
+      const hasExpectedWriteGeneration = Number.isSafeInteger(
+        expectedWriteGeneration
+      ) && expectedWriteGeneration >= 0;
+      const ensureCurrent = typeof options.ensureCurrent === 'function'
+        ? options.ensureCurrent
+        : () => true;
+      if (harnessOptions.beforePageAdoptCreateGate
+          && tag === 'page-timer-adopt') {
+        if (typeof harnessOptions.onBeforePageAdoptCreate === 'function') {
+          harnessOptions.onBeforePageAdoptCreate();
+        }
+        await harnessOptions.beforePageAdoptCreateGate;
+      }
+      if (!isAutomationOperationCurrent(revision)
+          || !ensureCurrent()
+          || (hasExpectedWriteGeneration
+            && !isPwmAlarmWriteGenerationCurrent(expectedWriteGeneration))) {
+        calls.push({ type: 'repair-alarm-stale', tag, revision,
+          previousWriteOwner, expectedWriteGeneration });
+        return { created: false, writeOwner: 0 };
+      }
+      const writeOwner = ++pwmAlarmWriteGeneration;
       if (harnessOptions.pageAdoptCreateFailure === true
           && !pageAdoptCreateFailureUsed
           && tag === 'page-timer-adopt') {
         pageAdoptCreateFailureUsed = true;
-        throw new Error('synthetic page adoption create failure');
+        liveAt = 0;
+        calls.push({ type: 'repair-alarm-failed', tag, revision,
+          writeOwner, previousWriteOwner, expectedWriteGeneration });
+        return { created: false, writeOwner };
       }
       liveAt = Number(plan?.nextTriggerAt) || 0;
-      calls.push({ type: 'repair-alarm', tag, revision, at: liveAt });
-      return true;
+      calls.push({ type: 'repair-alarm', tag, revision, at: liveAt,
+        writeOwner, previousWriteOwner, expectedWriteGeneration });
+      schedule.alarmCreatedAt = Date.now();
+      schedule.alarmDelayMinutes = Math.max(
+        1,
+        (liveAt - Date.now()) / 60000
+      );
+      setNextTriggerAt(liveAt, { plannedAt: options.plannedAt });
+      return { created: true, writeOwner };
+    }
+    async function createPwmAlarmFromPlan(plan, tag, revision) {
+      return (await createPwmAlarmFromPlanWithReceipt(
+        plan,
+        tag,
+        revision
+      )).created;
     }
     async function applyPreparedSmartModeDurations() { return false; }
-    function setNextTriggerAt(value) {
-      schedule.nextTriggerAt = Number(value) > 0 ? Number(value) : 0;
-    }
-    function setPwmClockIntent(value) {
-      setNextTriggerAt(value);
-      schedule.alarmCreatedAt = 0;
-      schedule.alarmDelayMinutes = 0;
-    }
+    ${setNextTriggerAtSource16}
     function clearPwmRetryState() {
       schedule.pwmRetryKind = '';
       schedule.pwmRetryBoundaryAt = 0;
@@ -17199,35 +20697,95 @@ ${alarmPwmCatchBody16}
     }
     async function sendReadMessageToExactACHome() {
       calls.push({ type: 'page-timer-read' });
+      if (harnessOptions.pageReadGate) {
+        if (typeof harnessOptions.onPageRead === 'function') {
+          harnessOptions.onPageRead();
+        }
+        await harnessOptions.pageReadGate;
+      }
       return harnessOptions.pageTimerResult || { found: false, value: null };
     }
     function invalidateTimerBasedShutdown() {
       calls.push({ type: 'invalidate-shutdown', revision: pwmRuntimeRevision });
     }
-    async function clearPwmAlarm(revision) {
-      calls.push({ type: 'clear-pwm', revision, at: liveAt });
+    async function clearPwmAlarmWithReceipt(revision, _force = false, options = {}) {
+      const expected = Number(options.expectedWriteGeneration);
+      if (!isAutomationOperationCurrent(revision)
+          || (typeof options.ensureCurrent === 'function'
+            && !options.ensureCurrent())
+          || (Number.isSafeInteger(expected) && expected >= 0
+            && !isPwmAlarmWriteGenerationCurrent(expected))) {
+        calls.push({ type: 'clear-pwm-stale', revision, expected });
+        return { cleared: false, stale: true, writeOwner: 0 };
+      }
+      const writeOwner = ++pwmAlarmWriteGeneration;
+      calls.push({ type: 'clear-pwm', revision, at: liveAt, writeOwner });
       if (harnessOptions.pageAdoptClearFailure === true
           && !pageAdoptClearFailureUsed) {
         pageAdoptClearFailureUsed = true;
-        throw new Error('synthetic page adoption clear failure');
+        return {
+          cleared: false,
+          writeOwner,
+          error: 'synthetic page adoption clear failure'
+        };
       }
       liveAt = 0;
-      return true;
+      return {
+        cleared: isAutomationOperationCurrent(revision),
+        writeOwner
+      };
+    }
+    async function clearPwmAlarm(revision) {
+      return (await clearPwmAlarmWithReceipt(revision)).cleared;
     }
     async function advanceExpiredAlarmToNextBoundary(
       _expiredAt,
       revision,
-      phaseAdmissionEpoch = 0
+      phaseAdmissionEpoch = 0,
+      options = {}
     ) {
-      const phaseOwnerAccepted = !isSyncPhaseAdoptionAdmissionBlockedFor(
+      const phaseOwnerAccepted = isSyncPhaseAdoptionAdmissionOwnerCurrent(
         phaseAdmissionEpoch
       );
+      const previousWriteOwner = Number(options.previousWriteOwner) || 0;
       calls.push({ type: 'advance-expired', revision, phaseAdmissionEpoch,
-        phaseOwnerAccepted });
+        phaseOwnerAccepted,
+        previousWriteOwner });
+      if (harnessOptions.expiredRecoveryEntryGate) {
+        if (typeof harnessOptions.onExpiredRecoveryEntry === 'function') {
+          harnessOptions.onExpiredRecoveryEntry({
+            revision,
+            phaseAdmissionEpoch,
+            previousWriteOwner
+          });
+        }
+        await harnessOptions.expiredRecoveryEntryGate;
+      }
       const recoveryAt = Number(harnessOptions.expiredRecoveryAt) || 0;
+      let alarmWrite = { created: false, writeOwner: 0 };
+      let pageTimerWriteOwner = 0;
+      const recoveryIsCurrent = () => (
+        phaseOwnerAccepted
+        && isAutomationOperationCurrent(revision)
+        && (typeof options.ensureCurrent !== 'function'
+          || options.ensureCurrent())
+        && (typeof options.isPageTimerStateCurrent !== 'function'
+          || options.isPageTimerStateCurrent())
+        && (previousWriteOwner <= 0
+          || isPwmAlarmWriteGenerationCurrent(previousWriteOwner))
+      );
+      if (harnessOptions.expiredRecoveryClaimsPageOwner === true
+          && recoveryIsCurrent()
+          && typeof options.onPageTimerWriteOwnerClaimed === 'function') {
+        pageTimerWriteOwner = claimPageTimerWriteOwner(recoveryIsCurrent);
+        if (pageTimerWriteOwner > 0) {
+          options.onPageTimerWriteOwnerClaimed(pageTimerWriteOwner);
+          calls.push({ type: 'expired-page-owner-transfer',
+            pageTimerWriteOwner, previousWriteOwner });
+        }
+      }
       if (recoveryAt > Date.now()
-          && phaseOwnerAccepted
-          && isAutomationOperationCurrent(revision)) {
+          && recoveryIsCurrent()) {
         const recoveryRevision = harnessOptions.expiredRecoveryClaimsNewRevision
           ? pwmRuntimeRevision += 1
           : revision;
@@ -17244,24 +20802,64 @@ ${alarmPwmCatchBody16}
         }
         schedule.alarmCreatedAt = Date.now();
         schedule.alarmDelayMinutes = Math.max(1, (recoveryAt - Date.now()) / 60000);
+        if (typeof options.onOwnedPhaseStateChanged === 'function') {
+          options.onOwnedPhaseStateChanged();
+        }
         await persistSchedule('page-expired-phase-recovery-intent');
-        await createPwmAlarmFromPlan(
+        alarmWrite = await createPwmAlarmFromPlanWithReceipt(
           { nextTriggerAt: recoveryAt },
           'page-expired-phase-recovery',
-          recoveryRevision
+          recoveryRevision,
+          {
+            previousWriteOwner,
+            ensureCurrent: recoveryIsCurrent
+          }
         );
+        if (typeof options.onOwnedPhaseStateChanged === 'function') {
+          options.onOwnedPhaseStateChanged();
+        }
         if (harnessOptions.expiredRecoveryClaimsNewRevision) {
           calls.push({ type: 'expired-page-recovery-new-owner',
             revision: recoveryRevision, at: recoveryAt });
         }
       }
-      return true;
+      const receipt = Object.freeze({
+        advanced: alarmWrite.created === true,
+        persisted: alarmWrite.created === true,
+        writeOwner: alarmWrite.writeOwner,
+        nextTriggerAt: alarmWrite.created === true ? recoveryAt : 0,
+        pageTimerWriteOwner,
+        pageTimerState: pageTimerWriteOwner > 0
+          ? snapshotOwnedPageTimerState(pageTimerWriteOwner)
+          : null
+      });
+      if (typeof harnessOptions.onExpiredRecoveryReceipt === 'function') {
+        harnessOptions.onExpiredRecoveryReceipt(receipt);
+      }
+      if (harnessOptions.expiredRecoveryReturnGate) {
+        await harnessOptions.expiredRecoveryReturnGate;
+      }
+      return receipt;
     }
     async function rescheduleActiveBoundary() {
       calls.push({ type: 'active-boundary' });
+      if (harnessOptions.activeBoundaryGate) {
+        if (typeof harnessOptions.onActiveBoundary === 'function') {
+          harnessOptions.onActiveBoundary();
+        }
+        await harnessOptions.activeBoundaryGate;
+      }
+      if (harnessOptions.activeBoundaryFailure === true) {
+        throw new Error('synthetic active boundary failure');
+      }
     }
     ${syncPhaseAdmissionSource16}
     ${deferredRepairCoordinatorSource11}
+    const queueDeferredScheduleRepairImpl = queueDeferredScheduleRepair;
+    queueDeferredScheduleRepair = options => {
+      calls.push({ type: 'queue-repair', options: structuredClone(options) });
+      return queueDeferredScheduleRepairImpl(options);
+    };
     ${alarmAdmissionSource16}
     ${durableLivePwmOwnerSource16}
     ${stableDurableLivePwmOwnerSource16}
@@ -17273,11 +20871,74 @@ ${alarmPwmCatchBody16}
       pending: false,
       pendingReason: '',
       pendingRemote: null,
+      pendingRemoteCausalEnvelope: null,
+      pendingRemoteScheduleAuthorityGeneration: 0,
+      pendingRemoteMutationGeneration: 0,
+      rereadAfterSafetyDisable: false,
       pendingOutbound: false,
       pendingOutboundReason: ''
     };
+    let deferredSyncDisablePending = false;
+    let deferredSyncDisableEpoch = 0;
+    let deferredSyncDisableRemoteSnapshot = null;
+    let deferredSyncDisableLocalScheduleAuthorityGeneration = 0;
+    let deferredSyncDisableSuccessorSnapshot = null;
+    let deferredSyncDisableSuccessorLocalAuthorityGeneration = 0;
+    let deferredSyncDisableSuccessorPublishGeneration = 0;
+    let localScheduleAuthorityGeneration = 0;
+    let syncPublishGeneration = 0;
+    let localScheduleMutationGeneration = 0;
+    let localScheduleMutationCommitPendingGeneration = 0;
+    let deferredSyncDisableLocalMutationGeneration = 0;
+    let deferredSyncDisableSuccessorMutationGeneration = 0;
+    let deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
     let syncWriteChain = Promise.resolve();
     let syncWriteOperationsInFlight = 0;
+    function getSyncPayloadIdentity(value) {
+      if (!value || typeof value !== 'object') return '';
+      try { return JSON.stringify(value); } catch (_) { return ''; }
+    }
+    function deferRemoteSyncDisableWhileManualOffBlocked(remote) {
+      deferredSyncDisablePending = true;
+      deferredSyncDisableEpoch += 1;
+      deferredSyncDisableRemoteSnapshot = remote && typeof remote === 'object'
+        ? { ...remote, enabled: false }
+        : { enabled: false, syncedAt: 0 };
+      return Promise.resolve(true);
+    }
+    function rememberRemoteSyncSuccessorAfterDeferredDisable(remote) {
+      deferredSyncDisableSuccessorSnapshot = { ...remote };
+      deferredSyncDisableSuccessorLocalAuthorityGeneration =
+        deferredSyncDisableLocalScheduleAuthorityGeneration;
+      deferredSyncDisableSuccessorPublishGeneration = syncPublishGeneration;
+      deferredSyncDisableSuccessorMutationGeneration =
+        localScheduleMutationGeneration;
+      deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+      _syncOpLock.rereadAfterSafetyDisable = true;
+      return Promise.resolve(true);
+    }
+    function isDeferredSyncDisableSuccessorCandidate(remote) {
+      return !!deferredSyncDisableSuccessorSnapshot
+        && !!remote
+        && remote.enabled !== false
+        && getSyncPayloadIdentity(remote)
+          === getSyncPayloadIdentity(deferredSyncDisableSuccessorSnapshot);
+    }
+    async function discardStaleDeferredSyncDisableSuccessor(remote) {
+      if (!isDeferredSyncDisableSuccessorCandidate(remote)) return true;
+      deferredSyncDisableSuccessorSnapshot = null;
+      deferredSyncDisableSuccessorLocalAuthorityGeneration = 0;
+      deferredSyncDisableSuccessorMutationGeneration = 0;
+      deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+      return true;
+    }
+    function queuePendingSyncAdoption(reason = '', explicitRemote = null) {
+      _syncOpLock.pending = true;
+      _syncOpLock.pendingReason = reason || _syncOpLock.pendingReason;
+      if (explicitRemote && typeof explicitRemote === 'object') {
+        _syncOpLock.pendingRemote = explicitRemote;
+      }
+    }
     async function getSyncPublishPending() { return false; }
     async function scheduleSyncRetry(kind = 'publish') {
       calls.push({ type: 'sync-retry', kind });
@@ -17307,6 +20968,7 @@ ${alarmPwmCatchBody16}
     async function deliverAlarmForTest(scheduledTime) {
       const alarm = { name: 'ac-pwm', scheduledTime };
       const activeBoundaryActionDelivery = false;
+      const activeBoundaryRetry = {};
       ${phaseSensitiveAlarmGateBody16}
       ${alarmPwmCatchBody16}
         return;
@@ -17314,6 +20976,7 @@ ${alarmPwmCatchBody16}
     }
     function supersedeReplacementOwnerForTest(nextTriggerAt) {
       pwmRuntimeRevision += 1;
+      pwmAlarmWriteGeneration += 1;
       schedule.pwmState = 'on';
       setNextTriggerAt(nextTriggerAt);
       schedule.smartOnBoundaryAt = Number(harnessOptions.supersedingBoundaryAt) || 0;
@@ -17335,6 +20998,7 @@ ${alarmPwmCatchBody16}
     }
     function supersedeIncompleteReplacementOwnerForTest(nextTriggerAt) {
       pwmRuntimeRevision += 1;
+      pwmAlarmWriteGeneration += 1;
       schedule.pwmState = 'on';
       setNextTriggerAt(nextTriggerAt);
       schedule.smartOnBoundaryAt = Number(harnessOptions.supersedingBoundaryAt) || 0;
@@ -17360,6 +21024,7 @@ ${alarmPwmCatchBody16}
       return pwmRuntimeRevision;
     }
     function commitSameRevisionOwnerForTest(owner = {}) {
+      pwmAlarmWriteGeneration += 1;
       const nextTriggerAt = Number(owner.nextTriggerAt) || 0;
       const boundaryAt = Number(owner.boundaryAt) || 0;
       schedule.pwmState = owner.pwmState === 'off' ? 'off' : 'on';
@@ -17368,6 +21033,9 @@ ${alarmPwmCatchBody16}
       schedule.pwmRetryKind = String(owner.pwmRetryKind || '');
       schedule.pwmRetryBoundaryAt = Number(owner.pwmRetryBoundaryAt) || 0;
       schedule.pwmRetryScheduledAt = Number(owner.pwmRetryScheduledAt) || 0;
+      if (Object.prototype.hasOwnProperty.call(owner, 'pageTimerError')) {
+        schedule.pageTimerError = String(owner.pageTimerError || '');
+      }
       schedule.smartClockPlannedAt = Number(owner.smartClockPlannedAt)
         || Date.now();
       schedule.alarmCreatedAt = Date.now();
@@ -17379,8 +21047,9 @@ ${alarmPwmCatchBody16}
       liveAt = nextTriggerAt;
       calls.push({ type: 'same-revision-owner-commit',
         revision: pwmRuntimeRevision, at: nextTriggerAt,
-        pwmState: schedule.pwmState });
-      return pwmRuntimeRevision;
+        pwmState: schedule.pwmState,
+        writeOwner: pwmAlarmWriteGeneration });
+      return pwmAlarmWriteGeneration;
     }
     function finishSameRevisionExecutorForTest() {
       pwmExecutionWithRecoveryCount = Math.max(
@@ -17395,6 +21064,7 @@ ${alarmPwmCatchBody16}
       execute: executePwmStepWithRecovery,
       repair: repairScheduleClock,
       pageAdopt: tryAdoptPageTimer,
+      setPageTimerOnly: setPageTimer,
       adopt: tryAdoptSyncedState,
       deliverAlarm: deliverAlarmForTest,
       queue: queueDeferredScheduleRepair,
@@ -17408,6 +21078,7 @@ ${alarmPwmCatchBody16}
       beginSameRevisionExecutor: beginSameRevisionExecutorForTest,
       commitSameRevisionOwner: commitSameRevisionOwnerForTest,
       finishSameRevisionExecutor: finishSameRevisionExecutorForTest,
+      leaveActiveHours: () => { activeHoursAllowed = false; },
       drainWaits: async () => {
         let observed = 0;
         while (observed < waitUntilPromises.length) {
@@ -17447,7 +21118,11 @@ ${alarmPwmCatchBody16}
     class PwmRepairInterlockDate16 extends Date {
       static now() { return nowMs; }
     },
-    testConsole
+    testConsole,
+    scheduleMutations.setScheduleNextTrigger,
+    scheduleMutations.setSchedulePwmClockIntent,
+    scheduleMutations.replaceSchedulePwmRetryState,
+    scheduleMutations.replaceSchedulePageTimerState
   );
 
   const preserveRevokeOptions16 = {
@@ -17604,8 +21279,7 @@ ${alarmPwmCatchBody16}
   const executorFirstPreReleaseSafe16 = executorFirstInterlock16.physicalOn()
     && executorFirstRepair16 === undefined
     && executorFirstGenericRepair16?.deferred === true
-    && executorFirstQueuedRepair16?.smartOnExpectedBoundaryAt
-      === ingressBoundary16
+    && executorFirstQueuedRepair16?.smartOnExpectedBoundaryAt === 0
     && !executorFirstInterlock16.calls.some(call =>
       call.type === 'page-timer'
         || call.type === 'one-minute-alarm'
@@ -17628,7 +21302,7 @@ ${alarmPwmCatchBody16}
       && executorFirstAfter16.pwmState === 'off'
       && executorFirstAfter16.nextTriggerAt === intendedCutoffAt16
       && executorFirstInterlock16.live() === intendedCutoffAt16,
-    '16F-0B-1E-0C: 物理 ON/toggle promise 未返回时失配 alarm repair 只合并 trailing；无一分钟钟，最终仅保留 intended OFF cutoff');
+    '16F-0B-1E-0C: 物理 ON/toggle 未返回时 alarm 入口先退，generic repair 只留无边界 trailing；最终仅保留 intended OFF cutoff');
 
   let releaseRepairFirstStatus16;
   let markRepairFirstStatusStarted16;
@@ -17674,7 +21348,7 @@ ${alarmPwmCatchBody16}
       && repairFirstResult16?.success === true
       && repairFirstExecutionResult16 === false
       && repairFirstInterlock16.calls.filter(call =>
-        call.type === 'storage-reload').length === 1
+        call.type === 'storage-reload').length === 0
       && repairFirstInterlock16.calls.filter(call =>
         call.type === 'repair-alarm').length === 1
       && repairFirstInterlock16.calls.filter(call =>
@@ -17899,6 +21573,265 @@ ${alarmPwmCatchBody16}
       && expiredPageAdoption16.live() === expiredPageRecoveryAt16,
     '16F-0B-1E-0F-2: page 采纳 60s 内过期 phase 时沿 reservation epoch 推进；不会 self-noop，最终 durable/live 均为未来钟');
 
+  const expiredPageRaceSchedule16 = () => ({
+    enabled: true,
+    mode: 'auto',
+    clockMode: true,
+    pwmState: 'off',
+    onMinutes: 12,
+    offMinutes: 18,
+    nextTriggerAt: pageAdoptOldAlarmAt16,
+    smartOnBoundaryAt: 0,
+    smartClockPlannedAt: 0,
+    alarmCreatedAt: ingressBoundary16,
+    alarmDelayMinutes: 10,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0,
+    pageTimerError: '',
+    smartMode: { enabled: false, sensitivity: 7 }
+  });
+  const expiredPageAdoptionPlan16 = reason => ({
+    adopt: true,
+    nextTriggerAt: expiredPagePhaseAt16,
+    source: 'page-timer',
+    reason
+  });
+
+  let releaseExpiredPredecessorEntry16;
+  let markExpiredPredecessorEntry16;
+  const expiredPredecessorEntryGate16 = new Promise(resolve => {
+    releaseExpiredPredecessorEntry16 = resolve;
+  });
+  const expiredPredecessorEntryStarted16 = new Promise(resolve => {
+    markExpiredPredecessorEntry16 = resolve;
+  });
+  let expiredPredecessorEntry16 = null;
+  const expiredPredecessorRace16 = loadPwmRepairInterlock16(
+    expiredPageRaceSchedule16(),
+    pageAdoptOldAlarmAt16,
+    ingressBoundary16,
+    {
+      physicalOn: false,
+      restoreFromLive: false,
+      pageTimerResult: { found: true, value: '18:59' },
+      computePageTimerAdoption: () => expiredPageAdoptionPlan16(
+        'test-expired-predecessor-entry-race'
+      ),
+      expiredRecoveryAt: expiredPageRecoveryAt16,
+      expiredRecoveryAction: 'off',
+      expiredRecoveryEntryGate: expiredPredecessorEntryGate16,
+      onExpiredRecoveryEntry: entry => {
+        expiredPredecessorEntry16 = entry;
+        markExpiredPredecessorEntry16();
+      }
+    }
+  );
+  const expiredPredecessorAdoption16 = expiredPredecessorRace16.pageAdopt(
+    'test-expired-page-predecessor-entry'
+  );
+  await expiredPredecessorEntryStarted16;
+  const expiredPredecessorOuterClear16 = expiredPredecessorRace16.calls.find(
+    call => call.type === 'clear-pwm'
+  );
+  const expiredPredecessorReplacementAt16 =
+    ingressBoundary16 + 16 * 60_000;
+  const expiredPredecessorReplacementOwner16 = expiredPredecessorRace16
+    .commitSameRevisionOwner({
+      pwmState: 'off',
+      nextTriggerAt: expiredPredecessorReplacementAt16,
+      smartClockPlannedAt: ingressBoundary16 + 3_000,
+      pageTimerError: 'NEW-EXPIRED-PREDECESSOR-OWNER'
+    });
+  const expiredPredecessorReplacementIndex16 =
+    expiredPredecessorRace16.calls.length - 1;
+  releaseExpiredPredecessorEntry16();
+  const expiredPredecessorApplied16 = await expiredPredecessorAdoption16;
+  const expiredPredecessorAfter16 = expiredPredecessorRace16.snapshot();
+  const expiredPredecessorDurable16 = expiredPredecessorRace16.durable();
+  const expiredPredecessorTail16 = expiredPredecessorRace16.calls.slice(
+    expiredPredecessorReplacementIndex16 + 1
+  );
+  assertPass(expiredPredecessorEntry16?.previousWriteOwner > 0
+      && expiredPredecessorEntry16.previousWriteOwner
+        === expiredPredecessorOuterClear16?.writeOwner
+      && expiredPredecessorEntry16.revision === 42
+      && expiredPredecessorReplacementOwner16
+        > expiredPredecessorEntry16.previousWriteOwner
+      && expiredPredecessorApplied16 === false
+      && expiredPredecessorRace16.live()
+        === expiredPredecessorReplacementAt16
+      && expiredPredecessorAfter16.nextTriggerAt
+        === expiredPredecessorReplacementAt16
+      && expiredPredecessorDurable16.nextTriggerAt
+        === expiredPredecessorReplacementAt16
+      && expiredPredecessorAfter16.pageTimerError
+        === 'NEW-EXPIRED-PREDECESSOR-OWNER'
+      && !expiredPredecessorTail16.some(call =>
+        call.type === 'repair-alarm'
+          || call.type === 'clear-pwm'
+          || call.type === 'persist'
+          || call.type === 'active-boundary'
+          || call.type === 'sync'),
+    '16F-0B-1E-0F-2-1: page outer clear receipt 作为 expired helper predecessor；helper 入场 await 中同 revision writer 换主后零恢复写、零发布');
+
+  let expiredPageTransferReceipt16 = null;
+  const expiredPageOwnerTransfer16 = loadPwmRepairInterlock16(
+    expiredPageRaceSchedule16(),
+    pageAdoptOldAlarmAt16,
+    ingressBoundary16,
+    {
+      physicalOn: false,
+      restoreFromLive: false,
+      pageTimerResult: { found: true, value: '18:59' },
+      computePageTimerAdoption: () => expiredPageAdoptionPlan16(
+        'test-expired-page-owner-transfer'
+      ),
+      expiredRecoveryAt: expiredPageRecoveryAt16,
+      expiredRecoveryAction: 'off',
+      expiredRecoveryClaimsPageOwner: true,
+      onExpiredRecoveryReceipt: receipt => {
+        expiredPageTransferReceipt16 = receipt;
+      }
+    }
+  );
+  const expiredPageOwnerTransferApplied16 =
+    await expiredPageOwnerTransfer16.pageAdopt(
+      'test-expired-page-owner-transfer'
+    );
+  const expiredPageOwnerTransferCall16 = expiredPageOwnerTransfer16.calls.find(
+    call => call.type === 'expired-page-owner-transfer'
+  );
+  const expiredPageOwnerTransferAdvance16 = expiredPageOwnerTransfer16.calls.find(
+    call => call.type === 'advance-expired'
+  );
+  const expiredPageOwnerTransferState16 = expiredPageOwnerTransfer16.snapshot();
+  const expiredPageTransferStateMatches16 = [
+    'pageTimerMinutes',
+    'pageTimerTargetAt',
+    'pageTimerError',
+    'pageTimerRetryAt',
+    'pageTimerRetryMinutes'
+  ].every(key => (
+    expiredPageOwnerTransferState16[key]
+      === expiredPageTransferReceipt16?.pageTimerState?.[key]
+  ));
+  assertPass(pageTimerAdoptionBody16.includes(
+      'isPageTimerStateCurrent: pageTimerStateIsCurrent,')
+      && pageTimerAdoptionBody16.includes(
+        'onPageTimerWriteOwnerClaimed: takePhasePageTimerWriteOwner,')
+      && pageTimerAdoptionBody16.includes(
+        'onOwnedPhaseStateChanged: refreshPageReadContext')
+      && pageTimerAdoptionBody16.includes(
+        'advanceReceipt.pageTimerState ?? null')
+      && expiredPageOwnerTransferApplied16 === true
+      && expiredPageOwnerTransferCall16?.pageTimerWriteOwner > 0
+      && expiredPageTransferReceipt16?.advanced === true
+      && expiredPageTransferReceipt16?.persisted === true
+      && expiredPageTransferReceipt16?.pageTimerWriteOwner
+        === expiredPageOwnerTransferCall16?.pageTimerWriteOwner
+      && expiredPageTransferReceipt16?.pageTimerState?.pageTimerWriteOwner
+        === expiredPageOwnerTransferCall16?.pageTimerWriteOwner
+      && expiredPageTransferStateMatches16
+      && expiredPageOwnerTransferAdvance16?.previousWriteOwner > 0
+      && expiredPageOwnerTransfer16.calls.filter(call =>
+        call.type === 'repair-alarm'
+          && call.tag === 'page-expired-phase-recovery').length === 1
+      && expiredPageOwnerTransfer16.calls.filter(call =>
+        call.type === 'active-boundary').length === 1
+      && expiredPageOwnerTransfer16.calls.filter(call =>
+        call.type === 'sync').length === 1
+      && expiredPageOwnerTransfer16.snapshot().nextTriggerAt
+        === expiredPageRecoveryAt16
+      && expiredPageOwnerTransfer16.durable().nextTriggerAt
+        === expiredPageRecoveryAt16
+      && expiredPageOwnerTransfer16.live() === expiredPageRecoveryAt16,
+    '16F-0B-1E-0F-2-2: expired helper 从 passive read 转移到 page writer owner；claim callback 与 phase refresh 后 receipt 回传，旧 adoption 可完成唯一发布');
+
+  let releaseExpiredPageReceipt16;
+  let markExpiredPageReceipt16;
+  const expiredPageReceiptGate16 = new Promise(resolve => {
+    releaseExpiredPageReceipt16 = resolve;
+  });
+  const expiredPageReceiptReady16 = new Promise(resolve => {
+    markExpiredPageReceipt16 = resolve;
+  });
+  let expiredPageOwnedReceipt16 = null;
+  const expiredPageReceiptRace16 = loadPwmRepairInterlock16({
+    enabled: true,
+    mode: 'auto',
+    clockMode: true,
+    pwmState: 'off',
+    onMinutes: 12,
+    offMinutes: 18,
+    nextTriggerAt: pageAdoptOldAlarmAt16,
+    smartOnBoundaryAt: 0,
+    smartClockPlannedAt: 0,
+    alarmCreatedAt: ingressBoundary16,
+    alarmDelayMinutes: 10,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0,
+    pageTimerError: '',
+    smartMode: { enabled: false, sensitivity: 7 }
+  }, pageAdoptOldAlarmAt16, ingressBoundary16, {
+    physicalOn: false,
+    restoreFromLive: false,
+    pageTimerResult: { found: true, value: '18:59' },
+    computePageTimerAdoption: () => ({
+      adopt: true,
+      nextTriggerAt: expiredPagePhaseAt16,
+      source: 'page-timer',
+      reason: 'test-expired-receipt-owner-race'
+    }),
+    expiredRecoveryAt: expiredPageRecoveryAt16,
+    expiredRecoveryAction: 'off',
+    expiredRecoveryReturnGate: expiredPageReceiptGate16,
+    onExpiredRecoveryReceipt: receipt => {
+      expiredPageOwnedReceipt16 = receipt;
+      markExpiredPageReceipt16();
+    }
+  });
+  const expiredPageReceiptAdoption16 = expiredPageReceiptRace16.pageAdopt(
+    'test-expired-page-exact-receipt'
+  );
+  await expiredPageReceiptReady16;
+  const expiredPageReplacementAt16 = ingressBoundary16 + 14 * 60_000;
+  const expiredPageReplacementOwner16 = expiredPageReceiptRace16
+    .commitSameRevisionOwner({
+      pwmState: 'off',
+      nextTriggerAt: expiredPageReplacementAt16,
+      smartClockPlannedAt: ingressBoundary16 + 2_000,
+      pageTimerError: 'NEW-EXPIRED-PAGE-OWNER'
+    });
+  const expiredPageReplacementIndex16 = expiredPageReceiptRace16.calls.length - 1;
+  releaseExpiredPageReceipt16();
+  const expiredPageReceiptApplied16 = await expiredPageReceiptAdoption16;
+  const expiredPageReceiptAfter16 = expiredPageReceiptRace16.snapshot();
+  const expiredPageReceiptDurable16 = expiredPageReceiptRace16.durable();
+  const expiredPageReceiptTail16 = expiredPageReceiptRace16.calls.slice(
+    expiredPageReplacementIndex16 + 1
+  );
+  assertPass(expiredPageOwnedReceipt16?.advanced === true
+      && expiredPageOwnedReceipt16.writeOwner > 0
+      && expiredPageReplacementOwner16
+        > expiredPageOwnedReceipt16.writeOwner
+      && expiredPageReceiptApplied16 === false
+      && expiredPageReceiptRace16.live() === expiredPageReplacementAt16
+      && expiredPageReceiptAfter16.nextTriggerAt
+        === expiredPageReplacementAt16
+      && expiredPageReceiptDurable16.nextTriggerAt
+        === expiredPageReplacementAt16
+      && expiredPageReceiptAfter16.pageTimerError
+        === 'NEW-EXPIRED-PAGE-OWNER'
+      && !expiredPageReceiptTail16.some(call =>
+        call.type === 'active-boundary'
+          || call.type === 'sync'
+          || call.type === 'persist'
+          || call.type === 'clear-pwm'
+          || call.type === 'repair-alarm'),
+    '16F-0B-1E-0F-2C: expired helper 返回 exact PWM receipt；return continuation 前同 revision writer 换主时旧 adoption 不采样全局 generation、不发布旧 phase');
+
   const incompletePageNow16 = ingressBoundary16 + 3_000;
   const incompletePageRepairAt16 = incompletePageNow16 + 5 * 60_000;
   const incompletePageReplacement16 = loadPwmRepairInterlock16({
@@ -18121,7 +22054,7 @@ ${alarmPwmCatchBody16}
       && incompletePageProofDurable16.nextTriggerAt
         === incompletePageRepairAt16
       && incompletePageProofRace16.live() === incompletePageRepairAt16,
-    '16F-0B-1E-0F-2C: page replacement proof await 期间换成不完整 revision 44 后重证失败；沿原 19:00 收口 durable/live 19:05 typed safe-delay');
+    '16F-0B-1E-0F-2B-1: page replacement proof await 期间换成不完整 revision 44 后重证失败；沿原 19:00 收口 durable/live 19:05 typed safe-delay');
 
   const runPageAdoptionFailureInterlock16 = async failureKind => {
     let releaseIntentPersist;
@@ -18208,7 +22141,11 @@ ${alarmPwmCatchBody16}
           && result.liveAt === result.schedule.nextTriggerAt
           && result.calls.some(call =>
             call.type === 'persist'
-              && String(call.reason).startsWith('page-timer-adopt-error'))
+              && (String(call.reason).startsWith('page-timer-adopt-error')
+                || (result.failureKind === 'create'
+                  && String(call.reason).startsWith(
+                    'page-timer-adopt-alarm-failed'
+                  ))))
           && result.calls.some(call =>
             call.type === 'infra-alarm'
               && call.name === 'ac-watchdog'
@@ -18219,6 +22156,632 @@ ${alarmPwmCatchBody16}
           && !result.calls.some(call =>
             call.type === 'run-pwm' || call.type === 'unexpected-click')),
     '16F-0B-1E-0F-3: page adoption claim 后 persist/clear/create 任一异常时旧 alarm 在 reservation 内零 click；释放后立即 repair，durable watchdog 与唯一未来钟收口');
+
+  const repeatedPagePersistFailure16 = loadPwmRepairInterlock16({
+    enabled: true,
+    pwmState: 'off',
+    onMinutes: 12,
+    offMinutes: 18,
+    nextTriggerAt: pageAdoptOldAlarmAt16,
+    smartOnBoundaryAt: 0,
+    smartClockPlannedAt: 0,
+    alarmCreatedAt: ingressBoundary16,
+    alarmDelayMinutes: 10,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0,
+    pageTimerError: '',
+    smartMode: { enabled: false, sensitivity: 5 }
+  }, pageAdoptOldAlarmAt16, ingressBoundary16, {
+    physicalOn: false,
+    restoreFromLive: false,
+    pageTimerResult: { found: true, value: '19:23' },
+    pageAdoptPersistFailures: 2
+  });
+  const repeatedPagePersistOutcome16 = await repeatedPagePersistFailure16
+    .pageAdopt('test-repeated-page-adoption-persist-failure')
+    .then(value => ({ value }), error => ({ error }));
+  await repeatedPagePersistFailure16.drainWaits();
+  const repeatedPagePersistFailures16 = repeatedPagePersistFailure16.calls
+    .filter(call => call.type === 'page-adopt-persist-failure');
+  const repeatedPageRepairQueues16 = repeatedPagePersistFailure16.calls
+    .filter(call => call.type === 'queue-repair');
+  assertPass(repeatedPagePersistOutcome16.error === undefined
+      && repeatedPagePersistOutcome16.value === false
+      && repeatedPagePersistFailures16.length === 2
+      && String(repeatedPagePersistFailures16[0].reason).startsWith(
+        'page-timer-adopt-intent')
+      && String(repeatedPagePersistFailures16[1].reason).startsWith(
+        'page-timer-adopt-error')
+      && repeatedPageRepairQueues16.length === 1
+      && repeatedPageRepairQueues16[0].options.revokeOwnerRevision === 42
+      && repeatedPagePersistFailure16.calls.some(call =>
+        call.type === 'infra-alarm' && call.name === 'ac-watchdog')
+      && repeatedPagePersistFailure16.deferred() === null
+      && !repeatedPagePersistFailure16.calls.some(call =>
+        call.type === 'run-pwm' || call.type === 'unexpected-click'),
+    '16F-0B-1E-0F-3A: intent 与 failure persist 连续 rejection 仍不外抛；owner-current adoption 建 watchdog、唯一 queue 并在释放 reservation 后即时 repair');
+
+  const pageOwnerRaceSchedule16 = () => ({
+    enabled: true,
+    mode: 'auto',
+    clockMode: true,
+    pwmState: 'off',
+    onMinutes: 12,
+    offMinutes: 18,
+    nextTriggerAt: pageAdoptOldAlarmAt16,
+    smartOnBoundaryAt: 0,
+    smartClockPlannedAt: ingressBoundary16,
+    alarmCreatedAt: ingressBoundary16,
+    alarmDelayMinutes: 10,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0,
+    pageTimerError: '',
+    smartMode: { enabled: false, sensitivity: 7 }
+  });
+
+  let releasePageReadOwnerRace16;
+  let markPageReadOwnerRace16;
+  const pageReadOwnerGate16 = new Promise(resolve => {
+    releasePageReadOwnerRace16 = resolve;
+  });
+  const pageReadOwnerStarted16 = new Promise(resolve => {
+    markPageReadOwnerRace16 = resolve;
+  });
+  const pageReadOwnerOptions16 = {
+    physicalOn: false,
+    restoreFromLive: false,
+    pageTimerResult: { found: true, value: '19:23' },
+    pageReadGate: pageReadOwnerGate16,
+    onPageRead: markPageReadOwnerRace16
+  };
+  const pageReadOwnerAt16 = ingressBoundary16 + 6 * 60_000;
+  const pageReadOwnerRace16 = loadPwmRepairInterlock16(
+    pageOwnerRaceSchedule16(),
+    pageAdoptOldAlarmAt16,
+    ingressBoundary16,
+    pageReadOwnerOptions16
+  );
+  const pageReadOwnerAdoption16 = pageReadOwnerRace16.pageAdopt(
+    'test-page-read-owner-race'
+  );
+  await pageReadOwnerStarted16;
+  pageReadOwnerRace16.commitSameRevisionOwner({
+    pwmState: 'on',
+    nextTriggerAt: pageReadOwnerAt16,
+    smartClockPlannedAt: ingressBoundary16,
+    boundaryAt: ingressBoundary16,
+    pwmRetryKind: 'smart-on-safe-delay',
+    pwmRetryBoundaryAt: ingressBoundary16,
+    pwmRetryScheduledAt: pageReadOwnerAt16,
+    pageTimerError: 'NEW-PAGE-READ-OWNER'
+  });
+  const pageReadOwnerCommitIndex16 = pageReadOwnerRace16.calls.length - 1;
+  releasePageReadOwnerRace16();
+  const pageReadOwnerApplied16 = await pageReadOwnerAdoption16;
+  const pageReadOwnerAfter16 = pageReadOwnerRace16.snapshot();
+  const pageReadOwnerDurable16 = pageReadOwnerRace16.durable();
+  const pageReadOwnerTail16 = pageReadOwnerRace16.calls.slice(
+    pageReadOwnerCommitIndex16 + 1
+  );
+  assertPass(pageReadOwnerApplied16 === false
+      && pageReadOwnerRace16.revision() === 41
+      && pageReadOwnerRace16.live() === pageReadOwnerAt16
+      && pageReadOwnerAfter16.nextTriggerAt === pageReadOwnerAt16
+      && pageReadOwnerDurable16.nextTriggerAt === pageReadOwnerAt16
+      && pageReadOwnerAfter16.pwmRetryKind === 'smart-on-safe-delay'
+      && pageReadOwnerAfter16.pageTimerError === 'NEW-PAGE-READ-OWNER'
+      && !pageReadOwnerTail16.some(call =>
+        call.type === 'invalidate-shutdown'
+          || call.type === 'clear-pwm'
+          || call.type === 'persist'
+          || call.type === 'repair-alarm'
+          || call.type === 'sync'),
+    '16F-0B-1E-0F-4: page proof await 中 same-revision typed owner 提交后，二次 live/context 门禁在 claim 前零副作用拒绝旧计划');
+
+  let releaseSerializedPageRead16;
+  let markSerializedPageRead16;
+  let releasePageWriterLifecycle16;
+  let markPageWriterLifecycle16;
+  const serializedPageReadGate16 = new Promise(resolve => {
+    releaseSerializedPageRead16 = resolve;
+  });
+  const serializedPageReadStarted16 = new Promise(resolve => {
+    markSerializedPageRead16 = resolve;
+  });
+  const pageWriterLifecycleGate16 = new Promise(resolve => {
+    releasePageWriterLifecycle16 = resolve;
+  });
+  const pageWriterLifecycleStarted16 = new Promise(resolve => {
+    markPageWriterLifecycle16 = resolve;
+  });
+  const pageWriterTargetAt16 = ingressBoundary16 + 17 * 60_000;
+  const serializedPageWriterRace16 = loadPwmRepairInterlock16(
+    pageOwnerRaceSchedule16(),
+    pageAdoptOldAlarmAt16,
+    ingressBoundary16,
+    {
+      physicalOn: false,
+      restoreFromLive: false,
+      pageTimerResult: { found: true, value: '19:23' },
+      pageReadGate: serializedPageReadGate16,
+      onPageRead: markSerializedPageRead16,
+      pageTimerLifecycleGate: pageWriterLifecycleGate16,
+      onPageTimerLifecycleClaim: markPageWriterLifecycle16,
+      pageTimerLifecyclePersists: true
+    }
+  );
+  const serializedPageAdoption16 = serializedPageWriterRace16.pageAdopt(
+    'test-page-full-writer-read-generation'
+  );
+  await serializedPageReadStarted16;
+  const pageOnlyWriter16 = serializedPageWriterRace16.setPageTimerOnly(
+    17,
+    { targetAt: pageWriterTargetAt16 }
+  );
+  await pageWriterLifecycleStarted16;
+  releaseSerializedPageRead16();
+  const serializedPageApplied16 = await serializedPageAdoption16;
+  releasePageWriterLifecycle16();
+  await pageOnlyWriter16;
+  const serializedPageAfter16 = serializedPageWriterRace16.snapshot();
+  const serializedPageDurable16 = serializedPageWriterRace16.durable();
+  assertPass(serializedPageApplied16 === false
+      && serializedPageWriterRace16.revision() === 41
+      && serializedPageWriterRace16.live() === pageAdoptOldAlarmAt16
+      && serializedPageAfter16.nextTriggerAt === pageAdoptOldAlarmAt16
+      && serializedPageDurable16.nextTriggerAt === pageAdoptOldAlarmAt16
+      && serializedPageAfter16.pageTimerMinutes === 17
+      && serializedPageAfter16.pageTimerTargetAt === pageWriterTargetAt16
+      && serializedPageDurable16.pageTimerTargetAt === pageWriterTargetAt16
+      && serializedPageWriterRace16.calls.filter(call =>
+        call.type === 'page-timer-only-persist').length === 1
+      && !serializedPageWriterRace16.calls.some(call =>
+        call.type === 'invalidate-shutdown'
+          || call.type === 'clear-pwm'
+          || (call.type === 'persist'
+            && String(call.reason).startsWith('page-timer-adopt'))
+          || call.type === 'sync'),
+    '16F-0B-1E-0F-4A: passive picker read 与完整 page writer 共用 generation；writer 在读中 claim 后旧采纳零 phase 副作用，最新 page proof 保留');
+
+  let releasePageIntentWriter16;
+  let markPageIntentWriterStarted16;
+  const pageIntentWriterGate16 = new Promise(resolve => {
+    releasePageIntentWriter16 = resolve;
+  });
+  const pageIntentWriterStarted16 = new Promise(resolve => {
+    markPageIntentWriterStarted16 = resolve;
+  });
+  let releasePageIntentRepairStatus16;
+  let markPageIntentRepairStatusStarted16;
+  const pageIntentRepairStatusGate16 = new Promise(resolve => {
+    releasePageIntentRepairStatus16 = resolve;
+  });
+  const pageIntentRepairStatusStarted16 = new Promise(resolve => {
+    markPageIntentRepairStatusStarted16 = resolve;
+  });
+  const pageIntentWriterTargetAt16 = ingressBoundary16 + 19 * 60_000;
+  const pageIntentWriterRace16 = loadPwmRepairInterlock16(
+    pageOwnerRaceSchedule16(),
+    pageAdoptOldAlarmAt16,
+    ingressBoundary16,
+    {
+      physicalOn: false,
+      restoreFromLive: false,
+      pageTimerResult: { found: true, value: '19:23' },
+      persistGate: pageIntentWriterGate16,
+      onPersistStart: markPageIntentWriterStarted16,
+      pageTimerLifecyclePersists: true,
+      statusGate: pageIntentRepairStatusGate16,
+      onStatusStart: markPageIntentRepairStatusStarted16
+    }
+  );
+  const pageIntentWriterAdoption16 = pageIntentWriterRace16.pageAdopt(
+    'test-page-writer-after-intent-read'
+  );
+  await pageIntentWriterStarted16;
+  const pageIntentPersistIndex16 = pageIntentWriterRace16.calls.findIndex(call =>
+    call.type === 'persist'
+      && String(call.reason).startsWith('page-timer-adopt-intent')
+  );
+  const pageIntentWriterReceipt16 = await pageIntentWriterRace16
+    .setPageTimerOnly(19, { targetAt: pageIntentWriterTargetAt16 });
+  const pageIntentWriterCommitIndex16 = pageIntentWriterRace16.calls.findIndex(
+    call => call.type === 'page-timer-only-persist'
+      && call.targetAt === pageIntentWriterTargetAt16
+  );
+  releasePageIntentWriter16();
+  const pageIntentWriterApplied16 = await pageIntentWriterAdoption16;
+  await pageIntentRepairStatusStarted16;
+  const pageIntentWriterAfter16 = pageIntentWriterRace16.snapshot();
+  const pageIntentWriterDurable16 = pageIntentWriterRace16.durable();
+  const pageIntentWriterTail16 = pageIntentWriterRace16.calls.slice(
+    pageIntentWriterCommitIndex16 + 1
+  );
+  releasePageIntentRepairStatus16();
+  await pageIntentWriterRace16.drainWaits();
+  assertPass(pageIntentWriterApplied16 === false
+      && pageIntentWriterRace16.revision() === 42
+      && pageIntentWriterReceipt16?.success === true
+      && pageIntentWriterReceipt16?.pageTimerWriteOwner > 0
+      && pageIntentPersistIndex16 >= 0
+      && pageIntentWriterCommitIndex16 > pageIntentPersistIndex16
+      && pageIntentWriterAfter16.pageTimerMinutes === 19
+      && pageIntentWriterAfter16.pageTimerTargetAt
+        === pageIntentWriterTargetAt16
+      && pageIntentWriterAfter16.pageTimerError === ''
+      && pageIntentWriterDurable16.pageTimerMinutes === 19
+      && pageIntentWriterDurable16.pageTimerTargetAt
+        === pageIntentWriterTargetAt16
+      && pageIntentWriterDurable16.pageTimerError === ''
+      && !pageIntentWriterRace16.calls.some(call => call.type === 'clear-pwm')
+      && !pageIntentWriterTail16.some(call =>
+        (call.type === 'repair-alarm' && call.tag === 'page-timer-adopt')
+          || (call.type === 'persist'
+            && String(call.reason).startsWith('page-timer-adopt'))
+          || call.type === 'sync'),
+    '16F-0B-1E-0F-4B: page passive read 后 durable intent persist 中完整 writer 接管；旧 adoption 首次 clear 前退出且不覆盖最新 page proof');
+
+  let releasePagePredecessorCreate16;
+  let markPagePredecessorCreate16;
+  const pagePredecessorCreateGate16 = new Promise(resolve => {
+    releasePagePredecessorCreate16 = resolve;
+  });
+  const pagePredecessorCreateStarted16 = new Promise(resolve => {
+    markPagePredecessorCreate16 = resolve;
+  });
+  const pagePredecessorOptions16 = {
+    physicalOn: false,
+    restoreFromLive: false,
+    pageTimerResult: { found: true, value: '19:23' },
+    beforePageAdoptCreateGate: pagePredecessorCreateGate16,
+    onBeforePageAdoptCreate: markPagePredecessorCreate16
+  };
+  const pagePredecessorOwnerAt16 = ingressBoundary16 + 8 * 60_000;
+  const pagePredecessorRace16 = loadPwmRepairInterlock16(
+    pageOwnerRaceSchedule16(),
+    pageAdoptOldAlarmAt16,
+    ingressBoundary16,
+    pagePredecessorOptions16
+  );
+  const pagePredecessorAdoption16 = pagePredecessorRace16.pageAdopt(
+    'test-page-clear-create-predecessor-race'
+  );
+  await pagePredecessorCreateStarted16;
+  pagePredecessorRace16.commitSameRevisionOwner({
+    pwmState: 'on',
+    nextTriggerAt: pagePredecessorOwnerAt16,
+    smartClockPlannedAt: ingressBoundary16,
+    boundaryAt: ingressBoundary16,
+    pwmRetryKind: 'smart-on-safe-delay',
+    pwmRetryBoundaryAt: ingressBoundary16,
+    pwmRetryScheduledAt: pagePredecessorOwnerAt16,
+    pageTimerError: 'NEW-PAGE-PREDECESSOR-OWNER'
+  });
+  const pagePredecessorCommitIndex16 = pagePredecessorRace16.calls.length - 1;
+  releasePagePredecessorCreate16();
+  const pagePredecessorApplied16 = await pagePredecessorAdoption16;
+  const pagePredecessorAfter16 = pagePredecessorRace16.snapshot();
+  const pagePredecessorDurable16 = pagePredecessorRace16.durable();
+  const pagePredecessorTail16 = pagePredecessorRace16.calls.slice(
+    pagePredecessorCommitIndex16 + 1
+  );
+  assertPass(pagePredecessorApplied16 === false
+      && pagePredecessorRace16.revision() === 42
+      && pagePredecessorRace16.live() === pagePredecessorOwnerAt16
+      && pagePredecessorAfter16.nextTriggerAt === pagePredecessorOwnerAt16
+      && pagePredecessorDurable16.nextTriggerAt === pagePredecessorOwnerAt16
+      && pagePredecessorAfter16.pageTimerError
+        === 'NEW-PAGE-PREDECESSOR-OWNER'
+      && pagePredecessorTail16.filter(call =>
+        call.type === 'repair-alarm-stale').length === 1
+      && !pagePredecessorTail16.some(call =>
+        call.type === 'repair-alarm'
+          || call.type === 'clear-pwm'
+          || call.type === 'persist'
+          || call.type === 'sync'),
+    '16F-0B-1E-0F-5: page clear receipt 后 same-revision writer 接管；create predecessor 返回 owner0 stale，零旧 failure persist/clear/sync');
+
+  let releasePageFailureWatchdog16;
+  let markPageFailureWatchdog16;
+  const pageFailureWatchdogGate16 = new Promise(resolve => {
+    releasePageFailureWatchdog16 = resolve;
+  });
+  const pageFailureWatchdogStarted16 = new Promise(resolve => {
+    markPageFailureWatchdog16 = resolve;
+  });
+  const pageFailureWatchdogOptions16 = {
+    physicalOn: false,
+    restoreFromLive: false,
+    pageTimerResult: { found: true, value: '19:23' },
+    pageAdoptCreateFailure: true,
+    pageFailureWatchdogGate: pageFailureWatchdogGate16,
+    onPageFailureWatchdog: markPageFailureWatchdog16
+  };
+  const pageFailureOwnerAt16 = ingressBoundary16 + 9 * 60_000;
+  const pageFailureWatchdogRace16 = loadPwmRepairInterlock16(
+    pageOwnerRaceSchedule16(),
+    pageAdoptOldAlarmAt16,
+    ingressBoundary16,
+    pageFailureWatchdogOptions16
+  );
+  const pageFailureWatchdogAdoption16 = pageFailureWatchdogRace16.pageAdopt(
+    'test-page-failure-watchdog-owner-race'
+  );
+  await pageFailureWatchdogStarted16;
+  pageFailureWatchdogRace16.commitSameRevisionOwner({
+    pwmState: 'off',
+    nextTriggerAt: pageFailureOwnerAt16,
+    smartClockPlannedAt: ingressBoundary16 + 2_000,
+    pageTimerError: 'NEW-PAGE-FAILURE-WATCHDOG-OWNER'
+  });
+  const pageFailureOwnerIndex16 = pageFailureWatchdogRace16.calls.length - 1;
+  releasePageFailureWatchdog16();
+  const pageFailureWatchdogApplied16 = await pageFailureWatchdogAdoption16;
+  const pageFailureWatchdogAfter16 = pageFailureWatchdogRace16.snapshot();
+  const pageFailureWatchdogDurable16 = pageFailureWatchdogRace16.durable();
+  const pageFailureWatchdogTail16 = pageFailureWatchdogRace16.calls.slice(
+    pageFailureOwnerIndex16 + 1
+  );
+  assertPass(pageFailureWatchdogApplied16 === false
+      && pageFailureWatchdogRace16.deferred() === null
+      && pageFailureWatchdogRace16.live() === pageFailureOwnerAt16
+      && pageFailureWatchdogAfter16.nextTriggerAt === pageFailureOwnerAt16
+      && pageFailureWatchdogDurable16.nextTriggerAt === pageFailureOwnerAt16
+      && pageFailureWatchdogAfter16.pageTimerError
+        === 'NEW-PAGE-FAILURE-WATCHDOG-OWNER'
+      && !pageFailureWatchdogTail16.some(call =>
+        call.type === 'repair-clock'
+          || call.type === 'repair-alarm'
+          || call.type === 'persist'
+          || call.type === 'clear-pwm'
+          || call.type === 'sync'),
+    '16F-0B-1E-0F-5A: page physical create failure 已持久化后，延迟 watchdog await 中换主；旧 failure 不再 queue/repair replacement');
+
+  const runPagePostCreateOwnerRace16 = async activeBoundaryFailure => {
+    let releaseActiveBoundary;
+    let markActiveBoundary;
+    const activeBoundaryGate = new Promise(resolve => {
+      releaseActiveBoundary = resolve;
+    });
+    const activeBoundaryStarted = new Promise(resolve => {
+      markActiveBoundary = resolve;
+    });
+    const options = {
+      physicalOn: false,
+      restoreFromLive: false,
+      pageTimerResult: { found: true, value: '19:23' },
+      activeBoundaryGate,
+      onActiveBoundary: markActiveBoundary,
+      activeBoundaryFailure
+    };
+    const ownerAt = ingressBoundary16
+      + (activeBoundaryFailure ? 12 : 10) * 60_000;
+    const harness = loadPwmRepairInterlock16(
+      pageOwnerRaceSchedule16(),
+      pageAdoptOldAlarmAt16,
+      ingressBoundary16,
+      options
+    );
+    const adoption = harness.pageAdopt(
+      `test-page-post-create-owner-race-${activeBoundaryFailure ? 'reject' : 'resolve'}`
+    );
+    await activeBoundaryStarted;
+    harness.commitSameRevisionOwner({
+      pwmState: activeBoundaryFailure ? 'on' : 'off',
+      nextTriggerAt: ownerAt,
+      smartClockPlannedAt: ingressBoundary16 + 1_000,
+      boundaryAt: activeBoundaryFailure ? ingressBoundary16 : 0,
+      pwmRetryKind: activeBoundaryFailure ? 'smart-on-safe-delay' : '',
+      pwmRetryBoundaryAt: activeBoundaryFailure ? ingressBoundary16 : 0,
+      pwmRetryScheduledAt: activeBoundaryFailure ? ownerAt : 0,
+      pageTimerError: activeBoundaryFailure
+        ? 'NEW-PAGE-POST-CREATE-REJECT-OWNER'
+        : 'NEW-PAGE-POST-CREATE-RESOLVE-OWNER'
+    });
+    const commitIndex = harness.calls.length - 1;
+    releaseActiveBoundary();
+    const applied = await adoption;
+    return {
+      activeBoundaryFailure,
+      ownerAt,
+      applied,
+      schedule: harness.snapshot(),
+      durable: harness.durable(),
+      liveAt: harness.live(),
+      tail: harness.calls.slice(commitIndex + 1)
+    };
+  };
+  const pagePostCreateOwnerResults16 = await Promise.all([
+    runPagePostCreateOwnerRace16(false),
+    runPagePostCreateOwnerRace16(true)
+  ]);
+  assertPass(pagePostCreateOwnerResults16.every(result =>
+    result.applied === false
+      && result.liveAt === result.ownerAt
+      && result.schedule.nextTriggerAt === result.ownerAt
+      && result.durable.nextTriggerAt === result.ownerAt
+      && result.schedule.pageTimerError.startsWith('NEW-PAGE-POST-CREATE-')
+      && result.schedule.smartMode.sensitivity === 7
+      && !result.tail.some(call =>
+        call.type === 'persist'
+          || call.type === 'clear-pwm'
+          || call.type === 'sync'
+          || call.type === 'repair-alarm')),
+    '16F-0B-1E-0F-6: page verified commit 后 active-boundary await 中换主；resolve/reject 均保护 replacement durable/live/config，旧 catch 零回滚');
+
+  let releasePageActiveHoursBoundary16;
+  let markPageActiveHoursBoundary16;
+  const pageActiveHoursBoundaryGate16 = new Promise(resolve => {
+    releasePageActiveHoursBoundary16 = resolve;
+  });
+  const pageActiveHoursBoundaryStarted16 = new Promise(resolve => {
+    markPageActiveHoursBoundary16 = resolve;
+  });
+  const pageActiveHoursRace16 = loadPwmRepairInterlock16(
+    pageOwnerRaceSchedule16(),
+    pageAdoptOldAlarmAt16,
+    ingressBoundary16,
+    {
+      physicalOn: false,
+      restoreFromLive: false,
+      pageTimerResult: { found: true, value: '19:23' },
+      activeBoundaryGate: pageActiveHoursBoundaryGate16,
+      onActiveBoundary: markPageActiveHoursBoundary16
+    }
+  );
+  const pageActiveHoursAdoption16 = pageActiveHoursRace16.pageAdopt(
+    'test-page-active-hours-crossing'
+  );
+  await pageActiveHoursBoundaryStarted16;
+  pageActiveHoursRace16.leaveActiveHours();
+  releasePageActiveHoursBoundary16();
+  const pageActiveHoursApplied16 = await pageActiveHoursAdoption16;
+  const pageActiveHoursAbort16 = pageActiveHoursRace16.calls.find(call =>
+    call.type === 'abort-stale'
+      && call.reason === 'page-timer-adopt-active-hours-paused'
+  );
+  assertPass(pageActiveHoursApplied16 === false
+      && pageActiveHoursAbort16?.current === false
+      && pageActiveHoursRace16.calls.some(call =>
+        call.type === 'active-hours-pause'
+          && call.reason === 'page-timer-adopt-active-hours-paused')
+      && pageActiveHoursRace16.live() === pageAdoptNewAlarmAt16
+      && pageActiveHoursRace16.snapshot().nextTriggerAt
+        === pageAdoptNewAlarmAt16
+      && pageActiveHoursRace16.durable().nextTriggerAt
+        === pageAdoptNewAlarmAt16
+      && !pageActiveHoursRace16.calls.some(call => call.type === 'sync'),
+    '16F-0B-1E-0F-6A: active-boundary await 跨过运行时段 end 时先执行 abort/pause，再按 exact phase owner 退出；绝不被早退跳过');
+
+  const abortStaleAutomationSource16 = extractSourceSection(
+    backgroundSource,
+    'async function abortStaleAutomation(',
+    '\n\n// 返回下一次状态切换的时间戳',
+    'stale automation active-hours abort'
+  );
+  const borrowedAbortBoundaryNow16 = ownedBoundaryNow16 + 2 * 60 * 60_000;
+  const borrowedAbortBoundary16 = createOwnedActiveBoundaryHarness16(
+    borrowedAbortBoundaryNow16,
+    {
+      insideActiveHours: false,
+      naturalBoundaryAt: borrowedAbortBoundaryNow16 + 10 * 60 * 60_000,
+      schedule: {
+        enabled: true,
+        pwmState: 'on',
+        nextTriggerAt: borrowedAbortBoundaryNow16 + 5 * 60_000,
+        smartMode: { enabled: true, sensitivity: 5 },
+        activeHours: { enabled: true, start: '08:00', end: '23:00' }
+      }
+    }
+  );
+  const borrowedAbortEpoch16 = borrowedAbortBoundary16.tryClaim();
+  const runBorrowedAbort16 = new Function(
+    'isAutomationOperationCurrent', 'schedule', 'isWithinActiveHours',
+    'onActiveBoundaryCrossed', 'console',
+    `${abortStaleAutomationSource16}; return abortStaleAutomation;`
+  )(
+    () => false,
+    { enabled: true },
+    () => false,
+    options => borrowedAbortBoundary16.run(options),
+    testConsole
+  );
+  const borrowedAbortResult16 = await runBorrowedAbort16(
+    51,
+    'test-page-borrowed-phase-active-hours-pause',
+    { phaseAdmissionEpoch: borrowedAbortEpoch16 }
+  );
+  const borrowedAbortStillHeld16 = borrowedAbortBoundary16.blocked();
+  const borrowedAbortCompetingClaim16 = borrowedAbortBoundary16.tryClaim();
+  borrowedAbortBoundary16.release(borrowedAbortEpoch16);
+  const runPwmOnlyBody16 = pwmBody.slice(
+    0,
+    pwmBody.indexOf('\nasync function recoverTypedSmartOnAlarmException(')
+  );
+  const runPwmBorrowedAbortReasons16 = [...runPwmOnlyBody16.matchAll(
+    /abortStaleAutomation\(\s*automationRevision,\s*'([^']+)'\s*,\s*\{\s*phaseAdmissionEpoch\s*\}\s*\)/g
+  )].map(match => match[1]);
+  const expectedRunPwmBorrowedAbortReasons16 = [
+    'runPwmStep-retry-active-hours-paused',
+    'runPwmStep-weather-active-hours-paused',
+    'runPwmStep-smart-current-cycle-active-hours-paused',
+    'runPwmStep-status-active-hours-paused',
+    'runPwmStep-toggle-active-hours-paused',
+    'runPwmStep-deferred-active-hours-paused',
+    'runPwmStep-deferred-sync-active-hours-paused',
+    'runPwmStep-page-timer-active-hours-paused',
+    'runPwmStep-short-timer-active-hours-paused',
+    'runPwmStep-commit-active-hours-paused',
+    'runPwmStep-persist-active-hours-paused',
+    'runPwmStep-sync-active-hours-paused'
+  ];
+  const executorBorrowedAbortReasons16 = [...pwmStepWithRecoveryBody16.matchAll(
+    /abortStaleAutomation\(\s*failedRevision,\s*'([^']+)'\s*,\s*\{\s*phaseAdmissionEpoch\s*\}\s*\)/g
+  )].map(match => match[1]);
+  const expectedExecutorBorrowedAbortReasons16 = [
+    'pwm-exception-active-hours-paused',
+    'pwm-typed-recovery-active-hours-paused',
+    'pwm-generic-recovery-active-hours-paused'
+  ];
+  const borrowedAbortShutdownIndex16 = borrowedAbortBoundary16.calls.findIndex(
+    call => call.type === 'shutdown'
+  );
+  const borrowedAbortNaturalRearmIndex16 = borrowedAbortBoundary16.calls.findIndex(
+    call => call.type === 'create'
+      && call.name === 'ac-active-boundary'
+      && call.scheduledTime === borrowedAbortBoundaryNow16 + 10 * 60 * 60_000
+  );
+  assertPass(abortStaleAutomationSource16.includes(
+      '{ phaseAdmissionEpoch = 0 } = {}')
+      && abortStaleAutomationSource16.includes(
+        'await onActiveBoundaryCrossed({ phaseAdmissionEpoch });')
+      && activeBoundaryHandlerSource16.includes(
+        'const ownsExistingAdmission = isSyncPhaseAdoptionAdmissionOwnerCurrent(')
+      && activeBoundaryHandlerSource16.includes(
+        'if (!ownsExistingAdmission) {')
+      && countOccurrences(runPwmOnlyBody16, 'abortStaleAutomation(')
+        === runPwmBorrowedAbortReasons16.length
+      && runPwmBorrowedAbortReasons16.join(',')
+        === expectedRunPwmBorrowedAbortReasons16.join(',')
+      && countOccurrences(pwmStepWithRecoveryBody16, 'abortStaleAutomation(')
+        === executorBorrowedAbortReasons16.length
+      && executorBorrowedAbortReasons16.join(',')
+        === expectedExecutorBorrowedAbortReasons16.join(',')
+      && pwmStepWithRecoveryBody16.indexOf(
+        "'pwm-exception-active-hours-paused'"
+      ) < pwmStepWithRecoveryBody16.indexOf(
+        'recoverTypedSmartOnAlarmException('
+      )
+      && pwmStepWithRecoveryBody16.indexOf(
+        'recoverTypedSmartOnAlarmException('
+      ) < pwmStepWithRecoveryBody16.indexOf(
+        "'pwm-typed-recovery-active-hours-paused'"
+      )
+      && pwmStepWithRecoveryBody16.indexOf(
+        'recoverGenericPwmAlarmException('
+      ) < pwmStepWithRecoveryBody16.indexOf(
+        "'pwm-generic-recovery-active-hours-paused'"
+      )
+      && borrowedAbortEpoch16 > 0
+      && borrowedAbortResult16 === true
+      && borrowedAbortStillHeld16 === true
+      && borrowedAbortCompetingClaim16 === 0
+      && borrowedAbortBoundary16.deferred() === false
+      && borrowedAbortBoundary16.retryAt() === 0
+      && borrowedAbortBoundary16.calls.filter(call =>
+        call.type === 'runtime-reset').length === 1
+      && borrowedAbortBoundary16.calls.filter(call =>
+        call.type === 'shutdown').length === 1
+      && borrowedAbortShutdownIndex16 >= 0
+      && borrowedAbortNaturalRearmIndex16 > borrowedAbortShutdownIndex16
+      && borrowedAbortBoundary16.calls.filter(call =>
+        call.type === 'persist'
+          && call.reason === 'active-hours-leave-pre-shutdown').length === 1
+      && !borrowedAbortBoundary16.calls.some(call => call.type === 'setup')
+      && borrowedAbortBoundary16.blocked() === false,
+    '16F-0B-1E-0F-6B: run/recovery 所有 stale abort 继承 phase owner；跨 active-hours 同 epoch 立即 shutdown 而非只留 1min defer，调用方释放后才解锁');
 
   let releasePageAdoptExecutor16;
   let markPageAdoptExecutorStarted16;
@@ -18301,9 +22864,24 @@ ${alarmPwmCatchBody16}
     'recoverTypedSmartOnAlarmException', 'recoverGenericPwmAlarmException',
     `let pwmExecutionWithRecoveryCount = 0;
     let deferredRepairAfterPwmOptions = null;
-    function isSyncPhaseAdoptionAdmissionBlockedFor() {
-      return isSyncPhaseAdoptionAdmissionBlocked();
+    let syncPhaseAdoptionAdmissionEpoch = 0;
+    let syncPhaseAdoptionAdmissionOwner = 0;
+    function claimSyncPhaseAdoptionAdmission() {
+      if (syncPhaseAdoptionAdmissionOwner > 0) return 0;
+      const epoch = ++syncPhaseAdoptionAdmissionEpoch;
+      syncPhaseAdoptionAdmissionOwner = epoch;
+      return epoch;
     }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) > 0
+        && Number(epoch) === syncPhaseAdoptionAdmissionOwner;
+    }
+    function releaseSyncPhaseAdoptionAdmission(epoch) {
+      if (!isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch)) return false;
+      syncPhaseAdoptionAdmissionOwner = 0;
+      return true;
+    }
+    async function abortStaleAutomation() { return false; }
     function isCurrentPwmStepRunning() { return false; }
     function waitUntil(promise) { return Promise.resolve(promise); }
     function drainDeferredScheduleRepair() { return false; }
@@ -18366,9 +22944,24 @@ ${alarmPwmCatchBody16}
       'recoverTypedSmartOnAlarmException', 'recoverGenericPwmAlarmException',
       `let pwmExecutionWithRecoveryCount = 0;
       let deferredRepairAfterPwmOptions = null;
-      function isSyncPhaseAdoptionAdmissionBlockedFor() {
-        return isSyncPhaseAdoptionAdmissionBlocked();
+      let syncPhaseAdoptionAdmissionEpoch = 0;
+      let syncPhaseAdoptionAdmissionOwner = 0;
+      function claimSyncPhaseAdoptionAdmission() {
+        if (syncPhaseAdoptionAdmissionOwner > 0) return 0;
+        const epoch = ++syncPhaseAdoptionAdmissionEpoch;
+        syncPhaseAdoptionAdmissionOwner = epoch;
+        return epoch;
       }
+      function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+        return Number(epoch) > 0
+          && Number(epoch) === syncPhaseAdoptionAdmissionOwner;
+      }
+      function releaseSyncPhaseAdoptionAdmission(epoch) {
+        if (!isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch)) return false;
+        syncPhaseAdoptionAdmissionOwner = 0;
+        return true;
+      }
+      async function abortStaleAutomation() { return false; }
       function isCurrentPwmStepRunning() { return false; }
       function waitUntil(promise) { return Promise.resolve(promise); }
       function drainDeferredScheduleRepair() { return false; }
@@ -18954,7 +23547,11 @@ ${deferDurableSource16}
   const runCommitAlarmFailure16 = new Function(
     'schedule', 'applyPwmPlanState', 'abortStaleAutomation',
     'persistSchedule', 'createPwmAlarmFromPlan', 'isAutomationOperationCurrent',
-    `return async function runCommitFailure(plan, automationRevision) {
+    `return async function runCommitFailure(
+      plan,
+      automationRevision,
+      phaseAdmissionEpoch
+    ) {
 ${commitDurableSource16}
 };`
   )(
@@ -18972,7 +23569,7 @@ ${commitDurableSource16}
   await runCommitAlarmFailure16({
     kind: 'commit',
     phasePatch: { pwmState: 'off', nextTriggerAt: commitFailureTarget16 }
-  }, 9);
+  }, 9, 33);
   assertPass(commitFailureOrder16.join(',')
         === 'persist:runPwmStep-commit-intent,create-alarm:false,persist:runPwmStep-commit-alarm-failed'
       && commitFailureSnapshots16[0]?.pwmState === 'off'
@@ -18989,7 +23586,11 @@ ${commitDurableSource16}
   const runStaleCommitFailure16 = new Function(
     'schedule', 'applyPwmPlanState', 'abortStaleAutomation',
     'persistSchedule', 'createPwmAlarmFromPlan', 'isAutomationOperationCurrent',
-    `return async function runCommitFailure(plan, automationRevision) {
+    `return async function runCommitFailure(
+      plan,
+      automationRevision,
+      phaseAdmissionEpoch
+    ) {
 ${commitDurableSource16}
 };`
   )(
@@ -19013,7 +23614,7 @@ ${commitDurableSource16}
   await runStaleCommitFailure16({
     kind: 'commit',
     phasePatch: { pwmState: 'off', nextTriggerAt: commitFailureTarget16 }
-  }, 21);
+  }, 21, 34);
   assertPass(staleCommitOrder16.join(',')
         === 'persist:runPwmStep-commit-intent,create-alarm:false'
       && staleCommitSchedule16.pageTimerError === 'NEW-COMMIT-LIFECYCLE'
@@ -19062,7 +23663,8 @@ ${commitDurableSource16}
       'clearPwmRetryState', 'currentSmartControlBoundary',
       'applyPreparedSmartModeDurations', 'recoveringSmartCurrentCycle',
       'capturePwmExceptionRecoveryContext', 'abortStaleAutomation',
-      'automationRevision', 'activatePwmSmartRetryContext',
+      'automationRevision', 'phaseAdmissionEpoch',
+      'activatePwmSmartRetryContext',
       `return async function runSmartRetryAdmission() {
 ${smartRetryAdmissionCallerSource16}
 return { smartRetryAdmission, smartRetryContext };
@@ -19089,6 +23691,7 @@ return { smartRetryAdmission, smartRetryContext };
         return false;
       },
       41,
+      57,
       (admission, scheduleSnapshot) => {
         trace.push('activate');
         const context = Object.freeze({
@@ -20433,19 +25036,119 @@ return plan;
   }
   assertPass(pageTimerMessageQueuePass16,
     '16I: 页面消息串行；page/PWM 外围 owner 在排队前或发送后失效均不发送/不提交，最终页面由新 owner 落地');
+  const exactHomeSenderSource16 = extractSourceSection(
+    backgroundSource,
+    'async function getExactACHomeTab(tabId) {',
+    '\n\nasync function cancelAutomaticOnRequests()',
+    'exact home low-level sender guard'
+  );
+  const createTabsGetTakeoverHarness16 = () => new Function(
+    'isACHomePageTab', 'assessContentRuntimeIdentity', 'console',
+    `let activeAutomationRevision = 7;
+    let activeShutdownRevision = 9;
+    let releaseTabsGet;
+    let markTabsGetStarted;
+    const tabsGetGate = new Promise(resolve => { releaseTabsGet = resolve; });
+    const tabsGetStarted = new Promise(resolve => { markTabsGetStarted = resolve; });
+    const physicalMessages = [];
+    const chrome = { tabs: {
+      async get(tabId) {
+        markTabsGetStarted();
+        await tabsGetGate;
+        return { id: tabId, url: 'https://w5.ab.ust.hk/njggt/app/' };
+      },
+      async sendMessage(tabId, message) {
+        physicalMessages.push({ tabId, message: { ...message } });
+        return { success: true, runtimeIdentity: { content: {}, main: {} } };
+      }
+    } };
+    function isAutomationAllowed() { return true; }
+    function isAutomationOperationCurrent(revision) {
+      return revision === activeAutomationRevision;
+    }
+    function isTimerBasedShutdownCurrent(revision) {
+      return revision === activeShutdownRevision;
+    }
+    ${exactHomeSenderSource16}
+    ${pageTimerMessageQueueSource16}
+    return {
+      claimPageTimerWriteOwner,
+      send: sendSerializedPageTimerMessage,
+      tabsGetStarted,
+      releaseTabsGet,
+      supersedeAutomation() { activeAutomationRevision += 1; },
+      supersedeShutdown() { activeShutdownRevision += 1; },
+      physicalMessages
+    };`
+  )(
+    tab => tab?.url === 'https://w5.ab.ust.hk/njggt/app/',
+    () => ({ valid: true }),
+    testConsole
+  );
+  const pageTabsGetTakeover16 = createTabsGetTakeoverHarness16();
+  const pageTabsGetOwnerA16 = pageTabsGetTakeover16
+    .claimPageTimerWriteOwner(() => true);
+  const pageTabsGetPending16 = pageTabsGetTakeover16.send(
+    7,
+    { action: 'setTimer', minutes: 41 },
+    null,
+    null,
+    pageTabsGetOwnerA16
+  );
+  await pageTabsGetTakeover16.tabsGetStarted;
+  const pageTabsGetOwnerB16 = pageTabsGetTakeover16
+    .claimPageTimerWriteOwner(() => true);
+  pageTabsGetTakeover16.releaseTabsGet();
+  const pageTabsGetResult16 = await pageTabsGetPending16;
+
+  const automationTabsGetTakeover16 = createTabsGetTakeoverHarness16();
+  const automationTabsGetPending16 = automationTabsGetTakeover16.send(
+    7,
+    { action: 'setTimer', minutes: 42 },
+    7
+  );
+  await automationTabsGetTakeover16.tabsGetStarted;
+  automationTabsGetTakeover16.supersedeAutomation();
+  automationTabsGetTakeover16.releaseTabsGet();
+  const automationTabsGetResult16 = await automationTabsGetPending16;
+
+  const shutdownTabsGetTakeover16 = createTabsGetTakeoverHarness16();
+  const shutdownTabsGetPending16 = shutdownTabsGetTakeover16.send(
+    7,
+    { action: 'setTimer', minutes: 43 },
+    null,
+    9
+  );
+  await shutdownTabsGetTakeover16.tabsGetStarted;
+  shutdownTabsGetTakeover16.supersedeShutdown();
+  shutdownTabsGetTakeover16.releaseTabsGet();
+  const shutdownTabsGetResult16 = await shutdownTabsGetPending16;
+  assertPass(pageTabsGetOwnerB16 > pageTabsGetOwnerA16
+      && pageTabsGetResult16?.pageTimerStale === true
+      && automationTabsGetResult16?.automationStale === true
+      && shutdownTabsGetResult16?.shutdownStale === true
+      && pageTabsGetTakeover16.physicalMessages.length === 0
+      && automationTabsGetTakeover16.physicalMessages.length === 0
+      && shutdownTabsGetTakeover16.physicalMessages.length === 0
+      && exactHomeSenderSource16.includes(
+        'if (!messageIsCurrent()) return staleMessageResult();')
+      && serializedPageTimerBody.includes(
+        'ensureCurrent: serializedMessageIsCurrent'),
+    '16I-1: tabs.get await 中 page/automation/shutdown 任一 owner 换主，low-level sender 在物理 send 前零发送并保留精确 stale 分类');
   assertPass(countOccurrences(backgroundSource, "chrome.alarms.create('ac-pwm'") === 0,
     '16J: 所有 ac-pwm 写入统一经过带最终门禁的创建器');
   assertPass(contentSource.includes("if (action === 'off')")
       && contentSource.includes("if (action === 'on')")
       && !contentSource.includes("if (action === 'on' || action === 'off') {")
       && pageConfirmSource.includes("if (!requestId || action !== 'on')")
-      && pageConfirmSource.includes('requestACState(true, notAfterAt)')
-      && !pageConfirmSource.includes('requestACState(needOn, notAfterAt)'),
+      && pageConfirmSource.includes(
+        'true,\n          notAfterAt,\n          cancellationRevision')
+      && !pageConfirmSource.includes('requestACState(needOn, notAfterAt'),
     '16J-1: 隔离世界与主世界都硬拒绝 OFF 操作，生产点击器只接受 ON');
 
   const toggleBody16 = extractSourceSection(
     backgroundSource,
-    'async function toggleNowAndSync(action)',
+    'async function toggleNowAndSync(',
     '\nasync function ensureDiagnosticAlarms',
     'toggleNowAndSync active-hours behavior'
   );
@@ -20508,6 +25211,9 @@ return plan;
     'createPwmAlarmWithVerify', 'createAlarm', 'persistSchedule', 'updateBadge',
     'createPwmAlarmFromPlan',
     `let pwmRuntimeRevision = 31;
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) === 61;
+    }
     ${toggleBody16}; return toggleNowAndSync;`
   )(
     manualRaceSchedule16,
@@ -20552,7 +25258,9 @@ return plan;
     async () => { manualRaceCalls16.push('badge'); },
     async () => { manualRaceCalls16.push('create-pwm'); return true; }
   );
-  const manualRaceResult16 = await manualRaceToggle16('on');
+  const manualRaceResult16 = await manualRaceToggle16('on', {
+    phaseAdmissionEpoch: 61
+  });
   assertPass(manualRaceResult16.success === true
       && manualRaceCalls16.join(',') === 'toggle-on,status',
     '16K-2: 时段外开始的手动 ON 即使等待期间进入时段，也只执行手动动作而不续跑自动 lifecycle');
@@ -20586,6 +25294,20 @@ return plan;
     'createAlarm', 'persistSchedule', 'syncScheduleToSync', 'updateBadge',
     'createPwmAlarmFromPlan',
     `let pwmRuntimeRevision = 41;
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) === 62;
+    }
+    async function clearPwmAlarmWithReceipt(_revision, _preserveClock, options = {}) {
+      const current = typeof options.ensureCurrent !== 'function'
+        || options.ensureCurrent();
+      if (current) await chrome.alarms.clear('ac-pwm');
+      return { cleared: current };
+    }
+    async function createPwmAlarmFromPlanWithReceipt(plan) {
+      setPwmClockIntent(plan.nextTriggerAt);
+      const created = await createPwmAlarmWithVerify();
+      return { created, writeOwner: created ? 1 : 0 };
+    }
     ${toggleBody16}; return toggleNowAndSync;`
   )(
     manualTimerFailureSchedule16,
@@ -20647,7 +25369,11 @@ return plan;
     async () => { manualTimerFailureCalls16.push('clear-pwm'); },
     async () => {
       manualTimerFailureCalls16.push('set-page-timer');
-      return { success: false, error: 'fresh page timer empty' };
+      return {
+        success: false,
+        error: 'fresh page timer empty',
+        pageTimerWriteOwner: 1
+      };
     },
     async () => false,
     async () => { manualTimerFailureCalls16.push('create-pwm-retry'); return true; },
@@ -20657,7 +25383,9 @@ return plan;
     async () => { manualTimerFailureCalls16.push('badge'); },
     async () => { manualTimerFailureCalls16.push('unexpected-normal-pwm'); return true; }
   );
-  const manualTimerFailureResult16 = await manualTimerFailureToggle16('on');
+  const manualTimerFailureResult16 = await manualTimerFailureToggle16('on', {
+    phaseAdmissionEpoch: 62
+  });
   assertPass(manualTimerFailureResult16.success === false
       && manualTimerFailureCalls16.filter(call => call === 'toggle-on').length === 1
       && manualTimerFailureCalls16.filter(call => call === 'set-page-timer').length === 1
@@ -20720,6 +25448,9 @@ return plan;
     ${clearPwmRetryFacade16}
     function isAutomationAllowed() { return true; }
     function isAutomationOperationCurrent(revision) { return revision === 41; }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) === 63;
+    }
     async function writePageTimerRetryAlarm({ action, isCurrent }) {
       calls.push('writer:' + action + ':' + isCurrent());
       schedule = replacementSchedule;
@@ -20754,7 +25485,12 @@ return plan;
     function prepareFreshPwmStartState() {}
     function setSmartOnPwmRetryState() {}
     ${toggleBody16}
-    return { run: toggleNowAndSync, current: () => schedule, calls, persisted };`
+    return {
+      run: action => toggleNowAndSync(action, { phaseAdmissionEpoch: 63 }),
+      current: () => schedule,
+      calls,
+      persisted
+    };`
   )(
     manualOnSwapOld16,
     manualOnSwapNew16,
@@ -20847,6 +25583,12 @@ return plan;
     function isPwmAlarmWriteOwnerCurrent(owner) {
       return owner > 0 && owner === pwmAlarmWriteGeneration;
     }
+    function isPwmAlarmWriteGenerationCurrent(generation) {
+      const expected = Number(generation);
+      return Number.isSafeInteger(expected)
+        && expected >= 0
+        && expected === pwmAlarmWriteGeneration;
+    }
     function clearSchedulePageTimerProofState(state) {
       clearProofMutation(state);
     }
@@ -20875,6 +25617,15 @@ return plan;
     function isAutomationOperationCurrent(revision) {
       return revision === pwmRuntimeRevision && schedule.enabled === true;
     }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) === 64;
+    }
+    async function clearPwmAlarmWithReceipt(_revision, _preserveClock, options = {}) {
+      const current = typeof options.ensureCurrent !== 'function'
+        || options.ensureCurrent();
+      if (current) calls.push('clear-pwm');
+      return { cleared: current };
+    }
     async function writePageTimerRetryAlarm({ isCurrent }) {
       calls.push('writer:' + isCurrent());
       return { stale: !isCurrent(), alarmCreated: false };
@@ -20900,7 +25651,8 @@ return plan;
         pageTimerResult: {
           success: true,
           targetAt,
-          actualDelayMinutes: 23
+          actualDelayMinutes: 23,
+          pageTimerWriteOwner: pageTimerWriteGeneration
         }
       };
     }
@@ -20931,6 +25683,34 @@ return plan;
       };
       return { created: true, writeOwner };
     }
+    function snapshotPwmClockIntentState() {
+      return {
+        nextTriggerAt: schedule.nextTriggerAt,
+        smartClockPlannedAt: schedule.smartClockPlannedAt,
+        alarmCreatedAt: schedule.alarmCreatedAt,
+        alarmDelayMinutes: schedule.alarmDelayMinutes
+      };
+    }
+    function replayPwmClockIntentState(clockState) {
+      Object.assign(schedule, clockState);
+      return true;
+    }
+    async function persistOwnedPwmAlarmFailure() { return false; }
+    function snapshotVerifiedPwmClockState(writeOwner) {
+      if (!isPwmAlarmWriteOwnerCurrent(writeOwner) || !verifiedClock) return null;
+      return { ...verifiedClock, pwmAlarmWriteOwner: writeOwner };
+    }
+    function replayVerifiedPwmClockState(clockState) {
+      if (!clockState
+          || !isPwmAlarmWriteOwnerCurrent(clockState.pwmAlarmWriteOwner)) {
+        return false;
+      }
+      schedule.nextTriggerAt = clockState.nextTriggerAt;
+      schedule.smartClockPlannedAt = clockState.smartClockPlannedAt;
+      schedule.alarmCreatedAt = clockState.alarmCreatedAt;
+      schedule.alarmDelayMinutes = clockState.alarmDelayMinutes;
+      return true;
+    }
     async function createAlarm(name) {
       calls.push('alarm:' + name);
       if (name === 'ac-badge-tick') {
@@ -20945,7 +25725,7 @@ return plan;
     const chrome = { alarms: { async clear() {} } };
     ${toggleBody16}
     return {
-      run: () => toggleNowAndSync('on'),
+      run: () => toggleNowAndSync('on', { phaseAdmissionEpoch: 64 }),
       current: () => schedule,
       verifiedClock: () => verifiedClock,
       calls,
@@ -21212,9 +25992,10 @@ return plan;
       && watchdogBody13.includes('await clearAutomationRuntimeAlarmsWhileBlocked();')
       && ensureDiagnosticAlarmsBody.includes('if (isAutomationAllowed()) return { restart: true };')
       && ensureDiagnosticAlarmsBody.includes('if (repair.restart) return ensureDiagnosticAlarms();')
-      && disabledUpdateBranch16.includes('if (wasEnabled)')
+      && disabledUpdateBranch16.includes(
+        "if (wasEnabled || scheduleAutomationIntent === 'disable')")
       && disabledUpdateBranch16.includes('shutdownAfterScheduleDisable()'),
-    '16L-2: setup/看门狗在暂停时清泄漏运行闹钟，遇到恢复立即交还恢复链；停用编辑不误关机');
+    '16L-2: setup/看门狗在暂停时清泄漏运行闹钟，遇到恢复立即交还恢复链；每次明确 disable 都幂等重布关机保险');
   assertPass(diagnosticOrchestrationSource.includes(
       'const automationPausedByActiveHours = schedule._automationPausedByActiveHours === true'
     )
@@ -21258,30 +26039,286 @@ return plan;
     `let scheduleUpdateChain = Promise.resolve();
     ${serializedScheduleUpdateSourceF90}; return runSerializedScheduleUpdate;`
   )();
+  const reclaimPendingManualOffSourceF90 = extractSourceSection(
+    backgroundSource,
+    'function reclaimPendingManualOffAfterFailedAuthority(',
+    '\n\nfunction createManualOffAdmissionToken',
+    'failed user authority manual OFF reclaim'
+  );
+  const recoverFailedUserAuthoritySourceF90 = extractSourceSection(
+    backgroundSource,
+    'async function recoverSafetyAfterFailedUserAuthority(',
+    '\n\nasync function finalizeManualOffAutomationPhase(',
+    'failed user authority recovery'
+  );
   const tryAdoptSyncedStateSourceF90 = extractSourceSection(
     backgroundSource,
     "async function tryAdoptSyncedState(reason = '', explicitRemote = null) {",
     '\n\n// ----- v0.5.10: 页面定时器作为跨设备主同步通道 -----',
     'sync latest mailbox'
   );
-  const loadTryAdoptSyncedStateF90 = ({ chrome, applySyncedPhase }) => new Function(
-    'chrome', 'SYNC_KEY', 'applySyncedPhase', 'runSerializedScheduleUpdate',
+  const queuePendingSyncAdoptionSourceF90 = extractSourceSection(
+    backgroundSource,
+    "function queuePendingSyncAdoption(reason = '', explicitRemote = null) {",
+    '\n\nfunction drainDeferredSyncAdoptionAfterManualOffAdmission()',
+    'sync safety predecessor mailbox'
+  );
+  const localMutationFinishSourceF90 = extractSourceSection(
+    backgroundSource,
+    'function drainAfterLocalScheduleMutation(reason) {',
+    '\n\nfunction recordCommittedLocalScheduleMutation(',
+    'local mutation finish and successor rebase'
+  );
+  const loadTryAdoptSyncedStateF90 = ({
+    chrome,
+    applySyncedPhase: applySyncedPhaseHook,
+    serializedUpdate = runSerializedScheduleUpdateF90,
+    initialPendingPublish = false,
+    syncScheduleToSync: syncScheduleHook = async () => true
+  }) => new Function(
+    'chrome', 'SYNC_KEY', 'applySyncedPhaseHook', 'runSerializedScheduleUpdate',
+    'initialPendingPublish', 'syncScheduleHook',
     'appendDiagnosticLog', 'console',
     `const _syncOpLock = {
       busy: false,
       pending: false,
       pendingReason: '',
       pendingRemote: null,
+      pendingRemoteScheduleAuthorityGeneration: 0,
+      pendingRemoteMutationGeneration: 0,
+      rereadAfterSafetyDisable: false,
       pendingOutbound: false,
       pendingOutboundReason: ''
     };
+    let manualOffAutomaticOnBlocked = false;
+    let manualOffAdmissionToken = '';
     let syncWriteChain = Promise.resolve();
     let syncWriteOperationsInFlight = 0;
-    async function getSyncPublishPending() { return false; }
+    let pendingPublish = initialPendingPublish === true;
+    let deferredSyncDisableLoaded = true;
+    let deferredSyncDisablePending = false;
+    let deferredSyncDisableSyntheticReadFailure = false;
+    let deferredSyncDisableEpoch = 0;
+    let deferredSyncDisableRemoteSnapshot = null;
+    let localScheduleAuthorityGeneration = 0;
+    let syncPublishGeneration = 0;
+    let deferredSyncDisableLocalScheduleAuthorityGeneration = 0;
+    let deferredSyncDisableSuccessorSnapshot = null;
+    let deferredSyncDisableSuccessorLocalAuthorityGeneration = 0;
+    let deferredSyncDisableSuccessorPublishGeneration = 0;
+    let localScheduleMutationGeneration = 0;
+    let localScheduleMutationObservedAt = 0;
+    let localScheduleMutationCommittedObservedAt = 0;
+    const localScheduleMutationObservedAtByGeneration = new Map();
+    let localScheduleMutationCommitPendingGeneration = 0;
+    let deferredSyncDisableLocalMutationGeneration = 0;
+    let deferredSyncDisableSuccessorMutationGeneration = 0;
+    let deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+    const outboundReasons = [];
+    const successorTombstones = [];
+    let lastWaitUntilPromise = Promise.resolve();
+    function waitUntil(promise) {
+      lastWaitUntilPromise = Promise.resolve(promise);
+      void lastWaitUntilPromise.catch(() => {});
+      return promise;
+    }
+    function getSyncPayloadIdentity(value) {
+      if (!value || typeof value !== 'object') return '';
+      try { return JSON.stringify(value); } catch (_) { return ''; }
+    }
+    function deferRemoteSyncDisableWhileManualOffBlocked(remote) {
+      deferredSyncDisablePending = true;
+      deferredSyncDisableEpoch += 1;
+      deferredSyncDisableRemoteSnapshot = remote && typeof remote === 'object'
+        ? { ...remote, enabled: false }
+        : { enabled: false, syncedAt: 0 };
+      deferredSyncDisableLocalScheduleAuthorityGeneration =
+        localScheduleAuthorityGeneration;
+      return Promise.resolve(true);
+    }
+    function rememberRemoteSyncSuccessorAfterDeferredDisable(remote) {
+      deferredSyncDisableSuccessorSnapshot = { ...remote };
+      deferredSyncDisableSuccessorLocalAuthorityGeneration =
+        deferredSyncDisableLocalScheduleAuthorityGeneration;
+      deferredSyncDisableSuccessorPublishGeneration = syncPublishGeneration;
+      deferredSyncDisableSuccessorMutationGeneration =
+        localScheduleMutationGeneration;
+      deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+      _syncOpLock.rereadAfterSafetyDisable = true;
+      return Promise.resolve(true);
+    }
+    function isDeferredSyncDisableSuccessorCandidate(remote) {
+      return !!deferredSyncDisableSuccessorSnapshot
+        && !!remote
+        && remote.enabled !== false
+        && getSyncPayloadIdentity(remote)
+          === getSyncPayloadIdentity(deferredSyncDisableSuccessorSnapshot);
+    }
+    async function discardStaleDeferredSyncDisableSuccessor(
+      remote,
+      reason = ''
+    ) {
+      if (!isDeferredSyncDisableSuccessorCandidate(remote)) return true;
+      successorTombstones.push({
+        pending: false,
+        remote: structuredClone(remote),
+        discardReason: String(reason || '')
+      });
+      deferredSyncDisableSuccessorSnapshot = null;
+      deferredSyncDisableSuccessorLocalAuthorityGeneration = 0;
+      deferredSyncDisableSuccessorMutationGeneration = 0;
+      deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+      return true;
+    }
+    async function applySyncedPhase(remote, reason, options = {}) {
+      const successorAtEntry = isDeferredSyncDisableSuccessorCandidate(remote);
+      const result = await applySyncedPhaseHook(remote, reason, options);
+      if (result === true
+          && remote?.enabled === false
+          && deferredSyncDisablePending
+          && getSyncPayloadIdentity(remote)
+            === getSyncPayloadIdentity(deferredSyncDisableRemoteSnapshot)) {
+        deferredSyncDisablePending = false;
+        deferredSyncDisableEpoch += 1;
+        deferredSyncDisableRemoteSnapshot = null;
+      }
+      if (result === true && successorAtEntry) {
+        deferredSyncDisableSuccessorSnapshot = null;
+        deferredSyncDisableSuccessorLocalAuthorityGeneration = 0;
+        deferredSyncDisableSuccessorPublishGeneration = 0;
+        deferredSyncDisableSuccessorMutationGeneration = 0;
+        deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+      }
+      return result;
+    }
+    async function getSyncPublishPending() { return pendingPublish; }
     async function scheduleSyncRetry() { return true; }
-    async function syncScheduleToSync() { return true; }
+    async function syncScheduleToSync(reason) {
+      outboundReasons.push(reason);
+      return syncScheduleHook(reason);
+    }
     function drainDeferredScheduleRepair() { return false; }
-    ${tryAdoptSyncedStateSourceF90}; return tryAdoptSyncedState;`
+    ${queuePendingSyncAdoptionSourceF90}
+    ${tryAdoptSyncedStateSourceF90}
+    ${localMutationFinishSourceF90}
+    Object.assign(tryAdoptSyncedState, {
+      arrive(reason, remote) {
+        if (remote?.enabled === false) {
+          deferRemoteSyncDisableWhileManualOffBlocked(remote, reason);
+        }
+        return tryAdoptSyncedState(reason, remote);
+      },
+      setPendingPublish(value) { pendingPublish = value === true; },
+      commitLocalMutation({ authority = false } = {}) {
+        localScheduleMutationGeneration += 1;
+        if (authority) localScheduleAuthorityGeneration += 1;
+        if (deferredSyncDisablePending
+            || deferredSyncDisableSuccessorSnapshot) {
+          deferredSyncDisableLocalPublishAfterRemoteAuthority = true;
+        }
+        pendingPublish = true;
+        return {
+          localScheduleAuthorityGeneration,
+          localScheduleMutationGeneration
+        };
+      },
+      claimLocalMutationForTest() {
+        localScheduleMutationGeneration += 1;
+        localScheduleMutationObservedAt += 1;
+        localScheduleMutationObservedAtByGeneration.set(
+          localScheduleMutationGeneration,
+          localScheduleMutationObservedAt
+        );
+        localScheduleMutationCommitPendingGeneration =
+          localScheduleMutationGeneration;
+        return localScheduleMutationGeneration;
+      },
+      completeClaimedLocalMutationForTest() {
+        if (deferredSyncDisablePending
+            || deferredSyncDisableSuccessorSnapshot) {
+          deferredSyncDisableLocalPublishAfterRemoteAuthority = true;
+        }
+        pendingPublish = true;
+        localScheduleMutationCommitPendingGeneration = 0;
+        return localScheduleMutationGeneration;
+      },
+      abortClaimedLocalMutationForTest() {
+        localScheduleMutationCommitPendingGeneration = 0;
+        return localScheduleMutationGeneration;
+      },
+      finishClaimedLocalMutationWithActualSemanticsForTest({
+        committed = false
+      } = {}) {
+        if (committed) {
+          localScheduleMutationCommittedObservedAt = Math.max(
+            localScheduleMutationCommittedObservedAt,
+            Number(localScheduleMutationObservedAtByGeneration.get(
+              localScheduleMutationGeneration
+            )) || 0
+          );
+        }
+        finishLocalScheduleMutationCommit(localScheduleMutationGeneration);
+        return localScheduleMutationGeneration;
+      },
+      waitForBackgroundTasks() { return lastWaitUntilPromise; },
+      restoreDeferredRecord(record = null) {
+        const restored = record && typeof record === 'object'
+          ? structuredClone(record)
+          : null;
+        deferredSyncDisablePending = restored?.pending === true;
+        deferredSyncDisableEpoch += deferredSyncDisablePending ? 1 : 0;
+        deferredSyncDisableRemoteSnapshot = deferredSyncDisablePending
+          ? structuredClone(restored?.remote || {
+              enabled: false,
+              syncedAt: 0
+            })
+          : null;
+        deferredSyncDisableLocalScheduleAuthorityGeneration =
+          localScheduleAuthorityGeneration;
+        deferredSyncDisableSuccessorSnapshot =
+          restored?.successor?.remote
+              && typeof restored.successor.remote === 'object'
+              && restored.successor.remote.enabled !== false
+            ? structuredClone(restored.successor.remote)
+            : null;
+        deferredSyncDisableSuccessorLocalAuthorityGeneration =
+          deferredSyncDisableSuccessorSnapshot
+            ? localScheduleAuthorityGeneration
+            : 0;
+        deferredSyncDisableSuccessorMutationGeneration =
+          deferredSyncDisableSuccessorSnapshot
+            ? localScheduleMutationGeneration
+            : 0;
+        deferredSyncDisableLocalPublishAfterRemoteAuthority =
+          restored?.localPublishAfterRemoteAuthority === true;
+        _syncOpLock.rereadAfterSafetyDisable =
+          !!deferredSyncDisableSuccessorSnapshot;
+      },
+      state() {
+        return {
+          ..._syncOpLock,
+          pendingPublish,
+          localScheduleAuthorityGeneration,
+          localScheduleMutationGeneration,
+          localScheduleMutationCommitPendingGeneration,
+          deferredSyncDisableLocalPublishAfterRemoteAuthority,
+          deferredSyncDisablePending,
+          deferredSyncDisableEpoch,
+          deferredSyncDisableRemoteSnapshot:
+            deferredSyncDisableRemoteSnapshot
+              ? structuredClone(deferredSyncDisableRemoteSnapshot)
+              : null,
+          deferredSyncDisableSuccessorSnapshot:
+            deferredSyncDisableSuccessorSnapshot
+              ? structuredClone(deferredSyncDisableSuccessorSnapshot)
+              : null,
+          deferredSyncDisableSuccessorMutationGeneration,
+          outboundReasons: [...outboundReasons],
+          successorTombstones: structuredClone(successorTombstones)
+        };
+      }
+    });
+    return tryAdoptSyncedState;`
   )(
     {
       ...chrome,
@@ -21291,8 +26328,10 @@ return plan;
       }
     },
     'ac_schedule_sync_test',
-    applySyncedPhase,
-    runSerializedScheduleUpdateF90,
+    applySyncedPhaseHook,
+    serializedUpdate,
+    initialPendingPublish,
+    syncScheduleHook,
     () => {},
     testConsole
   );
@@ -21309,6 +26348,9 @@ return plan;
     'publishSchedule', 'resetDisabledPwmRuntime', 'requestTimerBasedShutdown',
     'createAlarm', 'rescheduleActiveBoundary',
     'finishDisablePreemptionHook', 'comfortStartHook',
+    'initialManualOffToken', 'recoverAuthorityHook',
+    'authorityReleaseHook', 'localMutationCommitHook',
+    'remoteSafetyPreflightHook',
     `let schedule = {
       enabled: false,
       mode: 'pwm',
@@ -21323,22 +26365,316 @@ return plan;
     let smartReapplyPending = false;
     let automaticDisableAdmissionEpoch = 0;
     let automaticOnAdmissionBlocked = false;
+    let manualToggleIntentEpoch = 0;
+    let manualToggleIntentAction = '';
+    let manualToggleIntentSource = '';
+    let manualToggleIntentCompletedEpoch = 0;
+    let manualToggleIntentCompletedAction = '';
+    let manualOffAdmissionLoaded = true;
+    let manualOffAutomaticOnBlocked = !!initialManualOffToken;
+    let manualOffAdmissionToken = String(initialManualOffToken || '');
+    let manualOffAdmissionRequestedAt = initialManualOffToken ? 1 : 0;
+    let manualOffAdmissionPredecessorRequestedAt = 0;
+    let manualOffAdmissionPredecessorTokens = [];
+    let schedulePersistenceAuthorityEpoch = 0;
+    let deferredSyncDisablePending = false;
+    let deferredSyncDisableLoaded = true;
+    let deferredSyncDisableEpoch = 0;
+    let deferredSyncDisableLocalScheduleAuthorityGeneration = 0;
+    let remoteDisableArrivalGeneration = 0;
+    let localScheduleAuthorityGeneration = 0;
+    let localScheduleMutationGeneration = 0;
+    let remoteSyncAuthorityObservedAt = 0;
+    let localScheduleAuthorityObservedAt = 0;
+    let localScheduleMutationObservedAt = 0;
+    let localScheduleMutationCommittedObservedAt = 0;
+    const localScheduleMutationObservedAtByGeneration = new Map();
+    let syncAuthorityDurableBaselineLoaded = false;
+    let syncAuthorityDurableBaselineLoadPromise = null;
+    let startupManualOffAdmissionRestorePromise = null;
+    let syncAuthorityPreBaselineSequence = 0;
+    let syncAuthorityDurablePreBaselineSequenceReservedThrough = 0;
+    const syncAuthorityPreBaselineSequenceByObservedAt = new Map();
+    let deferredSyncDisableAuthorityOrderObservedAt = 0;
+    let deferredSyncDisableAuthorityPreBaselineSequence = 0;
+    let deferredSyncDisableSuccessorAuthorityOrderObservedAt = 0;
+    let deferredSyncDisableSuccessorAuthorityPreBaselineSequence = 0;
+    let localScheduleMutationCommitPendingGeneration = 0;
+    let startupDeferredDisableSupersededByUserIntent = false;
+    let startupRestoreSupersedingIntentEpoch = 0;
+    function isStartupRestoreSupersededByUserIntent() {
+      return startupRestoreSupersedingIntentEpoch > 0;
+    }
+    function releaseStartupRestoreSupersession(intentEpoch) {
+      const epoch = Number(intentEpoch) || 0;
+      if (epoch > 0 && startupRestoreSupersedingIntentEpoch === epoch) {
+        startupRestoreSupersedingIntentEpoch = 0;
+        return true;
+      }
+      return false;
+    }
+    let explicitDisableDurableWriteChain = Promise.resolve();
     let syncPublishGeneration = 0;
     let pwmRuntimeRevision = 1;
+    let syncPhaseAdoptionAdmissionEpoch = 0;
+    let syncPhaseAdoptionAdmissionOwner = 0;
+    const syncPhaseAdoptionAdmissionWaiters = [];
+    const phaseEvents = [];
+    const authorityEvents = [];
+    const cancellationEvents = [];
     let comfortStartRuns = 0;
+    function claimSyncPhaseAdoptionAdmission() {
+      if (syncPhaseAdoptionAdmissionOwner > 0) return 0;
+      const admissionEpoch = ++syncPhaseAdoptionAdmissionEpoch;
+      syncPhaseAdoptionAdmissionOwner = admissionEpoch;
+      phaseEvents.push('claim:' + admissionEpoch);
+      return admissionEpoch;
+    }
+    function claimSyncPhaseAdoptionAdmissionWhenAvailable() {
+      const admissionEpoch = claimSyncPhaseAdoptionAdmission();
+      if (admissionEpoch > 0) return Promise.resolve(admissionEpoch);
+      return new Promise(resolve => {
+        syncPhaseAdoptionAdmissionWaiters.push(resolve);
+      });
+    }
+    function releaseSyncPhaseAdoptionAdmission(admissionEpoch) {
+      if (syncPhaseAdoptionAdmissionOwner !== admissionEpoch) return false;
+      phaseEvents.push('release:' + admissionEpoch);
+      const nextWaiter = syncPhaseAdoptionAdmissionWaiters.shift();
+      if (nextWaiter) {
+        const nextAdmissionEpoch = ++syncPhaseAdoptionAdmissionEpoch;
+        syncPhaseAdoptionAdmissionOwner = nextAdmissionEpoch;
+        nextWaiter(nextAdmissionEpoch);
+        return true;
+      }
+      syncPhaseAdoptionAdmissionOwner = 0;
+      return true;
+    }
+    function drainDeferredScheduleRepair() { return false; }
+    function runSerializedSchedulePhaseOperation(
+      operation,
+      reason = 'schedule-phase'
+    ) {
+      return runSerializedScheduleUpdate(async () => {
+        const phaseAdmissionEpoch =
+          await claimSyncPhaseAdoptionAdmissionWhenAvailable();
+        try {
+          return await operation(phaseAdmissionEpoch);
+        } finally {
+          releaseSyncPhaseAdoptionAdmission(phaseAdmissionEpoch);
+          drainDeferredScheduleRepair(reason + '-complete');
+        }
+      });
+    }
     async function persistSchedule(reason, options = {}) {
-      return persistScheduleHook(reason, options, { ...schedule });
+      return persistScheduleHook(
+        reason,
+        options,
+        { ...schedule },
+        syncPhaseAdoptionAdmissionOwner
+      );
+    }
+    function claimManualToggleIntent(action) {
+      manualToggleIntentEpoch += 1;
+      manualToggleIntentAction = action === 'disable'
+        ? 'disable'
+        : action === 'off'
+          ? 'off'
+          : 'on';
+      return manualToggleIntentEpoch;
+    }
+    function nextSyncAuthorityObservedAt() {
+      const observedAt = Math.max(
+        Date.now(),
+        remoteSyncAuthorityObservedAt + 1
+      );
+      remoteSyncAuthorityObservedAt = observedAt;
+      return observedAt;
+    }
+    function rememberLocalScheduleMutationAfterRemoteAuthority(reason = '') {
+      void reason;
+      return Promise.resolve(true);
+    }
+    async function commitLocalScheduleMutationAuthority(
+      mutationGeneration,
+      reason = ''
+    ) {
+      if (typeof localMutationCommitHook === 'function') {
+        const hookResult = await localMutationCommitHook({
+          mutationGeneration,
+          reason,
+          schedule: structuredClone(schedule)
+        });
+        if (hookResult !== undefined) return hookResult;
+      }
+      void reason;
+      const cutoffObservedAt = Number(
+        localScheduleMutationObservedAtByGeneration.get(mutationGeneration)
+      ) || 0;
+      if (mutationGeneration !== localScheduleMutationGeneration
+          || mutationGeneration
+            !== localScheduleMutationCommitPendingGeneration
+          || cutoffObservedAt <= 0) return false;
+      localScheduleMutationCommittedObservedAt = Math.max(
+        localScheduleMutationCommittedObservedAt,
+        cutoffObservedAt
+      );
+      return true;
+    }
+    function finishLocalScheduleMutationCommit(mutationGeneration) {
+      if (localScheduleMutationCommitPendingGeneration
+          !== mutationGeneration) return false;
+      const cutoffObservedAt = Number(
+        localScheduleMutationObservedAtByGeneration.get(mutationGeneration)
+      ) || 0;
+      if (cutoffObservedAt <= 0
+          || localScheduleMutationCommittedObservedAt
+            < cutoffObservedAt) return false;
+      localScheduleMutationCommitPendingGeneration = 0;
+      localScheduleMutationObservedAtByGeneration.delete(
+        mutationGeneration
+      );
+      return true;
+    }
+    function isManualToggleIntentCurrent(intentEpoch, action) {
+      return intentEpoch === manualToggleIntentEpoch
+        && action === manualToggleIntentAction;
+    }
+    async function finalizeCompletedManualToggleAuthority(
+      intentEpoch,
+      action
+    ) {
+      const normalizedAction = action === 'off'
+        ? 'off'
+        : action === 'disable'
+          ? 'disable'
+          : 'on';
+      if (!isManualToggleIntentCurrent(intentEpoch, normalizedAction)) {
+        return false;
+      }
+      manualToggleIntentCompletedEpoch = intentEpoch;
+      manualToggleIntentCompletedAction = normalizedAction;
+      if (!manualOffAutomaticOnBlocked
+          && !manualOffAdmissionToken) return true;
+      return releaseManualOffAdmissionForAuthority(
+        intentEpoch,
+        normalizedAction
+      );
+    }
+    async function commitScheduleAuthority({
+      ensureCurrent,
+      markSyncPublishPending = false,
+      clearDeferredSyncDisable = false,
+      reason = ''
+    } = {}) {
+      const deferredDisableEpochAtCommit = deferredSyncDisableEpoch;
+      const authorityIsCurrent = () => (
+        (typeof ensureCurrent !== 'function' || ensureCurrent())
+        && (!clearDeferredSyncDisable
+          || deferredSyncDisableEpoch === deferredDisableEpochAtCommit)
+      );
+      if (!authorityIsCurrent()) return false;
+      authorityEvents.push('commit:start:' + reason);
+      await persistSchedule(reason, {
+        markSyncPublishPending,
+        clearDeferredSyncDisable
+      });
+      if (!authorityIsCurrent()) {
+        authorityEvents.push('commit:stale:' + reason);
+        return false;
+      }
+      if (clearDeferredSyncDisable) {
+        deferredSyncDisableLoaded = true;
+        deferredSyncDisablePending = false;
+        deferredSyncDisableEpoch += 1;
+        startupDeferredDisableSupersededByUserIntent = false;
+      }
+      authorityEvents.push('commit:done:' + reason);
+      return true;
+    }
+    async function releaseManualOffAdmissionForAuthority(intentEpoch, action) {
+      const normalizedAction = action === 'disable' ? 'disable' : 'on';
+      const deferredDisableEpochAtRelease = deferredSyncDisableEpoch;
+      const releaseIsCurrent = () => (
+        isManualToggleIntentCurrent(intentEpoch, normalizedAction)
+        && !deferredSyncDisablePending
+        && deferredSyncDisableEpoch === deferredDisableEpochAtRelease
+      );
+      authorityEvents.push('release:start:' + normalizedAction + ':' + intentEpoch);
+      if (!releaseIsCurrent()) return false;
+      if (typeof authorityReleaseHook === 'function') {
+        await authorityReleaseHook({
+          intentEpoch,
+          action: normalizedAction,
+          token: manualOffAdmissionToken,
+          phaseOwner: syncPhaseAdoptionAdmissionOwner
+        });
+      }
+      if (!releaseIsCurrent()) {
+        authorityEvents.push('release:stale:' + normalizedAction + ':' + intentEpoch);
+        return false;
+      }
+      manualOffAdmissionToken = '';
+      manualOffAdmissionRequestedAt = 0;
+      manualOffAutomaticOnBlocked = false;
+      authorityEvents.push('release:done:' + normalizedAction + ':' + intentEpoch);
+      return true;
+    }
+    function releaseManualOffAdmissionForManualOn(intentEpoch) {
+      return releaseManualOffAdmissionForAuthority(intentEpoch, 'on');
+    }
+    async function commitScheduleAndReleaseManualOffAdmission({
+      ensureCurrent,
+      markSyncPublishPending = false,
+      clearDeferredSyncDisable = false,
+      reason = ''
+    } = {}) {
+      if (typeof ensureCurrent === 'function' && !ensureCurrent()) return false;
+      await persistSchedule(reason, {
+        markSyncPublishPending,
+        clearDeferredSyncDisable
+      });
+      if (typeof ensureCurrent === 'function' && !ensureCurrent()) return false;
+      if (clearDeferredSyncDisable) {
+        deferredSyncDisablePending = false;
+        deferredSyncDisableEpoch += 1;
+      }
+      manualOffAdmissionToken = '';
+      manualOffAdmissionRequestedAt = 0;
+      manualOffAutomaticOnBlocked = false;
+      return true;
     }
     async function syncScheduleToSync(reason) {
       return publishSchedule(reason, { ...schedule });
     }
+    function isAutomationAllowedForSchedule(snapshot) {
+      return snapshot?.enabled === true;
+    }
     function isAutomationAllowed() {
-      return !automaticOnAdmissionBlocked && schedule.enabled;
+      return manualOffAdmissionLoaded
+        && !manualOffAutomaticOnBlocked
+        && deferredSyncDisableLoaded
+        && !deferredSyncDisablePending
+        && !automaticOnAdmissionBlocked
+        && isAutomationAllowedForSchedule(schedule);
     }
     function isComfortStartActive() {
       return schedule.enabled && Number(schedule.comfortStartUntil) > Date.now();
     }
     async function scheduleSyncRetry() { return true; }
+    async function refreshRemoteDisableBeforeLocalRelease(
+      ensureCurrent,
+      reason = ''
+    ) {
+      if (typeof remoteSafetyPreflightHook === 'function') {
+        return remoteSafetyPreflightHook({
+          ensureCurrent,
+          reason,
+          schedule: structuredClone(schedule)
+        });
+      }
+      return typeof ensureCurrent !== 'function' || ensureCurrent();
+    }
     async function runComfortStart() {
       if (!isAutomationAllowed()) {
         return { success: false, cancelled: true, error: 'admission blocked' };
@@ -21352,8 +26688,40 @@ return plan;
       return { success: true, minimumMinutes: 5 };
     }
     function invalidateTimerBasedShutdown() {}
+    async function settleDeferredSyncDisable(
+      _phaseAdmissionEpoch,
+      { ensureCurrent, reason = '' } = {}
+    ) {
+      if (typeof ensureCurrent === 'function' && !ensureCurrent()) return null;
+      schedule.enabled = false;
+      const settled = await commitScheduleAndReleaseManualOffAdmission({
+        ensureCurrent,
+        markSyncPublishPending: true,
+        clearDeferredSyncDisable: true,
+        reason: reason + '-deferred-sync-disable'
+      });
+      return settled
+        ? { success: true, remoteDisabled: true, schedule: { ...schedule } }
+        : null;
+    }
+    ${reclaimPendingManualOffSourceF90}
     ${explicitDisableClaimSource6}
-    async function finishExplicitDisablePreemption() {
+    function queueManualOffAutomaticOnCancellation(options = {}) {
+      cancellationEvents.push(
+        'queue:' + String(options.claimRevision === false)
+          + ':' + String(options.holdManualOffAdmission === false)
+      );
+      return (async () => {
+        if (typeof finishDisablePreemptionHook === 'function') {
+          await finishDisablePreemptionHook({ ...schedule });
+        }
+        cancellationEvents.push('settled');
+        return true;
+      })();
+    }
+    async function finishExplicitDisablePreemption(preemptionPromise = null) {
+      cancellationEvents.push('finish');
+      if (preemptionPromise) return preemptionPromise;
       if (typeof finishDisablePreemptionHook === 'function') {
         return finishDisablePreemptionHook({ ...schedule });
       }
@@ -21365,6 +26733,26 @@ return plan;
       }
     }
     async function rescheduleSmartWeatherAlarm() {}
+    async function resumePendingManualOffAdmission(reason) {
+      return runSerializedSchedulePhaseOperation(
+        async phaseAdmissionEpoch => {
+          phaseEvents.push('resume:' + phaseAdmissionEpoch + ':' + reason);
+          if (typeof recoverAuthorityHook === 'function') {
+            return recoverAuthorityHook({
+              phaseAdmissionEpoch,
+              phaseOwner: syncPhaseAdoptionAdmissionOwner,
+              manualToggleIntentEpoch,
+              manualToggleIntentAction,
+              manualOffAdmissionToken,
+              reason
+            });
+          }
+          return { success: true, resumed: true };
+        },
+        reason
+      );
+    }
+    ${recoverFailedUserAuthoritySourceF90}
     function sanitizeMinutes(value, fallback) {
       const parsed = Number.parseInt(value, 10);
       return Number.isFinite(parsed) && parsed >= 1 ? parsed : fallback;
@@ -21373,16 +26761,117 @@ return plan;
       const parsed = Number(value);
       return Number.isFinite(parsed) ? Math.max(0, Math.min(10, parsed)) : 5;
     }
+    function clearPwmRetryState() {
+      schedule.pwmRetryKind = '';
+      schedule.pwmRetryBoundaryAt = 0;
+      schedule.pwmRetryScheduledAt = 0;
+    }
+    function snapshotScheduleForLocalPersistence() {
+      if (!schedule.smartMode?.enabled) {
+        schedule.smartOnBoundaryAt = 0;
+        clearPwmRetryState();
+      }
+      return { ...schedule };
+    }
     async function dispatch(msg, sendResponse) {
+      const declaredScheduleAutomationIntent = msg.type === 'updateSchedule'
+        ? String(msg.data?.automationIntent || '')
+        : '';
+      const scheduleAutomationIntent = declaredScheduleAutomationIntent
+        || (msg.type === 'updateSchedule' && msg.data?.enabled === false
+          ? 'disable'
+          : '');
+      const localScheduleMutationGenerationAtArrival =
+        ++localScheduleMutationGeneration;
+      localScheduleMutationObservedAt = nextSyncAuthorityObservedAt();
+      localScheduleMutationObservedAtByGeneration.set(
+        localScheduleMutationGenerationAtArrival,
+        localScheduleMutationObservedAt
+      );
+      localScheduleMutationCommitPendingGeneration =
+        localScheduleMutationGenerationAtArrival;
+      let localScheduleAuthorityGenerationAtArrival =
+        localScheduleAuthorityGeneration;
+      if (scheduleAutomationIntent === 'enable'
+          || scheduleAutomationIntent === 'disable') {
+        localScheduleAuthorityGenerationAtArrival =
+          ++localScheduleAuthorityGeneration;
+        localScheduleAuthorityObservedAt = nextSyncAuthorityObservedAt();
+      }
+      if (deferredSyncDisablePending) {
+        rememberLocalScheduleMutationAfterRemoteAuthority(
+          'updateSchedule-' + localScheduleMutationGenerationAtArrival
+        );
+      }
+      if (scheduleAutomationIntent
+          && deferredSyncDisablePending
+          && deferredSyncDisableLocalScheduleAuthorityGeneration
+            !== localScheduleAuthorityGenerationAtArrival) {
+        startupDeferredDisableSupersededByUserIntent = true;
+      }
+      const explicitScheduleEnableIntentEpoch = scheduleAutomationIntent === 'enable'
+        ? claimManualToggleIntent('on')
+        : 0;
+      const explicitScheduleDisableIntentEpoch = scheduleAutomationIntent === 'disable'
+        ? claimManualToggleIntent('disable')
+        : 0;
+      const explicitScheduleDisableAdmissionEpoch = scheduleAutomationIntent === 'disable'
+        ? preemptAutomaticOnForExplicitDisable()
+        : 0;
+      const scheduleAuthorityRemoteDisableGenerationAtArrival =
+        remoteDisableArrivalGeneration;
+      const explicitScheduleDisablePreemptionPromise =
+        scheduleAutomationIntent === 'disable'
+          ? queueManualOffAutomaticOnCancellation({
+              claimRevision: false,
+              holdManualOffAdmission: false
+            })
+          : Promise.resolve();
+      const scheduleUpdateAdmissionEpochAtArrival = automaticDisableAdmissionEpoch;
       ${updateScheduleBody}
     }
     return {
       dispatch,
       state: () => ({ ...schedule }),
+      setScheduleEnabled(value) { schedule.enabled = value === true; },
       admissionBlocked: () => automaticOnAdmissionBlocked,
       admissionEpoch: () => automaticDisableAdmissionEpoch,
       automationAllowed: () => isAutomationAllowed(),
-      comfortStartRuns: () => comfortStartRuns
+      claimPhase: claimSyncPhaseAdoptionAdmission,
+      releasePhase: releaseSyncPhaseAdoptionAdmission,
+      phaseOwner: () => syncPhaseAdoptionAdmissionOwner,
+      phaseEvents: () => [...phaseEvents],
+      manualIntent: () => ({
+        epoch: manualToggleIntentEpoch,
+        action: manualToggleIntentAction,
+        token: manualOffAdmissionToken,
+        blocked: manualOffAutomaticOnBlocked
+      }),
+      claimManualIntent: action => claimManualToggleIntent(action),
+      arriveDeferredDisable: () => {
+        deferredSyncDisableLoaded = true;
+        deferredSyncDisablePending = true;
+        deferredSyncDisableEpoch += 1;
+        deferredSyncDisableLocalScheduleAuthorityGeneration =
+          localScheduleAuthorityGeneration;
+        remoteDisableArrivalGeneration += 1;
+      },
+      deferredDisable: () => ({
+        loaded: deferredSyncDisableLoaded,
+        pending: deferredSyncDisablePending,
+        epoch: deferredSyncDisableEpoch
+      }),
+      authorityEvents: () => [...authorityEvents],
+      cancellationEvents: () => [...cancellationEvents],
+      waitExplicitDisableChain: () => explicitDisableDurableWriteChain,
+      comfortStartRuns: () => comfortStartRuns,
+      reloadFromStored(snapshot) {
+        schedule = structuredClone(snapshot);
+        return { ...schedule };
+      },
+      persistCurrent(reason = 'test-post-reload-persist') {
+        return persistSchedule(reason, { syncFromLiveAlarm: false });
+      }
     };`
   );
   const actualUpdateHarnessF90 = makeActualUpdateHarnessF90(
@@ -21451,10 +26940,14 @@ return plan;
     'remote-disable-event',
     { syncedAt: 2, enabled: false }
   );
-  await Promise.resolve();
-  const queuesBlockedBehindActualUpdateF90 = actualUpdatePersistReasonsF90.length === 2
-    && actualUpdatePersistReasonsF90[1]
-      === 'updateSchedule-disable-admission-intent'
+  for (let attempt = 0;
+    attempt < 20 && actualUpdatePersistReasonsF90.length < 2;
+    attempt += 1) {
+    await Promise.resolve();
+  }
+  const queuesBlockedBehindActualUpdateF90 =
+    actualUpdatePersistReasonsF90.slice(0, 2).join(',')
+      === 'updateSchedule,updateSchedule-disable-admission-intent'
     && actualUpdateHarnessF90.state().enabled === false
     && actualUpdateHarnessF90.admissionBlocked() === true
     && actualUpdateResponsesF90.length === 0
@@ -21467,7 +26960,7 @@ return plan;
     syncOwnerF90,
     queuedSyncF90
   ]);
-  assertPass(queuesBlockedBehindActualUpdateF90
+  const actualUpdatePassF90 = queuesBlockedBehindActualUpdateF90
       && firstActualUpdateOutcomeF90.status === 'rejected'
       && firstActualUpdateOutcomeF90.reason?.message
         === '设置请求已被更晚的明确停用取消'
@@ -21482,8 +26975,1010 @@ return plan;
       && !actualUpdateRuntimeAlarmsF90.includes('ac-watchdog')
       && syncReadsF90 === 0
       && adoptedStatesF90.join(',') === 'false'
-      && applySyncedPhaseBody.includes('remoteSyncedAt <= lastSyncedAt'),
+      && applySyncedPhaseBody.includes('remoteSyncedAt <= lastSyncedAt');
+  assertPass(actualUpdatePassF90,
     '16M-2: 明确停用先原子落 intent 并锁准入；旧 enable 失败，后续停用事务与 sync 串行且仅采纳 mailbox disable');
+
+  const failedEnableRecoveryEventsF90 = [];
+  const failedEnablePhaseOwnersF90 = [];
+  const failedEnableRecoveryHarnessF90 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async (reason, _options, _snapshot, phaseOwner) => {
+      failedEnablePhaseOwnersF90.push({ reason, phaseOwner });
+      if (reason === 'updateSchedule-enable') {
+        throw new Error('synthetic enable release storage rejection');
+      }
+      return true;
+    },
+    async () => true,
+    async () => true,
+    async () => true,
+    async () => ({ success: true }),
+    async () => true,
+    async () => true,
+    null,
+    null,
+    'failed-enable-old-off-token',
+    async context => {
+      failedEnableRecoveryEventsF90.push(context);
+      return { success: true, resumed: true };
+    }
+  );
+  const failedEnableRecoveryOutcomeF90 = await Promise.allSettled([
+    failedEnableRecoveryHarnessF90.dispatch({
+      type: 'updateSchedule',
+      data: {
+        enabled: true,
+        automationIntent: 'enable',
+        restart: false,
+        onMinutes: 15,
+        offMinutes: 45,
+        activeHours: { enabled: false, start: '08:00', end: '23:00' },
+        smartMode: { enabled: false, sensitivity: 5 }
+      }
+    }, () => {})
+  ]);
+  const failedEnableRecoveredIntentF90 =
+    failedEnableRecoveryHarnessF90.manualIntent();
+  assertPass(failedEnableRecoveryOutcomeF90[0]?.status === 'rejected'
+      && failedEnableRecoveryOutcomeF90[0]?.reason?.message
+        === 'synthetic enable release storage rejection'
+      && failedEnablePhaseOwnersF90.length === 2
+      && failedEnablePhaseOwnersF90.every(entry =>
+        entry.reason === 'updateSchedule-enable'
+          && entry.phaseOwner === 1)
+      && failedEnableRecoveryEventsF90.length === 1
+      && failedEnableRecoveryEventsF90[0].phaseAdmissionEpoch === 2
+      && failedEnableRecoveryEventsF90[0].phaseOwner === 2
+      && failedEnableRecoveryEventsF90[0].manualToggleIntentAction === 'off'
+      && failedEnableRecoveryEventsF90[0].manualOffAdmissionToken
+        === 'failed-enable-old-off-token'
+      && failedEnableRecoveryHarnessF90.phaseEvents().join(',')
+        === 'claim:1,release:1,claim:2,resume:2:updateSchedule-enable-failed-resume-off,release:2'
+      && failedEnableRecoveryHarnessF90.phaseOwner() === 0
+      && failedEnableRecoveredIntentF90.action === 'off'
+      && failedEnableRecoveredIntentF90.blocked === true,
+    '16M-2A: 明确 enable 的 marker release 在持有 phase 时写失败，先归还旧 owner 再 reclaim 同 token OFF；fresh phase 恢复完成且不形成 phase 自锁');
+
+  const runExplicitEnableFalseAdmissionFailureF90 = async failureStage => {
+    let durableFalseAdmission = null;
+    const persistSnapshots = [];
+    let preflightCalls = 0;
+    const harness = makeActualUpdateHarnessF90(
+      runSerializedScheduleUpdateF90,
+      async (reason, _options, snapshot) => {
+        persistSnapshots.push({ reason, snapshot: structuredClone(snapshot) });
+        if (failureStage === 'true-commit'
+            && reason === 'updateSchedule-enable') {
+          throw new Error('synthetic explicit enable true commit rejection');
+        }
+        return true;
+      },
+      async () => true,
+      async () => true,
+      async () => {},
+      async () => ({ success: true }),
+      async () => true,
+      async () => true,
+      null,
+      null,
+      '',
+      null,
+      null,
+      async ({ schedule: firstPhaseSchedule }) => {
+        durableFalseAdmission = structuredClone(firstPhaseSchedule);
+        return undefined;
+      },
+      async () => {
+        preflightCalls += 1;
+        return failureStage !== 'preflight';
+      }
+    );
+    const outcome = await Promise.allSettled([
+      harness.dispatch({
+        type: 'updateSchedule',
+        data: {
+          enabled: true,
+          automationIntent: 'enable',
+          restart: false,
+          onMinutes: 22,
+          offMinutes: 38,
+          activeHours: { enabled: true, start: '09:15', end: '18:45' },
+          smartMode: { enabled: false, sensitivity: 7 }
+        }
+      }, () => {})
+    ]);
+    const memoryAfterFailure = harness.state();
+    const reloaded = harness.reloadFromStored(durableFalseAdmission);
+    await harness.persistCurrent(
+      `explicit-enable-${failureStage}-post-reload`
+    );
+    return {
+      durableFalseAdmission,
+      memoryAfterFailure,
+      reloaded,
+      persistSnapshots,
+      preflightCalls,
+      outcome: outcome[0]
+    };
+  };
+  const explicitEnablePreflightFailureF90 =
+    await runExplicitEnableFalseAdmissionFailureF90('preflight');
+  const explicitEnableTrueCommitFailureF90 =
+    await runExplicitEnableFalseAdmissionFailureF90('true-commit');
+  const explicitEnableFailureKeepsFalseAdmissionF90 = result => {
+    const durable = result.durableFalseAdmission;
+    const memory = result.memoryAfterFailure;
+    const reloaded = result.reloaded;
+    const finalPersist = result.persistSnapshots.at(-1)?.snapshot;
+    return result.outcome?.status === 'rejected'
+      && result.preflightCalls === 1
+      && durable?.enabled === false
+      && durable?.onMinutes === 22
+      && durable?.offMinutes === 38
+      && durable?.activeHours?.start === '09:15'
+      && durable?.activeHours?.end === '18:45'
+      && durable?.smartMode?.sensitivity === 7
+      && memory?.enabled === false
+      && memory?.onMinutes === durable.onMinutes
+      && memory?.offMinutes === durable.offMinutes
+      && memory?.activeHours?.start === durable.activeHours.start
+      && memory?.activeHours?.end === durable.activeHours.end
+      && memory?.smartMode?.sensitivity === durable.smartMode.sensitivity
+      && reloaded?.enabled === false
+      && reloaded?.onMinutes === durable.onMinutes
+      && reloaded?.offMinutes === durable.offMinutes
+      && finalPersist?.enabled === false
+      && finalPersist?.onMinutes === durable.onMinutes
+      && finalPersist?.offMinutes === durable.offMinutes;
+  };
+  assertPass(explicitEnableFailureKeepsFalseAdmissionF90(
+      explicitEnablePreflightFailureF90
+    )
+      && explicitEnablePreflightFailureF90.outcome?.reason?.message
+        === '明确启用发布前未能确认远端 Lamport safety'
+      && !explicitEnablePreflightFailureF90.persistSnapshots.some(entry =>
+        entry.reason === 'updateSchedule-enable')
+      && explicitEnableFailureKeepsFalseAdmissionF90(
+        explicitEnableTrueCommitFailureF90
+      )
+      && explicitEnableTrueCommitFailureF90.outcome?.reason?.message
+        === 'synthetic explicit enable true commit rejection'
+      && explicitEnableTrueCommitFailureF90.persistSnapshots.filter(entry =>
+        entry.reason === 'updateSchedule-enable').length === 2,
+    '16M-2A-0: explicit enable 第一阶段 M 已 durable 新 config+false 后，preflight/true commit 失败均保持内存与 storage 同一 false admission；reload/persist 不回旧 config 或 true');
+
+  const ordinaryConfigMarkerPersistsF90 = [];
+  const ordinaryConfigMarkerHarnessF90 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async (reason, options, snapshot) => {
+      ordinaryConfigMarkerPersistsF90.push({ reason, options, snapshot });
+      return true;
+    },
+    async () => true,
+    async () => true,
+    async () => true,
+    async () => ({ success: true }),
+    async () => true,
+    async () => true,
+    null,
+    null,
+    'config-must-not-release-manual-off'
+  );
+  let ordinaryConfigMarkerResponseF90 = null;
+  await ordinaryConfigMarkerHarnessF90.dispatch({
+    type: 'updateSchedule',
+    data: {
+      enabled: true,
+      restart: false,
+      onMinutes: 22,
+      offMinutes: 38,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  }, response => { ordinaryConfigMarkerResponseF90 = response; });
+
+  const conditionalMarkerReleaseGateF90 = makeDeferred9G();
+  const conditionalMarkerReleaseStartedF90 = makeDeferred9G();
+  const conditionalMarkerHarnessF90 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async () => true,
+    async () => true,
+    async () => true,
+    async () => true,
+    async () => ({ success: true }),
+    async () => true,
+    async () => true,
+    null,
+    null,
+    'conditional-release-old-manual-off',
+    null,
+    async () => {
+      conditionalMarkerReleaseStartedF90.resolve();
+      await conditionalMarkerReleaseGateF90.promise;
+    }
+  );
+  let conditionalMarkerResponseF90 = null;
+  const conditionalMarkerRunF90 = conditionalMarkerHarnessF90.dispatch({
+    type: 'updateSchedule',
+    data: {
+      enabled: true,
+      automationIntent: 'enable',
+      restart: false,
+      onMinutes: 15,
+      offMinutes: 45,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  }, response => { conditionalMarkerResponseF90 = response; });
+  await conditionalMarkerReleaseStartedF90.promise;
+  conditionalMarkerHarnessF90.claimManualIntent('off');
+  conditionalMarkerReleaseGateF90.resolve();
+  const conditionalMarkerOutcomeF90 = await Promise.allSettled([
+    conditionalMarkerRunF90
+  ]);
+  const conditionalMarkerStateF90 = conditionalMarkerHarnessF90.manualIntent();
+  assertPass(ordinaryConfigMarkerResponseF90?.success === true
+      && ordinaryConfigMarkerPersistsF90.some(item =>
+        item.reason === 'updateSchedule'
+          && item.snapshot.enabled === false)
+      && ordinaryConfigMarkerHarnessF90.state().enabled === false
+      && ordinaryConfigMarkerHarnessF90.manualIntent().token
+        === 'config-must-not-release-manual-off'
+      && ordinaryConfigMarkerHarnessF90.manualIntent().blocked === true
+      && !ordinaryConfigMarkerHarnessF90.authorityEvents().some(event =>
+        event.startsWith('release:'))
+      && conditionalMarkerOutcomeF90[0]?.status === 'rejected'
+      && conditionalMarkerOutcomeF90[0]?.reason?.message
+        === '本机自动化 authority 未能终态覆盖迟显 OFF 凭证'
+      && conditionalMarkerResponseF90 === null
+      && conditionalMarkerHarnessF90.state().enabled === true
+      && conditionalMarkerStateF90.action === 'off'
+      && conditionalMarkerStateF90.token
+        === 'conditional-release-old-manual-off'
+      && conditionalMarkerStateF90.blocked === true
+      && conditionalMarkerHarnessF90.comfortStartRuns() === 0
+      && conditionalMarkerHarnessF90.authorityEvents().join(',')
+        === 'commit:start:updateSchedule-enable,commit:done:updateSchedule-enable,release:start:on:1,release:stale:on:1',
+    '16M-2A-1: stale 普通 config(enabled=true) 无权改总开关或清 manual OFF；明确 enable 已落 schedule 后若 completion await 中被后继 OFF 换主，请求 fail closed 且零 comfort/ON');
+
+  const remoteDisableRetryGateF90 = makeDeferred9G();
+  const remoteDisableRetryStartedF90 = makeDeferred9G();
+  const remoteDisableRetryPersistsF90 = [];
+  let remoteDisableEnableAttemptsF90 = 0;
+  const remoteDisableRetryHarnessF90 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async (reason, options, snapshot, phaseOwner) => {
+      remoteDisableRetryPersistsF90.push({
+        reason,
+        options,
+        snapshot,
+        phaseOwner
+      });
+      if (reason === 'updateSchedule-enable') {
+        remoteDisableEnableAttemptsF90 += 1;
+        remoteDisableRetryStartedF90.resolve();
+        await remoteDisableRetryGateF90.promise;
+        throw new Error('synthetic enable authority retry rejection');
+      }
+      return true;
+    },
+    async () => true,
+    async () => true,
+    async () => true,
+    async () => ({ success: true }),
+    async () => true,
+    async () => true,
+    null,
+    null,
+    'remote-disable-during-enable-retry'
+  );
+  const remoteDisableRetryRunF90 = remoteDisableRetryHarnessF90.dispatch({
+    type: 'updateSchedule',
+    data: {
+      enabled: true,
+      automationIntent: 'enable',
+      restart: false,
+      onMinutes: 15,
+      offMinutes: 45,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  }, () => {});
+  await remoteDisableRetryStartedF90.promise;
+  remoteDisableRetryHarnessF90.arriveDeferredDisable();
+  remoteDisableRetryGateF90.resolve();
+  const remoteDisableRetryOutcomeF90 = await Promise.allSettled([
+    remoteDisableRetryRunF90
+  ]);
+  const remoteDisableRetryStateF90 = remoteDisableRetryHarnessF90.manualIntent();
+  assertPass(remoteDisableRetryOutcomeF90[0]?.status === 'rejected'
+      && remoteDisableRetryOutcomeF90[0]?.reason?.message
+        === 'synthetic enable authority retry rejection'
+      && remoteDisableEnableAttemptsF90 === 1
+      && remoteDisableRetryPersistsF90.filter(item =>
+        item.reason === 'updateSchedule-enable').length === 1
+      && !remoteDisableRetryPersistsF90.some(item =>
+        item.reason
+          === 'updateSchedule-enable-failed-deferred-sync-disable')
+      && remoteDisableRetryHarnessF90.state().enabled === false
+      && remoteDisableRetryHarnessF90.deferredDisable().pending === true
+      && remoteDisableRetryHarnessF90.deferredDisable().epoch === 1
+      && remoteDisableRetryStateF90.token
+        === 'remote-disable-during-enable-retry'
+      && remoteDisableRetryStateF90.blocked === true
+      && remoteDisableRetryHarnessF90.comfortStartRuns() === 0
+      && remoteDisableRetryHarnessF90.phaseEvents().join(',')
+        === 'claim:1,release:1',
+    '16M-2A-2: enable authority 首写失败期间 remote disable 换主后不重试旧 true/不冒充 F owner；保留 F durable admission，零 comfort/ON');
+
+  const remoteDisablePhaseWaitPersistsF90 = [];
+  const remoteDisablePhaseWaitHarnessF90 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async (reason, options, snapshot, phaseOwner) => {
+      remoteDisablePhaseWaitPersistsF90.push({
+        reason,
+        options,
+        snapshot,
+        phaseOwner
+      });
+      return true;
+    },
+    async () => true,
+    async () => true,
+    async () => true,
+    async () => ({ success: true }),
+    async () => true,
+    async () => true,
+    null,
+    null,
+    'remote-disable-while-enable-waits-phase'
+  );
+  const remoteDisableHeldPhaseF90 =
+    remoteDisablePhaseWaitHarnessF90.claimPhase();
+  const remoteDisablePhaseWaitRunF90 =
+    remoteDisablePhaseWaitHarnessF90.dispatch({
+      type: 'updateSchedule',
+      data: {
+        enabled: true,
+        automationIntent: 'enable',
+        restart: false,
+        onMinutes: 15,
+        offMinutes: 45,
+        activeHours: { enabled: false, start: '08:00', end: '23:00' },
+        smartMode: { enabled: false, sensitivity: 5 }
+      }
+    }, () => {});
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    await Promise.resolve();
+  }
+  const remoteDisableEnableWaitedForPhaseF90 =
+    remoteDisablePhaseWaitHarnessF90.phaseOwner()
+      === remoteDisableHeldPhaseF90
+    && remoteDisablePhaseWaitPersistsF90.length === 0;
+  remoteDisablePhaseWaitHarnessF90.arriveDeferredDisable();
+  remoteDisablePhaseWaitHarnessF90.releasePhase(remoteDisableHeldPhaseF90);
+  const remoteDisablePhaseWaitOutcomeF90 = await Promise.allSettled([
+    remoteDisablePhaseWaitRunF90
+  ]);
+  const remoteDisablePhaseWaitPassF90 = remoteDisableEnableWaitedForPhaseF90
+      && remoteDisablePhaseWaitOutcomeF90[0]?.status === 'rejected'
+      && remoteDisablePhaseWaitOutcomeF90[0]?.reason?.message
+        === '明确启用发布前未能确认远端 Lamport safety'
+      && !remoteDisablePhaseWaitPersistsF90.some(item =>
+        item.reason === 'updateSchedule-enable')
+      && remoteDisablePhaseWaitPersistsF90.length === 0
+      && remoteDisablePhaseWaitHarnessF90.state().enabled === false
+      && remoteDisablePhaseWaitHarnessF90.deferredDisable().pending === true
+      && remoteDisablePhaseWaitHarnessF90.comfortStartRuns() === 0
+      && remoteDisablePhaseWaitHarnessF90.manualIntent().token
+        === 'remote-disable-while-enable-waits-phase'
+      && remoteDisablePhaseWaitHarnessF90.manualIntent().blocked === true
+      && remoteDisablePhaseWaitHarnessF90.phaseOwner() === 0
+      && remoteDisablePhaseWaitHarnessF90.phaseEvents().join(',')
+        === 'claim:1,release:1,release:2'
+      && updateScheduleBody.includes(
+        'scheduleAuthorityRemoteDisableGenerationAtArrival')
+      && updateScheduleBody.includes('=== remoteDisableArrivalGeneration');
+  assertPass(remoteDisablePhaseWaitPassF90,
+    '16M-2A-3: enable 等 phase FIFO 时 live remote disable bump generation；旧 enable 零 persist/零 recovery，F owner admission 保留且零 comfort');
+
+  const enablePostWriteRaceGateF90 = makeDeferred9G();
+  const enablePostWriteRaceStartedF90 = makeDeferred9G();
+  const enablePostWritePersistsF90 = [];
+  const enablePostWritePublishesF90 = [];
+  let enablePostWriteDurableEnabledF90 = false;
+  const enablePostWriteRaceHarnessF90 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async (reason, options, snapshot, phaseOwner) => {
+      enablePostWriteDurableEnabledF90 = snapshot.enabled === true;
+      enablePostWritePersistsF90.push({
+        reason,
+        options,
+        snapshot,
+        phaseOwner
+      });
+      if (reason === 'updateSchedule-enable') {
+        enablePostWriteRaceStartedF90.resolve();
+        await enablePostWriteRaceGateF90.promise;
+      }
+      return true;
+    },
+    async () => true,
+    async (_reason, snapshot) => {
+      enablePostWritePublishesF90.push(snapshot.enabled);
+      return true;
+    },
+    async () => true,
+    async () => ({ success: true }),
+    async () => true,
+    async () => true
+  );
+  const enablePostWriteRaceRunF90 = enablePostWriteRaceHarnessF90.dispatch({
+    type: 'updateSchedule',
+    data: {
+      enabled: true,
+      automationIntent: 'enable',
+      restart: false,
+      onMinutes: 15,
+      offMinutes: 45,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  }, () => {});
+  await enablePostWriteRaceStartedF90.promise;
+  const enableTrueReachedDurableBeforeRemoteF90 =
+    enablePostWriteDurableEnabledF90 === true
+    && enablePostWriteRaceHarnessF90.state().enabled === true
+    && enablePostWriteRaceHarnessF90.admissionBlocked() === true
+    && enablePostWriteRaceHarnessF90.comfortStartRuns() === 0;
+  enablePostWriteRaceHarnessF90.arriveDeferredDisable();
+  enablePostWriteRaceGateF90.resolve();
+  const enablePostWriteRaceOutcomeF90 = await Promise.allSettled([
+    enablePostWriteRaceRunF90
+  ]);
+  assertPass(enableTrueReachedDurableBeforeRemoteF90
+      && enablePostWriteRaceOutcomeF90[0]?.status === 'rejected'
+      && enablePostWriteRaceOutcomeF90[0]?.reason?.message
+        === '明确启用已被后续自动控制或远端停用替代'
+      && enablePostWritePersistsF90.some(item =>
+        item.reason === 'updateSchedule-enable'
+          && item.snapshot.enabled === true
+          && item.phaseOwner === 1)
+      && !enablePostWritePersistsF90.some(item =>
+        item.reason === 'updateSchedule-enable-failed-deferred-sync-disable')
+      && enablePostWriteDurableEnabledF90 === true
+      && enablePostWriteRaceHarnessF90.state().enabled === false
+      && enablePostWriteRaceHarnessF90.admissionBlocked() === true
+      && enablePostWriteRaceHarnessF90.deferredDisable().pending === true
+      && enablePostWriteRaceHarnessF90.comfortStartRuns() === 0
+      && enablePostWriteRaceHarnessF90.phaseEvents().join(',')
+        === 'claim:1,release:1'
+      && enablePostWritePublishesF90.length === 0,
+    '16M-2A-4: explicit enable 的 local.set 已落 true 后 remote generation 换主；旧 owner 只回滚 memory，不冒充 F owner 清 admission/发布 true，零 comfort ON');
+
+  let doubleEnableWriteAttemptsF90 = 0;
+  let doubleEnableDurableEnabledF90 = false;
+  const doubleEnableFailurePublishesF90 = [];
+  const doubleEnableFailureHarnessF90 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async (reason, _options, snapshot) => {
+      if (reason === 'updateSchedule-enable') {
+        doubleEnableWriteAttemptsF90 += 1;
+        throw new Error('synthetic explicit enable local.set rejection');
+      }
+      doubleEnableDurableEnabledF90 = snapshot.enabled === true;
+      return true;
+    },
+    async () => true,
+    async (_reason, snapshot) => {
+      doubleEnableFailurePublishesF90.push(snapshot.enabled);
+      return true;
+    },
+    async () => true,
+    async () => ({ success: true }),
+    async () => true,
+    async () => true
+  );
+  const doubleEnableFailureResponsesF90 = [];
+  const doubleEnableFailureOutcomeF90 = await Promise.allSettled([
+    doubleEnableFailureHarnessF90.dispatch({
+      type: 'updateSchedule',
+      data: {
+        enabled: true,
+        automationIntent: 'enable',
+        restart: false,
+        onMinutes: 15,
+        offMinutes: 45,
+        activeHours: { enabled: false, start: '08:00', end: '23:00' },
+        smartMode: { enabled: false, sensitivity: 5 }
+      }
+    }, response => { doubleEnableFailureResponsesF90.push(response); })
+  ]);
+  assertPass(doubleEnableFailureOutcomeF90[0]?.status === 'rejected'
+      && doubleEnableFailureOutcomeF90[0]?.reason?.message
+        === 'synthetic explicit enable local.set rejection'
+      && doubleEnableWriteAttemptsF90 === 2
+      && doubleEnableFailureResponsesF90.length === 0
+      && doubleEnableFailureHarnessF90.state().enabled === false
+      && doubleEnableDurableEnabledF90 === false
+      && doubleEnableFailureHarnessF90.admissionBlocked() === true
+      && doubleEnableFailureHarnessF90.automationAllowed() === false
+      && doubleEnableFailureHarnessF90.comfortStartRuns() === 0
+      && doubleEnableFailurePublishesF90.length === 0
+      && updateScheduleBody.includes('scheduleBeforeExplicitEnable')
+      && updateScheduleBody.includes('!explicitEnableDurablyPersisted'),
+    '16M-2A-5: ordinary disabled→explicit enable 两次 storage I/O throw；请求失败且 pre-commit snapshot 恢复 memory/durable false，automatic admission 保持 fail closed');
+
+  const trueToTrueEnableEventsF90 = [];
+  let trueToTrueEnableResponseF90 = null;
+  const trueToTrueEnableHarnessF90 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async (reason, _options, snapshot) => {
+      trueToTrueEnableEventsF90.push(
+        `persist:${reason}:${snapshot.enabled}`
+      );
+      return true;
+    },
+    async () => {
+      trueToTrueEnableEventsF90.push('setup');
+      return true;
+    },
+    async (_reason, snapshot) => {
+      trueToTrueEnableEventsF90.push(`publish:${snapshot.enabled}`);
+      return true;
+    },
+    async () => true,
+    async () => ({ success: true }),
+    async () => true,
+    async () => true,
+    null,
+    async () => {
+      trueToTrueEnableEventsF90.push('comfort');
+      return { success: true };
+    },
+    '',
+    null,
+    null,
+    ({ reason, schedule: snapshot }) => {
+      trueToTrueEnableEventsF90.push(
+        `mutation:${reason}:${snapshot.enabled}`
+      );
+      return undefined;
+    }
+  );
+  trueToTrueEnableHarnessF90.setScheduleEnabled(true);
+  await trueToTrueEnableHarnessF90.dispatch({
+    type: 'updateSchedule',
+    data: {
+      enabled: true,
+      automationIntent: 'enable',
+      restart: false,
+      onMinutes: 15,
+      offMinutes: 45,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  }, response => { trueToTrueEnableResponseF90 = response; });
+  const trueToTrueFalseAdmissionIndexF90 =
+    trueToTrueEnableEventsF90.indexOf(
+      'mutation:updateSchedule-local-mutation-intent:false'
+    );
+  const trueToTrueAuthorityIndexF90 =
+    trueToTrueEnableEventsF90.indexOf(
+      'persist:updateSchedule-enable:true'
+    );
+  assertPass(trueToTrueEnableResponseF90?.success === true
+      && trueToTrueFalseAdmissionIndexF90 >= 0
+      && trueToTrueAuthorityIndexF90 > trueToTrueFalseAdmissionIndexF90
+      && trueToTrueEnableHarnessF90.state().enabled === true
+      && trueToTrueEnableHarnessF90.admissionBlocked() === false
+      && trueToTrueEnableEventsF90.includes('setup')
+      && !trueToTrueEnableEventsF90.includes('comfort')
+      && trueToTrueEnableEventsF90.at(-1) === 'publish:true'
+      && updateScheduleBody.includes(
+        '// durable true（包括 true→true）。先提交 config/M cutoff + OFF'),
+    '16M-2A-5A: true→true explicit enable 也先 durable false admission/M intent，再做 remote preflight 与 true authority；零 comfort 重启窗');
+
+  const staleGenericAfterDisablePublishesF90 = [];
+  const staleGenericAfterDisableResponsesF90 = [];
+  const staleGenericAfterDisableHarnessF90 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async () => true,
+    async () => true,
+    async (_reason, snapshot) => {
+      staleGenericAfterDisablePublishesF90.push(snapshot.enabled);
+      return true;
+    },
+    async () => true,
+    async () => ({ success: true }),
+    async () => true,
+    async () => true
+  );
+  await staleGenericAfterDisableHarnessF90.dispatch({
+    type: 'updateSchedule',
+    data: {
+      enabled: false,
+      automationIntent: 'disable',
+      restart: false,
+      onMinutes: 15,
+      offMinutes: 45,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  }, response => { staleGenericAfterDisableResponsesF90.push(response); });
+  staleGenericAfterDisableHarnessF90.arriveDeferredDisable();
+  await staleGenericAfterDisableHarnessF90.dispatch({
+    type: 'updateSchedule',
+    data: {
+      enabled: true,
+      restart: true,
+      onMinutes: 21,
+      offMinutes: 39,
+      activeHours: { enabled: false, start: '09:00', end: '22:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  }, response => { staleGenericAfterDisableResponsesF90.push(response); });
+  assertPass(staleGenericAfterDisableHarnessF90.state().enabled === false
+      && staleGenericAfterDisableHarnessF90.comfortStartRuns() === 0
+      && staleGenericAfterDisableHarnessF90.automationAllowed() === false
+      && staleGenericAfterDisableResponsesF90.length === 2
+      && staleGenericAfterDisableResponsesF90.every(response =>
+        response?.schedule?.enabled === false)
+      && staleGenericAfterDisablePublishesF90.length === 2
+      && staleGenericAfterDisablePublishesF90.every(enabled =>
+        enabled === false)
+      && updateScheduleBody.includes('enabled: _requestedEnabled')
+      && updateScheduleBody.includes(
+        ": scheduleAutomationIntent === 'disable'\n            ? false\n            : schedule.enabled"),
+    '16M-2A-6: explicit/remote disable 后 stale ordinary config(enabled=true) 仅改 config；总开关保持 false，零 comfort/ON 且无 outbound true');
+
+  const updatePhaseHandoffSetupAtF90 = 1_800_000_300_000;
+  const updatePhaseHandoffHarnessF90 = new Function(
+    'updatePhaseHandoffSetupAt',
+    `let schedule = {
+      enabled: true,
+      mode: 'pwm',
+      clockMode: false,
+      onMinutes: 20,
+      offMinutes: 10,
+      pwmState: 'off',
+      nextTriggerAt: 1_800_000_060_000,
+      smartClockPlannedAt: 1_800_000_000_000,
+      alarmCreatedAt: 1_800_000_000_000,
+      alarmDelayMinutes: 1,
+      pageTimerMinutes: null,
+      pageTimerTargetAt: 0,
+      pageTimerError: '',
+      pageTimerRetryAt: 0,
+      pageTimerRetryMinutes: 0,
+      activeHours: { enabled: true, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    };
+    let durableSchedule = structuredClone(schedule);
+    let livePwmAt = Number(schedule.nextTriggerAt) || 0;
+    let scheduleUpdateChain = Promise.resolve();
+    let localScheduleMutationGeneration = 0;
+    let localScheduleMutationCommitPendingGeneration = 0;
+    let syncPhaseAdoptionAdmissionEpoch = 0;
+    let syncPhaseAdoptionAdmissionOwner = 0;
+    const syncPhaseAdoptionAdmissionWaiters = [];
+    let automaticDisableAdmissionEpoch = 0;
+    let automaticOnAdmissionBlocked = false;
+    let syncPublishGeneration = 0;
+    let pwmRuntimeRevision = 1;
+    let smartReapplyInFlight = false;
+    let smartReapplyPending = false;
+    let releaseOldShutdown;
+    let markOldShutdownStarted;
+    const oldShutdownGate = new Promise(resolve => { releaseOldShutdown = resolve; });
+    const oldShutdownStarted = new Promise(resolve => { markOldShutdownStarted = resolve; });
+    let releaseForeignRecovery;
+    let markForeignRecoveryStarted;
+    const foreignRecoveryGate = new Promise(resolve => {
+      releaseForeignRecovery = resolve;
+    });
+    const foreignRecoveryStarted = new Promise(resolve => {
+      markForeignRecoveryStarted = resolve;
+    });
+    let foreignRecoveryPlannerCalls = 0;
+    const calls = [];
+    function runSerializedScheduleUpdate(operation) {
+      const run = scheduleUpdateChain.catch(() => {}).then(operation);
+      scheduleUpdateChain = run.catch(() => {});
+      return run;
+    }
+    function claimSyncPhaseAdoptionAdmission() {
+      if (syncPhaseAdoptionAdmissionOwner > 0) return 0;
+      const admissionEpoch = ++syncPhaseAdoptionAdmissionEpoch;
+      syncPhaseAdoptionAdmissionOwner = admissionEpoch;
+      return admissionEpoch;
+    }
+    function claimSyncPhaseAdoptionAdmissionWhenAvailable() {
+      const admissionEpoch = claimSyncPhaseAdoptionAdmission();
+      if (admissionEpoch > 0) return Promise.resolve(admissionEpoch);
+      return new Promise(resolve => {
+        syncPhaseAdoptionAdmissionWaiters.push(resolve);
+      });
+    }
+    function releaseSyncPhaseAdoptionAdmission(admissionEpoch) {
+      if (syncPhaseAdoptionAdmissionOwner !== admissionEpoch) return false;
+      const nextWaiter = syncPhaseAdoptionAdmissionWaiters.shift();
+      if (nextWaiter) {
+        const nextAdmissionEpoch = ++syncPhaseAdoptionAdmissionEpoch;
+        syncPhaseAdoptionAdmissionOwner = nextAdmissionEpoch;
+        calls.push({ type: 'phase-handoff', from: admissionEpoch,
+          to: nextAdmissionEpoch });
+        nextWaiter(nextAdmissionEpoch);
+        return true;
+      }
+      syncPhaseAdoptionAdmissionOwner = 0;
+      return true;
+    }
+    function isSyncPhaseAdoptionAdmissionBlocked() {
+      return syncPhaseAdoptionAdmissionOwner > 0;
+    }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(admissionEpoch) {
+      return Number(admissionEpoch) > 0
+        && Number(admissionEpoch) === syncPhaseAdoptionAdmissionOwner;
+    }
+    function isSyncPhaseAdoptionAdmissionBlockedFor(admissionEpoch = 0) {
+      return syncPhaseAdoptionAdmissionOwner > 0
+        && syncPhaseAdoptionAdmissionOwner !== Number(admissionEpoch);
+    }
+    function drainDeferredScheduleRepair() { return false; }
+    function isAutomationAllowed() {
+      return !automaticOnAdmissionBlocked
+        && schedule.enabled === true
+        && schedule.activeHours?.enabled !== true;
+    }
+    function isComfortStartActive() { return false; }
+    function invalidateTimerBasedShutdown() {}
+    function preemptAutomaticOnForExplicitDisable() { return 0; }
+    async function finishExplicitDisablePreemption() { return true; }
+    function releaseExplicitDisableAdmission() {}
+    async function commitLocalScheduleMutationAuthority(
+      mutationGeneration,
+      reason = ''
+    ) {
+      calls.push({ type: 'local-mutation-commit',
+        mutationGeneration, reason });
+      return mutationGeneration === localScheduleMutationGeneration
+        && mutationGeneration
+          === localScheduleMutationCommitPendingGeneration;
+    }
+    function finishLocalScheduleMutationCommit(mutationGeneration) {
+      if (localScheduleMutationCommitPendingGeneration
+          !== mutationGeneration) return false;
+      localScheduleMutationCommitPendingGeneration = 0;
+      return true;
+    }
+    async function scheduleSyncRetry() { return true; }
+    async function rescheduleSmartWeatherAlarm() {}
+    async function runComfortStart() { return { success: true }; }
+    async function resetDisabledPwmRuntime() { pwmRuntimeRevision += 1; }
+    async function persistSchedule(reason, options = {}) {
+      durableSchedule = structuredClone(schedule);
+      calls.push({ type: 'persist', reason, options: { ...options },
+        snapshot: structuredClone(schedule) });
+    }
+    async function requestTimerBasedShutdown(reason) {
+      calls.push({ type: 'unexpected-update-shutdown', reason });
+      return { success: false, error: 'update must not retain leave shutdown' };
+    }
+    async function setupAlarms(startImmediately, options = {}) {
+      calls.push({ type: 'setup', startImmediately,
+        phaseAdmissionEpoch: options.phaseAdmissionEpoch });
+      schedule.pwmState = 'off';
+      schedule.nextTriggerAt = updatePhaseHandoffSetupAt;
+      schedule.smartClockPlannedAt = updatePhaseHandoffSetupAt - 1_000;
+      schedule.alarmCreatedAt = updatePhaseHandoffSetupAt - 1_000;
+      schedule.alarmDelayMinutes = 1;
+      schedule.pageTimerMinutes = 20;
+      schedule.pageTimerTargetAt = updatePhaseHandoffSetupAt + 20 * 60_000;
+      schedule.pageTimerError = '';
+      schedule.pageTimerRetryAt = 0;
+      schedule.pageTimerRetryMinutes = 0;
+      durableSchedule = structuredClone(schedule);
+      livePwmAt = updatePhaseHandoffSetupAt;
+      return true;
+    }
+    async function createAlarm(name) { calls.push({ type: 'alarm', name }); }
+    async function rescheduleActiveBoundary() {
+      calls.push({ type: 'active-boundary-reschedule' });
+    }
+    async function syncScheduleToSync(reason) {
+      calls.push({ type: 'sync', reason });
+      return true;
+    }
+    function sanitizeMinutes(value, fallback) {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) && parsed >= 1 ? parsed : fallback;
+    }
+    function normalizeSmartSensitivity(value) {
+      const parsed = Number(value);
+      return Number.isFinite(parsed) ? Math.max(0, Math.min(10, parsed)) : 5;
+    }
+    function isAutomationOperationCurrent(revision) {
+      return revision === pwmRuntimeRevision && schedule.enabled === true;
+    }
+    function getActiveSmartOnPwmRetryContext() {
+      return { hasTypedSmartOnRetry: false, hasSafetyTimerRetry: false };
+    }
+    function snapshotPreparedSmartRuntime() {
+      return {
+        owner: Object.freeze({ source: 'foreign-watchdog-A' }),
+        pwmState: schedule.pwmState,
+        onMinutes: schedule.onMinutes,
+        offMinutes: schedule.offMinutes
+      };
+    }
+    function isSmartPreparationOwnerCurrent() { return true; }
+    function halfHourBoundaryAtOrBefore(value) { return Number(value) || 0; }
+    async function applyPreparedSmartModeDurations(options = {}) {
+      calls.push({ type: 'foreign-recovery-await',
+        phaseAdmissionEpoch: syncPhaseAdoptionAdmissionOwner,
+        hasEnsureCurrent: typeof options.ensureCurrent === 'function' });
+      markForeignRecoveryStarted();
+      await foreignRecoveryGate;
+      return false;
+    }
+    function classifySmartOnClock() { return { applicable: false, valid: false }; }
+    function planPwmLifecycleRecovery() {
+      foreignRecoveryPlannerCalls += 1;
+      calls.push({ type: 'foreign-recovery-planner' });
+      return { kind: 'noop', reason: 'foreign recovery must not reach planner' };
+    }
+    async function abortStaleAutomation(revision, reason, options = {}) {
+      calls.push({ type: 'foreign-recovery-abort', revision, reason,
+        options: { ...options } });
+      return true;
+    }
+    const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+    const SMART_MODE = { ON_MAX: 25 };
+    ${recoverLifecycleBody16}
+    function startForeignWatchdogRecovery() {
+      const phaseAdmissionEpoch = syncPhaseAdoptionAdmissionOwner;
+      calls.push({ type: 'foreign-recovery-start', phaseAdmissionEpoch });
+      return recoverPwmLifecycle({
+        source: 'watchdogCheck-foreign-owner',
+        phaseAdmissionEpoch,
+        automationRevision: pwmRuntimeRevision,
+        now: updatePhaseHandoffSetupAt - 120_000,
+        liveAlarmAt: 0,
+        storedAlarmAt: 0,
+        plannedActionAt: 0,
+        missingClockAction: 'noop'
+      });
+    }
+    async function startOldLeaveBoundary() {
+      const phaseAdmissionEpoch = claimSyncPhaseAdoptionAdmission();
+      calls.push({ type: 'old-leave-claim', phaseAdmissionEpoch });
+      markOldShutdownStarted();
+      await oldShutdownGate;
+      schedule.pageTimerMinutes = 55;
+      schedule.pageTimerTargetAt = updatePhaseHandoffSetupAt + 55 * 60_000;
+      schedule.pageTimerError = 'old leave shutdown proof';
+      schedule.pageTimerRetryAt = updatePhaseHandoffSetupAt + 60_000;
+      schedule.pageTimerRetryMinutes = 55;
+      await persistSchedule('old-leave-shutdown');
+      releaseSyncPhaseAdoptionAdmission(phaseAdmissionEpoch);
+      calls.push({ type: 'old-leave-release', phaseAdmissionEpoch });
+      return true;
+    }
+    function releaseStartupRestoreSupersession() { return false; }
+    async function dispatch(msg, sendResponse) {
+      const scheduleAutomationIntent = '';
+      const localScheduleMutationGenerationAtArrival =
+        ++localScheduleMutationGeneration;
+      localScheduleMutationCommitPendingGeneration =
+        localScheduleMutationGenerationAtArrival;
+      const localScheduleAuthorityGenerationAtArrival = 0;
+      const explicitScheduleEnableIntentEpoch = 0;
+      const explicitScheduleDisableIntentEpoch = 0;
+      const explicitScheduleDisableAdmissionEpoch = 0;
+      const scheduleUpdateAdmissionEpochAtArrival = automaticDisableAdmissionEpoch;
+      ${updateScheduleBody}
+    }
+    return {
+      startOldLeaveBoundary,
+      oldShutdownStarted,
+      releaseOldShutdown,
+      startForeignWatchdogRecovery,
+      foreignRecoveryStarted,
+      releaseForeignRecovery,
+      foreignRecoveryPlannerCalls: () => foreignRecoveryPlannerCalls,
+      dispatch,
+      snapshot: () => structuredClone(schedule),
+      durable: () => structuredClone(durableSchedule),
+      phaseOwner: () => syncPhaseAdoptionAdmissionOwner,
+      livePwmAt: () => livePwmAt,
+      calls
+    };`
+  )(updatePhaseHandoffSetupAtF90);
+  const oldLeaveBoundaryF90 = updatePhaseHandoffHarnessF90
+    .startOldLeaveBoundary();
+  await updatePhaseHandoffHarnessF90.oldShutdownStarted;
+  const foreignWatchdogRecoveryF90 = updatePhaseHandoffHarnessF90
+    .startForeignWatchdogRecovery();
+  await updatePhaseHandoffHarnessF90.foreignRecoveryStarted;
+  const updatePhaseHandoffResponsesF90 = [];
+  const updatePhaseHandoffF90 = updatePhaseHandoffHarnessF90.dispatch({
+    type: 'updateSchedule',
+    data: {
+      enabled: true,
+      restart: true,
+      onMinutes: 20,
+      offMinutes: 10,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  }, response => { updatePhaseHandoffResponsesF90.push(response); });
+  await Promise.resolve();
+  await Promise.resolve();
+  const updatePhaseHandoffDuringF90 = updatePhaseHandoffHarnessF90.snapshot();
+  const updatePhaseHandoffCallsDuringF90 =
+    updatePhaseHandoffHarnessF90.calls.slice();
+  updatePhaseHandoffHarnessF90.releaseOldShutdown();
+  const [oldLeaveBoundaryResultF90] = await Promise.all([
+    oldLeaveBoundaryF90,
+    updatePhaseHandoffF90
+  ]);
+  updatePhaseHandoffHarnessF90.releaseForeignRecovery();
+  const foreignWatchdogRecoveryResultF90 = await foreignWatchdogRecoveryF90;
+  const updatePhaseHandoffAfterF90 = updatePhaseHandoffHarnessF90.snapshot();
+  const updatePhaseHandoffDurableF90 = updatePhaseHandoffHarnessF90.durable();
+  const updatePhaseHandoffSetupF90 = updatePhaseHandoffHarnessF90.calls.find(
+    call => call.type === 'setup'
+  );
+  const foreignWatchdogAbortF90 = updatePhaseHandoffHarnessF90.calls.find(
+    call => call.type === 'foreign-recovery-abort'
+  );
+  assertPass(updateScheduleBody.indexOf(
+      'claimSyncPhaseAdoptionAdmissionWhenAvailable()')
+        < updateScheduleBody.indexOf('schedule = {')
+      && updateScheduleBody.includes(
+        'setupAlarms(startImmediately, {\n          phaseAdmissionEpoch: updatePhaseAdmissionEpoch')
+      && updateScheduleBody.includes(
+        "throw new Error('设置已保存，但 PWM 主钟未收口')")
+      && watchdogBody13.indexOf('await loadScheduleFromStorage();')
+        < watchdogBody13.indexOf(
+          'const phaseAdmissionEpoch = claimSyncPhaseAdoptionAdmission();')
+      && watchdogBody13.includes('phaseAdmissionEpoch,')
+      && watchdogBody13.includes(
+        'releaseSyncPhaseAdoptionAdmission(phaseAdmissionEpoch);')
+      && recoverLifecycleBody16.includes(
+        'if (!isSyncPhaseAdoptionAdmissionOwnerCurrent(context.phaseAdmissionEpoch))')
+      && recoverLifecycleBody16.includes(
+        '&& isSyncPhaseAdoptionAdmissionOwnerCurrent(context.phaseAdmissionEpoch)')
+      && oldLeaveBoundaryResultF90 === true
+      && updatePhaseHandoffDuringF90.activeHours.enabled === true
+      && updatePhaseHandoffHarnessF90.phaseOwner() === 0
+      && !updatePhaseHandoffCallsDuringF90.some(call =>
+        call.type === 'persist' || call.type === 'setup')
+      && updatePhaseHandoffHarnessF90.calls.some(call =>
+        call.type === 'phase-handoff' && call.from === 1 && call.to === 2)
+      && updatePhaseHandoffSetupF90?.startImmediately === true
+      && updatePhaseHandoffSetupF90?.phaseAdmissionEpoch === 2
+      && updatePhaseHandoffResponsesF90[0]?.success === true
+      && foreignWatchdogRecoveryResultF90?.handled === false
+      && foreignWatchdogRecoveryResultF90?.plan?.reason === 'automation-stale'
+      && updatePhaseHandoffHarnessF90.foreignRecoveryPlannerCalls() === 0
+      && foreignWatchdogAbortF90?.reason
+        === 'lifecycle-prepare-active-hours-paused'
+      && foreignWatchdogAbortF90?.options?.phaseAdmissionEpoch === 1
+      && updatePhaseHandoffAfterF90.activeHours.enabled === false
+      && updatePhaseHandoffAfterF90.nextTriggerAt
+        === updatePhaseHandoffSetupAtF90
+      && updatePhaseHandoffDurableF90.nextTriggerAt
+        === updatePhaseHandoffSetupAtF90
+      && updatePhaseHandoffHarnessF90.livePwmAt()
+        === updatePhaseHandoffSetupAtF90
+      && updatePhaseHandoffAfterF90.pageTimerMinutes === 20
+      && updatePhaseHandoffAfterF90.pageTimerError === ''
+      && !updatePhaseHandoffHarnessF90.calls.some(call =>
+        call.type === 'unexpected-update-shutdown'),
+    '16M-2P1: leave-boundary/foreign watchdog 持旧 epoch 时 update 不写半状态；FIFO 接棒落 B 后旧 recovery 零 planner/零 A 回写，durable/live/page 均属新配置');
 
   const explicitDisableAdmissionSourceF90 = extractSourceSection(
     backgroundSource,
@@ -21504,6 +27999,11 @@ return plan;
     'appendDiagnosticLog', 'console',
     `let automaticDisableAdmissionEpoch = 0;
     let automaticOnAdmissionBlocked = false;
+    let syncAuthorityDurableBaselineLoaded = true;
+    let manualOffAdmissionLoaded = true;
+    let manualOffAutomaticOnBlocked = false;
+    let deferredSyncDisableLoaded = true;
+    let deferredSyncDisablePending = false;
     let syncPublishGeneration = 0;
     let pwmRuntimeRevision = 31;
     let schedule = { enabled: true, comfortStartUntil: 1, comfortStartOnConfirmedAt: 1 };
@@ -21555,6 +28055,11 @@ return plan;
     'appendDiagnosticLog', 'console',
     `let automaticDisableAdmissionEpoch = 0;
     let automaticOnAdmissionBlocked = false;
+    let syncAuthorityDurableBaselineLoaded = true;
+    let manualOffAdmissionLoaded = true;
+    let manualOffAutomaticOnBlocked = false;
+    let deferredSyncDisableLoaded = true;
+    let deferredSyncDisablePending = false;
     let syncPublishGeneration = 0;
     let pwmRuntimeRevision = 5;
     let schedule = { enabled: true, comfortStartUntil: 1, comfortStartOnConfirmedAt: 1 };
@@ -21588,9 +28093,11 @@ return plan;
   let failClosedPersistCallF90 = 0;
   const failClosedHarnessF90 = makeActualUpdateHarnessF90(
     runSerializedScheduleUpdateF90,
-    async () => {
+    async reason => {
       failClosedPersistCallF90 += 1;
-      if (failClosedPersistCallF90 === 2) throw new Error('storage rejected');
+      if (reason === 'updateSchedule-disable-admission-intent') {
+        throw new Error('storage rejected');
+      }
     },
     async () => {},
     async () => {},
@@ -21603,6 +28110,7 @@ return plan;
     type: 'updateSchedule',
     data: {
       enabled: true,
+      automationIntent: 'enable',
       restart: true,
       onMinutes: 15,
       offMinutes: 45,
@@ -21615,11 +28123,18 @@ return plan;
   try {
     await failClosedHarnessF90.dispatch({
       ...explicitEnableMessageF90,
-      data: { ...explicitEnableMessageF90.data, enabled: false }
+      data: {
+        ...explicitEnableMessageF90.data,
+        enabled: false,
+        automationIntent: 'disable'
+      }
     }, () => {});
   } catch (error) {
     failedDisableErrorF90 = error?.message || String(error);
   }
+  let failedDisableChainSettledF90 = false;
+  await failClosedHarnessF90.waitExplicitDisableChain();
+  failedDisableChainSettledF90 = true;
   const remainsFailClosedAfterPersistFailureF90 = failedDisableErrorF90 === 'storage rejected'
     && failClosedHarnessF90.state().enabled === false
     && failClosedHarnessF90.admissionBlocked() === true
@@ -21630,20 +28145,159 @@ return plan;
     response => { recoveredEnableResponseF90 = response; }
   );
   const persistBeforeComfortStartF90 = updateScheduleBody.indexOf(
-    "await persistSchedule('updateSchedule');"
+    "reason: 'updateSchedule-enable'"
   ) < updateScheduleBody.indexOf("comfortStart = await runComfortStart('user-enable');");
   const releaseBeforeComfortStartF90 = updateScheduleBody.indexOf(
     'releaseExplicitDisableAdmission(updateAdmissionEpoch);'
   ) < updateScheduleBody.indexOf("comfortStart = await runComfortStart('user-enable');");
   assertPass(remainsFailClosedAfterPersistFailureF90
+      && failedDisableChainSettledF90
+      && failClosedHarnessF90.cancellationEvents().join(',')
+        === 'queue:true:true,settled'
       && failClosedHarnessF90.state().enabled === true
       && failClosedHarnessF90.admissionBlocked() === false
       && failClosedHarnessF90.automationAllowed() === true
       && failClosedHarnessF90.comfortStartRuns() === 2
       && recoveredEnableResponseF90?.comfortStart?.success === true
       && persistBeforeComfortStartF90
-      && releaseBeforeComfortStartF90,
-    '16M-5: 停用落盘失败保持 fail-closed；后续明确 enable 先成功落盘解锁，再真正执行五分钟舒适启动');
+      && releaseBeforeComfortStartF90
+      && updateScheduleBody.includes(
+        'explicitDisableDurableWriteChain = explicitDisableIntentPromise')
+      && updateScheduleBody.includes('.catch(() => {});'),
+    '16M-5: 停用落盘失败仍已结算入场 cancel ticket，rejection 不污染 durable chain；后续明确 enable 可原子取得 authority 后执行舒适启动');
+
+  const rejectedDisableCancelGateF90 = makeDeferred9G();
+  const rejectedDisableCancelStartedF90 = makeDeferred9G();
+  let rejectedDisableWritesF90 = 0;
+  const rejectedDisableCancelHarnessF90 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async reason => {
+      if (reason === 'updateSchedule-disable-admission-intent') {
+        rejectedDisableWritesF90 += 1;
+        throw new Error('synthetic fast durable disable rejection');
+      }
+      return true;
+    },
+    async () => true,
+    async () => true,
+    async () => true,
+    async () => ({ success: true }),
+    async () => true,
+    async () => true,
+    async () => {
+      rejectedDisableCancelStartedF90.resolve();
+      await rejectedDisableCancelGateF90.promise;
+    }
+  );
+  const rejectedDisableCancelRunF90 = rejectedDisableCancelHarnessF90.dispatch({
+    type: 'updateSchedule',
+    data: {
+      enabled: false,
+      automationIntent: 'disable',
+      restart: false,
+      onMinutes: 15,
+      offMinutes: 45,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  }, () => {});
+  let rejectedDisableHandlerSettledF90 = false;
+  void rejectedDisableCancelRunF90.then(
+    () => { rejectedDisableHandlerSettledF90 = true; },
+    () => { rejectedDisableHandlerSettledF90 = true; }
+  );
+  await rejectedDisableCancelStartedF90.promise;
+  for (let attempt = 0;
+    attempt < 20 && rejectedDisableWritesF90 < 2;
+    attempt += 1) {
+    await Promise.resolve();
+  }
+  const rejectedDisableWaitedForCancelF90 =
+    rejectedDisableHandlerSettledF90 === false
+    && rejectedDisableWritesF90 === 2
+    && rejectedDisableCancelHarnessF90.cancellationEvents().join(',')
+      === 'queue:true:true';
+  rejectedDisableCancelGateF90.resolve();
+  const rejectedDisableCancelOutcomeF90 = await Promise.allSettled([
+    rejectedDisableCancelRunF90
+  ]);
+  assertPass(rejectedDisableWaitedForCancelF90
+      && rejectedDisableCancelOutcomeF90[0]?.status === 'rejected'
+      && rejectedDisableCancelOutcomeF90[0]?.reason?.message
+        === 'synthetic fast durable disable rejection'
+      && rejectedDisableHandlerSettledF90 === true
+      && rejectedDisableCancelHarnessF90.cancellationEvents().join(',')
+        === 'queue:true:true,settled'
+      && updateScheduleBody.includes(
+        'await explicitScheduleDisablePreemptionPromise.catch(() => {});'),
+    '16M-5A: durable disable 快速 reject 也必须等 listener 入场 cancel ticket settle 后 handler 才结束；失败路径不漏取消在途 ON');
+
+  const repeatedDisableShutdownsF90 = [];
+  const repeatedDisableResponsesF90 = [];
+  const repeatedDisableFirstShutdownGateF90 = makeDeferred9G();
+  const repeatedDisableFirstShutdownStartedF90 = makeDeferred9G();
+  const repeatedDisableHarnessF90 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async () => true,
+    async () => true,
+    async () => true,
+    async () => true,
+    async reason => {
+      repeatedDisableShutdownsF90.push(reason);
+      if (repeatedDisableShutdownsF90.length === 1) {
+        repeatedDisableFirstShutdownStartedF90.resolve();
+        await repeatedDisableFirstShutdownGateF90.promise;
+      }
+      return { success: true, reason };
+    },
+    async () => true,
+    async () => true
+  );
+  const repeatedDisableMessageF90 = {
+    type: 'updateSchedule',
+    data: {
+      enabled: false,
+      automationIntent: 'disable',
+      restart: false,
+      onMinutes: 15,
+      offMinutes: 45,
+      activeHours: { enabled: false, start: '08:00', end: '23:00' },
+      smartMode: { enabled: false, sensitivity: 5 }
+    }
+  };
+  const firstRepeatedDisableF90 = repeatedDisableHarnessF90.dispatch(
+    repeatedDisableMessageF90,
+    response => { repeatedDisableResponsesF90.push(response); }
+  );
+  await repeatedDisableFirstShutdownStartedF90.promise;
+  const secondRepeatedDisableF90 = repeatedDisableHarnessF90.dispatch(
+    repeatedDisableMessageF90,
+    response => { repeatedDisableResponsesF90.push(response); }
+  );
+  await Promise.resolve();
+  const secondRepeatedDisableQueuedF90 =
+    repeatedDisableShutdownsF90.length === 1
+    && repeatedDisableResponsesF90.length === 0;
+  repeatedDisableFirstShutdownGateF90.resolve();
+  const repeatedDisableOutcomesF90 = await Promise.allSettled([
+    firstRepeatedDisableF90,
+    secondRepeatedDisableF90
+  ]);
+  assertPass(secondRepeatedDisableQueuedF90 === false
+      && repeatedDisableOutcomesF90[0]?.status === 'rejected'
+      && repeatedDisableOutcomesF90[0]?.reason?.message
+        === '明确停用发布前未能确认远端 Lamport safety'
+      && repeatedDisableOutcomesF90[1]?.status === 'fulfilled'
+      && repeatedDisableShutdownsF90.join(',')
+        === 'updateSchedule-disable-preflight,updateSchedule-disable-preflight,schedule-disabled'
+      && repeatedDisableResponsesF90.length === 1
+      && repeatedDisableResponsesF90.every(response =>
+        response?.success === true
+          && response?.offResult?.success === true)
+      && repeatedDisableHarnessF90.state().enabled === false
+      && repeatedDisableHarnessF90.cancellationEvents().filter(event =>
+        event === 'queue:true:true').length === 2,
+    '16M-5B: D1 preflight shutdown 阻塞时快速到达 D2；两次到达均立即预约安全钟，D2 最终接棒再幂等 shutdown，D1 Lamport preflight stale 不漏关机');
 
   // 旧 enable 已排在 schedule queue 后、本机随后明确 disable：disable intent
   // 先原子落地并 bump epoch；旧 enable 取得队列时必须在 mutation/publish 前拒绝。
@@ -21692,7 +28346,11 @@ return plan;
   );
   const winningQueuedDisableF90 = staleEnableHarnessF90.dispatch({
     ...explicitEnableMessageF90,
-    data: { ...explicitEnableMessageF90.data, enabled: false }
+    data: {
+      ...explicitEnableMessageF90.data,
+      enabled: false,
+      automationIntent: 'disable'
+    }
   }, response => { staleEnableResponsesF90.push(response); });
   while (!staleEnablePersistF90.some(item =>
     item.reason === 'updateSchedule-disable-admission-intent')) {
@@ -21771,7 +28429,11 @@ return plan;
   );
   const disablingLastActionF90 = lastActionHarnessF90.dispatch({
     ...explicitEnableMessageF90,
-    data: { ...explicitEnableMessageF90.data, enabled: false }
+    data: {
+      ...explicitEnableMessageF90.data,
+      enabled: false,
+      automationIntent: 'disable'
+    }
   }, response => { lastActionResponsesF90.push(response); });
   await disableCancellationStartedF90;
   const enablingLastActionF90 = lastActionHarnessF90.dispatch(
@@ -21793,21 +28455,26 @@ return plan;
     ]);
   const disableCancelEndIndexF90 = lastActionEventsF90.indexOf('disable-cancel:end');
   const comfortStartIndexF90 = lastActionEventsF90.indexOf('comfort:start');
-  assertPass(enableStayedQueuedBehindDisableF90
-      && disableLastActionOutcomeF90.status === 'fulfilled'
+  const lastActionPassF90 = enableStayedQueuedBehindDisableF90
+      && disableLastActionOutcomeF90.status === 'rejected'
+      && disableLastActionOutcomeF90.reason?.message
+        === '明确停用发布前未能确认远端 Lamport safety'
       && enableLastActionOutcomeF90.status === 'fulfilled'
       && disableCancelEndIndexF90 >= 0
       && comfortStartIndexF90 > disableCancelEndIndexF90
       && lastActionEventsF90.filter(event => event === 'disable-cancel:start').length === 1
       && lastActionEventsF90.filter(event => event === 'disable-cancel:end').length === 1
       && lastActionEventsF90.filter(event => event.startsWith('publish:')).join(',')
-        === 'publish:false,publish:true'
+        === 'publish:true'
+      && !lastActionEventsF90.some(event =>
+        event.includes('updateSchedule-disable-admission-intent'))
       && lastActionHarnessF90.state().enabled === true
       && lastActionHarnessF90.comfortStartRuns() === 1
       && lastActionPublishMarkerF90 === false
-      && lastActionResponsesF90.length === 2
-      && lastActionResponsesF90.at(-1)?.schedule?.enabled === true,
-    '16M-7: disable 同步预留队列覆盖完整取消；期间后到 enable 继续排队并最后获胜，取消不追到 comfort/ON 之后');
+      && lastActionResponsesF90.length === 1
+      && lastActionResponsesF90.at(-1)?.schedule?.enabled === true;
+  assertPass(lastActionPassF90,
+    '16M-7: disable 同步预留队列覆盖完整取消；后到 enable 淘汰未通过 Lamport preflight 的旧 disable，仍须排在取消结算后且最终仅发布 true');
 
   let releaseFailingSyncApplyF90;
   let markFailingSyncApplyStartedF90;
@@ -21913,6 +28580,598 @@ return plan;
       && outOfOrderSyncAppliesF90.join(',') === '7,6',
     '16M-2C: 较慢时钟的显式 disable 安全淘汰失败中的 enable，异常后仍串行执行停用');
 
+  // F 已成为 durable safety predecessor、但还在 schedule FIFO 等待时，后到
+  // 的更高时钟 T 只能登记 fresh reread；不得用 pendingRemote=null 淘汰 F，
+  // 更不得在 F 的 durable shutdown/clear 之前把 T 交给 apply。
+  const runSerializedSafetyMailboxF90 = new Function(
+    `let scheduleUpdateChain = Promise.resolve();
+    ${serializedScheduleUpdateSourceF90}; return runSerializedScheduleUpdate;`
+  )();
+  let releaseSafetyMailboxHolderF90;
+  let markSafetyMailboxHolderStartedF90;
+  const safetyMailboxHolderGateF90 = new Promise(resolve => {
+    releaseSafetyMailboxHolderF90 = resolve;
+  });
+  const safetyMailboxHolderStartedF90 = new Promise(resolve => {
+    markSafetyMailboxHolderStartedF90 = resolve;
+  });
+  const safetyMailboxHolderF90 = runSerializedSafetyMailboxF90(async () => {
+    markSafetyMailboxHolderStartedF90();
+    await safetyMailboxHolderGateF90;
+  });
+  await safetyMailboxHolderStartedF90;
+  const safetyDisableF90 = {
+    enabled: false,
+    syncedAt: 8,
+    pwmState: 'on',
+    nextTriggerAt: 0
+  };
+  const freshEnableAfterSafetyF90 = {
+    enabled: true,
+    syncedAt: 9,
+    pwmState: 'off',
+    nextTriggerAt: Date.now() + 60_000
+  };
+  const safetyMailboxAppliesF90 = [];
+  let safetyMailboxReadsF90 = 0;
+  let safetyMailboxHarnessF90;
+  safetyMailboxHarnessF90 = loadTryAdoptSyncedStateF90({
+    serializedUpdate: runSerializedSafetyMailboxF90,
+    chrome: {
+      storage: {
+        sync: {
+          async get(key) {
+            safetyMailboxReadsF90 += 1;
+            return { [key]: structuredClone(freshEnableAfterSafetyF90) };
+          }
+        }
+      }
+    },
+    applySyncedPhase: async remote => {
+      safetyMailboxAppliesF90.push({
+        enabled: remote.enabled,
+        deferredAtEntry:
+          safetyMailboxHarnessF90.state().deferredSyncDisablePending
+      });
+      return true;
+    }
+  });
+  const safetyPredecessorF90 = safetyMailboxHarnessF90.arrive(
+    'safety-disable-waits-schedule-fifo',
+    safetyDisableF90
+  );
+  while (!safetyMailboxHarnessF90.state().busy) await Promise.resolve();
+  const laterTrueSignalF90 = safetyMailboxHarnessF90.arrive(
+    'higher-true-behind-safety-disable',
+    freshEnableAfterSafetyF90
+  );
+  await Promise.resolve();
+  const safetyStayedBeforeFifoReleaseF90 =
+    safetyMailboxAppliesF90.length === 0
+    && safetyMailboxHarnessF90.state().deferredSyncDisablePending === true
+    && safetyMailboxHarnessF90.state().rereadAfterSafetyDisable === true;
+  releaseSafetyMailboxHolderF90();
+  const [safetyMailboxHolderOutcomeF90, safetyPredecessorOutcomeF90,
+    laterTrueSignalOutcomeF90] = await Promise.allSettled([
+    safetyMailboxHolderF90,
+    safetyPredecessorF90,
+    laterTrueSignalF90
+  ]);
+  assertPass(safetyStayedBeforeFifoReleaseF90
+      && safetyMailboxHolderOutcomeF90.status === 'fulfilled'
+      && safetyPredecessorOutcomeF90.status === 'fulfilled'
+      && laterTrueSignalOutcomeF90.status === 'fulfilled'
+      && laterTrueSignalOutcomeF90.value === false
+      && safetyMailboxAppliesF90.map(item => item.enabled).join(',')
+        === 'false,true'
+      && safetyMailboxAppliesF90[0]?.deferredAtEntry === true
+      && safetyMailboxAppliesF90[1]?.deferredAtEntry === false
+      && safetyMailboxReadsF90 === 0
+      && safetyMailboxHarnessF90.state().deferredSyncDisablePending === false,
+    '16M-2D: busy mailbox 保留 exact remote false predecessor；其 durable apply/clear 完成后才消费已持久 successor true，不能先启用再补停用');
+
+  // F/T 都已进入 durable mailbox 后，本机明确 authority 仍可在 F 等待
+  // schedule FIFO 时接棒。T 不能因 identity 仍在内存而永久挡住 outbound；
+  // 必须先落 durable discard tombstone，再只发布本机胜出的状态。
+  const runSerializedStaleSuccessorF90 = new Function(
+    `let scheduleUpdateChain = Promise.resolve();
+    ${serializedScheduleUpdateSourceF90}; return runSerializedScheduleUpdate;`
+  )();
+  const staleSuccessorHolderGateF90 = makeDeferred9G();
+  const staleSuccessorHolderStartedF90 = makeDeferred9G();
+  const staleSuccessorHolderF90 = runSerializedStaleSuccessorF90(async () => {
+    staleSuccessorHolderStartedF90.resolve();
+    await staleSuccessorHolderGateF90.promise;
+  });
+  await staleSuccessorHolderStartedF90.promise;
+  const staleSuccessorAppliesF90 = [];
+  const staleSuccessorOutboundF90 = [];
+  const staleSuccessorHarnessF90 = loadTryAdoptSyncedStateF90({
+    serializedUpdate: runSerializedStaleSuccessorF90,
+    chrome: { storage: { sync: { async get() { return {}; } } } },
+    applySyncedPhase: async remote => {
+      staleSuccessorAppliesF90.push(structuredClone(remote));
+      return true;
+    },
+    syncScheduleToSync: async reason => {
+      staleSuccessorOutboundF90.push(reason);
+      return true;
+    }
+  });
+  const staleSuccessorDisableF90 = staleSuccessorHarnessF90.arrive(
+    'safety-disable-before-local-authority',
+    { ...safetyDisableF90, syncedAt: 18 }
+  );
+  while (!staleSuccessorHarnessF90.state().busy) await Promise.resolve();
+  const staleSuccessorTrueF90 = staleSuccessorHarnessF90.arrive(
+    'true-before-later-local-authority',
+    { ...freshEnableAfterSafetyF90, syncedAt: 19 }
+  );
+  const localAuthorityAfterSuccessorF90 =
+    staleSuccessorHarnessF90.commitLocalMutation({ authority: true });
+  const staleSuccessorBeforeReleaseF90 = staleSuccessorHarnessF90.state();
+  staleSuccessorHolderGateF90.resolve();
+  const staleSuccessorOutcomesF90 = await Promise.allSettled([
+    staleSuccessorHolderF90,
+    staleSuccessorDisableF90,
+    staleSuccessorTrueF90
+  ]);
+  const staleSuccessorAfterF90 = staleSuccessorHarnessF90.state();
+  assertPass(staleSuccessorOutcomesF90.every(outcome =>
+        outcome.status === 'fulfilled')
+      && staleSuccessorBeforeReleaseF90.deferredSyncDisablePending === true
+      && staleSuccessorBeforeReleaseF90
+        .deferredSyncDisableSuccessorSnapshot?.enabled === true
+      && localAuthorityAfterSuccessorF90.localScheduleAuthorityGeneration === 1
+      && localAuthorityAfterSuccessorF90.localScheduleMutationGeneration === 1
+      && staleSuccessorAppliesF90.length === 1
+      && staleSuccessorAppliesF90[0]?.enabled === false
+      && staleSuccessorAfterF90.deferredSyncDisablePending === false
+      && staleSuccessorAfterF90.deferredSyncDisableSuccessorSnapshot === null
+      && staleSuccessorAfterF90.successorTombstones.length === 1
+      && staleSuccessorAfterF90.successorTombstones[0]?.pending === false
+      && staleSuccessorAfterF90.successorTombstones[0]?.remote?.enabled === true
+      && staleSuccessorAfterF90.successorTombstones[0]?.discardReason
+        === 'later-local-explicit-authority'
+      && staleSuccessorOutboundF90.length === 1
+      && staleSuccessorAfterF90.outboundReasons.length === 1,
+    '16M-2D-1: F→T 后本机明确 authority 接棒会 durable tombstone stale T；F 收口后放行唯一 local outbound，不遗留 successor 无限 adopt retry');
+
+  // T 在 ordinary M1 已 claim、但首个 durable commit 尚未结算时到达，
+  // 两者会冻结同一个 generation。仅比较“不相等且有更晚 pending M”会把 T
+  // 提前 apply，随后 M1 再反向覆盖。success/abort 两条 finish 都应先解除
+  // pending，再由同一 durable mailbox 重放一次 T。
+  const runSameGenerationPendingSuccessorF90 = async outcome => {
+    const applied = [];
+    const mailbox = loadTryAdoptSyncedStateF90({
+      chrome: { storage: { sync: { async get() { return {}; } } } },
+      applySyncedPhase: async remote => {
+        applied.push(structuredClone(remote));
+        return true;
+      }
+    });
+    const mutationGeneration = mailbox.claimLocalMutationForTest();
+    const remote = {
+      enabled: true,
+      syncedAt: 20 + (outcome === 'commit' ? 1 : 2),
+      pwmState: outcome === 'commit' ? 'on' : 'off',
+      nextTriggerAt: Date.now() + 2 * 60_000
+    };
+    mailbox.restoreDeferredRecord({
+      pending: false,
+      safetyCleared: true,
+      successor: {
+        observedAt: Date.now() + 1,
+        remote: structuredClone(remote)
+      }
+    });
+    const beforeFinishResult = await mailbox.arrive(
+      `same-generation-before-${outcome}`,
+      remote
+    );
+    const beforeFinish = mailbox.state();
+    if (outcome === 'commit') {
+      mailbox.completeClaimedLocalMutationForTest();
+      mailbox.setPendingPublish(false);
+    } else {
+      mailbox.abortClaimedLocalMutationForTest();
+    }
+    const afterFinishResult = await mailbox.arrive(
+      `same-generation-after-${outcome}`,
+      null
+    );
+    return {
+      mutationGeneration,
+      beforeFinishResult,
+      beforeFinish,
+      afterFinishResult,
+      afterFinish: mailbox.state(),
+      applied
+    };
+  };
+  const sameGenerationCommitF90 =
+    await runSameGenerationPendingSuccessorF90('commit');
+  const sameGenerationAbortF90 =
+    await runSameGenerationPendingSuccessorF90('abort');
+  const sameGenerationCasesF90 = [
+    sameGenerationCommitF90,
+    sameGenerationAbortF90
+  ];
+  assertPass(sameGenerationCasesF90.every(result => (
+        result.mutationGeneration === 1
+        && result.beforeFinishResult === false
+        && result.beforeFinish.localScheduleMutationCommitPendingGeneration
+          === 1
+        && result.beforeFinish
+          .deferredSyncDisableSuccessorMutationGeneration === 1
+        && result.beforeFinish
+          .deferredSyncDisableSuccessorSnapshot?.enabled === true
+        && result.applied.length === 1
+        && result.afterFinishResult === true
+        && result.afterFinish.localScheduleMutationCommitPendingGeneration
+          === 0
+        && result.afterFinish.deferredSyncDisableSuccessorSnapshot === null
+      )),
+    '16M-2D-1B: same-generation T 在 ordinary M durable pending 时零 apply；M success/abort finish 后各从原 mailbox 唯一重放');
+
+  // Live startup 已恢复 safety-cleared T mailbox，但 T 的 apply 仍在旧 phase
+  // owner 后排队。后到 toggleNow 是本机 phase authority：arrival 先 bump M，
+  // 让旧 apply 在首个 mutation 前 stale；manual phase 完成后 drain 只能
+  // tombstone 早 T，不能把 +2min 远端相位盖过 OFF +30min / ON +60min。
+  const runManualToggleAfterQueuedSuccessor16 = async manualAction => {
+    const manualIsOff = manualAction === 'off';
+    const manualTargetAt = syncApplyNow16
+      + (manualIsOff ? 30 : 60) * 60_000;
+    const staleRemoteAt = syncApplyNow16 + 2 * 60_000;
+    const initialAt = syncApplyNow16 + 10 * 60_000;
+    const actual = loadActualSyncApply16({
+      ...syncCfg16,
+      enabled: true,
+      mode: 'pwm',
+      clockMode: false,
+      pwmState: manualIsOff ? 'off' : 'on',
+      nextTriggerAt: initialAt,
+      smartClockPlannedAt: syncApplyNow16,
+      alarmCreatedAt: syncApplyNow16,
+      alarmDelayMinutes: 10,
+      pageTimerError: ''
+    }, initialAt, 0);
+    const remote = {
+      ...syncCfg16,
+      enabled: true,
+      pwmState: manualIsOff ? 'on' : 'off',
+      nextTriggerAt: staleRemoteAt,
+      smartClockPlannedAt: syncApplyNow16,
+      syncedAt: syncApplyNow16 + (manualIsOff ? 201 : 202)
+    };
+    const outbound = [];
+    const mailbox = loadTryAdoptSyncedStateF90({
+      chrome: { storage: { sync: { async get() { return {}; } } } },
+      applySyncedPhase: (candidate, reason, options) =>
+        actual.apply(candidate, reason, options),
+      syncScheduleToSync: async reason => {
+        outbound.push(reason);
+        return true;
+      }
+    });
+    mailbox.restoreDeferredRecord({
+      pending: false,
+      safetyCleared: true,
+      successor: {
+        observedAt: syncApplyNow16 + 100,
+        remote: structuredClone(remote)
+      }
+    });
+    const oldPhaseOwner = actual.holdPhaseAdmission();
+    const queuedApply = mailbox.arrive(
+      `queued-T-before-manual-${manualAction}`,
+      remote
+    );
+    for (let attempt = 0;
+      attempt < 50 && actual.phaseWaiterCount() === 0;
+      attempt += 1) {
+      await Promise.resolve();
+    }
+    const reachedOldOwnerBarrier = actual.phaseWaiterCount() === 1;
+    const actualMutationGeneration = actual.claimLocalMutationForTest(
+      `toggleNow-${manualAction}-arrival`
+    );
+    const mailboxMutationGeneration = mailbox.claimLocalMutationForTest();
+    actual.releasePhaseAdmission(oldPhaseOwner);
+    const queuedOutcome = await queuedApply;
+    const mailboxAfterOldApply = mailbox.state();
+    actual.commitClaimedLocalPhaseForTest({
+      pwmState: manualIsOff ? 'on' : 'off',
+      nextTriggerAt: manualTargetAt,
+      smartClockPlannedAt: syncApplyNow16,
+      alarmCreatedAt: syncApplyNow16,
+      alarmDelayMinutes: manualIsOff ? 30 : 60,
+      pageTimerTargetAt: manualTargetAt
+    }, `toggleNow-${manualAction}-phase`);
+    mailbox.completeClaimedLocalMutationForTest();
+    const drainOutcome = await mailbox.arrive(
+      `toggleNow-${manualAction}-complete-drain`,
+      null
+    );
+    return {
+      reachedOldOwnerBarrier,
+      actualMutationGeneration,
+      mailboxMutationGeneration,
+      queuedOutcome,
+      drainOutcome,
+      mailboxAfterOldApply,
+      mailboxAfterDrain: mailbox.state(),
+      actualSnapshot: actual.snapshot(),
+      actualDurable: actual.durable(),
+      liveAt: actual.live(),
+      staleRemoteAt,
+      manualTargetAt,
+      createCalls: actual.calls.filter(call => call.type === 'create-pwm'),
+      outbound
+    };
+  };
+  const queuedSuccessorThenManualOff16 =
+    await runManualToggleAfterQueuedSuccessor16('off');
+  const queuedSuccessorThenManualOn16 =
+    await runManualToggleAfterQueuedSuccessor16('on');
+  assertPass([queuedSuccessorThenManualOff16,
+    queuedSuccessorThenManualOn16].every(result => (
+      result.reachedOldOwnerBarrier
+      && result.actualMutationGeneration === 1
+      && result.mailboxMutationGeneration === 1
+      && result.queuedOutcome === false
+      && result.mailboxAfterOldApply
+        .deferredSyncDisableSuccessorSnapshot?.enabled === true
+      && result.actualSnapshot.nextTriggerAt === result.manualTargetAt
+      && result.actualDurable.nextTriggerAt === result.manualTargetAt
+      && result.liveAt === result.manualTargetAt
+      && !result.createCalls.some(call => call.at === result.staleRemoteAt)
+      && result.mailboxAfterDrain.deferredSyncDisableSuccessorSnapshot === null
+      && result.mailboxAfterDrain.successorTombstones.length === 1
+      && result.outbound.length === 1
+    ))
+      && queuedSuccessorThenManualOff16.actualSnapshot.pwmState === 'on'
+      && queuedSuccessorThenManualOn16.actualSnapshot.pwmState === 'off',
+    '16M-2D-1A: queued early T 在旧 phase owner 后遇 toggleNow arrival M 即 stale；manual OFF/ON 收口 drain 只 tombstone T，分别保留 +30m ON 与 +60m OFF');
+
+  // F 到达时冻结的 mutation generation 必须贯穿 apply。若普通本机配置
+  // 已在 F 取得 phase 前 durable，F 只拥有 safety enabled=false，不能把
+  // 携带的旧 on/off minutes、activeHours 等配置一并倒灌。
+  const preserveLocalConfigAt16 = syncApplyNow16 + 45 * 60_000;
+  const preserveLocalConfigHarness16 = loadActualSyncApply16({
+    ...syncCfg16,
+    enabled: true,
+    mode: 'pwm',
+    clockMode: false,
+    onMinutes: 15,
+    offMinutes: 45,
+    pwmState: 'off',
+    nextTriggerAt: preserveLocalConfigAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    alarmCreatedAt: syncApplyNow16,
+    alarmDelayMinutes: 45,
+    pageTimerError: ''
+  }, preserveLocalConfigAt16, 0);
+  const preserveLocalConfigRemoteF16 = {
+    enabled: false,
+    mode: 'pwm',
+    clockMode: false,
+    onMinutes: 5,
+    offMinutes: 55,
+    activeHours: { enabled: true, start: '01:00', end: '02:00' },
+    smartMode: { enabled: false, sensitivity: 1 },
+    comfortStartUntil: 0,
+    pwmState: 'off',
+    nextTriggerAt: preserveLocalConfigAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    syncedAt: syncApplyNow16 + 20
+  };
+  await preserveLocalConfigHarness16.deferRemoteDisable(
+    preserveLocalConfigRemoteF16,
+    'remote-f-before-local-config'
+  );
+  const preservedMutationGeneration16 =
+    preserveLocalConfigHarness16.commitLocalConfigMutation({
+      onMinutes: 37,
+      offMinutes: 23,
+      activeHours: { enabled: true, start: '09:30', end: '18:30' },
+      smartMode: { enabled: true, sensitivity: 8 }
+    });
+  const preserveLocalConfigApplied16 = await preserveLocalConfigHarness16.apply(
+    preserveLocalConfigRemoteF16,
+    'remote-f-after-local-config'
+  );
+  const preservedLocalConfig16 = preserveLocalConfigHarness16.snapshot();
+  const preservedDurableConfig16 = preserveLocalConfigHarness16.durable();
+  assertPass(preservedMutationGeneration16 === 1
+      && preserveLocalConfigApplied16 === true
+      && preservedLocalConfig16.enabled === false
+      && preservedDurableConfig16.enabled === false
+      && preservedLocalConfig16.onMinutes === 37
+      && preservedLocalConfig16.offMinutes === 23
+      && preservedLocalConfig16.activeHours?.start === '09:30'
+      && preservedLocalConfig16.activeHours?.end === '18:30'
+      && preservedLocalConfig16.smartMode?.enabled === true
+      && preservedLocalConfig16.smartMode?.sensitivity === 8
+      && preservedDurableConfig16.onMinutes === 37
+      && preservedDurableConfig16.offMinutes === 23
+      && preserveLocalConfigHarness16.calls.some(call =>
+        call.type === 'defer-remote-disable' && call.epoch === 1)
+      && preserveLocalConfigHarness16.calls.some(call =>
+        call.type === 'clear-deferred-disable'),
+    '16M-2D-2: F 到达后普通本机 config durable 再采纳 F 时只提交 enabled=false；冻结 mutation generation 阻止旧 remote minutes/activeHours 回灌');
+
+  // 对照：F 已到达并冻结 gen0，但随后到达的 M1 在首次 durable set 前
+  // throw/abort。arrival generation 不是 authority；F 必须恢复完整 config，
+  // disabled phase 也要收口为 off/zero，不能保留从未提交的本机半状态。
+  const abortedMutationInitialAt16 = syncApplyNow16 + 46 * 60_000;
+  const abortedMutationRemoteF16 = {
+    enabled: false,
+    mode: 'pwm',
+    clockMode: false,
+    onMinutes: 9,
+    offMinutes: 51,
+    activeHours: { enabled: true, start: '06:30', end: '07:30' },
+    smartMode: { enabled: false, sensitivity: 2 },
+    comfortStartUntil: 0,
+    pwmState: 'off',
+    nextTriggerAt: 0,
+    smartClockPlannedAt: 0,
+    syncedAt: syncApplyNow16 + 21
+  };
+  const abortedMutationRemoteFHarness16 = loadActualSyncApply16({
+    ...syncCfg16,
+    enabled: true,
+    onMinutes: 41,
+    offMinutes: 19,
+    activeHours: { enabled: true, start: '09:00', end: '18:00' },
+    smartMode: { enabled: true, sensitivity: 9 },
+    pwmState: 'on',
+    nextTriggerAt: abortedMutationInitialAt16,
+    smartClockPlannedAt: syncApplyNow16,
+    alarmCreatedAt: syncApplyNow16,
+    alarmDelayMinutes: 46
+  }, abortedMutationInitialAt16, 0, {
+    faithfulDisabledReset: true
+  });
+  const abortedMutationHeldPhase16 = abortedMutationRemoteFHarness16
+    .holdPhaseAdmission();
+  let abortedMutationRemoteFSettled16 = false;
+  const abortedMutationRemoteFApply16 = abortedMutationRemoteFHarness16.apply(
+    abortedMutationRemoteF16,
+    'remote-F-before-aborted-M',
+    {
+      scheduleAuthorityGeneration: 0,
+      scheduleMutationGeneration: 0
+    }
+  ).finally(() => { abortedMutationRemoteFSettled16 = true; });
+  for (let attempt = 0; attempt < 10
+      && !abortedMutationRemoteFHarness16.calls.some(call =>
+        call.type === 'defer-remote-disable'); attempt += 1) {
+    await Promise.resolve();
+  }
+  const abortedMutationRemoteFDeferred16 =
+    abortedMutationRemoteFHarness16.calls.some(call =>
+      call.type === 'defer-remote-disable')
+    && abortedMutationRemoteFSettled16 === false;
+  const abortedMutationGeneration16 = abortedMutationRemoteFHarness16
+    .claimLocalMutationForTest('M-arrival-before-first-durable-set-throws');
+  const abortedMutationRolledBack16 = abortedMutationRemoteFHarness16
+    .abortClaimedLocalMutationForTest();
+  abortedMutationRemoteFHarness16.releasePhaseAdmission(
+    abortedMutationHeldPhase16
+  );
+  const abortedMutationRemoteFApplied16 = await abortedMutationRemoteFApply16;
+  const abortedMutationRemoteFSnapshot16 =
+    abortedMutationRemoteFHarness16.snapshot();
+  const abortedMutationRemoteFDurable16 =
+    abortedMutationRemoteFHarness16.durable();
+  assertPass(abortedMutationRemoteFDeferred16
+      && abortedMutationGeneration16 === 1
+      && abortedMutationRolledBack16 === 1
+      && abortedMutationRemoteFApplied16 === true
+      && abortedMutationRemoteFSnapshot16.enabled === false
+      && abortedMutationRemoteFSnapshot16.onMinutes === 9
+      && abortedMutationRemoteFSnapshot16.offMinutes === 51
+      && abortedMutationRemoteFSnapshot16.activeHours?.start === '06:30'
+      && abortedMutationRemoteFSnapshot16.activeHours?.end === '07:30'
+      && abortedMutationRemoteFSnapshot16.smartMode?.enabled === false
+      && abortedMutationRemoteFSnapshot16.smartMode?.sensitivity === 2
+      && abortedMutationRemoteFSnapshot16.pwmState === 'off'
+      && abortedMutationRemoteFSnapshot16.nextTriggerAt === 0
+      && abortedMutationRemoteFDurable16.onMinutes === 9
+      && abortedMutationRemoteFDurable16.offMinutes === 51
+      && abortedMutationRemoteFDurable16.activeHours?.start === '06:30'
+      && abortedMutationRemoteFDurable16.pwmState === 'off'
+      && abortedMutationRemoteFDurable16.nextTriggerAt === 0,
+    '16M-2D-2A: F 等 phase 时后到 M 仅 arrival 后首写 throw/abort；F 不认 transient generation，完整 config 与 disabled phase 均采纳并 durable');
+
+  // startup 已加载的 durable M cutoff 即使来自未来墙钟，也只是 inbound
+  // Lamport 基线。后到 F/T 的 arrival observedAt 必须从 C+1 起单调增长；
+  // 因而旧 M 不得错误保护 config，F 与其后 T 都能完整接管 config/phase。
+  const futureCutoffC16 = syncApplyNow16 + 30 * 24 * 60 * 60_000;
+  const futureCutoffF16 = {
+    enabled: false,
+    mode: 'pwm',
+    clockMode: false,
+    onMinutes: 8,
+    offMinutes: 52,
+    activeHours: { enabled: true, start: '05:00', end: '06:00' },
+    smartMode: { enabled: false, sensitivity: 1 },
+    comfortStartUntil: 0,
+    pwmState: 'off',
+    nextTriggerAt: 0,
+    smartClockPlannedAt: 0,
+    syncedAt: futureCutoffC16 + 1
+  };
+  const futureCutoffTAt16 = futureCutoffC16 + 25 * 60_000;
+  const futureCutoffT16 = {
+    enabled: true,
+    mode: 'pwm',
+    clockMode: false,
+    onMinutes: 28,
+    offMinutes: 32,
+    activeHours: { enabled: false, start: '08:00', end: '23:00' },
+    smartMode: { enabled: false, sensitivity: 7 },
+    comfortStartUntil: 0,
+    pwmState: 'off',
+    nextTriggerAt: futureCutoffTAt16,
+    smartClockPlannedAt: futureCutoffC16 + 2,
+    syncedAt: futureCutoffC16 + 3
+  };
+  const futureCutoffApplyHarness16 = loadActualSyncApply16({
+    ...syncCfg16,
+    enabled: true,
+    onMinutes: 45,
+    offMinutes: 15,
+    activeHours: { enabled: true, start: '10:00', end: '19:00' },
+    smartMode: { enabled: true, sensitivity: 10 },
+    pwmState: 'on',
+    nextTriggerAt: syncApplyNow16 + 45 * 60_000,
+    smartClockPlannedAt: syncApplyNow16,
+    alarmCreatedAt: syncApplyNow16,
+    alarmDelayMinutes: 45
+  }, syncApplyNow16 + 45 * 60_000, 0, {
+    faithfulDisabledReset: true,
+    initialLocalMutationCutoff: futureCutoffC16,
+    initialRemoteAuthorityObservedAt: futureCutoffC16
+  });
+  const futureCutoffFApplied16 = await futureCutoffApplyHarness16.apply(
+    futureCutoffF16,
+    'future-cutoff-F-after-baseline'
+  );
+  const futureCutoffAfterF16 = futureCutoffApplyHarness16.snapshot();
+  const futureCutoffFObservedAt16 =
+    futureCutoffApplyHarness16.deferredRemoteObservedAt();
+  const futureCutoffTApplied16 = await futureCutoffApplyHarness16.apply(
+    futureCutoffT16,
+    'future-cutoff-T-after-F'
+  );
+  const futureCutoffAfterT16 = futureCutoffApplyHarness16.snapshot();
+  const futureCutoffDurableT16 = futureCutoffApplyHarness16.durable();
+  assertPass(futureCutoffApplyHarness16
+        .localMutationCommittedObservedAt() === futureCutoffC16
+      && futureCutoffFApplied16 === true
+      && futureCutoffFObservedAt16 > futureCutoffC16
+      && futureCutoffAfterF16.enabled === false
+      && futureCutoffAfterF16.onMinutes === 8
+      && futureCutoffAfterF16.offMinutes === 52
+      && futureCutoffAfterF16.activeHours?.start === '05:00'
+      && futureCutoffAfterF16.smartMode?.sensitivity === 1
+      && futureCutoffAfterF16.pwmState === 'off'
+      && futureCutoffAfterF16.nextTriggerAt === 0
+      && futureCutoffTApplied16 === true
+      && futureCutoffAfterT16.enabled === true
+      && futureCutoffAfterT16.onMinutes === 28
+      && futureCutoffAfterT16.offMinutes === 32
+      && futureCutoffAfterT16.activeHours?.enabled === false
+      && futureCutoffAfterT16.smartMode?.sensitivity === 7
+      && futureCutoffAfterT16.pwmState === 'off'
+      && futureCutoffAfterT16.nextTriggerAt === futureCutoffTAt16
+      && futureCutoffDurableT16.onMinutes === 28
+      && futureCutoffDurableT16.nextTriggerAt === futureCutoffTAt16,
+    '16M-2D-2B: future durable M cutoff 是 inbound Lamport 基线；F arrival observedAt>C 后完整采纳 config/disabled phase，随后 T 完整接管 config/phase');
+
   const releasePwmOwnershipSourceF90 = extractSourceSection(
     backgroundSource,
     'function releasePwmStepOwnership(automationRevision) {',
@@ -21938,6 +29197,7 @@ return plan;
     let pwmStepRunningRevision = initialPwmStepRunning ? 7 : null;
     let pwmRuntimeRevision = 7;
     let lastPwmStepAt = 0;
+    function isSyncPhaseAdoptionAdmissionBlocked() { return false; }
     ${releasePwmOwnershipSourceF90}
     ${smartReapplyLoopSourceF90}
     async function dispatch(msg, sendResponse) {
@@ -22021,12 +29281,9513 @@ return plan;
       && pwmDeferredHarnessF90.state().smartReapplyPending === false,
     '16M-3: 真实 reapplySmartNow 分支在 single-flight 与 PWM 占用期间均保留尾随重算');
 
+  const manualToggleIntentSource16 = extractSourceSection(
+    backgroundSource,
+    'function claimManualToggleIntent(action) {',
+    '\nfunction claimTimerBasedShutdown()',
+    'manual toggle arrival ownership'
+  );
+  const messageListenerStart16 = backgroundSource.indexOf(
+    'chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {'
+  );
+  const messageListenerAsyncStart16 = backgroundSource.indexOf(
+    '\n  (async () => {',
+    messageListenerStart16
+  );
+  const manualIntentClaimIndex16 = backgroundSource.indexOf(
+    'const manualToggleRequestEpoch = msg.type === \'toggleNow\'',
+    messageListenerStart16
+  );
+  const manualToggleMessageStart16 = backgroundSource.indexOf(
+    "if (msg.type === 'toggleNow') {",
+    messageListenerAsyncStart16
+  );
+  const manualToggleMessageEnd16 = backgroundSource.indexOf(
+    "\n    if (msg.type === 'ensureDiagnostics')",
+    manualToggleMessageStart16
+  );
+  const manualToggleMessageBody16 = manualToggleMessageStart16 >= 0
+      && manualToggleMessageEnd16 > manualToggleMessageStart16
+    ? backgroundSource.slice(manualToggleMessageStart16, manualToggleMessageEnd16)
+    : '';
+  let releaseManualSyncHolder16;
+  let markManualSyncHolderStarted16;
+  const manualSyncHolderGate16 = new Promise(resolve => {
+    releaseManualSyncHolder16 = resolve;
+  });
+  const manualSyncHolderStarted16 = new Promise(resolve => {
+    markManualSyncHolderStarted16 = resolve;
+  });
+  const manualSyncHarness16 = new Function(
+    'holderGate', 'markHolderStarted',
+    `let scheduleUpdateChain = Promise.resolve();
+    let automaticDisableAdmissionEpoch = 0;
+    let manualToggleIntentEpoch = 0;
+    let manualToggleIntentAction = '';
+    let schedulePersistenceAuthorityEpoch = 0;
+    let manualOffAutomaticOnBlocked = false;
+    let pwmRuntimeRevision = 0;
+    let syncPublishGeneration = 0;
+    let syncPhaseAdoptionAdmissionEpoch = 0;
+    let syncPhaseAdoptionAdmissionOwner = 0;
+    const syncPhaseAdoptionAdmissionWaiters = [];
+    const schedule = { enabled: true };
+    const calls = [];
+    function claimSyncPhaseAdoptionAdmission() {
+      if (syncPhaseAdoptionAdmissionOwner > 0) return 0;
+      const epoch = ++syncPhaseAdoptionAdmissionEpoch;
+      syncPhaseAdoptionAdmissionOwner = epoch;
+      calls.push('phase-claim:' + epoch);
+      return epoch;
+    }
+    function claimSyncPhaseAdoptionAdmissionWhenAvailable() {
+      const epoch = claimSyncPhaseAdoptionAdmission();
+      if (epoch > 0) return Promise.resolve(epoch);
+      return new Promise(resolve => {
+        syncPhaseAdoptionAdmissionWaiters.push(resolve);
+      });
+    }
+    function releaseSyncPhaseAdoptionAdmission(epoch) {
+      calls.push('phase-release:' + epoch);
+      if (syncPhaseAdoptionAdmissionOwner !== epoch) return false;
+      const next = syncPhaseAdoptionAdmissionWaiters.shift();
+      if (next) {
+        const nextEpoch = ++syncPhaseAdoptionAdmissionEpoch;
+        syncPhaseAdoptionAdmissionOwner = nextEpoch;
+        next(nextEpoch);
+      } else {
+        syncPhaseAdoptionAdmissionOwner = 0;
+      }
+      return true;
+    }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) > 0
+        && Number(epoch) === syncPhaseAdoptionAdmissionOwner;
+    }
+    function drainDeferredScheduleRepair(reason) {
+      calls.push('drain:' + reason);
+      return false;
+    }
+    function invalidateTimerBasedShutdown() {}
+    ${manualToggleIntentSource16}
+    ${serializedScheduleUpdateSourceF90}
+    function isAutomationAllowed() {
+      calls.push('unexpected-automation-read');
+      return true;
+    }
+    async function toggleAC() {
+      calls.push('unexpected-physical-on');
+      return { success: true };
+    }
+    ${toggleBody16}
+    return {
+      startSyncHolder() {
+        return runSerializedScheduleUpdate(async () => {
+          calls.push('sync:start');
+          markHolderStarted();
+          await holderGate;
+          automaticDisableAdmissionEpoch += 1;
+          calls.push('sync:disable-generation');
+        });
+      },
+      queueManualOn() {
+        const manualOnAdmissionEpoch = automaticDisableAdmissionEpoch;
+        const manualToggleRequestEpoch = claimManualToggleIntent('on');
+        calls.push('manual:arrival:' + manualToggleRequestEpoch);
+        return runSerializedSchedulePhaseOperation(
+          phaseAdmissionEpoch => toggleNowAndSync('on', {
+            phaseAdmissionEpoch,
+            ensureCurrent: () => (
+              manualOnAdmissionEpoch === automaticDisableAdmissionEpoch
+              && isManualToggleIntentCurrent(manualToggleRequestEpoch, 'on')
+            )
+          }),
+          'manual-toggle-on'
+        );
+      },
+      calls,
+      owner: () => syncPhaseAdoptionAdmissionOwner
+    };`
+  )(manualSyncHolderGate16, markManualSyncHolderStarted16);
+  const manualSyncHolderRun16 = manualSyncHarness16.startSyncHolder();
+  await manualSyncHolderStarted16;
+  const manualOnQueuedBehindSync16 = manualSyncHarness16.queueManualOn();
+  await Promise.resolve();
+  const manualOnHadNoEarlyEffects16 = !manualSyncHarness16.calls.some(call =>
+    call.startsWith('phase-claim:')
+      || call === 'unexpected-automation-read'
+      || call === 'unexpected-physical-on');
+  releaseManualSyncHolder16();
+  const [, manualOnAfterSync16] = await Promise.all([
+    manualSyncHolderRun16,
+    manualOnQueuedBehindSync16
+  ]);
+  assertPass(manualOnHadNoEarlyEffects16
+      && manualOnAfterSync16?.phaseStale === true
+      && manualSyncHarness16.owner() === 0
+      && manualSyncHarness16.calls.includes('sync:disable-generation')
+      && manualSyncHarness16.calls.includes('phase-claim:1')
+      && manualSyncHarness16.calls.includes('phase-release:1')
+      && manualSyncHarness16.calls.includes('drain:manual-toggle-on-complete')
+      && !manualSyncHarness16.calls.includes('unexpected-automation-read')
+      && !manualSyncHarness16.calls.includes('unexpected-physical-on')
+      && backgroundSource.includes(
+        'const manualToggleAutomaticAdmissionEpoch = automaticDisableAdmissionEpoch;')
+      && manualToggleMessageBody16.includes(
+        'result = await runSerializedSchedulePhaseOperation(')
+      && manualToggleMessageBody16.includes(
+        'manualToggleAutomaticAdmissionEpoch === automaticDisableAdmissionEpoch')
+      && manualToggleMessageBody16.includes(
+        "isManualToggleIntentCurrent(\n          manualToggleRequestEpoch,\n          'on'")
+      && manualToggleMessageBody16.includes(
+        'await releaseManualOffAdmissionForManualOn('),
+    '16M-3A: manual ON 排在 sync/设置后时先等 schedule→phase；disable generation 换代后零物理 ON，合法 owner 才能清 durable OFF admission');
+
   const requestTimerBasedShutdownSource16 = extractSourceSection(
     backgroundSource,
     'function canReusePageTimerProof(state, requestedMinutes, now) {',
     '\n// ----- 闹钟触发时执行 -----',
     'requestTimerBasedShutdown deadline'
   );
+  const manualOffFinalizeSource16 = extractSourceSection(
+    backgroundSource,
+    'async function finalizeManualOffAutomationPhase(',
+    '\nasync function toggleNowAndSync(',
+    'manual OFF phase finalizer'
+  );
+  const manualToggleAcSource16 = extractSourceSection(
+    backgroundSource,
+    'async function toggleAC(\n',
+    '\nasync function toggleACOnce(',
+    'manual toggle ensureCurrent forwarding'
+  );
+  const manualPreparedOnSource16 = extractSourceSection(
+    backgroundSource,
+    'async function turnOnWithPreparedPageTimer(',
+    '\n// ----- 切换 AC 状态 -----',
+    'prepared manual ON current guard'
+  );
+  let releaseManualOnIntentPersist16;
+  let markManualOnIntentPersistStarted16;
+  const manualOnIntentPersistGate16 = new Promise(resolve => {
+    releaseManualOnIntentPersist16 = resolve;
+  });
+  const manualOnIntentPersistStarted16 = new Promise(resolve => {
+    markManualOnIntentPersistStarted16 = resolve;
+  });
+  const manualArrivalOnHarness16 = new Function(
+    'persistGate', 'markPersistStarted',
+    `let schedule = { enabled: true, onMinutes: 23, pwmState: 'on' };
+    let pwmRuntimeRevision = 31;
+    let syncPublishGeneration = 0;
+    let pageTimerWriteGeneration = 0;
+    let manualToggleIntentEpoch = 0;
+    let manualToggleIntentAction = '';
+    let schedulePersistenceAuthorityEpoch = 0;
+    let manualOffAutomaticOnBlocked = false;
+    const calls = [];
+    function invalidateTimerBasedShutdown() {}
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) === 71;
+    }
+    function isAutomationAllowed() { return true; }
+    function isAutomationOperationCurrent(revision) {
+      return revision === pwmRuntimeRevision;
+    }
+    function clearPageTimerProofState() {
+      pageTimerWriteGeneration += 1;
+      calls.push('clear-proof:' + pageTimerWriteGeneration);
+      return pageTimerWriteGeneration;
+    }
+    function isPageTimerWriteOwnerCurrent(owner) {
+      return owner === pageTimerWriteGeneration;
+    }
+    function clearPwmRetryState() { calls.push('clear-retry'); }
+    async function writePageTimerRetryAlarm({ isCurrent }) {
+      calls.push('clear-retry-alarm:' + isCurrent());
+      return { stale: !isCurrent(), alarmCreated: false };
+    }
+    async function persistSchedule(reason) {
+      calls.push('persist:' + reason);
+      if (reason === 'toggleNowAndSync-on-intent') {
+        markPersistStarted();
+        await persistGate;
+      }
+    }
+    async function toggleAC() {
+      calls.push('physical-on');
+      return { success: true };
+    }
+    ${manualToggleIntentSource16}
+    ${toggleBody16}
+    return {
+      startOn() {
+        const epoch = claimManualToggleIntent('on');
+        calls.push('arrival:on:' + epoch);
+        return toggleNowAndSync('on', {
+          phaseAdmissionEpoch: 71,
+          ensureCurrent: () => isManualToggleIntentCurrent(epoch, 'on')
+        });
+      },
+      arriveOff() {
+        const epoch = claimManualToggleIntent('off');
+        calls.push('arrival:off:' + epoch);
+        return epoch;
+      },
+      calls
+    };`
+  )(manualOnIntentPersistGate16, markManualOnIntentPersistStarted16);
+  const manualArrivalOldOnRun16 = manualArrivalOnHarness16.startOn();
+  await manualOnIntentPersistStarted16;
+  const manualArrivalOffEpoch16 = manualArrivalOnHarness16.arriveOff();
+  releaseManualOnIntentPersist16();
+  const manualArrivalOldOnResult16 = await manualArrivalOldOnRun16;
+
+  let releaseManualOffStatus16;
+  let markManualOffStatusStarted16;
+  const manualOffStatusGate16 = new Promise(resolve => {
+    releaseManualOffStatus16 = resolve;
+  });
+  const manualOffStatusStarted16 = new Promise(resolve => {
+    markManualOffStatusStarted16 = resolve;
+  });
+  const manualArrivalOffHarness16 = new Function(
+    'statusGate', 'markStatusStarted', 'isPageTimerProofFresh',
+    `let schedule = {
+      enabled: true,
+      pageTimerMinutes: null,
+      pageTimerTargetAt: 0,
+      pageTimerError: '',
+      pageTimerRetryAt: 0,
+      pageTimerRetryMinutes: 0
+    };
+    let manualToggleIntentEpoch = 0;
+    let manualToggleIntentAction = '';
+    let schedulePersistenceAuthorityEpoch = 0;
+    let manualOffAutomaticOnBlocked = false;
+    let timerBasedShutdownRevision = 0;
+    let pwmRuntimeRevision = 0;
+    let syncPublishGeneration = 0;
+    let pageTimerWriteGeneration = 0;
+    let statusCalls = 0;
+    let physicalTimerWrites = 0;
+    const calls = [];
+    function claimTimerBasedShutdown() {
+      timerBasedShutdownRevision += 1;
+      return timerBasedShutdownRevision;
+    }
+    function isTimerBasedShutdownCurrent(revision) {
+      return revision === timerBasedShutdownRevision;
+    }
+    function invalidateTimerBasedShutdown() {
+      timerBasedShutdownRevision += 1;
+    }
+    function clearPageTimerProofState() {
+      pageTimerWriteGeneration += 1;
+      calls.push('clear-proof:' + pageTimerWriteGeneration);
+      return pageTimerWriteGeneration;
+    }
+    function isPageTimerWriteOwnerCurrent(owner) {
+      return owner === pageTimerWriteGeneration;
+    }
+    async function writePageTimerRetryAlarm({ isCurrent }) {
+      calls.push('clear-retry-alarm:' + isCurrent());
+      return { stale: !isCurrent(), alarmCreated: false };
+    }
+    async function getCurrentACStatus() {
+      statusCalls += 1;
+      calls.push('status:' + statusCalls);
+      if (statusCalls === 1) {
+        markStatusStarted();
+        await statusGate;
+      }
+      return { isOn: true };
+    }
+    async function persistSchedule(reason) { calls.push('persist:' + reason); }
+    async function setPageTimer(_minutes, options = {}) {
+      if (typeof options.ensureCurrent === 'function'
+          && !options.ensureCurrent()) {
+        calls.push('timer-stale-before-physical');
+        return { success: false, shutdownStale: true };
+      }
+      physicalTimerWrites += 1;
+      calls.push('physical-timer');
+      return { success: true };
+    }
+    function sanitizeMinutes(value, fallback) {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) && parsed >= 1 ? parsed : fallback;
+    }
+    const Date = { now: () => 1_800_200_000_000 };
+    const console = { log() {}, warn() {}, error() {} };
+    ${manualToggleIntentSource16}
+    ${requestTimerBasedShutdownSource16}
+    ${toggleBody16}
+    return {
+      startOff() {
+        const epoch = claimManualToggleIntent('off');
+        calls.push('arrival:off:' + epoch);
+        return toggleNowAndSync('off', {
+          ensureCurrent: () => isManualToggleIntentCurrent(epoch, 'off')
+        });
+      },
+      arriveOn() {
+        const epoch = claimManualToggleIntent('on');
+        calls.push('arrival:on:' + epoch);
+        return epoch;
+      },
+      calls,
+      writes: () => physicalTimerWrites
+    };`
+  )(
+    manualOffStatusGate16,
+    markManualOffStatusStarted16,
+    syncHelpers.isPageTimerProofFresh
+  );
+  const manualArrivalOldOffRun16 = manualArrivalOffHarness16.startOff();
+  await manualOffStatusStarted16;
+  const manualArrivalOnEpoch16 = manualArrivalOffHarness16.arriveOn();
+  releaseManualOffStatus16();
+  const manualArrivalOldOffResult16 = await manualArrivalOldOffRun16;
+  assertPass(manualIntentClaimIndex16 > messageListenerStart16
+      && manualIntentClaimIndex16 < messageListenerAsyncStart16
+      && manualToggleMessageBody16.includes(
+        "const immediatePromise = toggleNowAndSync('off', {")
+      && manualToggleMessageBody16.includes(
+        'const manualOffIsCurrent = () => (')
+      && manualToggleMessageBody16.includes(
+        'const admissionReceipt = await manualOffAdmission?.durablePromise;')
+      && manualToggleMessageBody16.includes(
+        'manualOffAdmissionToken === admissionToken')
+      && manualToggleMessageBody16.includes(
+        'const result = await runManualOffAdmissionFlight(')
+      && manualToggleMessageBody16.includes(
+        'const phaseResult = await finalizeManualOffAutomationPhase(')
+      && toggleBody16.includes("requestTimerBasedShutdown(\n      'toggle-now-off',\n      1,\n      { ensureCurrent }")
+      && toggleBody16.includes('ensureCurrent: manualToggleIsCurrent')
+      && manualToggleAcSource16.includes('ensureCurrent: callerIsCurrent')
+      && toggleOnceBody.includes(
+        '_toggleOnExistingTab(homeTab, action, options)')
+      && backgroundSource.includes(
+        'return turnOnWithPreparedPageTimer(tab, options);')
+      && manualPreparedOnSource16.includes('ensureCurrent: callerIsCurrent')
+      && setTimerBody.includes('ensureCurrent = null')
+      && setTimerBody.includes(
+        'pageTimerWriteOwner,\n      ensureCurrent\n    });')
+      && manualArrivalOffEpoch16 === 2
+      && manualArrivalOldOnResult16?.phaseStale === true
+      && manualArrivalOnHarness16.calls.includes(
+        'persist:toggleNowAndSync-on-intent')
+      && !manualArrivalOnHarness16.calls.includes('physical-on')
+      && manualArrivalOnEpoch16 === 2
+      && manualArrivalOldOffResult16?.result?.shutdownStale === true
+      && manualArrivalOffHarness16.writes() === 0
+      && !manualArrivalOffHarness16.calls.includes('physical-timer'),
+    '16M-3B: manual arrival epoch 在任何 await 前认领；后到 OFF 淘汰旧 ON 物理发送，后到 ON 淘汰旧 OFF 页面 timer 写入');
+
+  const manualCancellationCalls16 = [];
+  const firstManualCancellationGate16 = makeDeferred9G();
+  const secondManualCancellationGate16 = makeDeferred9G();
+  const firstManualCancellationStarted16 = makeDeferred9G();
+  const secondManualCancellationStarted16 = makeDeferred9G();
+  const manualCancellationGates16 = [
+    firstManualCancellationGate16,
+    secondManualCancellationGate16
+  ];
+  const manualCancellationStarts16 = [
+    firstManualCancellationStarted16,
+    secondManualCancellationStarted16
+  ];
+  let manualCancellationIndex16 = 0;
+  const manualCancellationHarness16 = new Function(
+    'cancelAutomaticOnRequests', 'appendDiagnosticLog', 'sanitizeMinutes',
+    'isAutomationAllowed', 'isAutomationOperationCurrent', 'toggleACOnce',
+    'console',
+    `let manualToggleIntentEpoch = 0;
+    let manualToggleIntentAction = '';
+    let schedulePersistenceAuthorityEpoch = 0;
+    let manualOffCancellationChain = Promise.resolve();
+    let manualOffAutomaticOnBlocked = false;
+    let pwmRuntimeRevision = 0;
+    let syncPublishGeneration = 0;
+    let activeAcToggleAttempt = null;
+    function invalidateTimerBasedShutdown() {}
+    ${manualToggleIntentSource16}
+    ${toggleCoordinatorSource9G}
+    return {
+      claim: claimManualToggleIntent,
+      isCurrent: isManualToggleIntentCurrent,
+      isEpochCurrent: isManualToggleIntentEpochCurrent,
+      queueOffCancellation: queueManualOffAutomaticOnCancellation,
+      toggleAC,
+      epoch: () => manualToggleIntentEpoch,
+      runtimeRevision: () => pwmRuntimeRevision,
+      automaticOnBlocked: () => manualOffAutomaticOnBlocked
+    };`
+  )(
+    async () => {
+      const index = manualCancellationIndex16;
+      manualCancellationIndex16 += 1;
+      manualCancellationCalls16.push(`cancel:${index + 1}:start`);
+      manualCancellationStarts16[index].resolve();
+      await manualCancellationGates16[index].promise;
+      manualCancellationCalls16.push(`cancel:${index + 1}:end`);
+    },
+    () => {},
+    (value, fallback) => {
+      const parsed = Number.parseInt(value, 10);
+      return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+    },
+    () => true,
+    () => true,
+    async (_action, options) => {
+      manualCancellationCalls16.push(
+        `physical-on:${typeof options.ensureCurrent !== 'function'
+          || options.ensureCurrent()}`
+      );
+      return { success: true, marker: 'latest-manual-on' };
+    },
+    testConsole
+  );
+  const frozenAutomaticOnEpoch16 = manualCancellationHarness16.epoch();
+  const firstQueuedOffEpoch16 = manualCancellationHarness16.claim('off');
+  const firstManualCancellationRun16 = manualCancellationHarness16
+    .queueOffCancellation();
+  const automaticOnBlockedAfterOffArrival16 = manualCancellationHarness16
+    .automaticOnBlocked();
+  await firstManualCancellationStarted16.promise;
+  const frozenAutomaticOnRun16 = manualCancellationHarness16.toggleAC('on', {
+    ensureCurrent: () => manualCancellationHarness16.isEpochCurrent(
+      frozenAutomaticOnEpoch16
+    )
+  });
+  const secondQueuedOffEpoch16 = manualCancellationHarness16.claim('off');
+  const secondManualCancellationRun16 = manualCancellationHarness16
+    .queueOffCancellation();
+  const latestManualOnEpoch16 = manualCancellationHarness16.claim('on');
+  const automaticOnRemainsBlockedUntilDurableRelease16 =
+    manualCancellationHarness16.automaticOnBlocked();
+  const latestManualOnRun16 = manualCancellationHarness16.toggleAC('on', {
+    ensureCurrent: () => manualCancellationHarness16.isCurrent(
+      latestManualOnEpoch16,
+      'on'
+    )
+  });
+  await Promise.resolve();
+  const zeroOnDuringFirstCancellation16 = !manualCancellationCalls16.some(
+    call => call.startsWith('physical-on:')
+  );
+  firstManualCancellationGate16.resolve();
+  await secondManualCancellationStarted16.promise;
+  const zeroOnDuringSecondCancellation16 = !manualCancellationCalls16.some(
+    call => call.startsWith('physical-on:')
+  );
+  secondManualCancellationGate16.resolve();
+  const [frozenAutomaticOnResult16, latestManualOnResult16] = await Promise.all([
+    frozenAutomaticOnRun16,
+    latestManualOnRun16
+  ]);
+  await Promise.all([
+    firstManualCancellationRun16,
+    secondManualCancellationRun16
+  ]);
+  assertPass(firstQueuedOffEpoch16 === 1
+      && secondQueuedOffEpoch16 === 2
+      && latestManualOnEpoch16 === 3
+      && manualCancellationHarness16.runtimeRevision() === 3
+      && automaticOnBlockedAfterOffArrival16
+      && automaticOnRemainsBlockedUntilDurableRelease16
+      && !manualCancellationHarness16.isCurrent(firstQueuedOffEpoch16, 'off')
+      && !manualCancellationHarness16.isCurrent(secondQueuedOffEpoch16, 'off')
+      && manualCancellationHarness16.isCurrent(latestManualOnEpoch16, 'on')
+      && zeroOnDuringFirstCancellation16
+      && zeroOnDuringSecondCancellation16
+      && frozenAutomaticOnResult16?.requestStale === true
+      && latestManualOnResult16?.marker === 'latest-manual-on'
+      && manualCancellationCalls16.join(',')
+        === 'cancel:1:start,cancel:1:end,cancel:2:start,cancel:2:end,physical-on:true'
+      && manualToggleIntentSource16.includes('manualToggleIntentEpoch += 1;')
+      && manualToggleIntentSource16.includes(
+        '.then(() => cancelAutomaticOnRequests())')
+      && toggleCoordinatorSource9G.includes(
+        'await waitForManualOffCancellationToSettle();')
+      && manualIntentClaimIndex16 < messageListenerAsyncStart16
+      && backgroundSource.indexOf(
+        'const manualOffPreemptionPromise = msg.type === \'toggleNow\'',
+        messageListenerStart16
+      ) < messageListenerAsyncStart16
+      && manualToggleMessageBody16.includes('await manualOffPreemptionPromise;')
+      && manualToggleMessageBody16.includes(
+        'await releaseManualOffAdmissionForManualOn(')
+      && countOccurrences(
+        backgroundSource,
+        'const manualToggleIntentEpochAtAdmission = manualToggleIntentEpoch;'
+      ) === 2
+      && backgroundSource.includes('ensureCurrent: comfortActuatorIsCurrent')
+      && pwmBody.includes('ensureCurrent: automaticOnActuatorIsCurrent'),
+    '16M-3C: OFF cancel 严格 FIFO；后到 ON 淘汰旧请求但 durable OFF barrier 保留到 phase owner 清理，取消链结算后仅最新 ON 物理执行一次');
+
+  const loadManualOffFinalizeHarness16 = ({
+    nowMs,
+    phaseCurrent = true,
+    onMinutes = 20,
+    offMinutes = 17,
+    forcePlannerRefuse = false
+  }) => {
+    class ManualOffFinalizeDate16 extends Date {
+      static now() { return nowMs; }
+    }
+    return new Function(
+      'SMART_MODE', 'planSmartOnAfterConfirmedOffDecision',
+      'nextHalfHourBoundary', 'halfHourBoundaryAtOrBefore', 'Date',
+      'initialOnMinutes', 'initialOffMinutes', 'forcePlannerRefuse',
+      `let schedule = {
+        enabled: true,
+        smartMode: { enabled: true, sensitivity: 5 },
+        onMinutes: initialOnMinutes,
+        offMinutes: initialOffMinutes,
+        pageTimerTargetAt: 0,
+        pageTimerError: '',
+        comfortStartUntil: Date.now() + 300000,
+        comfortStartOnConfirmedAt: Date.now(),
+        pwmState: 'off',
+        nextTriggerAt: 0,
+        smartClockPlannedAt: 0,
+        alarmCreatedAt: 0,
+        alarmDelayMinutes: 0,
+        smartOnBoundaryAt: 0,
+        pwmRetryKind: '',
+        pwmRetryBoundaryAt: 0,
+        pwmRetryScheduledAt: 0
+      };
+      let pwmRuntimeRevision = 41;
+      let pwmAlarmWriteGeneration = 0;
+      let manualToggleIntentEpoch = 1;
+      let manualToggleIntentAction = 'off';
+      let manualOffAutomaticOnBlocked = true;
+      let manualOffAdmissionToken = 'manual-off-test-token';
+      let manualOffAdmissionRequestedAt = Date.now();
+      let deferredSyncDisablePending = false;
+      let deferredSyncDisableEpoch = 0;
+      let currentPhaseOwner = ${phaseCurrent ? '71' : '72'};
+      let lastSmartOffPlan = null;
+      const calls = [];
+      function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+        return Number(epoch) === currentPhaseOwner;
+      }
+      function isManualToggleIntentCurrent(epoch, action) {
+        return epoch === manualToggleIntentEpoch
+          && action === manualToggleIntentAction;
+      }
+      async function requestTimerBasedShutdown(_reason, _minutes, options = {}) {
+        calls.push('timer:' + (typeof options.ensureCurrent !== 'function'
+          || options.ensureCurrent()));
+        schedule.pageTimerTargetAt = Date.now() + 60000;
+        return { success: true, targetAt: schedule.pageTimerTargetAt };
+      }
+      function isAutomationAllowed() { return schedule.enabled === true; }
+      function isAutomationAllowedIgnoringManualOff() {
+        return schedule.enabled === true;
+      }
+      function isAutomationOperationCurrent(revision) {
+        return revision === pwmRuntimeRevision && schedule.enabled === true;
+      }
+      function isAutomationOperationCurrentIgnoringManualOff(revision) {
+        return revision === pwmRuntimeRevision && schedule.enabled === true;
+      }
+      async function getCurrentACStatus() {
+        calls.push('status');
+        return { isOn: false };
+      }
+      function clearPwmRetryState() {
+        schedule.pwmRetryKind = '';
+        schedule.pwmRetryBoundaryAt = 0;
+        schedule.pwmRetryScheduledAt = 0;
+      }
+      function planSmartOnAfterConfirmedOff(candidate, options) {
+        lastSmartOffPlan = forcePlannerRefuse
+          ? { kind: 'refuse', reason: 'synthetic-planner-refuse' }
+          : planSmartOnAfterConfirmedOffDecision(candidate, options);
+        calls.push('smart-plan:' + lastSmartOffPlan.kind);
+        return lastSmartOffPlan;
+      }
+      function setSmartOnPwmRetryState(_action, scheduledAt, marker = {}) {
+        schedule.pwmRetryKind = marker.kind || 'smart-on';
+        schedule.pwmRetryBoundaryAt = Number(marker.boundaryAt) || 0;
+        schedule.pwmRetryScheduledAt = Number(scheduledAt) || 0;
+      }
+      function setPwmClockIntent(nextTriggerAt) {
+        schedule.nextTriggerAt = Number(nextTriggerAt) || 0;
+        schedule.smartClockPlannedAt = schedule.nextTriggerAt > 0
+          ? Date.now()
+          : 0;
+        schedule.alarmCreatedAt = 0;
+        schedule.alarmDelayMinutes = 0;
+      }
+      function snapshotPhaseAdoptionIntentState() {
+        return structuredClone(schedule);
+      }
+      function replayPhaseAdoptionIntentState(intent, options = {}) {
+        const clock = {
+          nextTriggerAt: schedule.nextTriggerAt,
+          smartClockPlannedAt: schedule.smartClockPlannedAt,
+          alarmCreatedAt: schedule.alarmCreatedAt,
+          alarmDelayMinutes: schedule.alarmDelayMinutes
+        };
+        Object.assign(schedule, structuredClone(intent));
+        if (options.replayClock === false) Object.assign(schedule, clock);
+        return true;
+      }
+      const chrome = {
+        alarms: {
+          async clear(name) {
+            calls.push('clear:' + name);
+            return true;
+          }
+        }
+      };
+      async function persistSchedule(reason, options = {}) {
+        calls.push('persist:' + reason + ':' + (options.syncFromLiveAlarm === false));
+      }
+      async function syncScheduleToSync(reason) {
+        calls.push('sync:' + reason);
+        return true;
+      }
+      async function commitScheduleAndReleaseManualOffAdmission({
+        ensureCurrent,
+        reason = ''
+      } = {}) {
+        calls.push('manual-off-commit:' + reason);
+        if (typeof ensureCurrent === 'function' && !ensureCurrent()) return false;
+        manualOffAdmissionToken = '';
+        manualOffAdmissionRequestedAt = 0;
+        manualOffAutomaticOnBlocked = false;
+        return true;
+      }
+      async function createPwmAlarmFromPlanWithReceipt(
+        plan,
+        tag,
+        revision,
+        options = {}
+      ) {
+        calls.push('pwm:' + tag + ':' + (typeof options.ensureCurrent !== 'function'
+          || options.ensureCurrent()));
+        if (!isAutomationOperationCurrent(revision)) {
+          return { created: false, writeOwner: 0 };
+        }
+        pwmAlarmWriteGeneration += 1;
+        schedule.nextTriggerAt = plan.nextTriggerAt;
+        schedule.smartClockPlannedAt = Date.now();
+        schedule.alarmCreatedAt = Date.now();
+        schedule.alarmDelayMinutes = (plan.nextTriggerAt - Date.now()) / 60000;
+        return { created: true, writeOwner: pwmAlarmWriteGeneration };
+      }
+      function isPwmAlarmWriteOwnerCurrent(owner) {
+        return owner > 0 && owner === pwmAlarmWriteGeneration;
+      }
+      function snapshotVerifiedPwmClockState(owner) {
+        if (!isPwmAlarmWriteOwnerCurrent(owner)) return null;
+        return {
+          nextTriggerAt: schedule.nextTriggerAt,
+          smartClockPlannedAt: schedule.smartClockPlannedAt,
+          alarmCreatedAt: schedule.alarmCreatedAt,
+          alarmDelayMinutes: schedule.alarmDelayMinutes,
+          pwmAlarmWriteOwner: owner
+        };
+      }
+      function replayVerifiedPwmClockState(clockState) {
+        if (!clockState
+            || !isPwmAlarmWriteOwnerCurrent(clockState.pwmAlarmWriteOwner)) {
+          return false;
+        }
+        schedule.nextTriggerAt = clockState.nextTriggerAt;
+        schedule.smartClockPlannedAt = clockState.smartClockPlannedAt;
+        schedule.alarmCreatedAt = clockState.alarmCreatedAt;
+        schedule.alarmDelayMinutes = clockState.alarmDelayMinutes;
+        return true;
+      }
+      async function createAlarm(name, options = {}) {
+        calls.push('alarm:' + name + ':' + (typeof options.ensureCurrent !== 'function'
+          || options.ensureCurrent()));
+        return true;
+      }
+      async function updateBadge() { calls.push('badge'); }
+      function sanitizeMinutes(value, fallback) {
+        const parsed = Number.parseInt(value, 10);
+        return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+      }
+      ${manualOffFinalizeSource16}
+      return {
+        run: () => finalizeManualOffAutomationPhase(71, () => true),
+        schedule: () => ({ ...schedule }),
+        plan: () => lastSmartOffPlan,
+        blocked: () => manualOffAutomaticOnBlocked,
+        calls
+      };`
+    )(
+      smartMode.SMART_MODE,
+      pwmPhase.planSmartOnAfterConfirmedOff,
+      pwmPhase.nextHalfHourBoundary,
+      pwmPhase.halfHourBoundaryAtOrBefore,
+      ManualOffFinalizeDate16,
+      onMinutes,
+      offMinutes,
+      forcePlannerRefuse
+    );
+  };
+
+  const ordinaryManualOffNow16 = new Date(2026, 7, 29, 12, 7, 0, 0).getTime();
+  const ordinaryManualOffHarness16 = loadManualOffFinalizeHarness16({
+    nowMs: ordinaryManualOffNow16
+  });
+  const ordinaryManualOffResult16 = await ordinaryManualOffHarness16.run();
+  const ordinaryManualOffSchedule16 = ordinaryManualOffHarness16.schedule();
+  const ordinaryManualOffBoundary16 = new Date(
+    2026,
+    7,
+    29,
+    12,
+    30,
+    0,
+    0
+  ).getTime();
+
+  const typedManualOffNow16 = new Date(2026, 7, 29, 12, 27, 0, 0).getTime();
+  const typedManualOffHarness16 = loadManualOffFinalizeHarness16({
+    nowMs: typedManualOffNow16
+  });
+  const typedManualOffResult16 = await typedManualOffHarness16.run();
+  const typedManualOffSchedule16 = typedManualOffHarness16.schedule();
+  const typedManualOffBoundary16 = new Date(
+    2026,
+    7,
+    29,
+    12,
+    30,
+    0,
+    0
+  ).getTime();
+  const typedManualOffRetryAt16 = typedManualOffNow16 + 6 * 60_000;
+  const staleManualOffHarness16 = loadManualOffFinalizeHarness16({
+    nowMs: ordinaryManualOffNow16,
+    phaseCurrent: false
+  });
+  const staleManualOffResult16 = await staleManualOffHarness16.run();
+  assertPass(ordinaryManualOffResult16?.success === true
+      && ordinaryManualOffHarness16.plan()?.kind === 'smart-on-boundary'
+      && ordinaryManualOffSchedule16.nextTriggerAt === ordinaryManualOffBoundary16
+      && new Date(ordinaryManualOffSchedule16.nextTriggerAt).getMinutes() % 30 === 0
+      && ordinaryManualOffSchedule16.pwmRetryKind === ''
+      && ordinaryManualOffHarness16.blocked() === false
+      && typedManualOffResult16?.success === true
+      && typedManualOffHarness16.plan()?.kind === 'smart-on-safe-delay'
+      && typedManualOffSchedule16.nextTriggerAt === typedManualOffRetryAt16
+      && typedManualOffSchedule16.nextTriggerAt
+        !== typedManualOffNow16 + (1 + 17) * 60_000
+      && typedManualOffSchedule16.pwmRetryKind === 'smart-on-safe-delay'
+      && typedManualOffSchedule16.pwmRetryBoundaryAt
+        === typedManualOffBoundary16
+      && typedManualOffSchedule16.pwmRetryScheduledAt
+        === typedManualOffRetryAt16
+      && typedManualOffHarness16.blocked() === false
+      && staleManualOffResult16?.shutdownStale === true
+      && staleManualOffHarness16.blocked() === true
+      && manualOffFinalizeSource16.includes(
+        'planSmartOnAfterConfirmedOff(schedule, {')
+      && manualOffFinalizeSource16.includes(
+        'minOffMinutes: SMART_MODE.MIN_OFF_MINUTES')
+      && !manualOffFinalizeSource16.includes(
+        'schedule.smartMode?.enabled === true\n    ? offConfirmedAt\n      + Math.max(1, sanitizeMinutes(schedule.offMinutes'),
+    '16M-3D: manual OFF finalize 的普通 smart clock 只落半点；跨 MIN_OFF 时只落原半点 typed retry，旧 offMinutes 相对钟不可提交且 barrier 仅 owner-current 结算后释放');
+
+  const crossedBoundaryManualOffNow16 = new Date(
+    2026,
+    7,
+    29,
+    19,
+    29,
+    30,
+    0
+  ).getTime();
+  const crossedBoundaryAt16 = new Date(
+    2026,
+    7,
+    29,
+    19,
+    30,
+    0,
+    0
+  ).getTime();
+  const crossedSafeDelayAt16 = new Date(
+    2026,
+    7,
+    29,
+    19,
+    35,
+    30,
+    0
+  ).getTime();
+  const crossedSafetySkipAt16 = new Date(
+    2026,
+    7,
+    29,
+    20,
+    0,
+    0,
+    0
+  ).getTime();
+  const crossedSafeDelayHarness16 = loadManualOffFinalizeHarness16({
+    nowMs: crossedBoundaryManualOffNow16,
+    onMinutes: 20,
+    offMinutes: 10
+  });
+  const crossedSafetySkipHarness16 = loadManualOffFinalizeHarness16({
+    nowMs: crossedBoundaryManualOffNow16,
+    onMinutes: 30,
+    offMinutes: 30
+  });
+  const crossedRefuseFallbackHarness16 = loadManualOffFinalizeHarness16({
+    nowMs: crossedBoundaryManualOffNow16,
+    onMinutes: 20,
+    offMinutes: 10,
+    forcePlannerRefuse: true
+  });
+  const [crossedSafeDelayResult16, crossedSafetySkipResult16,
+    crossedRefuseFallbackResult16] = await Promise.all([
+    crossedSafeDelayHarness16.run(),
+    crossedSafetySkipHarness16.run(),
+    crossedRefuseFallbackHarness16.run()
+  ]);
+  const crossedSafeDelaySchedule16 = crossedSafeDelayHarness16.schedule();
+  const crossedSafetySkipSchedule16 = crossedSafetySkipHarness16.schedule();
+  const crossedRefuseFallbackSchedule16 = crossedRefuseFallbackHarness16.schedule();
+  assertPass(crossedSafeDelayResult16?.success === true
+      && crossedSafeDelayHarness16.plan()?.kind === 'smart-on-safe-delay'
+      && crossedSafeDelaySchedule16.nextTriggerAt === crossedSafeDelayAt16
+      && crossedSafeDelaySchedule16.pwmRetryKind === 'smart-on-safe-delay'
+      && crossedSafeDelaySchedule16.pwmRetryBoundaryAt === crossedBoundaryAt16
+      && crossedSafetySkipResult16?.success === true
+      && crossedSafetySkipHarness16.plan()?.kind === 'smart-on-safety-skip'
+      && crossedSafetySkipSchedule16.nextTriggerAt === crossedSafetySkipAt16
+      && crossedSafetySkipSchedule16.pwmRetryKind === 'smart-on-safety-skip'
+      && crossedSafetySkipSchedule16.pwmRetryBoundaryAt === crossedBoundaryAt16
+      && crossedRefuseFallbackResult16?.success === true
+      && crossedRefuseFallbackHarness16.plan()?.kind === 'refuse'
+      && crossedRefuseFallbackSchedule16.nextTriggerAt === crossedSafetySkipAt16
+      && crossedRefuseFallbackSchedule16.pwmRetryKind === 'smart-on-safety-skip'
+      && crossedRefuseFallbackSchedule16.pwmRetryBoundaryAt === crossedBoundaryAt16
+      && manualOffFinalizeSource16.includes(
+        'Number(manualOffAdmissionRequestedAt) || Date.now()'),
+    '16M-3D-1: durable 19:29:30 OFF 请求跨过 19:30 后分别保持原 boundary 的 safe-delay、zero-run safety-skip 与 refuse fallback，不漂到普通 20:00 owner');
+
+  const blockedPwmOnAdmissionHarness16 = new Function(
+    'console',
+    `let schedule = { enabled: true, pwmState: 'on' };
+    let manualToggleIntentEpoch = 9;
+    let manualOffAutomaticOnBlocked = true;
+    let lastPwmStepAt = 0;
+    let ownershipClaims = 0;
+    function isAutomationAllowed() { return true; }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) === 81;
+    }
+    function isAutomationOperationCurrent() { return true; }
+    function isCurrentPwmStepRunning() { return false; }
+    function isManualToggleIntentEpochCurrent(epoch) {
+      return epoch === manualToggleIntentEpoch;
+    }
+    function claimPwmStepOwnership() {
+      ownershipClaims += 1;
+      return 1;
+    }
+    function invalidateTimerBasedShutdown() {
+      throw new Error('blocked PWM ON must not enter deep lifecycle');
+    }
+    ${pwmBody}
+    return {
+      run: () => runPwmStep({ phaseAdmissionEpoch: 81 }),
+      claims: () => ownershipClaims
+    };`
+  )(testConsole);
+  await blockedPwmOnAdmissionHarness16.run();
+  assertPass(blockedPwmOnAdmissionHarness16.claims() === 0
+      && pwmBody.indexOf(
+        "if (schedule.pwmState === 'on' && !automaticOnActuatorIsCurrent())")
+        < pwmBody.indexOf('const automationRevision = claimPwmStepOwnership();')
+      && manualToggleIntentSource16.includes(
+        'manualOffAutomaticOnBlocked = true;')
+      && !manualToggleIntentSource16.includes(
+        "if (normalizedAction === 'on') {\n    manualOffAutomaticOnBlocked = false;")
+      && manualToggleMessageBody16.includes(
+        'await releaseManualOffAdmissionForManualOn(')
+      && manualOffFinalizeSource16.includes(
+        'commitScheduleAndReleaseManualOffAdmission({'),
+    '16M-3E: OFF 到达同步冻结 automatic ON；runPwm 在 ownership/deep lifecycle 前零动作，claim ON 本身不解锁，只有 phase owner 的 durable commit 可释放');
+
+  const remoteDisabledPwmAdmissionHarness16 = new Function(
+    `let schedule = { enabled: true, pwmState: 'on' };
+    let manualToggleIntentEpoch = 9;
+    let manualOffAutomaticOnBlocked = false;
+    let deferredSyncDisablePending = true;
+    let lastPwmStepAt = 0;
+    let ownershipClaims = 0;
+    function isAutomationAllowed() {
+      return schedule.enabled === true && !deferredSyncDisablePending;
+    }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) === 82;
+    }
+    function isAutomationOperationCurrent() { return false; }
+    function isCurrentPwmStepRunning() { return false; }
+    function isManualToggleIntentEpochCurrent(epoch) {
+      return epoch === manualToggleIntentEpoch;
+    }
+    function claimPwmStepOwnership() {
+      ownershipClaims += 1;
+      return 1;
+    }
+    function invalidateTimerBasedShutdown() {
+      throw new Error('remote-disabled PWM must not enter deep lifecycle');
+    }
+    ${pwmBody}
+    return {
+      run: () => runPwmStep({ phaseAdmissionEpoch: 82 }),
+      claims: () => ownershipClaims
+    };`
+  )();
+  await remoteDisabledPwmAdmissionHarness16.run();
+  assertPass(remoteDisabledPwmAdmissionHarness16.claims() === 0
+      && pwmBody.indexOf('if (!isAutomationAllowed()) return;')
+        < pwmBody.indexOf('const automationRevision = claimPwmStepOwnership();'),
+    '16M-3E-1: generic runPwm 在 remote disable pending 后于 ownership/revision/deep lifecycle 前零 ON 退出');
+
+  const durableManualOffNow16 = new Date(
+    2026,
+    7,
+    29,
+    19,
+    29,
+    30,
+    0
+  ).getTime();
+  class DurableManualOffDate16 extends Date {
+    static now() { return durableManualOffNow16; }
+  }
+  const durableSyncPayloadIdentitySource16 = extractSourceSection(
+    backgroundSource,
+    'function normalizeSyncAuthorityTimestamp(value) {',
+    '\n\nfunction rememberLocalSyncPayload(value) {',
+    'durable harness sync payload identity'
+  );
+  const settleDeferredSyncDisableSource16 = extractSourceSection(
+    backgroundSource,
+    'async function settleDeferredSyncDisable(',
+    '\n\nasync function recoverSafetyAfterFailedUserAuthority(',
+    'durable deferred sync disable settlement'
+  );
+  const rememberRemoteSyncSuccessorSource16 = extractSourceSection(
+    backgroundSource,
+    'function rememberRemoteSyncSuccessorAfterDeferredDisable(',
+    '\n\nfunction isDeferredSyncDisableSuccessorCandidate(',
+    'durable deferred sync successor migration'
+  );
+  const deferRemoteSyncDisableSource16 = extractSourceSection(
+    backgroundSource,
+    'function deferRemoteSyncDisableWhileManualOffBlocked(',
+    '\n\nfunction rememberRemoteSyncSuccessorAfterDeferredDisable(',
+    'durable remote disable retry credential'
+  );
+  const clearDeferredSyncSuccessorSource16 = extractSourceSection(
+    backgroundSource,
+    'function isDeferredSyncDisableSuccessorCandidate(',
+    '\n\nasync function clearDeferredSyncDisableAfterRemoteAdoption(',
+    'durable deferred sync successor terminal tombstones'
+  );
+  const deferredSyncSuccessorAlarmSource16 = extractSourceSection(
+    backgroundSource,
+    '  const deferredSuccessorRetryIdentity =',
+    '\n  if (alarm.name === ACTIVE_BOUNDARY_OWNER_READ_RETRY_ALARM)',
+    'durable deferred sync successor retry delivery'
+  );
+  const deferredSyncDisableAlarmSource16 = extractSourceSection(
+    backgroundSource,
+    '  const deferredDisableRetryIdentity =',
+    '\n  const deferredSuccessorRetryIdentity =',
+    'durable deferred sync disable retry delivery'
+  );
+  const manualOffAlarmSource16 = extractSourceSection(
+    backgroundSource,
+    '  const manualOffRetryIdentity = parseManualOffRetryAlarm(alarm);',
+    "\n  if (alarm.name === 'ac-page-timer-retry')",
+    'durable manual OFF retry delivery'
+  );
+  const durableResumePendingManualOffSource16 = extractSourceSection(
+    backgroundSource,
+    "async function resumePendingManualOffAdmission(reason = 'recovery') {",
+    '\n\nasync function toggleNowAndSync(',
+    'durable pending manual OFF recovery mutation ownership'
+  );
+  const refreshRemoteDisableBeforeLocalReleaseSource16 =
+    extractSourceSection(
+      backgroundSource,
+      'async function refreshRemoteDisableBeforeLocalRelease(',
+      '\n\nasync function resumePendingManualOffAdmission(',
+      'local authority release remote-disable sync preflight'
+    );
+  const loadDurableManualOffAdmissionHarness16 = ({
+    marker = null,
+    terminalAuthority = null,
+    enabled = true,
+    pendingMarkerSetFailures = 0,
+    deferredSyncDisable = null,
+    syncPending = false,
+    retryAlarms: initialRetryAlarms = [],
+    syncPublishFailures = 0,
+    storageGetGate = null,
+    onStorageGetStarted = null,
+    retryGetAllGate = null,
+    onRetryGetAllStarted = null,
+    storageGetFailures = 0,
+    retryGetAllFailures = 0,
+    retryGetAllFailureCalls = [],
+    retryClearFailures = 0,
+    deferredMarkerSetFailures = 0,
+    deferredSuccessorSetFailures = 0,
+    localMutationSetFailures = 0,
+    localMutationSetGate = null,
+    onLocalMutationSetStarted = null,
+    syncRemote = null,
+    syncRemoteSequence = null,
+    syncGetFailures = 0,
+    syncGetGate = null,
+    onSyncGetStarted = null,
+    onSyncGet = null,
+    initialSyncWatermark = 0,
+    syncPayloadReceipt: initialSyncPayloadReceipt = null,
+    syncWatermarkGetFailures = 0,
+    syncWatermarkSetFailures = 0,
+    onSyncWatermarkSet = null,
+    schedule: initialStoredSchedule = null,
+    localMutationCutoff: initialLocalMutationCutoff = 0,
+    syncAuthorityBaselineLoaded: initialSyncAuthorityBaselineLoaded = true
+  } = {}) => new Function(
+    'initialMarker', 'initialTerminalAuthority',
+    'initialEnabled', 'initialPendingMarkerSetFailures',
+    'initialDeferredSyncDisable', 'initialSyncPending',
+    'initialRetryAlarms', 'initialSyncPublishFailures',
+    'initialStorageGetGate', 'initialOnStorageGetStarted',
+    'initialRetryGetAllGate', 'initialOnRetryGetAllStarted',
+    'initialStorageGetFailures', 'initialRetryGetAllFailures',
+    'initialRetryGetAllFailureCalls',
+    'initialRetryClearFailures',
+    'initialDeferredMarkerSetFailures',
+    'initialDeferredSuccessorSetFailures',
+    'initialLocalMutationSetFailures',
+    'initialLocalMutationSetGate', 'initialOnLocalMutationSetStarted',
+    'initialSyncRemote', 'initialSyncRemoteSequence',
+    'initialSyncGetFailures',
+    'initialSyncGetGate', 'initialOnSyncGetStarted',
+    'initialOnSyncGet',
+    'initialDurableSyncWatermark',
+    'initialSyncPayloadReceipt',
+    'initialSyncWatermarkGetFailures',
+    'initialSyncWatermarkSetFailures',
+    'initialOnSyncWatermarkSet',
+    'initialStoredSchedule', 'initialLocalMutationCutoff',
+    'initialSyncAuthorityBaselineLoaded',
+    'Date', 'console',
+    `const MANUAL_OFF_ADMISSION_KEY = 'ac_manual_off_admission_test';
+    const MANUAL_OFF_ADMISSION_SCHEMA_VERSION = 1;
+    const LOCAL_TERMINAL_AUTHORITY_KEY =
+      'ac_local_terminal_authority_test';
+    const LOCAL_TERMINAL_AUTHORITY_SCHEMA_VERSION = 1;
+    const LOCAL_SCHEDULE_MUTATION_CUTOFF_KEY =
+      'ac_local_schedule_mutation_cutoff_test';
+    const MANUAL_OFF_ADMISSION_RETRY_ALARM = 'ac-manual-off-admission-retry-test';
+    const DEFERRED_SYNC_DISABLE_RETRY_ALARM =
+      'ac-deferred-sync-disable-retry-test';
+    const DEFERRED_SYNC_SUCCESSOR_RETRY_ALARM =
+      'ac-deferred-sync-successor-retry-test';
+    const SCHEDULE_READ_RETRY_ALARM = 'ac-schedule-read-retry';
+    const DEFERRED_SYNC_DISABLE_KEY = 'ac_deferred_sync_disable_test';
+    const STORAGE_KEY = 'ac_schedule_test';
+    const SYNC_KEY = 'ac_schedule_sync_test';
+    const SYNC_WATERMARK_KEY = 'ac_schedule_sync_watermark_test';
+    const SYNC_PAYLOAD_RECEIPT_KEY =
+      'ac_schedule_sync_payload_receipt_test';
+    const SYNC_PAYLOAD_RECEIPT_SCHEMA_VERSION = 1;
+    const SYNC_PENDING_PUBLISH_KEY = 'ac_schedule_sync_publish_pending_test';
+    let schedule = initialStoredSchedule
+      ? structuredClone(initialStoredSchedule)
+      : {
+          enabled: initialEnabled,
+          smartMode: { enabled: false, sensitivity: 5 },
+          pwmRetryKind: '',
+          pwmRetryBoundaryAt: 0,
+          pwmRetryScheduledAt: 0
+        };
+    let pwmRuntimeRevision = 0;
+    let syncPublishGeneration = 0;
+    let syncWriteChain = Promise.resolve();
+    let syncWriteOperationsInFlight = 0;
+    let testOutboundWriteRelease = null;
+    let syncPublishRetryAlarmWriteChain = Promise.resolve();
+    let syncPublishRetryAlarmWriteGeneration = 0;
+    let syncPublishRetryAlarmWritesInFlight = 0;
+    let syncInboundArrivalGeneration = 0;
+    let remoteDisableArrivalGeneration = 0;
+    let lastSyncedAt = 0;
+    let syncWatermarkLoaded = false;
+    let syncWatermarkWriteChain = Promise.resolve();
+    let syncWatermarkWriteGeneration = 0;
+    let syncWatermarkWritesInFlight = 0;
+    let completedSyncPayloadReceipt = null;
+    let scheduleLoadBlockedRevision = null;
+    let manualToggleIntentEpoch = 0;
+    let manualToggleIntentAction = '';
+    let manualToggleIntentSource = '';
+    let manualToggleIntentCompletedEpoch = 0;
+    let manualToggleIntentCompletedAction = '';
+    let manualTogglePhaseCommitPendingEpoch = 0;
+    let schedulePersistenceAuthorityEpoch = 0;
+    let manualOffCancellationChain = Promise.resolve();
+    let manualOffAutomaticOnBlocked = true;
+    let manualOffAdmissionLoaded = false;
+    let manualOffAdmissionToken = '';
+    let manualOffAdmissionRequestedAt = 0;
+    let manualOffAdmissionRestoredFromStorage = false;
+    let manualOffAdmissionLocalMutationObservedAt = 0;
+    let manualOffAdmissionPredecessorSuccessorRetryAlarmNames = [];
+    let manualOffAdmissionMutationCoverageComplete = false;
+    let manualOffAdmissionPredecessorSuccessorObservedAt = 0;
+    let manualOffAdmissionPredecessorSuccessorIdentity = '';
+    let manualOffAdmissionReleasedThroughRequestedAt = 0;
+    let manualOffAdmissionPredecessorRequestedAt = 0;
+    let manualOffAdmissionPredecessorTokens = [];
+    let manualOffAdmissionSequence = 0;
+    let manualOffAdmissionWriteChain = Promise.resolve();
+    let manualOffAdmissionFlightToken = '';
+    let manualOffAdmissionFlightPromise = null;
+    const manualOffRetryAlarmOperationsInFlight = new Set();
+    let startupManualOffClassificationPending = false;
+    let startupManualOffClassificationIntentEpoch = 0;
+    let deferredSyncDisableRetryAlarmNames = new Set();
+    let deferredSyncDisableReleasedRetryAlarmNames = new Set();
+    const deferredSyncDisableRetryAlarmOperationsInFlight = new Set();
+    let deferredSyncSuccessorRetryAlarmEntries = new Map();
+    let deferredSyncSuccessorReleasedRetryAlarmNames = new Set();
+    const deferredSyncSuccessorRetryAlarmOperationsInFlight = new Set();
+    let criticalLocalStateWriteChain = Promise.resolve();
+    let deferredSyncDisableLoaded = false;
+    let deferredSyncDisablePending = false;
+    let deferredSyncDisableEpoch = 0;
+    let deferredSyncDisableSafetyAuthorityId = '';
+    let deferredSyncLastClearedSafetyAuthorityId = '';
+    let localScheduleAuthorityGeneration = 0;
+    let remoteSyncAuthorityObservedAt = 0;
+    let localScheduleMutationObservedAt = 0;
+    let localScheduleMutationCommittedObservedAt = 0;
+    const localScheduleMutationObservedAtByGeneration = new Map();
+    let localScheduleMutationCommitPendingGeneration = 0;
+    let syncAuthorityDurableBaselineLoaded =
+      initialSyncAuthorityBaselineLoaded === true;
+    let syncAuthorityDurableBaselineLoadPromise = null;
+    let startupManualOffAdmissionRestorePromise = null;
+    let syncAuthorityPreBaselineSequence = 0;
+    let syncAuthorityDurablePreBaselineSequenceReservedThrough = 0;
+    const syncAuthorityPreBaselineSequenceByObservedAt = new Map();
+    let deferredSyncDisableAuthorityOrderObservedAt = 0;
+    let deferredSyncDisableAuthorityPreBaselineSequence = 0;
+    let deferredSyncDisableSuccessorAuthorityOrderObservedAt = 0;
+    let deferredSyncDisableSuccessorAuthorityPreBaselineSequence = 0;
+    let completedLocalTerminalAuthority = null;
+    function normalizeLocalTerminalAuthority(value) {
+      if (!value || typeof value !== 'object'
+          || value.schemaVersion !== LOCAL_TERMINAL_AUTHORITY_SCHEMA_VERSION) {
+        return null;
+      }
+      const action = value.action === 'off'
+        ? 'off'
+        : value.action === 'disable'
+          ? 'disable'
+          : value.action === 'on'
+            ? 'on'
+            : '';
+      const observedAt = Number(value.observedAt) || 0;
+      if (!action || observedAt <= 0) return null;
+      return {
+        schemaVersion: LOCAL_TERMINAL_AUTHORITY_SCHEMA_VERSION,
+        action,
+        observedAt,
+        consumedRemoteDisableRetryAlarmNames: [...new Set(
+          Array.isArray(value.consumedRemoteDisableRetryAlarmNames)
+            ? value.consumedRemoteDisableRetryAlarmNames
+            : []
+        )],
+        completedAt: Number(value.completedAt) || 0
+      };
+    }
+    function adoptLocalTerminalAuthority(value) {
+      const normalized = normalizeLocalTerminalAuthority(value);
+      if (!normalized) return null;
+      if (!completedLocalTerminalAuthority
+          || normalized.observedAt
+            >= completedLocalTerminalAuthority.observedAt) {
+        completedLocalTerminalAuthority = normalized;
+      }
+      return completedLocalTerminalAuthority;
+    }
+    function localTerminalAuthorityCoversObservedAt(observedAt) {
+      const cutoff = Number(observedAt) || 0;
+      return cutoff > 0
+        && Number(completedLocalTerminalAuthority?.observedAt) >= cutoff;
+    }
+    function localTerminalAuthorityCoversRemoteDisable(identity) {
+      const retryAlarmName = String(identity?.name || '');
+      return !!completedLocalTerminalAuthority
+        && retryAlarmName
+        && completedLocalTerminalAuthority
+          .consumedRemoteDisableRetryAlarmNames
+          .includes(retryAlarmName);
+    }
+    let deferredSyncDisableLocalScheduleAuthorityGeneration = 0;
+    let localScheduleMutationGeneration = 0;
+    let deferredSyncDisableLocalMutationGeneration = 0;
+    let deferredSyncDisableSuccessorMutationGeneration = 0;
+    let deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+    let deferredSyncDisableLocalMutationPendingGeneration = 0;
+    let deferredSyncDisableRemoteSnapshot = null;
+    let deferredSyncDisableRemoteSnapshotComplete = false;
+    let deferredSyncDisableSyntheticReadFailure = false;
+    let deferredSyncDisableDurableReceiptEpoch = 0;
+    let deferredSyncDisableDurableReceiptIdentity = '';
+    let deferredSyncDisableObservedAt = 0;
+    let deferredSyncSuccessorEnumerationPendingEpoch = 0;
+    let deferredSyncDisableSuccessorSnapshot = null;
+    let deferredSyncDisableSuccessorObservedAt = 0;
+    let deferredSyncDisableSuccessorRetryAlarmName = '';
+    let deferredSyncSuccessorReleasedThroughObservedAt = 0;
+    let localScheduleAuthorityObservedAt = 0;
+    let deferredSyncDisableSuccessorLocalAuthorityGeneration = 0;
+    const _syncOpLock = {
+      busy: false,
+      pending: false,
+      pendingReason: '',
+      pendingRemote: null,
+      pendingRemoteCausalEnvelope: null,
+      pendingRemoteScheduleAuthorityGeneration: 0,
+      pendingRemoteMutationGeneration: 0,
+      rereadAfterSafetyDisable: false,
+      pendingOutbound: false,
+      pendingOutboundReason: ''
+    };
+    let startupDeferredDisableSupersededByUserIntent = false;
+    let startupRestoreSupersedingIntentEpoch = 0;
+    let automaticDisableAdmissionEpoch = 0;
+    let automaticOnAdmissionBlocked = false;
+    let syncPhaseAdoptionAdmissionEpoch = 0;
+    let syncPhaseAdoptionAdmissionOwner = 0;
+    const syncPhaseAdoptionAdmissionWaiters = [];
+    let storedMarker = structuredClone(initialMarker);
+    let storedTerminalAuthority = structuredClone(
+      initialTerminalAuthority
+    );
+    let storedDeferredSyncDisable = structuredClone(
+      initialDeferredSyncDisable
+    );
+    let storedLocalScheduleMutationCutoff =
+      Number(initialLocalMutationCutoff) || 0;
+    let storedSchedule = initialStoredSchedule
+      ? structuredClone(initialStoredSchedule)
+      : null;
+    let syncPublishPending = initialSyncPending === true;
+    const retryAlarms = new Map(
+      (initialRetryAlarms || []).map(alarm => [
+        alarm.name,
+        structuredClone(alarm)
+      ])
+    );
+    let syncPublishFailuresRemaining = initialSyncPublishFailures;
+    let storageGetGateConsumed = false;
+    let retryGetAllGateConsumed = false;
+    let storageGetFailuresRemaining = initialStorageGetFailures;
+    let retryGetAllFailuresRemaining = initialRetryGetAllFailures;
+    const retryGetAllFailureCallSet = new Set(
+      Array.isArray(initialRetryGetAllFailureCalls)
+        ? initialRetryGetAllFailureCalls
+        : []
+    );
+    let retryGetAllCallCount = 0;
+    const retryAlarmInjectionsByGetAllCall = new Map();
+    let retryClearFailuresRemaining = initialRetryClearFailures;
+    let pendingMarkerSetFailuresRemaining = initialPendingMarkerSetFailures;
+    let deferredMarkerSetFailuresRemaining =
+      initialDeferredMarkerSetFailures;
+    let deferredSuccessorSetFailuresRemaining =
+      initialDeferredSuccessorSetFailures;
+    let localMutationSetFailuresRemaining =
+      initialLocalMutationSetFailures;
+    let localMutationSetGateConsumed = false;
+    let syncGetGateConsumed = false;
+    let syncGetCalls = 0;
+    let syncGetFailuresRemaining = initialSyncGetFailures;
+    let storedSyncWatermark = Number(initialDurableSyncWatermark) || 0;
+    let storedSyncPayloadReceipt = initialSyncPayloadReceipt
+      ? structuredClone(initialSyncPayloadReceipt)
+      : null;
+    let syncWatermarkGetFailuresRemaining =
+      Number(initialSyncWatermarkGetFailures) || 0;
+    let syncWatermarkSetFailuresRemaining =
+      Number(initialSyncWatermarkSetFailures) || 0;
+    let pendingMarkerSetAttempts = 0;
+    let timerInvalidations = 0;
+    let deferredSyncDrains = 0;
+    const writes = [];
+    const lifecycleCalls = [];
+    const outboundPublishes = [];
+    const adoptedRemotes = [];
+    const chrome = {
+      storage: {
+        local: {
+          async get(key) {
+            if (Array.isArray(key) && key.includes(SYNC_WATERMARK_KEY)) {
+              if (syncWatermarkGetFailuresRemaining > 0) {
+                syncWatermarkGetFailuresRemaining -= 1;
+                throw new Error('synthetic sync watermark get rejection');
+              }
+              return {
+                [SYNC_WATERMARK_KEY]: storedSyncWatermark,
+                [SYNC_PAYLOAD_RECEIPT_KEY]:
+                  structuredClone(storedSyncPayloadReceipt)
+              };
+            }
+            if (Array.isArray(key)
+                && key.includes(SYNC_PENDING_PUBLISH_KEY)) {
+              return {
+                [SYNC_PENDING_PUBLISH_KEY]: syncPublishPending,
+                [LOCAL_SCHEDULE_MUTATION_CUTOFF_KEY]:
+                  storedLocalScheduleMutationCutoff
+              };
+            }
+            if (Array.isArray(key)) {
+              const snapshotAtRead = {
+                [MANUAL_OFF_ADMISSION_KEY]: structuredClone(storedMarker),
+                [LOCAL_TERMINAL_AUTHORITY_KEY]: structuredClone(
+                  storedTerminalAuthority
+                ),
+                [DEFERRED_SYNC_DISABLE_KEY]: structuredClone(
+                  storedDeferredSyncDisable
+                ),
+                [LOCAL_SCHEDULE_MUTATION_CUTOFF_KEY]:
+                  storedLocalScheduleMutationCutoff
+              };
+              if (!storageGetGateConsumed && initialStorageGetGate) {
+                storageGetGateConsumed = true;
+                if (typeof initialOnStorageGetStarted === 'function') {
+                  initialOnStorageGetStarted();
+                }
+                await initialStorageGetGate;
+              }
+              if (storageGetFailuresRemaining > 0) {
+                storageGetFailuresRemaining -= 1;
+                throw new Error('synthetic restore storage get rejection');
+              }
+              return snapshotAtRead;
+            }
+            if (key === SYNC_WATERMARK_KEY) {
+              if (syncWatermarkGetFailuresRemaining > 0) {
+                syncWatermarkGetFailuresRemaining -= 1;
+                throw new Error('synthetic sync watermark get rejection');
+              }
+              return { [key]: storedSyncWatermark };
+            }
+            if (key === DEFERRED_SYNC_DISABLE_KEY) {
+              return {
+                [key]: structuredClone(storedDeferredSyncDisable)
+              };
+            }
+            if (key === LOCAL_SCHEDULE_MUTATION_CUTOFF_KEY) {
+              return { [key]: storedLocalScheduleMutationCutoff };
+            }
+            if (key === LOCAL_TERMINAL_AUTHORITY_KEY) {
+              return {
+                [key]: structuredClone(storedTerminalAuthority)
+              };
+            }
+            if (key !== MANUAL_OFF_ADMISSION_KEY) return {};
+            return { [key]: structuredClone(storedMarker) };
+          },
+          async set(payload) {
+            if (Object.hasOwn(
+              payload,
+              LOCAL_SCHEDULE_MUTATION_CUTOFF_KEY
+            ) && !localMutationSetGateConsumed
+                && initialLocalMutationSetGate) {
+              localMutationSetGateConsumed = true;
+              if (typeof initialOnLocalMutationSetStarted === 'function') {
+                initialOnLocalMutationSetStarted();
+              }
+              await initialLocalMutationSetGate;
+            }
+            if (Object.hasOwn(
+              payload,
+              LOCAL_SCHEDULE_MUTATION_CUTOFF_KEY
+            ) && localMutationSetFailuresRemaining > 0) {
+              localMutationSetFailuresRemaining -= 1;
+              throw new Error('synthetic local mutation intent rejection');
+            }
+            if (payload?.[MANUAL_OFF_ADMISSION_KEY]?.state === 'pending') {
+              pendingMarkerSetAttempts += 1;
+              if (pendingMarkerSetFailuresRemaining > 0) {
+                pendingMarkerSetFailuresRemaining -= 1;
+                throw new Error('synthetic pending marker write rejection');
+              }
+            }
+            if (Object.hasOwn(payload, DEFERRED_SYNC_DISABLE_KEY)) {
+              const deferredValue = payload[DEFERRED_SYNC_DISABLE_KEY];
+              if (deferredValue?.successor
+                  && deferredSuccessorSetFailuresRemaining > 0) {
+                deferredSuccessorSetFailuresRemaining -= 1;
+                throw new Error('synthetic deferred successor write rejection');
+              }
+              if (deferredValue?.pending === true
+                  && !deferredValue?.successor
+                  && deferredMarkerSetFailuresRemaining > 0) {
+                deferredMarkerSetFailuresRemaining -= 1;
+                throw new Error('synthetic deferred F marker write rejection');
+              }
+            }
+            writes.push(structuredClone(payload));
+            if (Object.hasOwn(payload, STORAGE_KEY)) {
+              lifecycleCalls.push(
+                'local-set-schedule:'
+                + payload[STORAGE_KEY]?.enabled + ':'
+                + (payload[SYNC_PENDING_PUBLISH_KEY] === true)
+              );
+            }
+            if (Object.hasOwn(payload, DEFERRED_SYNC_DISABLE_KEY)) {
+              lifecycleCalls.push(
+                'local-set-deferred:'
+                + (payload[DEFERRED_SYNC_DISABLE_KEY]?.pending === true)
+              );
+            }
+            if (Object.hasOwn(payload, MANUAL_OFF_ADMISSION_KEY)) {
+              storedMarker = structuredClone(payload[MANUAL_OFF_ADMISSION_KEY]);
+            }
+            if (Object.hasOwn(payload, LOCAL_TERMINAL_AUTHORITY_KEY)) {
+              storedTerminalAuthority = structuredClone(
+                payload[LOCAL_TERMINAL_AUTHORITY_KEY]
+              );
+            }
+            if (Object.hasOwn(payload, STORAGE_KEY)) {
+              storedSchedule = structuredClone(payload[STORAGE_KEY]);
+            }
+            if (Object.hasOwn(payload, DEFERRED_SYNC_DISABLE_KEY)) {
+              storedDeferredSyncDisable = structuredClone(
+                payload[DEFERRED_SYNC_DISABLE_KEY]
+              );
+            }
+            if (Object.hasOwn(
+              payload,
+              LOCAL_SCHEDULE_MUTATION_CUTOFF_KEY
+            )) {
+              storedLocalScheduleMutationCutoff = Number(
+                payload[LOCAL_SCHEDULE_MUTATION_CUTOFF_KEY]
+              ) || 0;
+            }
+            if (Object.hasOwn(payload, SYNC_WATERMARK_KEY)) {
+              if (typeof initialOnSyncWatermarkSet === 'function') {
+                await initialOnSyncWatermarkSet(
+                  Number(payload[SYNC_WATERMARK_KEY]) || 0
+                );
+              }
+              if (syncWatermarkSetFailuresRemaining > 0) {
+                syncWatermarkSetFailuresRemaining -= 1;
+                throw new Error('synthetic sync watermark set rejection');
+              }
+              storedSyncWatermark = Number(
+                payload[SYNC_WATERMARK_KEY]
+              ) || 0;
+              if (Object.hasOwn(payload, SYNC_PAYLOAD_RECEIPT_KEY)) {
+                storedSyncPayloadReceipt = structuredClone(
+                  payload[SYNC_PAYLOAD_RECEIPT_KEY]
+                );
+              }
+            }
+            if (Object.hasOwn(payload, SYNC_PENDING_PUBLISH_KEY)) {
+              syncPublishPending = payload[SYNC_PENDING_PUBLISH_KEY] === true;
+            }
+          }
+        },
+        sync: {
+          async get(key) {
+            syncGetCalls += 1;
+            lifecycleCalls.push('sync-get:' + syncGetCalls);
+            const remoteForRead = Array.isArray(initialSyncRemoteSequence)
+                && initialSyncRemoteSequence.length > 0
+              ? initialSyncRemoteSequence[Math.min(
+                  syncGetCalls - 1,
+                  initialSyncRemoteSequence.length - 1
+                )]
+              : initialSyncRemote;
+            if (typeof initialOnSyncGet === 'function') {
+              await initialOnSyncGet(syncGetCalls);
+            }
+            if (!syncGetGateConsumed && initialSyncGetGate) {
+              syncGetGateConsumed = true;
+              if (typeof initialOnSyncGetStarted === 'function') {
+                initialOnSyncGetStarted();
+              }
+              await initialSyncGetGate;
+            }
+            if (syncGetFailuresRemaining > 0) {
+              syncGetFailuresRemaining -= 1;
+              throw new Error('synthetic recovery sync get rejection');
+            }
+            return { [key]: structuredClone(remoteForRead) };
+          }
+        }
+      },
+      alarms: {
+        async create(name, options = {}) {
+          if (name.startsWith(MANUAL_OFF_ADMISSION_RETRY_ALARM)
+              || name.startsWith(DEFERRED_SYNC_DISABLE_RETRY_ALARM)
+              || name.startsWith(DEFERRED_SYNC_SUCCESSOR_RETRY_ALARM)
+              || name.startsWith(SCHEDULE_READ_RETRY_ALARM)) {
+            retryAlarms.set(name, {
+              name,
+              scheduledTime: Number(options.when) || 0,
+              periodInMinutes: Number(options.periodInMinutes) || 0
+            });
+          }
+        },
+        async get(name) {
+          return structuredClone(retryAlarms.get(name) || null);
+        },
+        async getAll() {
+          retryGetAllCallCount += 1;
+          if (!retryGetAllGateConsumed && initialRetryGetAllGate) {
+            retryGetAllGateConsumed = true;
+            if (typeof initialOnRetryGetAllStarted === 'function') {
+              initialOnRetryGetAllStarted();
+            }
+            await initialRetryGetAllGate;
+          }
+          if (retryGetAllFailureCallSet.has(retryGetAllCallCount)) {
+            throw new Error(
+              'synthetic selected retry getAll rejection:'
+              + retryGetAllCallCount
+            );
+          }
+          if (retryGetAllFailuresRemaining > 0) {
+            retryGetAllFailuresRemaining -= 1;
+            throw new Error('synthetic retry getAll rejection');
+          }
+          const injected = retryAlarmInjectionsByGetAllCall.get(
+            retryGetAllCallCount
+          ) || [];
+          for (const alarm of injected) {
+            retryAlarms.set(alarm.name, structuredClone(alarm));
+          }
+          return structuredClone([...retryAlarms.values()]);
+        },
+        async clear(name) {
+          if (retryClearFailuresRemaining > 0) {
+            retryClearFailuresRemaining -= 1;
+            lifecycleCalls.push('alarm-clear-reject:' + name);
+            throw new Error('synthetic retry clear rejection');
+          }
+          const cleared = retryAlarms.delete(name);
+          lifecycleCalls.push('alarm-clear:' + name + ':' + cleared);
+          return cleared;
+        }
+      }
+    };
+    function appendDiagnosticLog() {}
+    ${durableSyncPayloadIdentitySource16}
+    function waitUntil(promise) {
+      void Promise.resolve(promise).catch(() => {});
+      return promise;
+    }
+    function drainDeferredSyncAdoptionAfterManualOffAdmission() {
+      deferredSyncDrains += 1;
+    }
+    function clearPwmRetryState() {
+      schedule.pwmRetryKind = '';
+      schedule.pwmRetryBoundaryAt = 0;
+      schedule.pwmRetryScheduledAt = 0;
+    }
+    function invalidateTimerBasedShutdown() { timerInvalidations += 1; }
+    async function cancelAutomaticOnRequests() {}
+    async function scheduleSyncRetry(kind = 'publish') {
+      lifecycleCalls.push('sync-retry:' + kind);
+      return true;
+    }
+    async function getSyncPublishPending() {
+      return syncPublishPending;
+    }
+    async function getSyncPublishAuthorityState() {
+      const stored = await chrome.storage.local.get([
+        SYNC_PENDING_PUBLISH_KEY,
+        LOCAL_SCHEDULE_MUTATION_CUTOFF_KEY
+      ]);
+      return {
+        pending: stored[SYNC_PENDING_PUBLISH_KEY] === true,
+        localMutationCutoffObservedAt: Math.max(
+          0,
+          Number(stored[LOCAL_SCHEDULE_MUTATION_CUTOFF_KEY]) || 0
+        )
+      };
+    }
+    async function createScheduleReadRetryWake(
+      alarm,
+      reason = '',
+      { identityToken = '' } = {}
+    ) {
+      const name = [
+        SCHEDULE_READ_RETRY_ALARM,
+        encodeURIComponent(String(alarm?.name || '')),
+        Math.max(1, Number(alarm?.scheduledTime) || Date.now()),
+        Math.max(0, Number(alarm?.periodInMinutes) || 0),
+        String(identityToken || '') || 'durable-harness-' + retryAlarms.size
+      ].join(':');
+      lifecycleCalls.push('schedule-read-retry:' + reason + ':' + name);
+      await chrome.alarms.create(name, { when: Date.now() + 60_000 });
+      return true;
+    }
+    function createScheduleReadRetryAlarmName(alarm, identityToken = '') {
+      return [
+        SCHEDULE_READ_RETRY_ALARM,
+        encodeURIComponent(String(alarm?.name || '')),
+        Math.max(1, Math.trunc(Number(alarm?.scheduledTime) || Date.now())),
+        Math.max(0, Number(alarm?.periodInMinutes) || 0),
+        String(identityToken || '') || 'durable-harness-' + retryAlarms.size
+      ].join(':');
+    }
+    function getDeferredSyncSuccessorClassificationWakeName(name) {
+      const identity = parseDeferredSyncSuccessorRetryAlarm({
+        name: String(name || '')
+      });
+      if (!identity) return '';
+      return [
+        SCHEDULE_READ_RETRY_ALARM,
+        encodeURIComponent(identity.name),
+        identity.observedAt + 60_000,
+        0,
+        'successor-lineage'
+      ].join(':');
+    }
+    async function clearDeferredSyncSuccessorRetryAlarms(
+      names,
+      { preserveReleasedNames = false } = {}
+    ) {
+      const uniqueNames = [...new Set(
+        (Array.isArray(names) ? names : []).map(String).filter(Boolean)
+      )];
+      for (const name of uniqueNames) {
+        await chrome.alarms.clear(name);
+        const wakeName = getDeferredSyncSuccessorClassificationWakeName(name);
+        if (wakeName) await chrome.alarms.clear(wakeName);
+        deferredSyncSuccessorRetryAlarmEntries.delete(name);
+        if (!preserveReleasedNames) {
+          deferredSyncSuccessorReleasedRetryAlarmNames.delete(name);
+        }
+      }
+      return true;
+    }
+    async function clearDeferredSyncDisableRetryAlarms(
+      names,
+      { preserveReleasedNames = false } = {}
+    ) {
+      for (const name of [...new Set(
+        (Array.isArray(names) ? names : []).map(String).filter(Boolean)
+      )]) {
+        await chrome.alarms.clear(name);
+        deferredSyncDisableRetryAlarmNames.delete(name);
+        if (!preserveReleasedNames) {
+          deferredSyncDisableReleasedRetryAlarmNames.delete(name);
+        }
+      }
+      return true;
+    }
+    function claimSyncPhaseAdoptionAdmissionWhenAvailable() {
+      if (syncPhaseAdoptionAdmissionOwner === 0) {
+        const epoch = ++syncPhaseAdoptionAdmissionEpoch;
+        syncPhaseAdoptionAdmissionOwner = epoch;
+        lifecycleCalls.push('phase-claim:' + epoch);
+        return Promise.resolve(epoch);
+      }
+      return new Promise(resolve => {
+        syncPhaseAdoptionAdmissionWaiters.push(resolve);
+      });
+    }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) > 0
+        && Number(epoch) === syncPhaseAdoptionAdmissionOwner;
+    }
+    function releaseSyncPhaseAdoptionAdmission(epoch) {
+      if (epoch !== syncPhaseAdoptionAdmissionOwner) return false;
+      lifecycleCalls.push('phase-release:' + epoch);
+      const next = syncPhaseAdoptionAdmissionWaiters.shift();
+      if (next) {
+        const nextEpoch = ++syncPhaseAdoptionAdmissionEpoch;
+        syncPhaseAdoptionAdmissionOwner = nextEpoch;
+        next(nextEpoch);
+      } else {
+        syncPhaseAdoptionAdmissionOwner = 0;
+      }
+      return true;
+    }
+    function drainDeferredScheduleRepair(reason) {
+      lifecycleCalls.push('phase-drain:' + reason);
+      return false;
+    }
+    function runSerializedSchedulePhaseOperation(operation, reason) {
+      return (async () => {
+        const epoch = await claimSyncPhaseAdoptionAdmissionWhenAvailable();
+        try {
+          return await operation(epoch);
+        } finally {
+          releaseSyncPhaseAdoptionAdmission(epoch);
+          drainDeferredScheduleRepair(reason + '-complete');
+        }
+      })();
+    }
+    async function finishExplicitDisablePreemption() {
+      lifecycleCalls.push('finish-disable-preemption');
+    }
+    async function resetDisabledPwmRuntime() {
+      lifecycleCalls.push('reset-disabled-runtime');
+      schedule.pwmState = 'off';
+    }
+    async function requestTimerBasedShutdown(reason, minutes, options = {}) {
+      lifecycleCalls.push('shutdown:' + reason + ':' + minutes + ':'
+        + (typeof options.ensureCurrent !== 'function'
+          || options.ensureCurrent()));
+      return { success: true };
+    }
+    async function toggleNowAndSync(action, options = {}) {
+      lifecycleCalls.push('resume-toggle:' + action + ':'
+        + (typeof options.ensureCurrent !== 'function'
+          || options.ensureCurrent()));
+      return { success: true };
+    }
+    async function finalizeManualOffAutomationPhase(
+      phaseAdmissionEpoch,
+      ensureCurrent,
+      admissionToken
+    ) {
+      lifecycleCalls.push('resume-finalize:' + phaseAdmissionEpoch + ':'
+        + admissionToken + ':' + ensureCurrent());
+      if (!ensureCurrent()) return { success: false, phaseStale: true };
+      const remoteSafetyReady = await refreshRemoteDisableBeforeLocalRelease(
+        ensureCurrent,
+        'test-resume-off-finalize'
+      );
+      if (!remoteSafetyReady || !ensureCurrent()) {
+        return {
+          success: false,
+          remoteSafetyReadPending: !remoteSafetyReady
+        };
+      }
+      if (deferredSyncDisablePending) {
+        return settleDeferredSyncDisable(phaseAdmissionEpoch, {
+          ensureCurrent,
+          existingTimerResult: { success: true },
+          reason: 'test-resume-off-phase'
+        });
+      }
+      const released = await commitScheduleAndReleaseManualOffAdmission({
+        ensureCurrent,
+        markSyncPublishPending: true,
+        drainDeferredSync: false,
+        reason: 'test-resume-off-phase'
+      });
+      return { success: released };
+    }
+    async function persistSchedule(reason) {
+      lifecycleCalls.push('persist:' + reason + ':' + schedule.enabled);
+      storedSchedule = structuredClone(schedule);
+      return true;
+    }
+    async function syncScheduleToSync(reason) {
+      if (isStartupRestoreSupersededByUserIntent()) {
+        syncPublishPending = true;
+        await scheduleSyncRetry('publish');
+        return false;
+      }
+      const loadedWatermark = await loadSyncWatermark();
+      if (loadedWatermark === null) return false;
+      const writeAt = Math.max(Date.now(), lastSyncedAt + 1);
+      const payload = {
+        reason,
+        enabled: schedule.enabled,
+        pending: syncPublishPending,
+        syncedAt: writeAt
+      };
+      outboundPublishes.push(payload);
+      lifecycleCalls.push('publish:' + reason + ':' + schedule.enabled);
+      if (syncPublishFailuresRemaining > 0) {
+        syncPublishFailuresRemaining -= 1;
+        return false;
+      }
+      const watermarkPersisted = await persistSyncWatermark(writeAt, payload);
+      if (!watermarkPersisted) return false;
+      syncPublishPending = false;
+      return true;
+    }
+    function releaseExplicitDisableAdmission(epoch) {
+      if (epoch === automaticDisableAdmissionEpoch) {
+        automaticOnAdmissionBlocked = false;
+      }
+    }
+    async function getCurrentACStatus() {
+      lifecycleCalls.push('status');
+      return { isOn: false };
+    }
+    ${manualToggleIntentSource16}
+    ${activeHoursPolicySource}
+    ${deferRemoteSyncDisableSource16}
+    ${rememberRemoteSyncSuccessorSource16}
+    ${clearDeferredSyncSuccessorSource16}
+    ${settleDeferredSyncDisableSource16}
+    ${syncWatermarkSource6}
+    ${refreshRemoteDisableBeforeLocalReleaseSource16}
+    ${durableResumePendingManualOffSource16}
+    ${queuePendingSyncAdoptionSourceF90}
+    async function tryAdoptSyncedState(reason, explicitRemote = null) {
+      lifecycleCalls.push('adopt:' + reason);
+      if (explicitRemote && typeof explicitRemote === 'object') {
+        adoptedRemotes.push(structuredClone(explicitRemote));
+      }
+      return true;
+    }
+    async function deliverDeferredSyncSuccessorRetryAlarm(alarm) {
+      ${deferredSyncSuccessorAlarmSource16}
+      return false;
+    }
+    async function deliverDeferredSyncDisableRetryAlarm(alarm) {
+      ${deferredSyncDisableAlarmSource16}
+      return false;
+    }
+    async function deliverManualOffRetryAlarm(alarm) {
+      ${manualOffAlarmSource16}
+      return false;
+    }
+    async function deliverScheduleReadRetryAlarm(alarm) {
+      const retryAlarmName = String(alarm?.name || '');
+      const prefix = SCHEDULE_READ_RETRY_ALARM + ':';
+      if (!retryAlarmName.startsWith(prefix)) return false;
+      const [encodedName = '', scheduledTimeText = '', periodText = ''] =
+        retryAlarmName.slice(prefix.length).split(':');
+      let originalName = '';
+      try { originalName = decodeURIComponent(encodedName); } catch (_) {
+        return false;
+      }
+      if (!originalName) return false;
+      // one-shot typed wake 已被浏览器消费；语义处理继续使用 immutable
+      // original identity，不能制造新的 observedAt/owner。
+      retryAlarms.delete(retryAlarmName);
+      const originalAlarm = {
+        name: originalName,
+        scheduledTime: Number(scheduledTimeText) || 0,
+        ...(Number(periodText) > 0
+          ? { periodInMinutes: Number(periodText) }
+          : {}),
+        scheduleReadRetryAlarmName: retryAlarmName
+      };
+      if (originalName.startsWith(DEFERRED_SYNC_SUCCESSOR_RETRY_ALARM + ':')) {
+        return deliverDeferredSyncSuccessorRetryAlarm(originalAlarm);
+      }
+      if (originalName.startsWith(DEFERRED_SYNC_DISABLE_RETRY_ALARM + ':')) {
+        return deliverDeferredSyncDisableRetryAlarm(originalAlarm);
+      }
+      if (originalName.startsWith(MANUAL_OFF_ADMISSION_RETRY_ALARM + ':')) {
+        return deliverManualOffRetryAlarm(originalAlarm);
+      }
+      return false;
+    }
+    return {
+      restore: restoreDurableManualOffAdmission,
+      claim: claimManualToggleIntent,
+      begin: beginDurableManualOffAdmission,
+      deferRemote(remote, reason = 'test-remote-disable') {
+        return deferRemoteSyncDisableWhileManualOffBlocked(remote, reason);
+      },
+      rememberSuccessor(
+        remote,
+        reason = 'test-manual-off-successor',
+        options = {}
+      ) {
+        return rememberRemoteSyncSuccessorAfterDeferredDisable(
+          remote,
+          reason,
+          options
+        );
+      },
+      bumpSyncInboundGeneration() {
+        syncInboundArrivalGeneration += 1;
+        return syncInboundArrivalGeneration;
+      },
+      bumpRemoteDisableArrivalGeneration() {
+        remoteDisableArrivalGeneration += 1;
+        return remoteDisableArrivalGeneration;
+      },
+      beginTestOutboundWrite() {
+        if (testOutboundWriteRelease) return false;
+        syncPublishGeneration += 1;
+        syncWriteOperationsInFlight += 1;
+        syncWriteChain = new Promise(resolve => {
+          testOutboundWriteRelease = resolve;
+        });
+        return true;
+      },
+      completeTestOutboundWrite(remote, receipt) {
+        if (!testOutboundWriteRelease) return false;
+        initialSyncRemote = remote && typeof remote === 'object'
+          ? structuredClone(remote)
+          : null;
+        const normalizedReceipt = normalizeSyncPayloadReceipt(receipt);
+        const watermark = normalizeSyncAuthorityTimestamp(
+          remote?.syncedAt
+        );
+        storedSyncWatermark = Math.max(storedSyncWatermark, watermark);
+        storedSyncPayloadReceipt = normalizedReceipt
+          ? structuredClone(normalizedReceipt)
+          : null;
+        lastSyncedAt = Math.max(lastSyncedAt, storedSyncWatermark);
+        syncWatermarkLoaded = true;
+        completedSyncPayloadReceipt = normalizedReceipt;
+        syncWriteOperationsInFlight = Math.max(
+          0,
+          syncWriteOperationsInFlight - 1
+        );
+        const release = testOutboundWriteRelease;
+        testOutboundWriteRelease = null;
+        release();
+        return true;
+      },
+      setSyncRemote(remote) {
+        initialSyncRemote = remote && typeof remote === 'object'
+          ? structuredClone(remote)
+          : null;
+      },
+      setSyncGetFailures(count) {
+        syncGetFailuresRemaining = Math.max(0, Number(count) || 0);
+      },
+      clearSuccessor(remote) {
+        return clearDeferredSyncDisableSuccessorAfterAdoption(remote);
+      },
+      discardSuccessor(remote, reason = 'test-later-local-authority') {
+        return discardStaleDeferredSyncDisableSuccessor(remote, reason);
+      },
+      claimLocalScheduleAuthority({ enabled: nextEnabled = false } = {}) {
+        localScheduleMutationGeneration += 1;
+        localScheduleAuthorityGeneration += 1;
+        localScheduleAuthorityObservedAt = nextSyncAuthorityObservedAt();
+        schedule.enabled = nextEnabled === true;
+        return {
+          localScheduleMutationGeneration,
+          localScheduleAuthorityGeneration,
+          localScheduleAuthorityObservedAt
+        };
+      },
+      rememberLocalMutation(reason = 'test-ordinary-local-mutation') {
+        localScheduleMutationGeneration += 1;
+        localScheduleMutationObservedAt = nextSyncAuthorityObservedAt();
+        localScheduleMutationObservedAtByGeneration.set(
+          localScheduleMutationGeneration,
+          localScheduleMutationObservedAt
+        );
+        localScheduleMutationCommitPendingGeneration =
+          localScheduleMutationGeneration;
+        return commitLocalScheduleMutationAuthority(
+          localScheduleMutationGeneration,
+          reason
+        );
+      },
+      beginLocalMutation(schedulePatch = {}) {
+        localScheduleMutationGeneration += 1;
+        localScheduleMutationObservedAt = nextSyncAuthorityObservedAt();
+        localScheduleMutationObservedAtByGeneration.set(
+          localScheduleMutationGeneration,
+          localScheduleMutationObservedAt
+        );
+        localScheduleMutationCommitPendingGeneration =
+          localScheduleMutationGeneration;
+        if (schedulePatch && typeof schedulePatch === 'object') {
+          schedule = { ...schedule, ...structuredClone(schedulePatch) };
+        }
+        return {
+          generation: localScheduleMutationGeneration,
+          observedAt: localScheduleMutationObservedAt
+        };
+      },
+      commitLocalMutation(generation, reason = 'test-local-mutation-intent') {
+        return commitLocalScheduleMutationAuthority(generation, reason);
+      },
+      finishLocalMutation(generation) {
+        return finishLocalScheduleMutationCommit(generation);
+      },
+      derivedLocalMutationBarrier() {
+        return hasCommittedLocalMutationAfterDeferredRemoteAuthority();
+      },
+      ensureSyncAuthorityBaseline() {
+        return ensureSyncAuthorityDurableBaselineLoaded();
+      },
+      effectiveDeferredRemoteAuthorityObservedAt() {
+        return getEffectiveDeferredRemoteAuthorityObservedAt();
+      },
+      completeSyncAuthorityBaseline(durableBaseline) {
+        return completeSyncAuthorityDurableBaseline(durableBaseline);
+      },
+      captureSuccessorsBeforeLocalMutation(generation, cutoffObservedAt) {
+        return captureDeferredSyncSuccessorRetryAlarmsBeforeLocalMutation(
+          generation,
+          cutoffObservedAt
+        );
+      },
+      authorityTupleAtOrBefore(candidate, cutoff) {
+        return isSyncAuthorityOrderTupleAtOrBefore(candidate, cutoff);
+      },
+      rebaseAuthorityTuple(candidate, durableBaseline) {
+        return rebaseSyncAuthorityOrderTuple(candidate, durableBaseline);
+      },
+      automationAllowed() {
+        return isAutomationAllowed();
+      },
+      roundTripSuccessorRetryCredential(
+        remote,
+        observedAt,
+        predecessorSafetyAuthorityId = '',
+        authorityOrderObservedAt = observedAt,
+        authorityPreBaselineSequence = 0
+      ) {
+        const name = createDeferredSyncSuccessorRetryAlarmName(
+          remote,
+          observedAt,
+          predecessorSafetyAuthorityId,
+          authorityOrderObservedAt,
+          authorityPreBaselineSequence
+        );
+        const parsed = parseDeferredSyncSuccessorRetryAlarm({ name });
+        return {
+          name,
+          observedAt: parsed?.observedAt || 0,
+          authorityOrderObservedAt:
+            parsed?.authorityOrderObservedAt || 0,
+          authorityPreBaselineSequence:
+            parsed?.authorityPreBaselineSequence || 0,
+          remote: parsed?.remote ? structuredClone(parsed.remote) : null,
+          predecessorSafetyAuthorityId:
+            parsed?.predecessorSafetyAuthorityId || ''
+        };
+      },
+      roundTripDisableRetryCredential(
+        remote,
+        receivedAt,
+        safetyAuthorityId = deferredSyncDisableSafetyAuthorityId,
+        authorityOrderObservedAt = receivedAt,
+        authorityPreBaselineSequence = 0
+      ) {
+        const name = createDeferredSyncDisableRetryAlarmName(
+          receivedAt,
+          remote,
+          safetyAuthorityId,
+          authorityOrderObservedAt,
+          authorityPreBaselineSequence
+        );
+        const parsed = parseDeferredSyncDisableRetryAlarm({ name });
+        return {
+          name,
+          receivedAt: parsed?.receivedAt || 0,
+          authorityOrderObservedAt:
+            parsed?.authorityOrderObservedAt || 0,
+          authorityPreBaselineSequence:
+            parsed?.authorityPreBaselineSequence || 0,
+          remote: parsed?.remote ? structuredClone(parsed.remote) : null
+        };
+      },
+      parseSuccessorRetryCredential(alarm) {
+        const parsed = parseDeferredSyncSuccessorRetryAlarm(
+          structuredClone(alarm)
+        );
+        return parsed
+          ? {
+              name: parsed.name,
+              observedAt: parsed.observedAt,
+              authorityOrderObservedAt:
+                parsed.authorityOrderObservedAt,
+              authorityPreBaselineSequence:
+                parsed.authorityPreBaselineSequence,
+              predecessorSafetyAuthorityId:
+                parsed.predecessorSafetyAuthorityId,
+              remote: structuredClone(parsed.remote),
+              scheduledTime: Number(parsed.alarm?.scheduledTime) || 0
+            }
+          : null;
+      },
+      injectRetryAlarm(alarm) {
+        if (!alarm?.name) return false;
+        retryAlarms.set(alarm.name, structuredClone(alarm));
+        return true;
+      },
+      injectRetryAlarmOnGetAll(callNumber, alarm) {
+        const targetCall = Number(callNumber) || 0;
+        if (targetCall <= 0 || !alarm?.name) return false;
+        const queued = retryAlarmInjectionsByGetAllCall.get(targetCall)
+          || [];
+        queued.push(structuredClone(alarm));
+        retryAlarmInjectionsByGetAllCall.set(targetCall, queued);
+        return true;
+      },
+      injectDurableSuccessorBeforeLocalMutation(
+        remote,
+        observedAt,
+        alarm
+      ) {
+        if (!remote || remote.enabled !== true || !alarm?.name) return false;
+        const remoteSnapshot = structuredClone(remote);
+        const successorObservedAt = Number(observedAt) || 0;
+        deferredSyncDisableLoaded = true;
+        deferredSyncDisablePending = false;
+        deferredSyncDisableSuccessorSnapshot = remoteSnapshot;
+        deferredSyncDisableSuccessorObservedAt = successorObservedAt;
+        deferredSyncDisableSuccessorLocalAuthorityGeneration =
+          localScheduleAuthorityGeneration;
+        deferredSyncDisableSuccessorMutationGeneration =
+          localScheduleMutationGeneration;
+        deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+        deferredSyncSuccessorRetryAlarmEntries.set(alarm.name, {
+          remote: structuredClone(remoteSnapshot),
+          observedAt: successorObservedAt,
+          scheduleAuthorityGeneration: localScheduleAuthorityGeneration,
+          scheduleMutationGeneration: localScheduleMutationGeneration
+        });
+        retryAlarms.set(alarm.name, structuredClone(alarm));
+        storedDeferredSyncDisable = {
+          pending: false,
+          safetyCleared: true,
+          safetyCutoffObservedAt: 0,
+          localMutationCutoffObservedAt: 0,
+          successor: {
+            observedAt: successorObservedAt,
+            remote: structuredClone(remoteSnapshot)
+          },
+          releasedRetryAlarmNames: [],
+          releasedSuccessorRetryAlarmNames: [],
+          releasedSuccessorThroughObservedAt: 0
+        };
+        return true;
+      },
+      deliverSuccessorRetryAlarm(alarm) {
+        return deliverDeferredSyncSuccessorRetryAlarm(
+          structuredClone(alarm)
+        );
+      },
+      deliverDisableRetryAlarm(alarm) {
+        return deliverDeferredSyncDisableRetryAlarm(
+          structuredClone(alarm)
+        );
+      },
+      deliverManualRetryAlarm(alarm) {
+        return deliverManualOffRetryAlarm(structuredClone(alarm));
+      },
+      deliverScheduleReadRetryAlarm(alarm) {
+        return deliverScheduleReadRetryAlarm(structuredClone(alarm));
+      },
+      finalizeManualAuthority: finalizeCompletedManualToggleAuthority,
+      reclaimManualOffAfterFailedAuthority:
+        reclaimPendingManualOffAfterFailedAuthority,
+      prepareBaseRelease: prepareDeferredSyncDisableForRelease,
+      prepareStableRelease: prepareStableDeferredSyncDisableRelease,
+      validateStableRelease: validateStableDeferredSyncDisableRelease,
+      setManualOffBlocked(value) {
+        manualOffAutomaticOnBlocked = value === true;
+      },
+      commitAuthority: commitScheduleAuthority,
+      commit: commitScheduleAndReleaseManualOffAdmission,
+      releaseForAuthority: releaseManualOffAdmissionForAuthority,
+      releaseForOn: releaseManualOffAdmissionForManualOn,
+      flight: runManualOffAdmissionFlight,
+      trackRetryOperation: trackManualOffRetryAlarmOperation,
+      waitForRetryOperationsToSettle() {
+        return Promise.all([
+          waitForManualOffRetryAlarmOperationsToSettle(),
+          waitForDeferredSyncDisableRetryAlarmOperationsToSettle(),
+          waitForDeferredSyncSuccessorRetryAlarmOperationsToSettle()
+        ]);
+      },
+      queueEarlySyncRemote(remote) {
+        return queuePendingSyncAdoption(
+          'test-startup-early-remote',
+          remote && typeof remote === 'object'
+            ? structuredClone(remote)
+            : null
+        );
+      },
+      setDeferredPending(value) {
+        deferredSyncDisableLoaded = true;
+        deferredSyncDisablePending = value === true;
+        deferredSyncDisableEpoch += 1;
+      },
+      settleDeferredForCurrentUser(reason = 'user-authority') {
+        const intentEpoch = manualToggleIntentEpoch;
+        return runSerializedSchedulePhaseOperation(
+          phaseAdmissionEpoch => settleDeferredSyncDisable(
+            phaseAdmissionEpoch,
+            {
+              ensureCurrent: () => manualToggleIntentEpoch === intentEpoch,
+              reason
+            }
+          ),
+          reason
+        );
+      },
+      refreshRemoteSafety(
+        ensureCurrent = () => true,
+        reason = 'test-local-authority-preflight',
+        options = {}
+      ) {
+        return refreshRemoteDisableBeforeLocalRelease(
+          ensureCurrent,
+          reason,
+          options
+        );
+      },
+      resumePending(reason = 'test-resume') {
+        return resumePendingManualOffAdmission(reason);
+      },
+      refreshManualOffCredentials() {
+        return refreshManualOffAdmissionFromDurableCredentials();
+      },
+      publishSchedule(reason = 'test-publish') {
+        return syncScheduleToSync(reason);
+      },
+      loadWatermark() {
+        return loadSyncWatermark();
+      },
+      persistObservedWatermark(value) {
+        return persistSyncWatermark(value);
+      },
+      releaseStartupSupersession(intentEpoch) {
+        return releaseStartupRestoreSupersession(intentEpoch);
+      },
+      setScheduleEnabled(value) {
+        schedule.enabled = value === true;
+      },
+      setCompletedLocalTerminalAuthority(
+        action,
+        observedAt,
+        {
+          consumedRemoteDisableIdentities = [],
+          consumedRemoteDisableRetryAlarmNames = []
+        } = {}
+      ) {
+        completedLocalTerminalAuthority = {
+          schemaVersion: LOCAL_TERMINAL_AUTHORITY_SCHEMA_VERSION,
+          action: action === 'disable'
+            ? 'disable'
+            : action === 'off'
+              ? 'off'
+              : 'on',
+          observedAt: Number(observedAt) || 0,
+          consumedRemoteDisableIdentities: [
+            ...consumedRemoteDisableIdentities
+          ],
+          consumedRemoteDisableRetryAlarmNames: [
+            ...consumedRemoteDisableRetryAlarmNames
+          ],
+          completedAt: Date.now()
+        };
+        storedTerminalAuthority = structuredClone(
+          completedLocalTerminalAuthority
+        );
+      },
+      async runInitDeferredRecovery() {
+        lifecycleCalls.push('init-restore:start');
+        await restoreDurableManualOffAdmission();
+        lifecycleCalls.push('init-restore:end');
+        if (storedSchedule && typeof storedSchedule === 'object') {
+          schedule = structuredClone(storedSchedule);
+          lifecycleCalls.push('init-schedule-load:' + schedule.enabled);
+        }
+        if (startupManualOffClassificationPending) {
+          await refreshManualOffAdmissionFromDurableCredentials();
+        }
+        if (manualOffAutomaticOnBlocked
+            && manualOffAdmissionToken
+            && manualOffAdmissionRestoredFromStorage) {
+          await resumePendingManualOffAdmission('init-recovery');
+        } else if (deferredSyncDisablePending
+            && !startupDeferredDisableSupersededByUserIntent) {
+          await runSerializedSchedulePhaseOperation(
+            phaseAdmissionEpoch => settleDeferredSyncDisable(
+              phaseAdmissionEpoch,
+              { reason: 'init' }
+            ),
+            'init-deferred-sync-disable'
+          );
+          if (manualOffAutomaticOnBlocked
+              && manualOffAdmissionToken
+              && manualOffAdmissionRestoredFromStorage) {
+            await resumePendingManualOffAdmission(
+              'init-reclassified-recovery'
+            );
+          }
+        }
+        if (!isStartupRestoreSupersededByUserIntent()
+            && !startupDeferredDisableSupersededByUserIntent
+            && !manualOffAutomaticOnBlocked
+            && !deferredSyncDisablePending
+            && syncPublishPending) {
+          await syncScheduleToSync('init-pending-publish');
+        }
+      },
+      state: () => ({
+        liveSchedule: structuredClone(schedule),
+        manualToggleIntentEpoch,
+        manualToggleIntentAction,
+        manualToggleIntentSource,
+        manualOffAutomaticOnBlocked,
+        manualOffAdmissionLoaded,
+        manualOffAdmissionToken,
+        manualOffAdmissionRequestedAt,
+        manualOffAdmissionRestoredFromStorage,
+        manualOffAdmissionLocalMutationObservedAt,
+        manualOffAdmissionPredecessorSuccessorRetryAlarmNames: [
+          ...manualOffAdmissionPredecessorSuccessorRetryAlarmNames
+        ],
+        manualOffAdmissionMutationCoverageComplete,
+        manualOffAdmissionReleasedThroughRequestedAt,
+        manualOffAdmissionPredecessorRequestedAt,
+        manualOffAdmissionPredecessorTokens: [
+          ...manualOffAdmissionPredecessorTokens
+        ],
+        startupManualOffClassificationPending,
+        startupManualOffClassificationIntentEpoch,
+        deferredSyncDisableLoaded,
+        deferredSyncDisablePending,
+        deferredSyncDisableEpoch,
+        deferredSyncDisableSafetyAuthorityId,
+        deferredSyncLastClearedSafetyAuthorityId,
+        localScheduleAuthorityGeneration,
+        localScheduleMutationGeneration,
+        localScheduleMutationObservedAt,
+        localScheduleMutationCommittedObservedAt,
+        localScheduleMutationCommitPendingGeneration,
+        syncAuthorityDurableBaselineLoaded,
+        syncAuthorityPreBaselineSequence,
+        syncAuthorityDurablePreBaselineSequenceReservedThrough,
+        syncAuthorityPreBaselineSequenceByObservedAt: [
+          ...syncAuthorityPreBaselineSequenceByObservedAt.entries()
+        ],
+        deferredSyncDisableAuthorityOrderObservedAt,
+        deferredSyncDisableAuthorityPreBaselineSequence,
+        deferredSyncDisableSuccessorAuthorityOrderObservedAt,
+        deferredSyncDisableSuccessorAuthorityPreBaselineSequence,
+        completedLocalTerminalAuthority:
+          structuredClone(completedLocalTerminalAuthority),
+        localScheduleAuthorityObservedAt,
+        remoteSyncAuthorityObservedAt,
+        deferredSyncDisableRemoteSnapshot:
+          structuredClone(deferredSyncDisableRemoteSnapshot),
+        deferredSyncDisableRemoteSnapshotComplete,
+        deferredSyncDisableSyntheticReadFailure,
+        deferredSyncDisableDurableReceiptEpoch,
+        deferredSyncDisableDurableReceiptIdentity,
+        deferredSyncDisableObservedAt,
+        deferredSyncSuccessorEnumerationPendingEpoch,
+        deferredSyncDisableSuccessorSnapshot:
+          structuredClone(deferredSyncDisableSuccessorSnapshot),
+        deferredSyncDisableSuccessorObservedAt,
+        deferredSyncDisableSuccessorRetryAlarmName,
+        deferredSyncSuccessorReleasedThroughObservedAt,
+        deferredSyncDisableSuccessorLocalAuthorityGeneration,
+        deferredSyncDisableSuccessorMutationGeneration,
+        deferredSyncDisableLocalPublishAfterRemoteAuthority,
+        deferredSyncDisableReleasedRetryAlarmNames: [
+          ...deferredSyncDisableReleasedRetryAlarmNames
+        ],
+        deferredSyncSuccessorRetryAlarmEntries: [
+          ...deferredSyncSuccessorRetryAlarmEntries.entries()
+        ].map(([name, entry]) => [name, structuredClone(entry)]),
+        deferredSyncSuccessorReleasedRetryAlarmNames: [
+          ...deferredSyncSuccessorReleasedRetryAlarmNames
+        ],
+        pendingRemote: structuredClone(_syncOpLock.pendingRemote),
+        pendingRemoteCausalEnvelope:
+          structuredClone(_syncOpLock.pendingRemoteCausalEnvelope),
+        rereadAfterSafetyDisable: _syncOpLock.rereadAfterSafetyDisable,
+        startupDeferredDisableSupersededByUserIntent,
+        startupRestoreSupersedingIntentEpoch,
+        startupRestoreSupersededByUserIntent:
+          isStartupRestoreSupersededByUserIntent(),
+        storedMarker: structuredClone(storedMarker),
+        storedTerminalAuthority:
+          structuredClone(storedTerminalAuthority),
+        storedDeferredSyncDisable: structuredClone(storedDeferredSyncDisable),
+        storedLocalScheduleMutationCutoff,
+        storedSchedule: structuredClone(storedSchedule),
+        syncPublishPending,
+        automaticDisableAdmissionEpoch,
+        automaticOnAdmissionBlocked,
+        phaseOwner: syncPhaseAdoptionAdmissionOwner,
+        retryOperationsInFlight: manualOffRetryAlarmOperationsInFlight.size,
+        retryGetAllCallCount,
+        syncGetCalls,
+        syncInboundArrivalGeneration,
+        remoteDisableArrivalGeneration,
+        syncWriteOperationsInFlight,
+        lastSyncedAt,
+        syncWatermarkLoaded,
+        storedSyncWatermark,
+        storedSyncPayloadReceipt:
+          structuredClone(storedSyncPayloadReceipt),
+        retryAlarms: structuredClone([...retryAlarms.values()]),
+        pendingMarkerSetAttempts,
+        timerInvalidations,
+        deferredSyncDrains,
+        lifecycleCalls: [...lifecycleCalls],
+        outboundPublishes: structuredClone(outboundPublishes),
+        adoptedRemotes: structuredClone(adoptedRemotes),
+        writes: structuredClone(writes)
+      })
+    };`
+  )(
+    marker,
+    terminalAuthority,
+    enabled,
+    pendingMarkerSetFailures,
+    deferredSyncDisable,
+    syncPending,
+    initialRetryAlarms,
+    syncPublishFailures,
+    storageGetGate,
+    onStorageGetStarted,
+    retryGetAllGate,
+    onRetryGetAllStarted,
+    storageGetFailures,
+    retryGetAllFailures,
+    retryGetAllFailureCalls,
+    retryClearFailures,
+    deferredMarkerSetFailures,
+    deferredSuccessorSetFailures,
+    localMutationSetFailures,
+    localMutationSetGate,
+    onLocalMutationSetStarted,
+    syncRemote,
+    syncRemoteSequence,
+    syncGetFailures,
+    syncGetGate,
+    onSyncGetStarted,
+    onSyncGet,
+    initialSyncWatermark,
+    initialSyncPayloadReceipt,
+    syncWatermarkGetFailures,
+    syncWatermarkSetFailures,
+    onSyncWatermarkSet,
+    initialStoredSchedule,
+    initialLocalMutationCutoff,
+    initialSyncAuthorityBaselineLoaded,
+    DurableManualOffDate16,
+    testConsole
+  );
+
+  const drainTypedScheduleReadWakes16 = async (harness, maxRounds = 4) => {
+    const delivered = new Set();
+    for (let round = 0; round < maxRounds; round += 1) {
+      const wake = harness.state().retryAlarms.find(alarm =>
+        alarm.name.startsWith('ac-schedule-read-retry:')
+        && !delivered.has(alarm.name));
+      if (!wake) break;
+      delivered.add(wake.name);
+      await harness.deliverScheduleReadRetryAlarm(wake);
+      await harness.waitForRetryOperationsToSettle();
+    }
+    return [...delivered];
+  };
+
+  const durableRestartMarker16 = Object.freeze({
+    schemaVersion: 1,
+    token: 'restart-pending-manual-off',
+    requestedAt: durableManualOffNow16
+  });
+  const durableRestartHarness16 = loadDurableManualOffAdmissionHarness16({
+    marker: durableRestartMarker16
+  });
+  const durableRestartBefore16 = durableRestartHarness16.state();
+  await durableRestartHarness16.restore();
+  const durableRestartRestored16 = durableRestartHarness16.state();
+  const durableOffPhaseCommitted16 = await durableRestartHarness16.commit({
+    ensureCurrent: () => true,
+    reason: 'test-off-phase-commit'
+  });
+  const durableRestartCommitted16 = durableRestartHarness16.state();
+
+  // SW 可能在 remote false onChanged 送达前终止。恢复 pending manual-OFF
+  // 时必须先读 sync safety：先把 F durable + 收口 disabled，再允许本机
+  // outbound；否则旧 enabled=true 会先覆盖唯一 remote disable authority。
+  const recoveryPreflightRemoteF16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 7 * 24 * 60 * 60_000,
+    onMinutes: 13,
+    offMinutes: 47
+  };
+  const recoveryPreflightHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: durableRestartMarker16,
+      syncRemote: recoveryPreflightRemoteF16
+    });
+  await recoveryPreflightHarness16.restore();
+  let recoveryPreflightResult16 =
+    await recoveryPreflightHarness16.resumePending(
+      'startup-pending-off-sync-preflight'
+    );
+  await recoveryPreflightHarness16.waitForRetryOperationsToSettle();
+  if (recoveryPreflightResult16?.remoteDisabled !== true) {
+    recoveryPreflightResult16 = await recoveryPreflightHarness16.resumePending(
+      'startup-pending-off-sync-preflight-retry'
+    );
+    await recoveryPreflightHarness16.waitForRetryOperationsToSettle();
+  }
+  const recoveryPreflightState16 = recoveryPreflightHarness16.state();
+  const recoveryPreflightSyncReadIndex16 =
+    recoveryPreflightState16.lifecycleCalls.indexOf('sync-get:1');
+  const recoveryPreflightFreshReadIndex16 =
+    recoveryPreflightState16.lifecycleCalls.indexOf('sync-get:2');
+  const recoveryPreflightDurableFIndex16 =
+    recoveryPreflightState16.lifecycleCalls.indexOf(
+      'local-set-deferred:true'
+    );
+  const recoveryPreflightDisabledCommitIndex16 =
+    recoveryPreflightState16.lifecycleCalls.indexOf(
+      'local-set-schedule:false:true'
+    );
+  const recoveryPreflightPublishIndex16 =
+    recoveryPreflightState16.lifecycleCalls.findIndex(value =>
+      value.startsWith('publish:'));
+  recoveryPreflightHarness16.setScheduleEnabled(true);
+  const recoveryPreflightExplicitTrueCommitted16 =
+    await recoveryPreflightHarness16.commitAuthority({
+      ensureCurrent: () => true,
+      markSyncPublishPending: true,
+      reason: 'explicit-true-after-fast-clock-F'
+    });
+  const recoveryPreflightExplicitTruePublished16 =
+    await recoveryPreflightHarness16.publishSchedule(
+      'explicit-true-after-fast-clock-F'
+    );
+  const recoveryPreflightAfterExplicitTrue16 =
+    recoveryPreflightHarness16.state();
+  assertPass(recoveryPreflightResult16?.remoteDisabled === true
+      && recoveryPreflightState16.syncGetCalls >= 2
+      && recoveryPreflightSyncReadIndex16 >= 0
+      && recoveryPreflightDurableFIndex16
+        > recoveryPreflightSyncReadIndex16
+      && recoveryPreflightFreshReadIndex16
+        > recoveryPreflightDurableFIndex16
+      && recoveryPreflightDisabledCommitIndex16
+        > recoveryPreflightFreshReadIndex16
+      && recoveryPreflightPublishIndex16
+        > recoveryPreflightDisabledCommitIndex16
+      && recoveryPreflightState16.outboundPublishes.length === 1
+      && recoveryPreflightState16.outboundPublishes[0]?.enabled === false
+      && recoveryPreflightState16.outboundPublishes[0]?.syncedAt
+        > recoveryPreflightRemoteF16.syncedAt
+      && recoveryPreflightState16.storedSyncWatermark
+        === recoveryPreflightState16.outboundPublishes[0]?.syncedAt
+      && recoveryPreflightState16.storedSchedule?.enabled === false
+      && recoveryPreflightState16.storedDeferredSyncDisable?.pending === false
+      && recoveryPreflightState16.manualOffAutomaticOnBlocked === false
+      && recoveryPreflightState16.manualOffAdmissionToken === ''
+      && recoveryPreflightExplicitTrueCommitted16 === true
+      && recoveryPreflightExplicitTruePublished16 === true
+      && recoveryPreflightAfterExplicitTrue16.outboundPublishes.length === 2
+      && recoveryPreflightAfterExplicitTrue16.outboundPublishes[1]?.enabled
+        === true
+      && recoveryPreflightAfterExplicitTrue16.outboundPublishes[1]?.syncedAt
+        > recoveryPreflightState16.outboundPublishes[0]?.syncedAt
+      && recoveryPreflightAfterExplicitTrue16.storedSyncWatermark
+        === recoveryPreflightAfterExplicitTrue16
+          .outboundPublishes[1]?.syncedAt,
+    '16M-3F-0A: pending manual-OFF 重启先 sync preflight durable/settle fast-clock F，再 outbound false；后续 explicit true 继续以更高 Lamport syncedAt 发布');
+
+  // restart 已有 durable F，但 sync store 可能已被后继 T 改写。preflight
+  // 不能因本次 read=true 就跳过 marker 内 F 的快时钟：先补 durable
+  // watermark，再消费 F；本机 safety false 必须严格新于该 F。
+  const recoveryStoredFObservedAt16 = durableManualOffNow16 - 40;
+  const recoveryStoredFFastSyncedAt16 =
+    durableManualOffNow16 + 6 * 24 * 60 * 60_000;
+  const recoveryStoredFRemote16 = {
+    enabled: false,
+    syncedAt: recoveryStoredFFastSyncedAt16,
+    onMinutes: 14,
+    offMinutes: 46
+  };
+  const recoveryStoreAlreadyT16 = {
+    enabled: true,
+    syncedAt: recoveryStoredFFastSyncedAt16 - 1,
+    onMinutes: 22,
+    offMinutes: 38,
+    pwmState: 'off',
+    nextTriggerAt: durableManualOffNow16 + 8 * 60_000
+  };
+  const recoveryStoredFHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: durableRestartMarker16,
+      deferredSyncDisable: {
+        pending: true,
+        receivedAt: recoveryStoredFObservedAt16,
+        safetyCutoffObservedAt: recoveryStoredFObservedAt16,
+        successorPredecessorCoverageComplete: true,
+        successorPredecessorCoverageThroughObservedAt:
+          recoveryStoredFObservedAt16,
+        remote: structuredClone(recoveryStoredFRemote16),
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: recoveryStoredFObservedAt16
+      },
+      syncRemote: recoveryStoreAlreadyT16
+    });
+  await recoveryStoredFHarness16.restore();
+  const recoveryStoredFResult16 =
+    await recoveryStoredFHarness16.resumePending(
+      'startup-marker-F-store-already-T'
+    );
+  const recoveryStoredFState16 = recoveryStoredFHarness16.state();
+  assertPass(recoveryStoredFResult16?.remoteDisabled === true
+      && recoveryStoredFState16.syncGetCalls >= 2
+      && recoveryStoredFState16.outboundPublishes.length === 1
+      && recoveryStoredFState16.outboundPublishes[0]?.enabled === false
+      && recoveryStoredFState16.outboundPublishes[0]?.syncedAt
+        > recoveryStoredFFastSyncedAt16
+      && recoveryStoredFState16.storedSyncWatermark
+        === recoveryStoredFState16.outboundPublishes[0]?.syncedAt
+      && recoveryStoredFState16.storedSchedule?.enabled === false
+      && recoveryStoredFState16.deferredSyncDisablePending === false
+      && recoveryStoredFState16.manualOffAutomaticOnBlocked === false,
+    '16M-3F-0A-1: restart 已有 fast-clock F marker、sync store 已 T 时仍先补 F watermark；settle 后 safety false syncedAt 严格更高');
+
+  // standalone F（没有 manual-OFF marker）由 init / alarm retry / failed
+  // authority 直接进入 settleDeferredSyncDisable。它们也必须先推进 F 的
+  // Lamport 水位；不能只有 manual OFF/ON 的 release preflight 才安全。
+  const standaloneFastFRecord16 = {
+    pending: true,
+    receivedAt: recoveryStoredFObservedAt16 - 1,
+    safetyCutoffObservedAt: recoveryStoredFObservedAt16 - 1,
+    successorPredecessorCoverageComplete: true,
+    successorPredecessorCoverageThroughObservedAt:
+      recoveryStoredFObservedAt16 - 1,
+    remote: structuredClone(recoveryStoredFRemote16),
+    releasedRetryAlarmNames: [],
+    releasedSuccessorRetryAlarmNames: [],
+    releasedSuccessorThroughObservedAt: recoveryStoredFObservedAt16 - 1
+  };
+  const standaloneReleasedMarker16 = {
+    schemaVersion: 1,
+    state: 'released',
+    releasedAt: durableManualOffNow16 - 1,
+    releasedToken: 'standalone-F-no-manual-token',
+    releasedTokens: ['standalone-F-no-manual-token'],
+    releasedThroughRequestedAt: durableManualOffNow16 - 2
+  };
+  const standaloneInitFHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      deferredSyncDisable: standaloneFastFRecord16
+    });
+  await standaloneInitFHarness16.runInitDeferredRecovery();
+  const standaloneInitFState16 = standaloneInitFHarness16.state();
+  const standaloneRetryFHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      deferredSyncDisable: standaloneFastFRecord16
+    });
+  await standaloneRetryFHarness16.restore();
+  const standaloneRetryFResult16 =
+    await standaloneRetryFHarness16.settleDeferredForCurrentUser(
+      'standalone-F-retry-owner'
+    );
+  const standaloneRetryFState16 = standaloneRetryFHarness16.state();
+  assertPass(standaloneInitFState16.outboundPublishes.length === 1
+      && standaloneInitFState16.outboundPublishes[0]?.enabled === false
+      && standaloneInitFState16.outboundPublishes[0]?.syncedAt
+        > recoveryStoredFFastSyncedAt16
+      && standaloneInitFState16.storedSyncWatermark
+        === standaloneInitFState16.outboundPublishes[0]?.syncedAt
+      && standaloneInitFState16.deferredSyncDisablePending === false
+      && standaloneRetryFResult16?.remoteDisabled === true
+      && standaloneRetryFState16.outboundPublishes.length === 1
+      && standaloneRetryFState16.outboundPublishes[0]?.enabled === false
+      && standaloneRetryFState16.outboundPublishes[0]?.syncedAt
+        > recoveryStoredFFastSyncedAt16
+      && standaloneRetryFState16.storedSyncWatermark
+        === standaloneRetryFState16.outboundPublishes[0]?.syncedAt
+      && standaloneRetryFState16.deferredSyncDisablePending === false,
+    '16M-3F-0A-2: standalone fast-clock F 的 init/retry settle 同样先 durable watermark；所有 safety false outbound 严格新于 F');
+
+  // F2 的 local marker 双写失败时，compact retry alarm 是 F2 payload 的
+  // immutable durable receipt。restart 必须选 F1 record / F2 credential 中
+  // Lamport 较新的 F2，并以高于 F2 的水位完成 safety false publish。
+  const alarmOnlyF1ObservedAt16 = durableManualOffNow16 - 100;
+  const alarmOnlyF1Remote16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 2 * 24 * 60 * 60_000,
+    onMinutes: 17,
+    offMinutes: 43
+  };
+  const alarmOnlyF2Remote16 = {
+    ...alarmOnlyF1Remote16,
+    syncedAt: durableManualOffNow16 + 10 * 24 * 60 * 60_000,
+    onMinutes: 20,
+    offMinutes: 40
+  };
+  const alarmOnlyF2WriterHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      deferredSyncDisable: {
+        pending: true,
+        receivedAt: alarmOnlyF1ObservedAt16,
+        safetyCutoffObservedAt: alarmOnlyF1ObservedAt16,
+        successorPredecessorCoverageComplete: true,
+        successorPredecessorCoverageThroughObservedAt:
+          alarmOnlyF1ObservedAt16,
+        remote: structuredClone(alarmOnlyF1Remote16),
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: alarmOnlyF1ObservedAt16
+      },
+      deferredMarkerSetFailures: 2
+    });
+  await alarmOnlyF2WriterHarness16.restore();
+  const alarmOnlyF2Persisted16 =
+    await alarmOnlyF2WriterHarness16.deferRemote(
+      alarmOnlyF2Remote16,
+      'F2-marker-double-reject-alarm-only'
+    );
+  await alarmOnlyF2WriterHarness16.waitForRetryOperationsToSettle();
+  const alarmOnlyF2BeforeCrash16 = alarmOnlyF2WriterHarness16.state();
+  const alarmOnlyF2RestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: alarmOnlyF2BeforeCrash16.storedMarker,
+      deferredSyncDisable:
+        alarmOnlyF2BeforeCrash16.storedDeferredSyncDisable,
+      retryAlarms: alarmOnlyF2BeforeCrash16.retryAlarms,
+      syncRemote: alarmOnlyF2Remote16
+    });
+  await alarmOnlyF2RestartHarness16.restore();
+  const alarmOnlyF2Restored16 = alarmOnlyF2RestartHarness16.state();
+  let alarmOnlyF2SettleResult16 =
+    await alarmOnlyF2RestartHarness16.settleDeferredForCurrentUser(
+      'F2-compact-credential-restart'
+    );
+  if (alarmOnlyF2SettleResult16?.remoteDisabled !== true) {
+    await alarmOnlyF2RestartHarness16.waitForRetryOperationsToSettle();
+    alarmOnlyF2SettleResult16 =
+      await alarmOnlyF2RestartHarness16.settleDeferredForCurrentUser(
+        'F2-compact-credential-restart-retry'
+      );
+  }
+  const alarmOnlyF2Restarted16 = alarmOnlyF2RestartHarness16.state();
+  const alarmOnlyF2UnsafePublishes16 =
+    alarmOnlyF2Restarted16.outboundPublishes.filter(payload =>
+      !(payload.syncedAt > alarmOnlyF2Remote16.syncedAt));
+  assertPass(alarmOnlyF2Persisted16 === false
+      && alarmOnlyF2BeforeCrash16.storedDeferredSyncDisable?.remote?.syncedAt
+        === alarmOnlyF1Remote16.syncedAt
+      && alarmOnlyF2BeforeCrash16.retryAlarms.some(alarm =>
+        alarm.name.startsWith('ac-deferred-sync-disable-retry-test:'))
+      && alarmOnlyF2Restored16.deferredSyncDisablePending === true
+      && alarmOnlyF2Restored16
+        .deferredSyncDisableRemoteSnapshot?.syncedAt
+          === alarmOnlyF2Remote16.syncedAt
+      && alarmOnlyF2Restored16
+        .deferredSyncDisableRemoteSnapshot?.onMinutes
+          === alarmOnlyF2Remote16.onMinutes
+      && alarmOnlyF2Restored16
+        .deferredSyncDisableRemoteSnapshotComplete === true
+      && alarmOnlyF2SettleResult16?.remoteDisabled === true
+      && alarmOnlyF2Restarted16.deferredSyncDisablePending === false
+      && alarmOnlyF2Restarted16.outboundPublishes.length === 1
+      && alarmOnlyF2Restarted16.outboundPublishes[0]?.enabled === false
+      && alarmOnlyF2Restarted16.outboundPublishes[0]?.syncedAt
+        > alarmOnlyF2Remote16.syncedAt
+      && alarmOnlyF2UnsafePublishes16.length === 0
+      && alarmOnlyF2Restarted16.storedSyncWatermark
+        === alarmOnlyF2Restarted16.outboundPublishes[0]?.syncedAt,
+    '16M-3F-0A-3: durable F1 + compact F2 alarm（F2 marker 双拒绝）重启明确吸收 F2 payload；safety false publish 水位严格高于 F2');
+
+  // onAlarm 看到 getAll 后迟显的 exact F credential 时，必须沿用 alarm
+  // 自带的 receivedAt/name。若 sync preflight 暂时失败，内存/durable F
+  // 仍由该 identity 唯一证明，不能用 Date.now() 另铸 F2 并制造假先后。
+  const exactAlarmOnlyFRemote16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 2_500,
+    onMinutes: 18,
+    offMinutes: 42
+  };
+  const exactAlarmOnlyFReceivedAt16 = durableManualOffNow16 - 55;
+  const exactAlarmOnlyFHarness16 =
+    loadDurableManualOffAdmissionHarness16({ syncGetFailures: 1 });
+  const exactAlarmOnlyFCredential16 =
+    exactAlarmOnlyFHarness16.roundTripDisableRetryCredential(
+      exactAlarmOnlyFRemote16,
+      exactAlarmOnlyFReceivedAt16
+    );
+  exactAlarmOnlyFHarness16.injectRetryAlarm({
+    name: exactAlarmOnlyFCredential16.name,
+    scheduledTime: exactAlarmOnlyFReceivedAt16 + 60_000,
+    periodInMinutes: 1
+  });
+  await exactAlarmOnlyFHarness16.deliverDisableRetryAlarm({
+    name: exactAlarmOnlyFCredential16.name
+  });
+  await exactAlarmOnlyFHarness16.waitForRetryOperationsToSettle();
+  const exactAlarmOnlyFState16 = exactAlarmOnlyFHarness16.state();
+  const exactAlarmOnlyFNames16 = exactAlarmOnlyFState16.retryAlarms
+    .map(alarm => alarm.name)
+    .filter(name => name.startsWith(
+      'ac-deferred-sync-disable-retry-test:'
+    ));
+  assertPass(exactAlarmOnlyFState16.deferredSyncDisablePending === true
+      && exactAlarmOnlyFState16.deferredSyncDisableObservedAt
+        === exactAlarmOnlyFReceivedAt16
+      && exactAlarmOnlyFState16
+        .deferredSyncDisableRemoteSnapshot?.syncedAt
+          === exactAlarmOnlyFRemote16.syncedAt
+      && exactAlarmOnlyFState16.storedDeferredSyncDisable?.receivedAt
+        === exactAlarmOnlyFReceivedAt16
+      && exactAlarmOnlyFNames16.length === 1
+      && exactAlarmOnlyFNames16[0] === exactAlarmOnlyFCredential16.name
+      && exactAlarmOnlyFState16.outboundPublishes.length === 0,
+    '16M-3F-0A-3A: late-visible exact F1 alarm 沿用原 receivedAt/name；sync preflight reject 时不 mint now-F2，保持唯一 pending receipt/零 publish');
+
+  // Tpre 的 observedAt 可能来自回拨前的未来墙钟，数值大于后来真实 F。
+  // F onAlarm 必须按“当前已登记 mailbox”精确 terminal，而不是用墙钟
+  // 猜 T 是 post-F；fresh sync=false 证明当前 authority 仍是 F。
+  const alarmRollbackTpreRemote16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 + 2_600,
+    onMinutes: 29,
+    offMinutes: 31,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 20 * 60_000
+  };
+  const alarmRollbackTpreObservedAt16 =
+    durableManualOffNow16 + 30 * 24 * 60 * 60_000;
+  const rollbackAfterTpreFRemote16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 2_700,
+    onMinutes: 12,
+    offMinutes: 48
+  };
+  const rollbackAfterTpreFReceivedAt16 = durableManualOffNow16 - 45;
+  const alarmRollbackTpreHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      syncRemote: rollbackAfterTpreFRemote16
+    });
+  const alarmRollbackTpreCredential16 =
+    alarmRollbackTpreHarness16.roundTripSuccessorRetryCredential(
+      alarmRollbackTpreRemote16,
+      alarmRollbackTpreObservedAt16
+    );
+  alarmRollbackTpreHarness16.injectRetryAlarm({
+    name: alarmRollbackTpreCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  });
+  await alarmRollbackTpreHarness16.rememberSuccessor(
+    alarmRollbackTpreRemote16,
+    'future-clock-Tpre-before-real-F',
+    {
+      credentialObservedAt: alarmRollbackTpreObservedAt16,
+      credentialRetryAlarmName: alarmRollbackTpreCredential16.name,
+      recoverFromRetryCredential: true
+    }
+  );
+  const rollbackAfterTpreFCredential16 =
+    alarmRollbackTpreHarness16.roundTripDisableRetryCredential(
+      rollbackAfterTpreFRemote16,
+      rollbackAfterTpreFReceivedAt16
+    );
+  alarmRollbackTpreHarness16.injectRetryAlarm({
+    name: rollbackAfterTpreFCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  });
+  await alarmRollbackTpreHarness16.deliverDisableRetryAlarm({
+    name: rollbackAfterTpreFCredential16.name
+  });
+  await alarmRollbackTpreHarness16.waitForRetryOperationsToSettle();
+  if (alarmRollbackTpreHarness16.state().deferredSyncDisablePending) {
+    await alarmRollbackTpreHarness16.settleDeferredForCurrentUser(
+      'future-clock-Tpre-real-F-retry'
+    );
+    await alarmRollbackTpreHarness16.waitForRetryOperationsToSettle();
+  }
+  await drainTypedScheduleReadWakes16(alarmRollbackTpreHarness16);
+  const alarmRollbackTpreSettled16 = alarmRollbackTpreHarness16.state();
+  assertPass(alarmRollbackTpreSettled16.deferredSyncDisablePending === false
+      && alarmRollbackTpreSettled16.storedSchedule?.enabled === false
+      && alarmRollbackTpreSettled16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && alarmRollbackTpreSettled16
+        .deferredSyncSuccessorReleasedRetryAlarmNames.includes(
+          alarmRollbackTpreCredential16.name
+        )
+      && alarmRollbackTpreSettled16.storedDeferredSyncDisable
+        ?.releasedSuccessorRetryAlarmNames
+        ?.includes(alarmRollbackTpreCredential16.name)
+      && !alarmRollbackTpreSettled16.retryAlarms.some(alarm =>
+        alarm.name === alarmRollbackTpreCredential16.name)
+      && alarmRollbackTpreSettled16.outboundPublishes.length === 1
+      && alarmRollbackTpreSettled16.outboundPublishes[0]?.enabled === false,
+    '16M-3F-0A-3B: registered future-clock Tpre 后到真实低墙钟 F；fresh sync=false 时 exact tombstone Tpre，F 收口后不复活/不采纳旧 ON');
+
+  // 对照：F 后 sync store 已是 T1 时，settle 的 fresh preflight 必须把它
+  // 重建为 post-F successor；随后真实 tryAdopt 读取同一 T1 能唯一应用。
+  const postFCurrentTRemote16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 + 2_900,
+    onMinutes: 24,
+    offMinutes: 36,
+    pwmState: 'off',
+    nextTriggerAt: durableManualOffNow16 + 23 * 60_000
+  };
+  const postFAlarmRemote16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 2_800,
+    onMinutes: 14,
+    offMinutes: 46
+  };
+  const postFAlarmHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      syncRemote: postFCurrentTRemote16
+    });
+  const postFAlarmCredential16 =
+    postFAlarmHarness16.roundTripDisableRetryCredential(
+      postFAlarmRemote16,
+      durableManualOffNow16 - 35
+    );
+  postFAlarmHarness16.injectRetryAlarm({
+    name: postFAlarmCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  });
+  await postFAlarmHarness16.deliverDisableRetryAlarm({
+    name: postFAlarmCredential16.name
+  });
+  await postFAlarmHarness16.waitForRetryOperationsToSettle();
+  const postFAlarmSettled16 = postFAlarmHarness16.state();
+  const postFFreshApplied16 = [];
+  const postFFreshAdoptHarness16 = loadTryAdoptSyncedStateF90({
+    chrome: {
+      storage: {
+        sync: {
+          async get(key) {
+            return { [key]: structuredClone(postFCurrentTRemote16) };
+          }
+        }
+      }
+    },
+    applySyncedPhase: async remote => {
+      postFFreshApplied16.push(structuredClone(remote));
+      return true;
+    }
+  });
+  const postFFreshAdopted16 = await postFFreshAdoptHarness16(
+    'post-F-current-T-fresh-adopt'
+  );
+  assertPass(postFAlarmSettled16.deferredSyncDisablePending === false
+      && postFAlarmSettled16.storedSchedule?.enabled === false
+      && postFAlarmSettled16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === postFCurrentTRemote16.syncedAt
+      && postFAlarmSettled16.storedDeferredSyncDisable
+        ?.successor?.remote?.syncedAt === postFCurrentTRemote16.syncedAt
+      && postFFreshAdopted16 === true
+      && postFFreshApplied16.length === 1
+      && postFFreshApplied16[0]?.syncedAt
+        === postFCurrentTRemote16.syncedAt,
+    '16M-3F-0A-3C: exact F 后 fresh sync=true 重建合法 post-F T1 mailbox；F safety false 先收口，随后真实 adoption 唯一应用 T1');
+
+  // 旧三段/无 payload F alarm 只能证明存在未收口 safety authority，不能
+  // 证明远端 Lamport 水位。即使 low-level settle 被直接调用，也必须保持
+  // pending/block，零 outbound，等待 fresh sync F 重建完整 receipt。
+  const legacyAlarmOnlyReceivedAt16 = durableManualOffNow16 - 90;
+  const legacyAlarmOnlyName16 =
+    `ac-deferred-sync-disable-retry-test:${legacyAlarmOnlyReceivedAt16}:legacy-F:`;
+  const legacyAlarmOnlyHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      retryAlarms: [{
+        name: legacyAlarmOnlyName16,
+        scheduledTime: legacyAlarmOnlyReceivedAt16 + 60_000,
+        periodInMinutes: 1
+      }]
+    });
+  await legacyAlarmOnlyHarness16.restore();
+  const legacyAlarmOnlyRestored16 = legacyAlarmOnlyHarness16.state();
+  const legacyAlarmOnlySettleResult16 =
+    await legacyAlarmOnlyHarness16.settleDeferredForCurrentUser(
+      'legacy-F-credential-must-fail-closed'
+    );
+  const legacyAlarmOnlyAfterSettle16 = legacyAlarmOnlyHarness16.state();
+  assertPass(legacyAlarmOnlyRestored16.deferredSyncDisablePending === true
+      && legacyAlarmOnlyRestored16
+        .deferredSyncDisableRemoteSnapshot?.enabled === false
+      && legacyAlarmOnlyRestored16
+        .deferredSyncDisableRemoteSnapshot?.syncedAt === 0
+      && legacyAlarmOnlyRestored16
+        .deferredSyncDisableRemoteSnapshotComplete === false
+      && legacyAlarmOnlyRestored16
+        .deferredSyncDisableDurableReceiptEpoch === 0
+      && legacyAlarmOnlySettleResult16?.success === false
+      && legacyAlarmOnlySettleResult16?.remoteSafetyReadPending === true
+      && legacyAlarmOnlySettleResult16?.deferredRetryPending === true
+      && legacyAlarmOnlyAfterSettle16.deferredSyncDisablePending === true
+      && legacyAlarmOnlyAfterSettle16
+        .deferredSyncDisableRemoteSnapshotComplete === false
+      && legacyAlarmOnlyAfterSettle16
+        .deferredSyncDisableDurableReceiptEpoch === 0
+      && legacyAlarmOnlyAfterSettle16.outboundPublishes.length === 0
+      && legacyAlarmOnlyAfterSettle16.retryAlarms.some(alarm =>
+        alarm.name === legacyAlarmOnlyName16),
+    '16M-3F-0A-4: legacy F alarm-only 无 payload 时 snapshot incomplete；deferred pending 自身维持自动门禁，low-level settle 零 publish且保留 durable retry');
+
+  // record-only F 已经有完整 remote payload，但 startup 首次 local.get 可能
+  // 暂时失败并降级成 synthetic block。后续 retry 的 critical fresh read 必须
+  // 重新吸收 durable record，补 Lamport watermark，再完成 safety false。
+  const recordOnlyFObservedAt16 = durableManualOffNow16 - 80;
+  const recordOnlyFRemote16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 12 * 24 * 60 * 60_000,
+    onMinutes: 13,
+    offMinutes: 47
+  };
+  const recordOnlyFRecord16 = {
+    pending: true,
+    receivedAt: recordOnlyFObservedAt16,
+    safetyCutoffObservedAt: recordOnlyFObservedAt16,
+    successorPredecessorCoverageComplete: true,
+    successorPredecessorCoverageThroughObservedAt:
+      recordOnlyFObservedAt16,
+    remote: structuredClone(recordOnlyFRemote16),
+    releasedRetryAlarmNames: [],
+    releasedSuccessorRetryAlarmNames: [],
+    releasedSuccessorThroughObservedAt: recordOnlyFObservedAt16
+  };
+  const recordOnlyFRecoveryHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      deferredSyncDisable: recordOnlyFRecord16,
+      storageGetFailures: 1
+    });
+  await recordOnlyFRecoveryHarness16.restore();
+  const recordOnlyFSynthetic16 = recordOnlyFRecoveryHarness16.state();
+  const recordOnlyFClassifyResult16 =
+    await recordOnlyFRecoveryHarness16.settleDeferredForCurrentUser(
+      'record-only-F-after-startup-read-recovery'
+    );
+  await recordOnlyFRecoveryHarness16.waitForRetryOperationsToSettle();
+  const recordOnlyFRecoveryResult16 =
+    recordOnlyFClassifyResult16?.remoteDisabled === true
+      ? recordOnlyFClassifyResult16
+      : await recordOnlyFRecoveryHarness16.settleDeferredForCurrentUser(
+          'record-only-F-after-startup-read-recovery-retry'
+        );
+  const recordOnlyFRecovered16 = recordOnlyFRecoveryHarness16.state();
+  assertPass(recordOnlyFSynthetic16.deferredSyncDisablePending === true
+      && recordOnlyFSynthetic16
+        .deferredSyncDisableSyntheticReadFailure === true
+      && recordOnlyFSynthetic16
+        .deferredSyncDisableRemoteSnapshot?.syncedAt === 0
+      && (recordOnlyFClassifyResult16?.remoteDisabled === true
+        || (recordOnlyFClassifyResult16?.success === false
+          && recordOnlyFClassifyResult16?.remoteSafetyReadPending === true))
+      && recordOnlyFRecoveryResult16?.remoteDisabled === true
+      && recordOnlyFRecovered16
+        .deferredSyncDisableSyntheticReadFailure === false
+      && recordOnlyFRecovered16.deferredSyncDisablePending === false
+      && recordOnlyFRecovered16.outboundPublishes.length === 1
+      && recordOnlyFRecovered16.outboundPublishes[0]?.enabled === false
+      && recordOnlyFRecovered16.outboundPublishes[0]?.syncedAt
+        > recordOnlyFRemote16.syncedAt
+      && recordOnlyFRecovered16.storedSyncWatermark
+        === recordOnlyFRecovered16.outboundPublishes[0]?.syncedAt,
+    '16M-3F-0A-5: record-only F 的 startup 首读 reject 先建 synthetic block；I/O 恢复后同调用或有界 retry fresh-read exact F、补水位并安全收口');
+
+  // terminal tombstone 已覆盖的 F 物理 alarm 即使 clear 失败也只是残钟。
+  // startup 首读失败会短暂 synthetic-block；fresh local receipt 必须撤销它，
+  // 不能反杀后到本机 enabled=true，更不能安排 shutdown/outbound false。
+  const terminalResidualFObservedAt16 = durableManualOffNow16 - 70;
+  const terminalResidualFRemote16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 700
+  };
+  const terminalResidualFCredential16 =
+    loadDurableManualOffAdmissionHarness16()
+      .roundTripDisableRetryCredential(
+        terminalResidualFRemote16,
+        terminalResidualFObservedAt16
+      );
+  const terminalResidualFRecord16 = {
+    pending: false,
+    safetyCleared: true,
+    safetyCutoffObservedAt: terminalResidualFObservedAt16,
+    localMutationCutoffObservedAt: terminalResidualFObservedAt16 + 1,
+    releasedRetryAlarmNames: [terminalResidualFCredential16.name],
+    releasedSuccessorRetryAlarmNames: [],
+    releasedSuccessorThroughObservedAt: terminalResidualFObservedAt16
+  };
+  const terminalResidualFRecoveryHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      enabled: true,
+      deferredSyncDisable: terminalResidualFRecord16,
+      retryAlarms: [{
+        name: terminalResidualFCredential16.name,
+        scheduledTime: terminalResidualFObservedAt16 + 60_000,
+        periodInMinutes: 1
+      }],
+      storageGetFailures: 1,
+      retryClearFailures: 1
+    });
+  await terminalResidualFRecoveryHarness16.restore();
+  const terminalResidualFSynthetic16 =
+    terminalResidualFRecoveryHarness16.state();
+  const terminalResidualFRecoveryResult16 =
+    await terminalResidualFRecoveryHarness16.settleDeferredForCurrentUser(
+      'terminal-residual-F-after-startup-read-recovery'
+    );
+  await terminalResidualFRecoveryHarness16.waitForRetryOperationsToSettle();
+  const terminalResidualFRecovered16 =
+    terminalResidualFRecoveryHarness16.state();
+  assertPass(terminalResidualFSynthetic16.deferredSyncDisablePending === true
+      && terminalResidualFSynthetic16
+        .deferredSyncDisableSyntheticReadFailure === true
+      && terminalResidualFRecoveryResult16?.success === false
+      && terminalResidualFRecoveryResult16?.safetyCredentialReleased === true
+      && terminalResidualFRecovered16.deferredSyncDisablePending === false
+      && terminalResidualFRecovered16.liveSchedule?.enabled === true
+      && terminalResidualFRecovered16.storedSchedule === null
+      && terminalResidualFRecovered16.outboundPublishes.length === 0
+      && !terminalResidualFRecovered16.lifecycleCalls.some(value =>
+        value.startsWith('shutdown:')),
+    '16M-3F-0A-6: terminal F tombstone + physical残钟 + startup首读 reject 的 fresh repair 只撤 synthetic block；保留后到 enabled=true，零 shutdown/零 outbound');
+
+  // terminal user authority 只能消费它实际看见的 exact F alarm name。
+  // receivedAt/syncedAt 都可能回拨，且新 F 可以重放完全相同 payload；若按
+  // 数值 cutoff 或 payload identity 去重，新安全 OFF 会被误当旧残钟。
+  const terminalExactFRemote16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 880,
+    onMinutes: 17,
+    offMinutes: 43
+  };
+  const terminalExactFHarness16 =
+    loadDurableManualOffAdmissionHarness16({ syncGetFailures: 1 });
+  const terminalConsumedFCredential16 =
+    terminalExactFHarness16.roundTripDisableRetryCredential(
+      terminalExactFRemote16,
+      durableManualOffNow16 + 365 * 24 * 60 * 60_000
+    );
+  const terminalReplayFCredential16 =
+    terminalExactFHarness16.roundTripDisableRetryCredential(
+      terminalExactFRemote16,
+      durableManualOffNow16 - 500
+    );
+  terminalExactFHarness16.setCompletedLocalTerminalAuthority(
+    'on',
+    durableManualOffNow16,
+    {
+      consumedRemoteDisableRetryAlarmNames: [
+        terminalConsumedFCredential16.name
+      ]
+    }
+  );
+  terminalExactFHarness16.injectRetryAlarm({
+    name: terminalConsumedFCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  });
+  await terminalExactFHarness16.deliverDisableRetryAlarm({
+    name: terminalConsumedFCredential16.name
+  });
+  await terminalExactFHarness16.waitForRetryOperationsToSettle();
+  const terminalConsumedFState16 = terminalExactFHarness16.state();
+  terminalExactFHarness16.injectRetryAlarm({
+    name: terminalReplayFCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  });
+  await terminalExactFHarness16.deliverDisableRetryAlarm({
+    name: terminalReplayFCredential16.name
+  });
+  await terminalExactFHarness16.waitForRetryOperationsToSettle();
+  const terminalReplayFState16 = terminalExactFHarness16.state();
+  assertPass(terminalConsumedFState16.deferredSyncDisablePending === false
+      && !terminalConsumedFState16.retryAlarms.some(alarm =>
+        alarm.name === terminalConsumedFCredential16.name)
+      && terminalReplayFCredential16.name
+        !== terminalConsumedFCredential16.name
+      && terminalReplayFState16.deferredSyncDisablePending === true
+      && terminalReplayFState16
+        .deferredSyncDisableRemoteSnapshot?.syncedAt
+          === terminalExactFRemote16.syncedAt
+      && terminalReplayFState16.deferredSyncDisableObservedAt
+        === terminalReplayFCredential16.receivedAt
+      && terminalReplayFState16.retryAlarms.some(alarm =>
+        alarm.name === terminalReplayFCredential16.name)
+      && terminalReplayFState16.outboundPublishes.length === 0,
+    '16M-3F-0A-6A: completed local M 只 exact tombstone 已消费 F name；同 payload/回拨时钟的新 F credential 仍恢复 safety pending，不能被 payload 或 numeric cutoff 吞掉');
+
+  // fresh repair 不能只按 exact alarm 名过滤 durable successor；numeric
+  // release/local-mutation cutoff 同样是 terminal proof。observedAt=150 的 T
+  // 在 cutoff=200 以下，startup synthetic 恢复后不得回到 mailbox/adopt。
+  const staleRepairSuccessorRemote16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 + 800,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 30 * 60_000
+  };
+  const staleRepairSuccessorRecord16 = {
+    pending: false,
+    safetyCleared: true,
+    safetyCutoffObservedAt: 100,
+    localMutationCutoffObservedAt: 200,
+    successor: {
+      observedAt: 150,
+      remote: structuredClone(staleRepairSuccessorRemote16)
+    },
+    releasedRetryAlarmNames: [],
+    releasedSuccessorRetryAlarmNames: [],
+    releasedSuccessorThroughObservedAt: 200
+  };
+  const staleRepairSuccessorHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      enabled: true,
+      deferredSyncDisable: staleRepairSuccessorRecord16,
+      storageGetFailures: 1
+    });
+  await staleRepairSuccessorHarness16.restore();
+  const staleRepairSuccessorSynthetic16 =
+    staleRepairSuccessorHarness16.state();
+  const staleRepairSuccessorResult16 =
+    await staleRepairSuccessorHarness16.settleDeferredForCurrentUser(
+      'stale-successor-below-fresh-terminal-cutoff'
+    );
+  const staleRepairSuccessorRecovered16 =
+    staleRepairSuccessorHarness16.state();
+  assertPass(staleRepairSuccessorSynthetic16.deferredSyncDisablePending === true
+      && staleRepairSuccessorSynthetic16
+        .deferredSyncDisableSyntheticReadFailure === true
+      && staleRepairSuccessorResult16?.safetyCredentialReleased === true
+      && staleRepairSuccessorRecovered16.deferredSyncDisablePending === false
+      && staleRepairSuccessorRecovered16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && staleRepairSuccessorRecovered16
+        .deferredSyncSuccessorRetryAlarmEntries.length === 0
+      && staleRepairSuccessorRecovered16.outboundPublishes.length === 0,
+    '16M-3F-0A-7: startup synthetic 后 fresh terminal record 的 numeric cutoff 淘汰旧 durable T；observedAt 150 < cutoff 200 时零 restore/零 adopt');
+
+  // 本机墙钟可回拨：旧 F1 alarm 的 raw receivedAt 在未来，不代表它晚于
+  // 后到 F2。immutable raw 保持不变，selector 只按独立 logical tuple 选
+  // F2；remote syncedAt 仅用于 outbound watermark，不能反向替代 arrival order。
+  const rollbackF1ReceivedAt16 = durableManualOffNow16 + 40 * 24 * 60 * 60_000;
+  const rollbackF2ReceivedAt16 = durableManualOffNow16 - 60;
+  const rollbackF1AuthorityOrder16 = durableManualOffNow16 + 3_000;
+  const rollbackF2AuthorityOrder16 = rollbackF1AuthorityOrder16 + 1;
+  const rollbackF1Remote16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 900,
+    onMinutes: 16,
+    offMinutes: 44
+  };
+  const rollbackF2Remote16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 1_900,
+    onMinutes: 23,
+    offMinutes: 37
+  };
+  const rollbackCredentialHarness16 =
+    loadDurableManualOffAdmissionHarness16();
+  const rollbackF1Credential16 =
+    rollbackCredentialHarness16.roundTripDisableRetryCredential(
+      rollbackF1Remote16,
+      rollbackF1ReceivedAt16,
+      'f-test-clock-rollback-F1',
+      rollbackF1AuthorityOrder16
+    );
+  const rollbackF2Credential16 =
+    rollbackCredentialHarness16.roundTripDisableRetryCredential(
+      rollbackF2Remote16,
+      rollbackF2ReceivedAt16,
+      'f-test-clock-rollback-F2',
+      rollbackF2AuthorityOrder16
+    );
+  const rollbackFRecoveryHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      deferredSyncDisable: {
+        pending: true,
+        safetyAuthorityId: 'f-test-clock-rollback-F1',
+        receivedAt: rollbackF1ReceivedAt16,
+        authorityOrderObservedAt: rollbackF1AuthorityOrder16,
+        safetyCutoffObservedAt: rollbackF1ReceivedAt16,
+        successorPredecessorCoverageComplete: true,
+        successorPredecessorCoverageThroughObservedAt:
+          rollbackF1AuthorityOrder16,
+        remote: structuredClone(rollbackF1Remote16),
+        retryAlarmName: rollbackF1Credential16.name,
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: rollbackF1AuthorityOrder16
+      },
+      retryAlarms: [rollbackF1Credential16, rollbackF2Credential16].map(
+        credential => ({
+          name: credential.name,
+          scheduledTime: durableManualOffNow16 + 60_000,
+          periodInMinutes: 1
+        })
+      )
+    });
+  await rollbackFRecoveryHarness16.restore();
+  const clockRollbackFRestored16 = rollbackFRecoveryHarness16.state();
+  const clockRollbackFSettleResult16 =
+    await rollbackFRecoveryHarness16.settleDeferredForCurrentUser(
+      'rollback-F-max-lamport'
+    );
+  const clockRollbackFSettled16 = rollbackFRecoveryHarness16.state();
+  assertPass(clockRollbackFRestored16.deferredSyncDisablePending === true
+      && clockRollbackFRestored16.deferredSyncDisableObservedAt
+        === rollbackF2ReceivedAt16
+      && clockRollbackFRestored16
+        .deferredSyncDisableAuthorityOrderObservedAt
+          === rollbackF2AuthorityOrder16
+      && clockRollbackFRestored16
+        .deferredSyncDisableRemoteSnapshot?.syncedAt
+          === rollbackF2Remote16.syncedAt
+      && clockRollbackFRestored16
+        .deferredSyncDisableRemoteSnapshot?.onMinutes
+          === rollbackF2Remote16.onMinutes
+      && clockRollbackFSettleResult16?.remoteDisabled === true
+      && clockRollbackFSettled16.outboundPublishes.length === 1
+      && clockRollbackFSettled16.outboundPublishes[0]?.syncedAt
+        > rollbackF2Remote16.syncedAt,
+    '16M-3F-0A-8: future raw-clock F1 不压过 logical-later F2；restore 保持两份 immutable raw 并按 authority tuple 选 F2，outbound 水位再严格新于 F2 syncedAt');
+
+  // explicit enable / disable 都在本机 authority commit 前 fresh-read sync。
+  // 即使 remote T 使用未来 Lamport，随后本机 outbound 仍须严格更新；两条
+  // authority 不能用 Date.now() 直接生成比 T 更旧的 payload。
+  const explicitFutureTRemote16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 + 20 * 24 * 60 * 60_000,
+    onMinutes: 21,
+    offMinutes: 39
+  };
+  const runExplicitFutureAuthority16 = async action => {
+    const nextEnabled = action === 'on';
+    const harness = loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      enabled: !nextEnabled,
+      syncRemote: explicitFutureTRemote16
+    });
+    await harness.restore();
+    const intentEpoch = harness.claim(action);
+    harness.setScheduleEnabled(nextEnabled);
+    const preflight = await harness.refreshRemoteSafety(
+      () => true,
+      `explicit-${action}-future-T`
+    );
+    const committed = await harness.commitAuthority({
+      ensureCurrent: () => true,
+      markSyncPublishPending: true,
+      clearDeferredSyncDisable: true,
+      reason: `explicit-${action}-future-T`
+    });
+    const released = await harness.releaseForAuthority(
+      intentEpoch,
+      action
+    );
+    const published = await harness.publishSchedule(
+      `explicit-${action}-future-T`
+    );
+    return { preflight, committed, released, published, state: harness.state() };
+  };
+  const explicitFutureEnable16 = await runExplicitFutureAuthority16('on');
+  const explicitFutureDisable16 = await runExplicitFutureAuthority16('disable');
+  assertPass(explicitFutureEnable16.preflight === true
+      && explicitFutureEnable16.committed === true
+      && explicitFutureEnable16.released === true
+      && explicitFutureEnable16.published === true
+      && explicitFutureEnable16.state.outboundPublishes.length === 1
+      && explicitFutureEnable16.state.outboundPublishes[0]?.enabled === true
+      && explicitFutureEnable16.state.outboundPublishes[0]?.syncedAt
+        > explicitFutureTRemote16.syncedAt
+      && explicitFutureDisable16.preflight === true
+      && explicitFutureDisable16.committed === true
+      && explicitFutureDisable16.released === true
+      && explicitFutureDisable16.published === true
+      && explicitFutureDisable16.state.outboundPublishes.length === 1
+      && explicitFutureDisable16.state.outboundPublishes[0]?.enabled === false
+      && explicitFutureDisable16.state.outboundPublishes[0]?.syncedAt
+        > explicitFutureTRemote16.syncedAt
+      && updateScheduleBody.includes(
+        'refreshRemoteDisableBeforeLocalRelease('),
+    '16M-3F-0A-9: early explicit enable/disable fresh-read future T 后，authority commit/publish 的 Lamport 都严格高于 T');
+
+  // T 的 local mailbox 两次写失败时，exact retry alarm 可能是唯一 durable
+  // 副本。restart 首读失败会临时进入 synthetic F，但 fresh terminal record
+  // 证明没有未收口 F 后，不能把这张 alarm 误列为 synthetic predecessor；
+  // 必须重新 hydrate T mailbox，供后续 adoption。
+  const alarmOnlySuccessorRemote16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 + 2_100,
+    onMinutes: 28,
+    offMinutes: 32,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 27 * 60_000
+  };
+  const alarmOnlySuccessorWriter16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSuccessorSetFailures: 2
+    });
+  const alarmOnlySuccessorPersisted16 =
+    await alarmOnlySuccessorWriter16.rememberSuccessor(
+      alarmOnlySuccessorRemote16,
+      'alarm-only-T-before-startup-read-failure'
+    );
+  await alarmOnlySuccessorWriter16.waitForRetryOperationsToSettle();
+  const alarmOnlySuccessorBeforeCrash16 =
+    alarmOnlySuccessorWriter16.state();
+  const alarmOnlySuccessorRetryAlarm16 =
+    alarmOnlySuccessorBeforeCrash16.retryAlarms.find(alarm =>
+      alarm.name.startsWith('ac-deferred-sync-successor-retry-test:'));
+  const alarmOnlySuccessorRestart16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      enabled: true,
+      syncRemote: alarmOnlySuccessorRemote16,
+      deferredSyncDisable: {
+        pending: false,
+        safetyCleared: true,
+        safetyCutoffObservedAt: 0,
+        localMutationCutoffObservedAt: 0,
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: 0
+      },
+      retryAlarms: alarmOnlySuccessorRetryAlarm16
+        ? [alarmOnlySuccessorRetryAlarm16]
+        : [],
+      storageGetFailures: 1
+    });
+  await alarmOnlySuccessorRestart16.restore();
+  const alarmOnlySuccessorSynthetic16 = alarmOnlySuccessorRestart16.state();
+  let alarmOnlySuccessorRecoveryResult16 =
+    await alarmOnlySuccessorRestart16.settleDeferredForCurrentUser(
+      'alarm-only-T-after-fresh-terminal-classification'
+    );
+  await alarmOnlySuccessorRestart16.waitForRetryOperationsToSettle();
+  if (alarmOnlySuccessorRecoveryResult16?.remoteDisabled !== true
+      && alarmOnlySuccessorRestart16.state().deferredSyncDisablePending) {
+    alarmOnlySuccessorRecoveryResult16 =
+      await alarmOnlySuccessorRestart16.settleDeferredForCurrentUser(
+        'alarm-only-T-after-fresh-terminal-classification-retry'
+      );
+    await alarmOnlySuccessorRestart16.waitForRetryOperationsToSettle();
+  }
+  await drainTypedScheduleReadWakes16(alarmOnlySuccessorRestart16);
+  const alarmOnlySuccessorRecovered16 = alarmOnlySuccessorRestart16.state();
+  assertPass(alarmOnlySuccessorPersisted16 === false
+      && !!alarmOnlySuccessorRetryAlarm16
+      && alarmOnlySuccessorBeforeCrash16.storedDeferredSyncDisable === null
+      && alarmOnlySuccessorSynthetic16.deferredSyncDisablePending === true
+      && alarmOnlySuccessorSynthetic16
+        .deferredSyncDisableSyntheticReadFailure === true
+      && alarmOnlySuccessorRecoveryResult16?.remoteDisabled === true
+      && alarmOnlySuccessorRecovered16.deferredSyncDisablePending === false
+      && alarmOnlySuccessorRecovered16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === alarmOnlySuccessorRemote16.syncedAt
+      && alarmOnlySuccessorRecovered16
+        .deferredSyncSuccessorRetryAlarmEntries.some(([name, entry]) =>
+          name !== alarmOnlySuccessorRetryAlarm16.name
+          && entry?.remote?.syncedAt === alarmOnlySuccessorRemote16.syncedAt)
+      && alarmOnlySuccessorRecovered16
+        .deferredSyncSuccessorReleasedRetryAlarmNames.includes(
+          alarmOnlySuccessorRetryAlarm16.name
+        )
+      && !alarmOnlySuccessorRecovered16.retryAlarms.some(alarm =>
+        alarm.name === alarmOnlySuccessorRetryAlarm16.name)
+      && alarmOnlySuccessorRecovered16.retryAlarms.some(alarm =>
+        alarmOnlySuccessorRecovered16.deferredSyncSuccessorRetryAlarmEntries
+          .some(([name]) => name === alarm.name))
+      && alarmOnlySuccessorRecovered16.outboundPublishes.length === 1
+      && alarmOnlySuccessorRecovered16.outboundPublishes[0]?.enabled === false,
+    '16M-3F-0A-10: T mailbox 双写失败仅余 legacy exact alarm；startup synthetic 后 stable sync=true 先收口 safety F，再以当前 F lineage 重签 T credential，旧 alarm exact tombstone');
+
+  // record-only T 没有 alarm 可重新分类。startup 首读失败后，initReady 前
+  // ordinary update 已同步 claim M1；fresh repair 即使暂时 hydrate 旧 T，M1
+  // 首次 durable commit 也必须把它作为 predecessor terminal-discard，finish
+  // 后不能由 drain 反向采纳 T 覆盖新配置。
+  const earlyMutationOldSuccessor16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 + 2_200,
+    onMinutes: 31,
+    offMinutes: 29,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 24 * 60_000
+  };
+  const earlyMutationOldSuccessorObservedAt16 = durableManualOffNow16 - 100;
+  const earlyMutationOldSuccessorHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: standaloneReleasedMarker16,
+      enabled: true,
+      deferredSyncDisable: {
+        pending: false,
+        safetyCleared: true,
+        safetyCutoffObservedAt: 0,
+        localMutationCutoffObservedAt: 0,
+        successor: {
+          observedAt: earlyMutationOldSuccessorObservedAt16,
+          remote: structuredClone(earlyMutationOldSuccessor16)
+        },
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: 0
+      },
+      storageGetFailures: 1
+    });
+  await earlyMutationOldSuccessorHarness16.restore();
+  const earlyMutationOldSynthetic16 =
+    earlyMutationOldSuccessorHarness16.state();
+  const earlyMutationClaim16 =
+    earlyMutationOldSuccessorHarness16.beginLocalMutation({
+      onMinutes: 19,
+      offMinutes: 41
+    });
+  const earlyMutationFreshRepair16 =
+    await earlyMutationOldSuccessorHarness16.settleDeferredForCurrentUser(
+      'early-M1-record-only-T-fresh-repair'
+    );
+  const earlyMutationAfterRepair16 =
+    earlyMutationOldSuccessorHarness16.state();
+  const earlyMutationCommitted16 =
+    await earlyMutationOldSuccessorHarness16.commitLocalMutation(
+      earlyMutationClaim16.generation,
+      'early-M1-terminal-old-record-only-T'
+    );
+  const earlyMutationFinished16 =
+    earlyMutationOldSuccessorHarness16.finishLocalMutation(
+      earlyMutationClaim16.generation
+    );
+  const earlyMutationFinal16 = earlyMutationOldSuccessorHarness16.state();
+  assertPass(earlyMutationOldSynthetic16.deferredSyncDisablePending === true
+      && earlyMutationOldSynthetic16
+        .deferredSyncDisableSyntheticReadFailure === true
+      && earlyMutationFreshRepair16?.safetyCredentialReleased === true
+      && earlyMutationAfterRepair16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && earlyMutationCommitted16 === true
+      && earlyMutationFinished16 === undefined
+      && earlyMutationFinal16.localScheduleMutationCommitPendingGeneration
+        === 0
+      && earlyMutationFinal16.liveSchedule?.onMinutes === 19
+      && earlyMutationFinal16.liveSchedule?.offMinutes === 41
+      && earlyMutationFinal16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && !earlyMutationFinal16.storedDeferredSyncDisable?.successor
+      && earlyMutationFinal16.outboundPublishes.length === 0,
+    '16M-3F-0A-11: record-only old T + startup首读失败 + initReady前 M1；fresh repair 不把 predecessor hydrate 为 current，M1 durable terminal 后仍零反向采纳');
+
+  // preflight 本身读失败不是“没有 remote disable”。保持 marker/admission
+  // fail-closed 并只排 adopt retry；不得 release 或 publish 旧 enabled=true。
+  const recoveryPreflightRejectHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: durableRestartMarker16,
+      syncGetFailures: 1
+    });
+  await recoveryPreflightRejectHarness16.restore();
+  const recoveryPreflightRejectResult16 =
+    await recoveryPreflightRejectHarness16.resumePending(
+      'startup-pending-off-sync-preflight-reject'
+    );
+  const recoveryPreflightRejectState16 =
+    recoveryPreflightRejectHarness16.state();
+  assertPass(recoveryPreflightRejectResult16?.success === false
+      && recoveryPreflightRejectResult16?.remoteSafetyReadPending === true
+      && recoveryPreflightRejectState16.syncGetCalls === 1
+      && recoveryPreflightRejectState16.manualOffAutomaticOnBlocked === true
+      && recoveryPreflightRejectState16.manualOffAdmissionToken
+        === durableRestartMarker16.token
+      && recoveryPreflightRejectState16.storedMarker?.token
+        === durableRestartMarker16.token
+      && recoveryPreflightRejectState16.storedSchedule === null
+      && recoveryPreflightRejectState16.outboundPublishes.length === 0
+      && recoveryPreflightRejectState16.lifecycleCalls.includes(
+        'sync-retry:adopt'
+      )
+      && !recoveryPreflightRejectState16.lifecycleCalls.some(value =>
+        value.startsWith('local-set-schedule:')
+        || value.startsWith('publish:'))
+      && recoveryPreflightRejectState16.phaseOwner === 0,
+    '16M-3F-0B: pending manual-OFF recovery sync.get reject 时保持 durable marker/automatic block，零 release/零 outbound，仅排 adopt retry');
+
+  const recoveryWatermarkLoadRejectHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: durableRestartMarker16,
+      syncRemote: recoveryPreflightRemoteF16,
+      syncWatermarkGetFailures: 2
+    });
+  await recoveryWatermarkLoadRejectHarness16.restore();
+  const recoveryWatermarkLoadRejectResult16 =
+    await recoveryWatermarkLoadRejectHarness16.resumePending(
+      'startup-preflight-watermark-load-reject'
+    );
+  const recoveryWatermarkLoadRejectState16 =
+    recoveryWatermarkLoadRejectHarness16.state();
+  const recoveryWatermarkPersistRejectHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: durableRestartMarker16,
+      syncRemote: recoveryPreflightRemoteF16,
+      syncWatermarkSetFailures: 1
+    });
+  await recoveryWatermarkPersistRejectHarness16.restore();
+  const recoveryWatermarkPersistRejectResult16 =
+    await recoveryWatermarkPersistRejectHarness16.resumePending(
+      'startup-preflight-watermark-persist-reject'
+    );
+  const recoveryWatermarkPersistRejectState16 =
+    recoveryWatermarkPersistRejectHarness16.state();
+  assertPass(recoveryWatermarkLoadRejectResult16?.success === false
+      && recoveryWatermarkLoadRejectResult16?.remoteSafetyReadPending === true
+      && recoveryWatermarkLoadRejectState16.deferredSyncDisablePending === true
+      && recoveryWatermarkLoadRejectState16.manualOffAutomaticOnBlocked
+        === true
+      && recoveryWatermarkLoadRejectState16.storedSyncWatermark === 0
+      && recoveryWatermarkLoadRejectState16.outboundPublishes.length === 0
+      && recoveryWatermarkLoadRejectState16.lifecycleCalls.includes(
+        'sync-retry:adopt'
+      )
+      && recoveryWatermarkPersistRejectResult16?.success === false
+      && recoveryWatermarkPersistRejectResult16?.remoteSafetyReadPending
+        === true
+      && recoveryWatermarkPersistRejectState16.deferredSyncDisablePending
+        === true
+      && recoveryWatermarkPersistRejectState16.manualOffAutomaticOnBlocked
+        === true
+      && recoveryWatermarkPersistRejectState16.lastSyncedAt
+        === recoveryPreflightRemoteF16.syncedAt
+      && recoveryWatermarkPersistRejectState16.storedSyncWatermark === 0
+      && recoveryWatermarkPersistRejectState16.outboundPublishes.length === 0
+      && recoveryWatermarkPersistRejectState16.lifecycleCalls.includes(
+        'sync-retry:adopt'
+      ),
+    '16M-3F-0B-1: preflight F watermark 两次 load reject 或 persist reject 均 fail-closed；F/marker 保持且零 release/零 outbound');
+
+  const completedReceiptCutoff16 = durableManualOffNow16 - 10_000;
+  const completedReceiptRemoteF16 = {
+    enabled: false,
+    onMinutes: 15,
+    offMinutes: 45,
+    syncedAt: durableManualOffNow16 - 5_000
+  };
+  const completedReceiptIdentity16 = value => JSON.stringify(
+    Object.fromEntries(
+      Object.keys(value).sort().map(key => [key, value[key]])
+    )
+  );
+  const completedReceiptF16 = Object.freeze({
+    schemaVersion: 1,
+    syncedAt: completedReceiptRemoteF16.syncedAt,
+    identity: completedReceiptIdentity16(completedReceiptRemoteF16),
+    coveredLocalMutationObservedAt: completedReceiptCutoff16
+  });
+  const completedReceiptRetryAlarm16 = Object.freeze({
+    name: 'ac-sync-publish-retry',
+    scheduledTime: durableManualOffNow16 + 60_000
+  });
+  const completedReceiptExactHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: false,
+      syncRemote: completedReceiptRemoteF16,
+      initialSyncWatermark: completedReceiptRemoteF16.syncedAt,
+      syncPayloadReceipt: completedReceiptF16,
+      localMutationCutoff: completedReceiptCutoff16,
+      retryAlarms: [completedReceiptRetryAlarm16]
+    });
+  await completedReceiptExactHarness16.restore();
+  const completedReceiptExactMutation16 =
+    completedReceiptExactHarness16.beginLocalMutation({ enabled: false });
+  const completedReceiptExactCommitted16 =
+    await completedReceiptExactHarness16.commitLocalMutation(
+      completedReceiptExactMutation16.generation,
+      'completed-receipt-newer-local-M'
+    );
+  const completedReceiptExactReady16 =
+    await completedReceiptExactHarness16.refreshRemoteSafety(
+      () => true,
+      'completed-receipt-exact-predecessor'
+    );
+  const completedReceiptExactState16 = completedReceiptExactHarness16.state();
+  assertPass(completedReceiptExactCommitted16 === true
+      && completedReceiptExactReady16 === true
+      && completedReceiptExactState16.storedLocalScheduleMutationCutoff
+        === completedReceiptExactMutation16.observedAt
+      && completedReceiptExactState16.syncPublishPending === true
+      && completedReceiptExactState16.retryAlarms.some(alarm =>
+        alarm.name === completedReceiptRetryAlarm16.name)
+      && completedReceiptExactState16.deferredSyncDisablePending === false
+      && completedReceiptExactState16.storedDeferredSyncDisable?.pending
+        !== true
+      && completedReceiptExactState16.outboundPublishes.length === 0,
+    '16M-3F-0B-1A: exact completed local F receipt + 严格更新 durable M + current pending marker 可跨 fixed retry 消费 predecessor，零误 defer/零 outbound');
+
+  const completedReceiptChangedRemoteF16 = {
+    ...completedReceiptRemoteF16,
+    offMinutes: 44
+  };
+  const completedReceiptChangedHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: false,
+      syncRemote: completedReceiptChangedRemoteF16,
+      initialSyncWatermark: completedReceiptRemoteF16.syncedAt,
+      syncPayloadReceipt: completedReceiptF16,
+      localMutationCutoff: completedReceiptCutoff16
+    });
+  await completedReceiptChangedHarness16.restore();
+  const completedReceiptChangedMutation16 =
+    completedReceiptChangedHarness16.beginLocalMutation({ enabled: false });
+  const completedReceiptChangedCommitted16 =
+    await completedReceiptChangedHarness16.commitLocalMutation(
+      completedReceiptChangedMutation16.generation,
+      'completed-receipt-different-payload-M'
+    );
+  const completedReceiptChangedReady16 =
+    await completedReceiptChangedHarness16.refreshRemoteSafety(
+      () => true,
+      'completed-receipt-different-payload'
+    );
+  const completedReceiptChangedState16 =
+    completedReceiptChangedHarness16.state();
+  assertPass(completedReceiptChangedCommitted16 === true
+      && completedReceiptChangedReady16 === true
+      && completedReceiptChangedState16.deferredSyncDisablePending === true
+      && completedReceiptChangedState16
+        .storedDeferredSyncDisable?.remote?.syncedAt
+          === completedReceiptChangedRemoteF16.syncedAt
+      && completedReceiptChangedState16
+        .storedDeferredSyncDisable?.remote?.offMinutes === 44
+      && completedReceiptChangedState16.outboundPublishes.length === 0,
+    '16M-3F-0B-1B: 相同 syncedAt 但任一 canonical payload 字段不同仍是新 F；watermark/旧 receipt 不得跳过 durable defer');
+
+  const completedReceiptEqualCutoffHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: false,
+      syncRemote: completedReceiptRemoteF16,
+      initialSyncWatermark: completedReceiptRemoteF16.syncedAt,
+      syncPayloadReceipt: completedReceiptF16,
+      localMutationCutoff: completedReceiptCutoff16
+    });
+  await completedReceiptEqualCutoffHarness16.restore();
+  const completedReceiptEqualCutoffReady16 =
+    await completedReceiptEqualCutoffHarness16.refreshRemoteSafety(
+      () => true,
+      'completed-receipt-equal-cutoff'
+    );
+  const completedReceiptEqualCutoffState16 =
+    completedReceiptEqualCutoffHarness16.state();
+  assertPass(completedReceiptEqualCutoffReady16 === true
+      && completedReceiptEqualCutoffState16
+        .localScheduleMutationCommittedObservedAt
+          === completedReceiptCutoff16
+      && completedReceiptEqualCutoffState16.deferredSyncDisablePending === true
+      && completedReceiptEqualCutoffState16
+        .storedDeferredSyncDisable?.remote?.syncedAt
+          === completedReceiptRemoteF16.syncedAt
+      && completedReceiptEqualCutoffState16.outboundPublishes.length === 0,
+    '16M-3F-0B-1C: exact receipt 只覆盖相等/更旧 M 时仍 durable defer F；必须严格 newer durable M 才能免除安全收口');
+
+  const malformedCompletedReceipt16 = {
+    schemaVersion: 1,
+    syncedAt: completedReceiptRemoteF16.syncedAt,
+    identity: completedReceiptIdentity16(completedReceiptRemoteF16)
+  };
+  const malformedCompletedReceiptHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: false,
+      syncRemote: completedReceiptRemoteF16,
+      initialSyncWatermark: completedReceiptRemoteF16.syncedAt,
+      syncPayloadReceipt: malformedCompletedReceipt16,
+      localMutationCutoff: completedReceiptCutoff16
+    });
+  await malformedCompletedReceiptHarness16.restore();
+  const malformedCompletedReceiptMutation16 =
+    malformedCompletedReceiptHarness16.beginLocalMutation({ enabled: false });
+  const malformedCompletedReceiptCommitted16 =
+    await malformedCompletedReceiptHarness16.commitLocalMutation(
+      malformedCompletedReceiptMutation16.generation,
+      'malformed-completed-receipt-M'
+    );
+  const malformedCompletedReceiptReady16 =
+    await malformedCompletedReceiptHarness16.refreshRemoteSafety(
+      () => true,
+      'malformed-completed-receipt'
+    );
+  const malformedCompletedReceiptState16 =
+    malformedCompletedReceiptHarness16.state();
+  assertPass(malformedCompletedReceiptCommitted16 === true
+      && malformedCompletedReceiptReady16 === true
+      && malformedCompletedReceiptState16.deferredSyncDisablePending === true
+      && malformedCompletedReceiptState16
+        .storedDeferredSyncDisable?.remote?.syncedAt
+          === completedReceiptRemoteF16.syncedAt
+      && malformedCompletedReceiptState16.outboundPublishes.length === 0,
+    '16M-3F-0B-1D: completed receipt 缺 coveredLocalMutationObservedAt 属损坏 credential；即使 exact payload + newer M 也必须 defer F');
+
+  const futureCompletedReceiptHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: false,
+      syncRemote: completedReceiptRemoteF16,
+      initialSyncWatermark: completedReceiptRemoteF16.syncedAt - 1,
+      syncPayloadReceipt: completedReceiptF16,
+      localMutationCutoff: completedReceiptCutoff16
+    });
+  await futureCompletedReceiptHarness16.restore();
+  const futureCompletedReceiptLoadedAt16 =
+    await futureCompletedReceiptHarness16.loadWatermark();
+  const futureCompletedReceiptScalarAdvanced16 =
+    await futureCompletedReceiptHarness16.persistObservedWatermark(
+      completedReceiptRemoteF16.syncedAt
+    );
+  const futureCompletedReceiptMutation16 =
+    futureCompletedReceiptHarness16.beginLocalMutation({ enabled: false });
+  const futureCompletedReceiptCommitted16 =
+    await futureCompletedReceiptHarness16.commitLocalMutation(
+      futureCompletedReceiptMutation16.generation,
+      'future-completed-receipt-M'
+    );
+  const futureCompletedReceiptReady16 =
+    await futureCompletedReceiptHarness16.refreshRemoteSafety(
+      () => true,
+      'future-completed-receipt'
+    );
+  const futureCompletedReceiptState16 =
+    futureCompletedReceiptHarness16.state();
+  const futureCompletedReceiptRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: false,
+      syncRemote: completedReceiptRemoteF16,
+      initialSyncWatermark:
+        futureCompletedReceiptState16.storedSyncWatermark,
+      syncPayloadReceipt:
+        futureCompletedReceiptState16.storedSyncPayloadReceipt,
+      localMutationCutoff: completedReceiptCutoff16
+    });
+  await futureCompletedReceiptRestartHarness16.restore();
+  const futureCompletedReceiptRestartMutation16 =
+    futureCompletedReceiptRestartHarness16.beginLocalMutation({
+      enabled: false
+    });
+  const futureCompletedReceiptRestartCommitted16 =
+    await futureCompletedReceiptRestartHarness16.commitLocalMutation(
+      futureCompletedReceiptRestartMutation16.generation,
+      'future-completed-receipt-restart-M'
+    );
+  const futureCompletedReceiptRestartReady16 =
+    await futureCompletedReceiptRestartHarness16.refreshRemoteSafety(
+      () => true,
+      'future-completed-receipt-restart'
+    );
+  const futureCompletedReceiptRestartState16 =
+    futureCompletedReceiptRestartHarness16.state();
+  assertPass(futureCompletedReceiptLoadedAt16
+        === completedReceiptRemoteF16.syncedAt - 1
+      && futureCompletedReceiptScalarAdvanced16 === true
+      && futureCompletedReceiptCommitted16 === true
+      && futureCompletedReceiptReady16 === true
+      && futureCompletedReceiptState16.storedSyncWatermark
+        === completedReceiptRemoteF16.syncedAt
+      && futureCompletedReceiptState16.storedSyncPayloadReceipt === null
+      && futureCompletedReceiptState16.deferredSyncDisablePending === true
+      && futureCompletedReceiptState16
+        .storedDeferredSyncDisable?.remote?.syncedAt
+          === completedReceiptRemoteF16.syncedAt
+      && futureCompletedReceiptState16.outboundPublishes.length === 0
+      && futureCompletedReceiptRestartCommitted16 === true
+      && futureCompletedReceiptRestartReady16 === true
+      && futureCompletedReceiptRestartState16.deferredSyncDisablePending
+        === true
+      && futureCompletedReceiptRestartState16
+        .storedDeferredSyncDisable?.remote?.syncedAt
+          === completedReceiptRemoteF16.syncedAt,
+    '16M-3F-0B-1E: receipt syncedAt 超前 durable scalar 时拒绝并由 scalar-only writer durable tombstone；追平后同 SW/重启都不能追认并跳过 F');
+
+  const completedReceiptRetryOnlyHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: false,
+      syncRemote: completedReceiptRemoteF16,
+      initialSyncWatermark: completedReceiptRemoteF16.syncedAt,
+      syncPayloadReceipt: completedReceiptF16,
+      localMutationCutoff: completedReceiptCutoff16 + 1,
+      syncPending: false,
+      retryAlarms: [completedReceiptRetryAlarm16]
+    });
+  await completedReceiptRetryOnlyHarness16.restore();
+  const completedReceiptRetryOnlyReady16 =
+    await completedReceiptRetryOnlyHarness16.refreshRemoteSafety(
+      () => true,
+      'completed-receipt-retry-only'
+    );
+  const completedReceiptRetryOnlyState16 =
+    completedReceiptRetryOnlyHarness16.state();
+  assertPass(completedReceiptRetryOnlyReady16 === true
+      && completedReceiptRetryOnlyState16.syncPublishPending === false
+      && completedReceiptRetryOnlyState16.retryAlarms.some(alarm =>
+        alarm.name === completedReceiptRetryAlarm16.name)
+      && completedReceiptRetryOnlyState16.deferredSyncDisablePending === true
+      && completedReceiptRetryOnlyState16
+        .storedDeferredSyncDisable?.remote?.syncedAt
+          === completedReceiptRemoteF16.syncedAt
+      && completedReceiptRetryOnlyState16.outboundPublishes.length === 0,
+    '16M-3F-0B-1F: exact receipt + newer M 但 marker=false、仅剩 fixed retry 时仍 defer F；旧 retry 不能冒充 current M ownership');
+
+  const outboundWaitExactHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: false,
+      localMutationCutoff: completedReceiptCutoff16
+    });
+  await outboundWaitExactHarness16.restore();
+  const outboundWaitStarted16 =
+    outboundWaitExactHarness16.beginTestOutboundWrite();
+  const outboundWaitMutation16 =
+    outboundWaitExactHarness16.beginLocalMutation({ enabled: false });
+  const outboundWaitMutationCommitted16 =
+    await outboundWaitExactHarness16.commitLocalMutation(
+      outboundWaitMutation16.generation,
+      'outbound-wait-newer-local-M'
+    );
+  const outboundWaitPreflight16 =
+    outboundWaitExactHarness16.refreshRemoteSafety(
+      () => true,
+      'outbound-wait-exact-predecessor',
+      {
+        waitForExistingOutbound: true,
+        outboundWaitTimeoutMs: 100
+      }
+    );
+  const outboundWaitBeforeRelease16 = outboundWaitExactHarness16.state();
+  const outboundWaitCompleted16 =
+    outboundWaitExactHarness16.completeTestOutboundWrite(
+      completedReceiptRemoteF16,
+      completedReceiptF16
+    );
+  const outboundWaitReady16 = await outboundWaitPreflight16;
+  const outboundWaitAfterRelease16 = outboundWaitExactHarness16.state();
+  assertPass(outboundWaitStarted16 === true
+      && outboundWaitMutationCommitted16 === true
+      && outboundWaitBeforeRelease16.syncWriteOperationsInFlight === 1
+      && outboundWaitBeforeRelease16.syncGetCalls === 0
+      && outboundWaitCompleted16 === true
+      && outboundWaitReady16 === true
+      && outboundWaitAfterRelease16.syncWriteOperationsInFlight === 0
+      && outboundWaitAfterRelease16.syncGetCalls === 1
+      && outboundWaitAfterRelease16.syncPublishPending === true
+      && outboundWaitAfterRelease16.deferredSyncDisablePending === false
+      && outboundWaitAfterRelease16.outboundPublishes.length === 0,
+    '16M-3F-0B-1G: W1 sync writer 在途时 M2 先 durable false/cutoff/pending；明确 ON opt-in 等 W1 exact receipt 后同一次 preflight 成功，零误 F');
+
+  const outboundWaitInboundHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: false,
+      localMutationCutoff: completedReceiptCutoff16
+    });
+  await outboundWaitInboundHarness16.restore();
+  outboundWaitInboundHarness16.beginTestOutboundWrite();
+  const outboundWaitInboundMutation16 =
+    outboundWaitInboundHarness16.beginLocalMutation({ enabled: false });
+  await outboundWaitInboundHarness16.commitLocalMutation(
+    outboundWaitInboundMutation16.generation,
+    'outbound-wait-inbound-race-M'
+  );
+  const outboundWaitInboundPreflight16 =
+    outboundWaitInboundHarness16.refreshRemoteSafety(
+      () => true,
+      'outbound-wait-inbound-race',
+      {
+        waitForExistingOutbound: true,
+        outboundWaitTimeoutMs: 100
+      }
+    );
+  outboundWaitInboundHarness16.bumpSyncInboundGeneration();
+  outboundWaitInboundHarness16.bumpRemoteDisableArrivalGeneration();
+  outboundWaitInboundHarness16.completeTestOutboundWrite(
+    completedReceiptRemoteF16,
+    completedReceiptF16
+  );
+  const outboundWaitInboundReady16 = await outboundWaitInboundPreflight16;
+  const outboundWaitInboundState16 = outboundWaitInboundHarness16.state();
+  assertPass(outboundWaitInboundReady16 === false
+      && outboundWaitInboundState16.syncInboundArrivalGeneration === 1
+      && outboundWaitInboundState16.remoteDisableArrivalGeneration === 1
+      && outboundWaitInboundState16.syncGetCalls === 0
+      && outboundWaitInboundState16.syncWriteOperationsInFlight === 0
+      && outboundWaitInboundState16.lifecycleCalls.includes(
+        'sync-retry:adopt'
+      )
+      && outboundWaitInboundState16.outboundPublishes.length === 0,
+    '16M-3F-0B-1H: 等待 predecessor writer 期间任一 inbound/remote-F generation 换代即 stale；不使用 W1 receipt，fail-closed 排 adopt retry');
+
+  const outboundWaitTimeoutHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: false,
+      localMutationCutoff: completedReceiptCutoff16
+    });
+  await outboundWaitTimeoutHarness16.restore();
+  outboundWaitTimeoutHarness16.beginTestOutboundWrite();
+  const outboundWaitTimeoutReady16 =
+    await outboundWaitTimeoutHarness16.refreshRemoteSafety(
+      () => true,
+      'outbound-wait-timeout',
+      {
+        waitForExistingOutbound: true,
+        outboundWaitTimeoutMs: 5
+      }
+    );
+  const outboundWaitTimeoutBlockedState16 =
+    outboundWaitTimeoutHarness16.state();
+  outboundWaitTimeoutHarness16.completeTestOutboundWrite(
+    completedReceiptRemoteF16,
+    completedReceiptF16
+  );
+  assertPass(outboundWaitTimeoutReady16 === false
+      && outboundWaitTimeoutBlockedState16.syncWriteOperationsInFlight === 1
+      && outboundWaitTimeoutBlockedState16.syncGetCalls === 0
+      && outboundWaitTimeoutBlockedState16.lifecycleCalls.includes(
+        'sync-retry:adopt'
+      )
+      && outboundWaitTimeoutBlockedState16.outboundPublishes.length === 0,
+    '16M-3F-0B-1I: opt-in 等待卡住的 sync writer 有界超时；durable OFF admission 保持、零 store read/零 outbound并排 retry');
+
+  // 第一次 sync.get await 中若 live onChanged 已送到 T2，旧 F1 read receipt
+  // 不能再作为 authority。generation 变化迫使第二次 fresh read；T2 已在 M
+  // barrier 后进入 durable successor，应跨 recovery release 保留。
+  const recoveryPreflightStaleF116 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 - 30,
+    onMinutes: 11,
+    offMinutes: 49
+  };
+  const recoveryPreflightFreshT216 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 - 20,
+    onMinutes: 21,
+    offMinutes: 39,
+    pwmState: 'off',
+    nextTriggerAt: durableManualOffNow16 + 5 * 60_000
+  };
+  let recoveryPreflightStaleReadHarness16;
+  let recoveryPreflightT2Persisted16 = null;
+  recoveryPreflightStaleReadHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: durableRestartMarker16,
+      syncRemoteSequence: [
+        recoveryPreflightStaleF116,
+        recoveryPreflightFreshT216
+      ],
+      onSyncGet: async call => {
+        if (call !== 1) return;
+        recoveryPreflightStaleReadHarness16.bumpSyncInboundGeneration();
+        recoveryPreflightT2Persisted16 =
+          await recoveryPreflightStaleReadHarness16.rememberSuccessor(
+            recoveryPreflightFreshT216,
+            'preflight-read-await-live-T2'
+          );
+      }
+    });
+  await recoveryPreflightStaleReadHarness16.restore();
+  const recoveryPreflightStaleReadResult16 =
+    await recoveryPreflightStaleReadHarness16.resumePending(
+      'startup-preflight-stale-F1-fresh-T2'
+    );
+  await recoveryPreflightStaleReadHarness16
+    .waitForRetryOperationsToSettle();
+  const recoveryPreflightStaleReadState16 =
+    recoveryPreflightStaleReadHarness16.state();
+  const recoveryPreflightT2AlarmNames16 =
+    recoveryPreflightStaleReadState16.retryAlarms
+      .map(alarm => alarm.name)
+      .filter(name => name.startsWith(
+        'ac-deferred-sync-successor-retry-test:'
+      ));
+  assertPass(recoveryPreflightStaleReadResult16?.success === true
+      && recoveryPreflightT2Persisted16 === true
+      && recoveryPreflightStaleReadState16.syncGetCalls === 2
+      && recoveryPreflightStaleReadState16.syncInboundArrivalGeneration === 1
+      && recoveryPreflightStaleReadState16.deferredSyncDisablePending === false
+      && recoveryPreflightStaleReadState16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === recoveryPreflightFreshT216.syncedAt
+      && recoveryPreflightStaleReadState16
+        .storedDeferredSyncDisable?.successor?.remote?.syncedAt
+          === recoveryPreflightFreshT216.syncedAt
+      && recoveryPreflightT2AlarmNames16.length === 1
+      && !recoveryPreflightStaleReadState16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(recoveryPreflightT2AlarmNames16[0])
+      && !recoveryPreflightStaleReadState16.lifecycleCalls.includes(
+        'local-set-deferred:true'
+      ),
+    '16M-3F-0C: sync preflight await 中 live T2 换代使旧 F1 read stale；第二次 fresh read 后保留 T2 mailbox/alarm，不误 defer 或 tombstone');
+
+  // sync.get 可以稳定返回 F1，但在 persistSyncWatermark(F1) await 中又到达
+  // F2。settle 当前 F2 前必须把水位推进到 F2；安全实现也可令首轮
+  // fail-closed、下一 retry fresh-read F2，但绝不能发布 syncedAt<=F2。
+  const recoveryWatermarkF116 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 3 * 24 * 60 * 60_000,
+    onMinutes: 18,
+    offMinutes: 42
+  };
+  const recoveryWatermarkF216 = {
+    ...recoveryWatermarkF116,
+    syncedAt: durableManualOffNow16 + 9 * 24 * 60 * 60_000,
+    onMinutes: 19,
+    offMinutes: 41
+  };
+  let recoveryWatermarkSwapHarness16;
+  let recoveryWatermarkSwapInjected16 = false;
+  recoveryWatermarkSwapHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: durableRestartMarker16,
+      syncRemoteSequence: [recoveryWatermarkF116, recoveryWatermarkF216],
+      onSyncWatermarkSet: async watermarkAt => {
+        if (recoveryWatermarkSwapInjected16
+            || watermarkAt !== recoveryWatermarkF116.syncedAt) return;
+        recoveryWatermarkSwapInjected16 = true;
+        recoveryWatermarkSwapHarness16.bumpSyncInboundGeneration();
+        await recoveryWatermarkSwapHarness16.deferRemote(
+          recoveryWatermarkF216,
+          'watermark-await-live-F2'
+        );
+      }
+    });
+  await recoveryWatermarkSwapHarness16.restore();
+  const recoveryWatermarkSwapFirst16 =
+    await recoveryWatermarkSwapHarness16.resumePending(
+      'startup-preflight-F1-watermark-await-F2'
+    );
+  const recoveryWatermarkSwapAfterFirst16 =
+    recoveryWatermarkSwapHarness16.state();
+  const recoveryWatermarkSwapFinal16 =
+    recoveryWatermarkSwapFirst16?.remoteDisabled === true
+      ? recoveryWatermarkSwapFirst16
+      : await recoveryWatermarkSwapHarness16.resumePending(
+          'startup-preflight-F2-retry'
+        );
+  const recoveryWatermarkSwapState16 =
+    recoveryWatermarkSwapHarness16.state();
+  assertPass(recoveryWatermarkSwapInjected16 === true
+      && recoveryWatermarkSwapAfterFirst16.syncInboundArrivalGeneration === 1
+      && recoveryWatermarkSwapFinal16?.remoteDisabled === true
+      && recoveryWatermarkSwapState16.outboundPublishes.length === 1
+      && recoveryWatermarkSwapState16.outboundPublishes.every(payload =>
+        payload.enabled === false
+        && payload.syncedAt > recoveryWatermarkF216.syncedAt)
+      && recoveryWatermarkSwapState16.storedSyncWatermark
+        === recoveryWatermarkSwapState16.outboundPublishes[0]?.syncedAt
+      && recoveryWatermarkSwapState16.deferredSyncDisablePending === false
+      && recoveryWatermarkSwapState16.manualOffAutomaticOnBlocked === false
+      && recoveryWatermarkSwapState16.manualOffAdmissionToken === '',
+    '16M-3F-0C-1: preflight watermark await 中 F1→F2 换主；settle F2 前须推进 F2 水位（或首轮 fail-close 后 retry），零 stale syncedAt publish');
+
+  // 两次 bounded read 都被新的 inbound arrival 抢占时，不能用任一旧快照
+  // 猜测安全状态；保持 pending OFF marker，零 release/零 outbound 等 retry。
+  let recoveryPreflightDoubleStaleHarness16;
+  recoveryPreflightDoubleStaleHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: durableRestartMarker16,
+      syncRemoteSequence: [
+        recoveryPreflightStaleF116,
+        { ...recoveryPreflightStaleF116, syncedAt: durableManualOffNow16 - 25 }
+      ],
+      onSyncGet: async () => {
+        recoveryPreflightDoubleStaleHarness16.bumpSyncInboundGeneration();
+      }
+    });
+  await recoveryPreflightDoubleStaleHarness16.restore();
+  const recoveryPreflightDoubleStaleResult16 =
+    await recoveryPreflightDoubleStaleHarness16.resumePending(
+      'startup-preflight-double-stale'
+    );
+  const recoveryPreflightDoubleStaleState16 =
+    recoveryPreflightDoubleStaleHarness16.state();
+  assertPass(recoveryPreflightDoubleStaleResult16?.success === false
+      && recoveryPreflightDoubleStaleResult16?.remoteSafetyReadPending === true
+      && recoveryPreflightDoubleStaleState16.syncGetCalls >= 2
+      && recoveryPreflightDoubleStaleState16
+        .syncInboundArrivalGeneration
+          === recoveryPreflightDoubleStaleState16.syncGetCalls
+      && recoveryPreflightDoubleStaleState16.manualOffAutomaticOnBlocked
+        === true
+      && recoveryPreflightDoubleStaleState16.manualOffAdmissionToken
+        === durableRestartMarker16.token
+      && recoveryPreflightDoubleStaleState16.storedSchedule === null
+      && recoveryPreflightDoubleStaleState16.outboundPublishes.length === 0
+      && recoveryPreflightDoubleStaleState16.lifecycleCalls.includes(
+        'sync-retry:adopt'
+      )
+      && recoveryPreflightDoubleStaleState16.phaseOwner === 0,
+    '16M-3F-0D: sync preflight 连续两次 inbound generation 换代时 fail-closed；marker 保持、零 release/零 publish并排 adopt retry');
+
+  const durableStaleCommitHarness16 = loadDurableManualOffAdmissionHarness16({
+    marker: durableRestartMarker16
+  });
+  await durableStaleCommitHarness16.restore();
+  const durableStaleCommitResult16 = await durableStaleCommitHarness16.commit({
+    ensureCurrent: () => false,
+    reason: 'must-not-clear-stale-owner'
+  });
+  const durableStaleCommitState16 = durableStaleCommitHarness16.state();
+
+  const durableManualOnHarness16 = loadDurableManualOffAdmissionHarness16({
+    marker: durableRestartMarker16
+  });
+  await durableManualOnHarness16.restore();
+  const durableManualOnEpoch16 = durableManualOnHarness16.claim('on');
+  const durableManualOnReleased16 = await durableManualOnHarness16.releaseForOn(
+    durableManualOnEpoch16
+  );
+  const durableManualOnState16 = durableManualOnHarness16.state();
+
+  const durableDisableHarness16 = loadDurableManualOffAdmissionHarness16({
+    marker: durableRestartMarker16,
+    enabled: false
+  });
+  await durableDisableHarness16.restore();
+  const durableDisableCommitted16 = await durableDisableHarness16.commit({
+    ensureCurrent: () => true,
+    markSyncPublishPending: true,
+    reason: 'test-durable-disable'
+  });
+  const durableDisableState16 = durableDisableHarness16.state();
+
+  const durableArrivalHarness16 = loadDurableManualOffAdmissionHarness16();
+  const durableArrivalEpoch16 = durableArrivalHarness16.claim('off');
+  const durableArrivalAdmission16 = durableArrivalHarness16.begin(
+    durableArrivalEpoch16
+  );
+  const durableArrivalSynchronous16 = durableArrivalHarness16.state();
+  const durableArrivalPersisted16 = await durableArrivalAdmission16.durablePromise;
+  const durableArrivalState16 = durableArrivalHarness16.state();
+
+  const failedDurableArrivalHarness16 = loadDurableManualOffAdmissionHarness16({
+    pendingMarkerSetFailures: 2
+  });
+  const failedDurableArrivalEpoch16 = failedDurableArrivalHarness16.claim('off');
+  const failedDurableArrivalAdmission16 = failedDurableArrivalHarness16.begin(
+    failedDurableArrivalEpoch16
+  );
+  const failedDurableArrivalReceipt16 = await
+    failedDurableArrivalAdmission16.durablePromise;
+  const failedDurableArrivalState16 = failedDurableArrivalHarness16.state();
+  const failedDurableOffHandlerHarness16 = new Function(
+    'manualOffAdmission', 'manualToggleRequestEpoch',
+    'manualOffAdmissionToken',
+    `const msg = { type: 'toggleNow', action: 'off' };
+    let manualOffAutomaticOnBlocked = true;
+    const localScheduleMutationGenerationAtArrival = 1;
+    let localScheduleMutationCommittedObservedAt = 1;
+    const localScheduleMutationObservedAtByGeneration = new Map([[1, 1]]);
+    const manualOffPreemptionPromise = Promise.resolve();
+    const calls = [];
+    let response = null;
+    function isManualToggleIntentCurrent(epoch, action) {
+      return epoch === manualToggleRequestEpoch && action === 'off';
+    }
+    async function toggleNowAndSync(action, options = {}) {
+      calls.push('immediate:' + action + ':' + options.ensureCurrent());
+      return { success: true, immediate: true };
+    }
+    async function runSerializedSchedulePhaseOperation(operation, reason) {
+      calls.push('phase:' + reason);
+      return operation(91);
+    }
+    function runManualOffAdmissionFlight(token, operation) {
+      calls.push('flight:' + token);
+      return operation();
+    }
+    async function finalizeManualOffAutomationPhase(
+      phaseAdmissionEpoch,
+      ensureCurrent,
+      admissionToken
+    ) {
+      calls.push('finalize:' + phaseAdmissionEpoch + ':'
+        + ensureCurrent() + ':' + admissionToken);
+      return { success: true, finalized: true };
+    }
+    function finishManualTogglePhaseCommit(epoch) {
+      calls.push('finish-phase:' + epoch);
+    }
+    async function finalizeCompletedManualToggleAuthority(epoch, action) {
+      calls.push('complete:' + epoch + ':' + action);
+      return isManualToggleIntentCurrent(epoch, action);
+    }
+    async function commitLocalScheduleMutationAuthority(
+      generation,
+      reason = ''
+    ) {
+      calls.push('commit-mutation:' + generation + ':' + reason);
+      return generation === localScheduleMutationGenerationAtArrival;
+    }
+    function finishLocalScheduleMutationCommit(generation) {
+      calls.push('finish-mutation:' + generation);
+    }
+    function sendResponse(value) { response = value; }
+    async function dispatch() {
+      ${manualToggleMessageBody16}
+    }
+    return { dispatch, response: () => response, calls };`
+  )(
+    failedDurableArrivalAdmission16,
+    failedDurableArrivalEpoch16,
+    failedDurableArrivalAdmission16.token
+  );
+  await failedDurableOffHandlerHarness16.dispatch();
+  const failedDurableOffHandlerResponse16 =
+    failedDurableOffHandlerHarness16.response();
+
+  const initManualOffRestoreIndex16 = initBody13.indexOf(
+    'const startupRestorePromise = restoreDurableManualOffAdmission();'
+  );
+  const initManualOffRestorePublishIndex16 = initBody13.indexOf(
+    'startupManualOffAdmissionRestorePromise = startupRestorePromise;'
+  );
+  const initManualOffRestoreAwaitIndex16 = initBody13.indexOf(
+    'await startupRestorePromise;'
+  );
+  const initManualOffRestoreReleaseIndex16 = initBody13.indexOf(
+    'startupManualOffAdmissionRestorePromise = null;'
+  );
+  const initSyncAuthorityBaselineIndex16 = initBody13.indexOf(
+    'await ensureSyncAuthorityDurableBaselineLoaded()'
+  );
+  const initManualOffResumeIndex16 = initBody13.indexOf(
+    "await resumePendingManualOffAdmission('init-recovery');"
+  );
+  const initManualOffSetupIndex16 = initBody13.indexOf('await setupAlarms(');
+  const initManualOffComfortIndex16 = initBody13.indexOf(
+    "runComfortStart('startup-recovery')"
+  );
+  assertPass(durableRestartBefore16.manualOffAutomaticOnBlocked === true
+      && durableRestartBefore16.manualOffAdmissionLoaded === false
+      && durableRestartRestored16.manualOffAutomaticOnBlocked === true
+      && durableRestartRestored16.manualOffAdmissionLoaded === true
+      && durableRestartRestored16.manualOffAdmissionRestoredFromStorage === true
+      && durableRestartRestored16.manualOffAdmissionToken
+        === durableRestartMarker16.token
+      && durableRestartRestored16.manualOffAdmissionRequestedAt
+        === durableRestartMarker16.requestedAt
+      && durableRestartRestored16.manualToggleIntentAction === 'off'
+      && durableOffPhaseCommitted16 === true
+      && durableRestartCommitted16.manualOffAutomaticOnBlocked === false
+      && durableRestartCommitted16.storedMarker?.state === 'released'
+      && durableRestartCommitted16.storedSchedule?.enabled === true
+      && durableStaleCommitResult16 === false
+      && durableStaleCommitState16.manualOffAutomaticOnBlocked === true
+      && durableStaleCommitState16.storedMarker?.token
+        === durableRestartMarker16.token
+      && durableStaleCommitState16.writes.length === 0
+      && durableManualOnReleased16 === true
+      && durableManualOnState16.manualOffAutomaticOnBlocked === false
+      && durableManualOnState16.storedMarker?.state === 'released'
+      && durableManualOnState16.timerInvalidations === 1
+      && durableDisableCommitted16 === true
+      && durableDisableState16.manualOffAutomaticOnBlocked === false
+      && durableDisableState16.storedMarker?.state === 'released'
+      && durableDisableState16.storedSchedule?.enabled === false
+      && durableDisableState16.syncPublishPending === true
+      && durableArrivalSynchronous16.manualOffAutomaticOnBlocked === true
+      && durableArrivalSynchronous16.manualOffAdmissionToken
+        === durableArrivalAdmission16.token
+      && durableArrivalPersisted16?.persisted === true
+      && durableArrivalPersisted16?.stale === false
+      && durableArrivalPersisted16?.retryAlarmPending === true
+      && durableArrivalState16.storedMarker?.token
+        === durableArrivalAdmission16.token
+      && durableArrivalState16.storedMarker?.requestedAt
+        === durableManualOffNow16
+      && initManualOffRestoreIndex16 >= 0
+      && initManualOffRestorePublishIndex16 > initManualOffRestoreIndex16
+      && initManualOffRestoreAwaitIndex16
+        > initManualOffRestorePublishIndex16
+      && initManualOffRestoreReleaseIndex16
+        > initManualOffRestoreAwaitIndex16
+      && initSyncAuthorityBaselineIndex16
+        > initManualOffRestoreReleaseIndex16
+      && initSyncAuthorityBaselineIndex16
+        < initBody13.indexOf('await reconcileDiagnosticLogVersion();')
+      && initManualOffRestoreIndex16
+        < initBody13.indexOf('await reconcileDiagnosticLogVersion();')
+      && initManualOffRestoreIndex16 < initManualOffResumeIndex16
+      && initManualOffRestoreIndex16 < initManualOffSetupIndex16
+      && initManualOffRestoreIndex16 < initManualOffComfortIndex16,
+    '16M-3F: durable OFF marker 同步阻断并跨 SW 重启先恢复；stale owner 不清，off-phase commit、明确 ON 与 durable disable 才原子清标记后放行');
+  assertPass(failedDurableArrivalReceipt16?.persisted === false
+      && failedDurableArrivalReceipt16?.stale === false
+      && failedDurableArrivalReceipt16?.retryAlarmPending === true
+      && failedDurableArrivalState16.pendingMarkerSetAttempts === 2
+      && failedDurableArrivalState16.storedMarker === null
+      && failedDurableArrivalState16.retryAlarms.length === 1
+      && failedDurableArrivalState16.retryAlarms[0].periodInMinutes === 1
+      && failedDurableArrivalState16.manualOffAutomaticOnBlocked === true
+      && failedDurableOffHandlerResponse16?.success === true
+      && failedDurableOffHandlerResponse16?.finalized === true
+      && failedDurableOffHandlerResponse16?.admissionWarning
+        === 'synthetic pending marker write rejection'
+      && failedDurableOffHandlerHarness16.calls.join(',')
+        === `flight:${failedDurableArrivalAdmission16.token},immediate:off:true,commit-mutation:1:toggleNow-off-local-mutation-intent,phase:manual-toggle-off,finalize:91:true:${failedDurableArrivalAdmission16.token},complete:${failedDurableArrivalEpoch16}:off,finish-phase:${failedDurableArrivalEpoch16},finish-mutation:1`,
+    '16M-3F-1: durable marker 两次写拒绝仍保留 immutable periodic retry 凭证；OFF handler 不把 receipt object 当 boolean，继续 immediate+phase 收口并显式回传 warning');
+
+  const monotonicManualOffHarness16 =
+    loadDurableManualOffAdmissionHarness16();
+  const monotonicFirstEpoch16 = monotonicManualOffHarness16.claim('off');
+  const monotonicFirstAdmission16 = monotonicManualOffHarness16.begin(
+    monotonicFirstEpoch16
+  );
+  await monotonicFirstAdmission16.durablePromise;
+  const monotonicFirstCommitted16 = await monotonicManualOffHarness16.commit({
+    ensureCurrent: () => true,
+    reason: 'fixed-clock-first-off'
+  });
+  const monotonicSecondEpoch16 = monotonicManualOffHarness16.claim('off');
+  const monotonicSecondAdmission16 = monotonicManualOffHarness16.begin(
+    monotonicSecondEpoch16
+  );
+  await monotonicSecondAdmission16.durablePromise;
+  const monotonicSecondState16 = monotonicManualOffHarness16.state();
+
+  const crashRecoveredManualOffHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      retryAlarms: failedDurableArrivalState16.retryAlarms
+    });
+  await crashRecoveredManualOffHarness16.restore();
+  const crashRecoveredManualOffState16 =
+    crashRecoveredManualOffHarness16.state();
+  const crashRecoveredManualOffCommitted16 = await
+    crashRecoveredManualOffHarness16.commit({
+      ensureCurrent: () => true,
+      reason: 'retry-identity-crash-recovery'
+    });
+  const crashRecoveredManualOffAfterCommit16 =
+    crashRecoveredManualOffHarness16.state();
+
+  const releasedRetryIdentityHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: {
+        schemaVersion: 1,
+        state: 'released',
+        releasedAt: durableManualOffNow16,
+        releasedToken: failedDurableArrivalAdmission16.token,
+        releasedTokens: [failedDurableArrivalAdmission16.token],
+        releasedThroughRequestedAt: durableManualOffNow16
+      },
+      retryAlarms: failedDurableArrivalState16.retryAlarms
+    });
+  await releasedRetryIdentityHarness16.restore();
+  const releasedRetryIdentityState16 = releasedRetryIdentityHarness16.state();
+  assertPass(monotonicFirstCommitted16 === true
+      && monotonicFirstAdmission16.requestedAt === durableManualOffNow16
+      && monotonicSecondAdmission16.requestedAt
+        === monotonicFirstAdmission16.requestedAt + 1
+      && monotonicSecondAdmission16.token !== monotonicFirstAdmission16.token
+      && monotonicSecondState16.storedMarker?.state === 'pending'
+      && monotonicSecondState16.storedMarker?.token
+        === monotonicSecondAdmission16.token
+      && monotonicSecondState16.retryAlarms.length === 1
+      && crashRecoveredManualOffState16.manualOffAutomaticOnBlocked === true
+      && crashRecoveredManualOffState16.manualOffAdmissionRestoredFromStorage
+        === true
+      && crashRecoveredManualOffState16.manualOffAdmissionToken
+        === failedDurableArrivalAdmission16.token
+      && crashRecoveredManualOffState16.storedMarker === null
+      && crashRecoveredManualOffCommitted16 === true
+      && crashRecoveredManualOffAfterCommit16.storedMarker?.state
+        === 'released'
+      && crashRecoveredManualOffAfterCommit16.retryAlarms.length === 0
+      && releasedRetryIdentityState16.manualOffAutomaticOnBlocked === false
+      && releasedRetryIdentityState16.manualOffAdmissionToken === ''
+      && releasedRetryIdentityState16.retryAlarms.length === 0,
+    '16M-3F-2: 固定 Date.now 的连续 OFF 仍生成单调 requestedAt；marker 写失败/恢复中断只靠 immutable periodic identity 可重建 pending，同 token released tombstone 不会复活');
+
+  const retryOperationBarrier16 = makeDeferred9G();
+  const retryOperationBarrierHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: durableRestartMarker16
+    });
+  await retryOperationBarrierHarness16.restore();
+  const trackedRetryOperation16 = retryOperationBarrierHarness16
+    .trackRetryOperation(retryOperationBarrier16.promise);
+  const retryBarrierCommit16 = retryOperationBarrierHarness16.commit({
+    ensureCurrent: () => true,
+    reason: 'retry-operation-in-flight-barrier'
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  const retryBarrierBlockedState16 = retryOperationBarrierHarness16.state();
+  retryOperationBarrier16.resolve(true);
+  await trackedRetryOperation16;
+  const retryBarrierCommitted16 = await retryBarrierCommit16;
+  const retryBarrierSettledState16 = retryOperationBarrierHarness16.state();
+  assertPass(retryBarrierBlockedState16.retryOperationsInFlight === 1
+      && retryBarrierBlockedState16.writes.length === 0
+      && retryBarrierBlockedState16.storedMarker?.state !== 'released'
+      && retryBarrierCommitted16 === true
+      && retryBarrierSettledState16.retryOperationsInFlight === 0
+      && retryBarrierSettledState16.storedMarker?.state === 'released'
+      && retryBarrierSettledState16.retryAlarms.length === 0
+      && manualToggleIntentSource16.includes(
+        'await waitForManualOffRetryAlarmOperationsToSettle();')
+      && manualToggleIntentSource16.includes(
+        'if (!retryOwnerIsCurrent()) return false;'),
+    '16M-3F-2A: released tombstone 等全部 retry alarm I/O settle 后才取 identity/落盘；exact owner guard 阻止旧 token 补建或保留闹钟');
+
+  const predecessorRestoreGate16 = makeDeferred9G();
+  const predecessorRestoreStarted16 = makeDeferred9G();
+  const predecessorMarker16 = {
+    schemaVersion: 1,
+    state: 'pending',
+    token: 'startup-predecessor-off',
+    requestedAt: durableManualOffNow16 - 20_000
+  };
+  const predecessorRestoreHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: predecessorMarker16,
+      deferredSyncDisable: {
+        pending: true,
+        remote: { enabled: false, syncedAt: durableManualOffNow16 - 1 }
+      },
+      storageGetGate: predecessorRestoreGate16.promise,
+      onStorageGetStarted: () => predecessorRestoreStarted16.resolve()
+    });
+  const predecessorRestoreRun16 = predecessorRestoreHarness16.restore();
+  await predecessorRestoreStarted16.promise;
+  const predecessorWinningOnEpoch16 = predecessorRestoreHarness16.claim('on');
+  predecessorRestoreGate16.resolve();
+  await predecessorRestoreRun16;
+  const predecessorRestoreState16 = predecessorRestoreHarness16.state();
+  const predecessorDeferredSettlement16 = await predecessorRestoreHarness16
+    .settleDeferredForCurrentUser('startup-predecessor-user-on');
+  const predecessorSettledState16 = predecessorRestoreHarness16.state();
+
+  const deferredAbaRestoreGate16 = makeDeferred9G();
+  const deferredAbaRestoreStarted16 = makeDeferred9G();
+  const deferredAbaRestoreHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: {
+        schemaVersion: 1,
+        state: 'released',
+        releasedAt: durableManualOffNow16,
+        releasedThroughRequestedAt: durableManualOffNow16
+      },
+      deferredSyncDisable: { pending: true },
+      storageGetGate: deferredAbaRestoreGate16.promise,
+      onStorageGetStarted: () => deferredAbaRestoreStarted16.resolve()
+    });
+  const deferredAbaRestoreRun16 = deferredAbaRestoreHarness16.restore();
+  await deferredAbaRestoreStarted16.promise;
+  deferredAbaRestoreHarness16.setDeferredPending(false);
+  deferredAbaRestoreGate16.resolve();
+  await deferredAbaRestoreRun16;
+  const deferredAbaRestoreState16 = deferredAbaRestoreHarness16.state();
+  assertPass(predecessorWinningOnEpoch16 === 1
+      && predecessorRestoreState16.manualToggleIntentAction === 'on'
+      && predecessorRestoreState16.manualOffAdmissionToken === ''
+      && predecessorRestoreState16.manualOffAutomaticOnBlocked === true
+      && predecessorRestoreState16.manualOffAdmissionPredecessorRequestedAt
+        === predecessorMarker16.requestedAt
+      && predecessorRestoreState16.manualOffAdmissionPredecessorTokens
+        .join(',') === predecessorMarker16.token
+      && predecessorRestoreState16.startupRestoreSupersededByUserIntent
+        === true
+      && predecessorRestoreState16
+        .startupDeferredDisableSupersededByUserIntent === true
+      && predecessorDeferredSettlement16?.remoteDisabled === true
+      && predecessorSettledState16.storedSchedule?.enabled === false
+      && predecessorSettledState16.storedMarker?.releasedTokens?.includes(
+        predecessorMarker16.token)
+      && predecessorSettledState16.storedMarker
+        ?.releasedThroughRequestedAt === predecessorMarker16.requestedAt
+      && predecessorSettledState16.startupRestoreSupersededByUserIntent
+        === false
+      && predecessorSettledState16
+        .startupDeferredDisableSupersededByUserIntent === false
+      && deferredAbaRestoreState16.deferredSyncDisablePending === false
+      && deferredAbaRestoreState16.deferredSyncDisableEpoch === 1,
+    '16M-3F-2B: init storage await 中后到 user ON 保留 action，并把旧 OFF token/time 记为 predecessor；同 owner 消费 remote disable 时原子 tombstone，deferred epoch ABA 不回灌旧 pending');
+
+  // startup restore 只能由真正抢占它的 exact user-intent epoch 释放。旧请求
+  // 的 finally/global-catch 不得清掉更新 owner；当前请求 abort 后又必须立刻
+  // 解除 outbound gate，避免普通 publish 永久落入一分钟重试。
+  const startupSupersessionGate16 = makeDeferred9G();
+  const startupSupersessionStarted16 = makeDeferred9G();
+  const startupSupersessionHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      storageGetGate: startupSupersessionGate16.promise,
+      onStorageGetStarted: () => startupSupersessionStarted16.resolve()
+    });
+  const startupSupersessionRestore16 =
+    startupSupersessionHarness16.restore();
+  await startupSupersessionStarted16.promise;
+  const staleStartupIntentEpoch16 = startupSupersessionHarness16.claim('on');
+  const currentStartupIntentEpoch16 =
+    startupSupersessionHarness16.claim('on');
+  startupSupersessionGate16.resolve();
+  await startupSupersessionRestore16;
+  const startupSupersessionOwned16 = startupSupersessionHarness16.state();
+  const staleStartupRelease16 =
+    startupSupersessionHarness16.releaseStartupSupersession(
+      staleStartupIntentEpoch16
+    );
+  startupSupersessionHarness16.setManualOffBlocked(false);
+  const startupBlockedPublish16 = await startupSupersessionHarness16
+    .publishSchedule('startup-supersession-owner-pending');
+  const startupSupersessionAfterStaleRelease16 =
+    startupSupersessionHarness16.state();
+  const currentStartupRelease16 =
+    startupSupersessionHarness16.releaseStartupSupersession(
+      currentStartupIntentEpoch16
+    );
+  const startupReleasedPublish16 = await startupSupersessionHarness16
+    .publishSchedule('startup-supersession-owner-released');
+  const startupSupersessionReleased16 = startupSupersessionHarness16.state();
+  assertPass(staleStartupIntentEpoch16 === 1
+      && currentStartupIntentEpoch16 === 2
+      && startupSupersessionOwned16.startupRestoreSupersedingIntentEpoch
+        === currentStartupIntentEpoch16
+      && staleStartupRelease16 === false
+      && startupBlockedPublish16 === false
+      && startupSupersessionAfterStaleRelease16
+        .startupRestoreSupersedingIntentEpoch === currentStartupIntentEpoch16
+      && startupSupersessionAfterStaleRelease16.outboundPublishes.length === 0
+      && startupSupersessionAfterStaleRelease16.lifecycleCalls.filter(
+        call => call === 'sync-retry:publish'
+      ).length === 1
+      && currentStartupRelease16 === true
+      && startupReleasedPublish16 === true
+      && startupSupersessionReleased16.startupRestoreSupersedingIntentEpoch
+        === 0
+      && startupSupersessionReleased16.outboundPublishes.length === 1
+      && startupSupersessionReleased16.outboundPublishes[0]?.reason
+        === 'startup-supersession-owner-released'
+      && manualToggleIntentSource16.includes(
+        'releaseStartupRestoreSupersession(intentEpoch);'
+      )
+      && updateScheduleBody.includes('releaseStartupRestoreSupersession(')
+      && backgroundSource.includes(
+        "if (msg?.type === 'toggleNow') {\n      finishManualTogglePhaseCommit("
+      ),
+    '16M-3F-2B-0: startup supersession 由 exact manual intent epoch 单源持有；旧 finally 不清新 owner，当前 abort 释放后普通 publish 一次成功且无无限重试');
+
+  // marker 本身已 durable、但 retry alarm 创建失败时，startup 的某一路
+  // getAll reject 只能暂时把它记为 predecessor。init 必须在依赖 sync 的
+  // F/T settle 前 fresh 分类该 marker，并立即启动 OFF；随后 sync.get 即使
+  // reject，也只能让最终 release 等待重试，不能跳过物理安全动作。
+  const markerOnlyStartupToken16 = 'startup-marker-only-no-alarm';
+  const markerOnlyStartupMarker16 = {
+    schemaVersion: 1,
+    state: 'pending',
+    token: markerOnlyStartupToken16,
+    requestedAt: durableManualOffNow16 - 15_000
+  };
+  const markerOnlyPartialHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: markerOnlyStartupMarker16,
+      retryGetAllFailures: 1
+    });
+  await markerOnlyPartialHarness16.restore();
+  const markerOnlyPartialState16 = markerOnlyPartialHarness16.state();
+  const markerOnlyInitHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: markerOnlyStartupMarker16,
+      retryGetAllFailures: 1,
+      syncGetFailures: 1
+    });
+  await markerOnlyInitHarness16.runInitDeferredRecovery();
+  const markerOnlyInitState16 = markerOnlyInitHarness16.state();
+  const markerOnlyImmediateIndex16 =
+    markerOnlyInitState16.lifecycleCalls.indexOf('resume-toggle:off:true');
+  const markerOnlySyncReadIndex16 =
+    markerOnlyInitState16.lifecycleCalls.indexOf('sync-get:1');
+  assertPass(markerOnlyPartialState16
+        .startupManualOffClassificationPending === true
+      && markerOnlyPartialState16
+        .startupManualOffClassificationIntentEpoch === 0
+      && markerOnlyPartialState16.manualOffAdmissionToken === ''
+      && markerOnlyPartialState16.manualOffAdmissionPredecessorTokens
+        .includes(markerOnlyStartupToken16)
+      && markerOnlyInitState16
+        .startupManualOffClassificationPending === false
+      && markerOnlyInitState16.manualToggleIntentAction === 'off'
+      && markerOnlyInitState16.manualOffAdmissionToken
+        === markerOnlyStartupToken16
+      && markerOnlyInitState16.manualOffAutomaticOnBlocked === true
+      && markerOnlyImmediateIndex16 >= 0
+      && markerOnlySyncReadIndex16 > markerOnlyImmediateIndex16
+      && markerOnlyInitState16.lifecycleCalls.includes('sync-retry:adopt')
+      && markerOnlyInitState16.storedMarker?.state === 'pending'
+      && markerOnlyInitState16.outboundPublishes.length === 0,
+    '16M-3F-2B-1: startup partial read 只暂存 marker-only OFF predecessor；init fresh classify 后先启动 immediate OFF，sync.get reject 仅延迟 release/零 publish');
+
+  const retryAlarmFor16 = (token, requestedAt) => ({
+    name: `ac-manual-off-admission-retry-test:${requestedAt}:${encodeURIComponent(token)}`,
+    scheduledTime: requestedAt + 60_000,
+    periodInMinutes: 1
+  });
+  // init/getAll 已成功后才变为可见的旧 OFF alarm 不能借 handler 的 fresh
+  // read 冒充“新用户 OFF”。真实 ON 已在 listener 首行同步 claim；alarm
+  // 只登记为 predecessor，保留凭证供 ON authority 失败时 reclaim。
+  const lateVisibleOffToken16 = 'late-visible-old-off-A';
+  const lateVisibleOffAlarm16 = retryAlarmFor16(
+    lateVisibleOffToken16,
+    durableManualOffNow16 - 10_000
+  );
+  const lateVisibleOffHarness16 =
+    loadDurableManualOffAdmissionHarness16();
+  await lateVisibleOffHarness16.restore();
+  const lateVisibleOnEpoch16 = lateVisibleOffHarness16.claim('on');
+  lateVisibleOffHarness16.injectRetryAlarm(lateVisibleOffAlarm16);
+  await lateVisibleOffHarness16.deliverManualRetryAlarm(
+    lateVisibleOffAlarm16
+  );
+  const lateVisibleOffState16 = lateVisibleOffHarness16.state();
+  assertPass(lateVisibleOnEpoch16 === 1
+      && lateVisibleOffState16.manualToggleIntentEpoch
+        === lateVisibleOnEpoch16
+      && lateVisibleOffState16.manualToggleIntentAction === 'on'
+      && lateVisibleOffState16.manualToggleIntentSource === 'user'
+      && lateVisibleOffState16.manualOffAdmissionToken === ''
+      && lateVisibleOffState16.manualOffAdmissionPredecessorTokens
+        .includes(lateVisibleOffToken16)
+      && lateVisibleOffState16.retryAlarms.some(alarm =>
+        alarm.name === lateVisibleOffAlarm16.name)
+      && !lateVisibleOffState16.lifecycleCalls.some(value =>
+        value.startsWith('resume-toggle:off:')),
+    '16M-3F-2B-2: init 后 late-visible orphan OFF A 遇已同步 claim 的用户 ON，只登记 predecessor；ON epoch/action 不变且不误启动 OFF');
+
+  const retryAlarmForMutation16 = (
+    token,
+    requestedAt,
+    localMutationObservedAt
+  ) => ({
+    name: [
+      'ac-manual-off-admission-retry-test',
+      requestedAt,
+      localMutationObservedAt,
+      encodeURIComponent(token)
+    ].join(':'),
+    scheduledTime: requestedAt + 60_000,
+    periodInMinutes: 1
+  });
+
+  // A 可在 manual ON 的 physical toggle await 中才首次显现。ON 成功后的
+  // terminal write 必须把该 exact predecessor token 与 alarm 原子收口。
+  const duringOnAlarmToken16 = 'orphan-off-during-manual-on-toggle';
+  const duringOnAlarmHarness16 =
+    loadDurableManualOffAdmissionHarness16();
+  const duringOnEpoch16 = duringOnAlarmHarness16.claim('on');
+  const duringOnMutation16 = duringOnAlarmHarness16.beginLocalMutation();
+  const duringOnMutationCommitted16 =
+    await duringOnAlarmHarness16.commitLocalMutation(
+      duringOnMutation16.generation,
+      'manual-on-before-orphan-off-arrival'
+    );
+  const duringOnAlarm16 = retryAlarmForMutation16(
+    duringOnAlarmToken16,
+    durableManualOffNow16 - 8_000,
+    Math.max(1, duringOnMutation16.observedAt - 1)
+  );
+  duringOnAlarmHarness16.injectRetryAlarm(duringOnAlarm16);
+  await duringOnAlarmHarness16.deliverManualRetryAlarm(duringOnAlarm16);
+  const duringOnPredecessorState16 = duringOnAlarmHarness16.state();
+  const duringOnTerminalized16 =
+    await duringOnAlarmHarness16.finalizeManualAuthority(
+      duringOnEpoch16,
+      'on',
+      duringOnMutation16.observedAt
+    );
+  await duringOnAlarmHarness16.waitForRetryOperationsToSettle();
+  const duringOnTerminalState16 = duringOnAlarmHarness16.state();
+
+  // 对称窗口：ON response/terminal 已完成后 A 才第一次 delivery。handler
+  // 不能永久 block，也不能重启 OFF；应重试同一 completed authority 的 exact
+  // tombstone。若 ON 失败，则同一 predecessor 必须被 reclaim 成 recovery OFF。
+  const afterOnAlarmToken16 = 'orphan-off-after-manual-on-response';
+  const afterOnAlarmHarness16 =
+    loadDurableManualOffAdmissionHarness16();
+  const afterOnEpoch16 = afterOnAlarmHarness16.claim('on');
+  const afterOnMutation16 = afterOnAlarmHarness16.beginLocalMutation();
+  const afterOnMutationCommitted16 =
+    await afterOnAlarmHarness16.commitLocalMutation(
+      afterOnMutation16.generation,
+      'manual-on-before-late-off-delivery'
+    );
+  const afterOnInitialTerminal16 =
+    await afterOnAlarmHarness16.finalizeManualAuthority(
+      afterOnEpoch16,
+      'on',
+      afterOnMutation16.observedAt
+    );
+  const afterOnAlarm16 = retryAlarmForMutation16(
+    afterOnAlarmToken16,
+    durableManualOffNow16 - 7_000,
+    afterOnMutation16.observedAt
+  );
+  afterOnAlarmHarness16.injectRetryAlarm(afterOnAlarm16);
+  await afterOnAlarmHarness16.deliverManualRetryAlarm(afterOnAlarm16);
+  await afterOnAlarmHarness16.waitForRetryOperationsToSettle();
+  const afterOnTerminalState16 = afterOnAlarmHarness16.state();
+
+  const failedOnAlarmToken16 = 'orphan-off-reclaimed-after-failed-on';
+  const failedOnAlarmHarness16 =
+    loadDurableManualOffAdmissionHarness16();
+  const failedOnEpoch16 = failedOnAlarmHarness16.claim('on');
+  const failedOnAlarm16 = retryAlarmForMutation16(
+    failedOnAlarmToken16,
+    durableManualOffNow16 - 6_000,
+    0
+  );
+  failedOnAlarmHarness16.injectRetryAlarm(failedOnAlarm16);
+  await failedOnAlarmHarness16.deliverManualRetryAlarm(failedOnAlarm16);
+  const failedOnReclaimedEpoch16 =
+    failedOnAlarmHarness16.reclaimManualOffAfterFailedAuthority(
+      failedOnEpoch16,
+      'on',
+      () => true
+    );
+  const failedOnReclaimedState16 = failedOnAlarmHarness16.state();
+  assertPass(duringOnMutationCommitted16 === true
+      && duringOnPredecessorState16.manualToggleIntentAction === 'on'
+      && duringOnPredecessorState16.manualOffAdmissionPredecessorTokens
+        .includes(duringOnAlarmToken16)
+      && duringOnTerminalized16 === true
+      && duringOnTerminalState16.storedTerminalAuthority?.action === 'on'
+      && duringOnTerminalState16.storedMarker?.state === 'released'
+      && duringOnTerminalState16.storedMarker?.releasedTokens
+        ?.includes(duringOnAlarmToken16)
+      && !duringOnTerminalState16.retryAlarms.some(alarm =>
+        alarm.name === duringOnAlarm16.name)
+      && duringOnTerminalState16.manualOffAutomaticOnBlocked === false
+      && afterOnMutationCommitted16 === true
+      && afterOnInitialTerminal16 === true
+      && afterOnTerminalState16.storedMarker?.releasedTokens
+        ?.includes(afterOnAlarmToken16)
+      && !afterOnTerminalState16.retryAlarms.some(alarm =>
+        alarm.name === afterOnAlarm16.name)
+      && afterOnTerminalState16.manualToggleIntentEpoch === afterOnEpoch16
+      && afterOnTerminalState16.manualToggleIntentAction === 'on'
+      && afterOnTerminalState16.manualOffAutomaticOnBlocked === false
+      && failedOnReclaimedEpoch16 === failedOnEpoch16 + 1
+      && failedOnReclaimedState16.manualToggleIntentAction === 'off'
+      && failedOnReclaimedState16.manualToggleIntentSource === 'recovery'
+      && failedOnReclaimedState16.manualOffAdmissionToken
+        === failedOnAlarmToken16
+      && failedOnReclaimedState16.manualOffAutomaticOnBlocked === true,
+    '16M-3F-2B-2A: orphan OFF A 在 manual ON toggle await/成功 response 后均 exact terminal；失败 ON 则 reclaim 同 token 为 recovery OFF');
+
+  const alarmScheduleReadRequeueSource16 = extractSourceSection(
+    backgroundSource,
+    'function createScheduleReadRetryAlarmName(',
+    '\n\n// ----- 闹钟触发时执行 -----',
+    'one-shot alarm schedule-read requeue'
+  );
+  const createAlarmScheduleReadRequeueHarness16 = () => new Function(
+    'Date', 'console',
+    `const SCHEDULE_READ_RETRY_ALARM = 'ac-schedule-read-retry';
+    const ACTIVE_BOUNDARY_SCHEDULE_RETRY_ALARM =
+      'ac-active-boundary-schedule-retry';
+    const PAGE_TIMER_RETRY_ALARM = 'ac-page-timer-retry';
+    let localScheduleMutationGeneration = 0;
+    let localScheduleAuthorityGeneration = 0;
+    let schedulePersistenceAuthorityEpoch = 0;
+    let syncPhaseAdoptionAdmissionEpoch = 0;
+    let syncPhaseAdoptionAdmissionOwner = 0;
+    let pwmRuntimeRevision = 0;
+    let pwmAlarmWriteGeneration = 0;
+    let pageTimerRetryAlarmWriteGeneration = 0;
+    let pageTimerWriteGeneration = 0;
+    let timerBasedShutdownRevision = 0;
+    let activeBoundaryCompletionGeneration = 0;
+    let activeBoundaryRetry = { retryAt: 0, mode: '', boundaryAt: 0 };
+    let nextGetGate = null;
+    let nextGetStarted = null;
+    const alarms = new Map();
+    const writes = [];
+    const calls = [];
+    async function createAlarm(name, options = {}) {
+      writes.push({ name, options: structuredClone(options) });
+      alarms.set(name, {
+        name,
+        scheduledTime: Number(options?.when) || 0
+      });
+      return true;
+    }
+    const chrome = {
+      alarms: {
+        async get(name) {
+          calls.push('get:' + name);
+          if (nextGetGate) {
+            const gate = nextGetGate;
+            const markStarted = nextGetStarted;
+            nextGetGate = null;
+            nextGetStarted = null;
+            if (typeof markStarted === 'function') markStarted();
+            await gate;
+          }
+          return structuredClone(alarms.get(name) || null);
+        }
+      }
+    };
+    function appendDiagnosticLog() {}
+    async function readDurableActiveBoundaryRetry() {
+      return { readOk: true, ...activeBoundaryRetry };
+    }
+    function runSerializedActiveBoundaryMutation(operation) {
+      return operation();
+    }
+    function runSerializedPwmAlarmWrite(operation) { return operation(); }
+    function runSerializedPageTimerRetryAlarmWrite(operation) {
+      return operation();
+    }
+    ${alarmScheduleReadRequeueSource16}
+    return {
+      capture: alarm => captureScheduleReadRequeueReceipt(
+        alarm,
+        activeBoundaryRetry
+      ),
+      run: (alarm, receipt) => requeueAlarmAfterScheduleReadFailure(
+        alarm,
+        receipt || captureScheduleReadRequeueReceipt(
+          alarm,
+          activeBoundaryRetry
+        )
+      ),
+      setAlarm(name, scheduledTime) {
+        alarms.set(name, { name, scheduledTime });
+      },
+      clearAlarm(name) { alarms.delete(name); },
+      gateNextGet(gate, onStart) {
+        nextGetGate = gate;
+        nextGetStarted = onStart;
+      },
+      bumpMutation() { localScheduleMutationGeneration += 1; },
+      bumpPhaseClaimAndRelease() {
+        syncPhaseAdoptionAdmissionEpoch += 1;
+        syncPhaseAdoptionAdmissionOwner = syncPhaseAdoptionAdmissionEpoch;
+        syncPhaseAdoptionAdmissionOwner = 0;
+      },
+      bumpActiveBoundaryOwner() {
+        activeBoundaryCompletionGeneration += 1;
+      },
+      setActiveBoundaryRetry(value = {}) {
+        activeBoundaryRetry = {
+          retryAt: Number(value.retryAt) || 0,
+          mode: String(value.mode || ''),
+          boundaryAt: Number(value.boundaryAt) || 0
+        };
+      },
+      retryIdentities() {
+        return [...alarms.values()]
+          .map(alarm => parseScheduleReadRetryAlarm(alarm))
+          .filter(Boolean);
+      },
+      alarmAt(name) { return Number(alarms.get(name)?.scheduledTime) || 0; },
+      writes,
+      calls
+    };`
+  )(DurableManualOffDate16, testConsole);
+  const alarmScheduleReadRequeueHarness16 =
+    createAlarmScheduleReadRequeueHarness16();
+  const oneShotScheduleReadAlarmNames16 = [
+    'ac-page-timer-retry',
+    'ac-sync-adopt-retry',
+    'ac-pwm',
+    'ac-comfort-end'
+  ];
+  const oneShotScheduleReadResults16 = await Promise.all(
+    oneShotScheduleReadAlarmNames16.map(name =>
+      alarmScheduleReadRequeueHarness16.run({
+        name,
+        scheduledTime: durableManualOffNow16
+      }))
+  );
+  const oneShotScheduleReadRetryIdentities16 =
+    alarmScheduleReadRequeueHarness16.retryIdentities();
+  assertPass(oneShotScheduleReadResults16.every(Boolean)
+      && alarmScheduleReadRequeueHarness16.writes.length
+        === oneShotScheduleReadAlarmNames16.length
+      && alarmScheduleReadRequeueHarness16.writes.every(write =>
+        write.name.startsWith('ac-schedule-read-retry:')
+          && write.options?.when === durableManualOffNow16 + 60_000)
+      && oneShotScheduleReadRetryIdentities16.length
+        === oneShotScheduleReadAlarmNames16.length
+      && oneShotScheduleReadRetryIdentities16.every((identity, index) =>
+        identity.name === oneShotScheduleReadAlarmNames16[index]
+          && identity.scheduledTime === durableManualOffNow16)
+      && backgroundSource.includes(
+        'scheduledTime: scheduleReadRetryIdentity.scheduledTime'),
+    '16M-3F-2B-3: page-timer/sync/PWM/comfort one-shot 读失败均用独立 typed wake 保留原 name/scheduledTime；不覆盖同名 owner，也不把 t0 伪装成 t0+1min');
+
+  const runScheduleReadReplacementRace16 = async ({
+    alarmName,
+    replacementName = alarmName,
+    mutateOwner
+  }) => {
+    const harness = createAlarmScheduleReadRequeueHarness16();
+    const alarm = { name: alarmName, scheduledTime: durableManualOffNow16 };
+    const receipt = harness.capture(alarm);
+    const gate = makeDeferred9G();
+    const started = makeDeferred9G();
+    harness.gateNextGet(gate.promise, () => started.resolve());
+    const run = harness.run(alarm, receipt);
+    await started.promise;
+    mutateOwner(harness);
+    harness.setAlarm(
+      replacementName,
+      durableManualOffNow16 + 30_000
+    );
+    gate.resolve();
+    const result = await run;
+    const replacementScheduledTime = harness.alarmAt(replacementName);
+    // 后继 writer 可能在可见后仍因 durable commit/owner postcheck 失败而撤销。
+    // original delivery 的独立 typed wake 必须已存在，不能把“看见 t2”当作
+    // t0 已被永久接管的证明。
+    harness.clearAlarm(replacementName);
+    return {
+      harness,
+      result,
+      alarm,
+      replacementName,
+      replacementScheduledTime
+    };
+  };
+  const pwmReadReplacementRace16 = await runScheduleReadReplacementRace16({
+    alarmName: 'ac-pwm',
+    mutateOwner: harness => harness.bumpMutation()
+  });
+  const pageReadReplacementRace16 = await runScheduleReadReplacementRace16({
+    alarmName: 'ac-page-timer-retry',
+    mutateOwner: harness => harness.bumpPhaseClaimAndRelease()
+  });
+  const activeReadReplacementRace16 =
+    await runScheduleReadReplacementRace16({
+      alarmName: 'ac-active-boundary',
+      replacementName: 'ac-active-boundary-schedule-retry',
+      mutateOwner: harness => harness.bumpActiveBoundaryOwner()
+    });
+  const replacementRaceResults16 = [
+    pwmReadReplacementRace16,
+    pageReadReplacementRace16,
+    activeReadReplacementRace16
+  ];
+  assertPass(replacementRaceResults16.every(item =>
+      item.result === true
+        && item.replacementScheduledTime
+          === durableManualOffNow16 + 30_000
+        && item.harness.alarmAt(item.replacementName) === 0
+        && item.harness.retryIdentities().some(identity =>
+          identity.name === item.alarm.name
+            && identity.scheduledTime === item.alarm.scheduledTime)),
+    '16M-3F-2B-3A: old delivery 读失败期间 M/phase/active owner 变更且出现 same/opposite +30s alarm；绝不覆盖新 alarm，同时必须保留 original t0 typed wake，防 transient successor 后续失败吞动作');
+  const legacyReleasedMarker16 = {
+    schemaVersion: 1,
+    state: 'released',
+    releasedAt: durableManualOffNow16,
+    releasedToken: 'legacy-known-token',
+    releasedThroughRequestedAt: durableManualOffNow16
+  };
+  const legacyCoveredRetryHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: legacyReleasedMarker16,
+      retryAlarms: [retryAlarmFor16(
+        'legacy-unlisted-covered-token',
+        durableManualOffNow16
+      )]
+    });
+  await legacyCoveredRetryHarness16.restore();
+  const legacyCoveredRetryState16 = legacyCoveredRetryHarness16.state();
+  const legacyFutureRetryHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: legacyReleasedMarker16,
+      retryAlarms: [retryAlarmFor16(
+        'legacy-future-token',
+        durableManualOffNow16 + 1
+      )]
+    });
+  await legacyFutureRetryHarness16.restore();
+  const legacyFutureRetryState16 = legacyFutureRetryHarness16.state();
+  const identityCoveredMarkerHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: {
+        ...legacyReleasedMarker16,
+        releasedTokens: ['legacy-known-token']
+      },
+      retryAlarms: [retryAlarmFor16(
+        'identity-unlisted-token',
+        durableManualOffNow16
+      )]
+    });
+  await identityCoveredMarkerHarness16.restore();
+  const identityCoveredMarkerState16 = identityCoveredMarkerHarness16.state();
+  assertPass(legacyCoveredRetryState16.manualOffAutomaticOnBlocked === false
+      && legacyCoveredRetryState16.retryAlarms.length === 0
+      && legacyFutureRetryState16.manualOffAutomaticOnBlocked === true
+      && legacyFutureRetryState16.manualOffAdmissionToken
+        === 'legacy-future-token'
+      && identityCoveredMarkerState16.manualOffAutomaticOnBlocked === true
+      && identityCoveredMarkerState16.manualOffAdmissionToken
+        === 'identity-unlisted-token',
+    '16M-3F-2C: legacy released marker 只用 through cutoff，较早 alarm 不复活而新 identity 可恢复；带 releasedTokens 后改为 exact identity 覆盖，不误杀未列 token');
+
+  const doubleReadFailureToken16 = 'restore-double-read-failure-A';
+  const doubleReadFailureRequestedAt16 = durableManualOffNow16 - 25_000;
+  const doubleReadFailureAlarm16 = retryAlarmFor16(
+    doubleReadFailureToken16,
+    doubleReadFailureRequestedAt16
+  );
+  const doubleReadFailureHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      retryAlarms: [doubleReadFailureAlarm16],
+      storageGetFailures: 1,
+      retryGetAllFailures: 1,
+      retryClearFailures: 1
+    });
+  await doubleReadFailureHarness16.restore();
+  const doubleReadFailureBlocked16 = doubleReadFailureHarness16.state();
+  const doubleReadFailureOnEpoch16 = doubleReadFailureHarness16.claim('on');
+  const doubleReadFailureAuthorityCommitted16 =
+    await doubleReadFailureHarness16.commitAuthority({
+      ensureCurrent: () => true,
+      markSyncPublishPending: true,
+      clearDeferredSyncDisable: true,
+      reason: 'explicit-enable-after-double-restore-read-failure'
+    });
+  const doubleReadFailureReleased16 =
+    await doubleReadFailureHarness16.releaseForOn(
+      doubleReadFailureOnEpoch16
+    );
+  const doubleReadFailureReleasedState16 =
+    doubleReadFailureHarness16.state();
+  const doubleReadFailureRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: doubleReadFailureReleasedState16.storedMarker,
+      retryAlarms: doubleReadFailureReleasedState16.retryAlarms
+    });
+  await doubleReadFailureRestartHarness16.restore();
+  const doubleReadFailureRestartState16 =
+    doubleReadFailureRestartHarness16.state();
+  assertPass(doubleReadFailureBlocked16.manualOffAutomaticOnBlocked === true
+      && doubleReadFailureBlocked16.manualOffAdmissionToken === ''
+      && doubleReadFailureBlocked16.deferredSyncDisablePending === true
+      && doubleReadFailureBlocked16
+        .deferredSyncDisableSyntheticReadFailure === true
+      && doubleReadFailureBlocked16.retryAlarms.length === 1
+      && doubleReadFailureAuthorityCommitted16 === true
+      && doubleReadFailureReleased16 === true
+      && doubleReadFailureReleasedState16.manualOffAutomaticOnBlocked === false
+      && doubleReadFailureReleasedState16.manualOffAdmissionToken === ''
+      && doubleReadFailureReleasedState16.deferredSyncDisablePending === false
+      && doubleReadFailureReleasedState16
+        .deferredSyncDisableSyntheticReadFailure === false
+      && doubleReadFailureReleasedState16.storedMarker?.state === 'released'
+      && doubleReadFailureReleasedState16.storedMarker?.releasedTokens
+        ?.includes(doubleReadFailureToken16)
+      && doubleReadFailureReleasedState16.retryAlarms.length === 1
+      && doubleReadFailureRestartState16.manualOffAutomaticOnBlocked === false
+      && doubleReadFailureRestartState16.manualOffAdmissionToken === ''
+      && doubleReadFailureRestartState16.deferredSyncDisablePending === false
+      && doubleReadFailureRestartState16.retryAlarms.length === 0,
+    '16M-3F-2E: restore storage/getAll 首次双失败固定首读 intent baseline；后到 explicit ON 将旧 OFF credential 归为 predecessor，原子 tombstone 后 restart 不复活 A');
+
+  const manualOnDeferredRaceGate16 = makeDeferred9G();
+  const manualOnDeferredReleaseStarted16 = makeDeferred9G();
+  const manualOnDeferredRaceHarness16 = new Function(
+    'releaseGate', 'markReleaseStarted',
+    `const msg = { type: 'toggleNow', action: 'on' };
+    let schedule = { enabled: true };
+    let automaticDisableAdmissionEpoch = 0;
+    let remoteDisableArrivalGeneration = 0;
+    let scheduleAuthorityRemoteDisableGenerationAtArrival = 0;
+    let manualToggleRequestEpoch = 3;
+    const localScheduleMutationGenerationAtArrival = 1;
+    let localScheduleMutationCommittedObservedAt = 1;
+    const localScheduleMutationObservedAtByGeneration = new Map([[1, 1]]);
+    let manualToggleAutomaticAdmissionEpoch = 0;
+    let manualToggleIntentEpoch = 3;
+    let manualToggleIntentAction = 'on';
+    let manualOffAutomaticOnBlocked = true;
+    let manualOffAdmissionToken = 'manual-on-old-off';
+    let deferredSyncDisablePending = false;
+    let deferredSyncDisableEpoch = 0;
+    const explicitDisableDurableWriteChain = Promise.resolve();
+    const calls = [];
+    let response = null;
+    function isManualToggleIntentCurrent(epoch, action) {
+      return epoch === manualToggleIntentEpoch
+        && action === manualToggleIntentAction;
+    }
+    async function waitForScheduleUpdatesToSettle() {
+      calls.push('schedule-settled');
+    }
+    async function refreshRemoteDisableBeforeLocalRelease() {
+      calls.push('sync-preflight');
+      return true;
+    }
+    function runSerializedSchedulePhaseOperation(operation, reason) {
+      calls.push('phase:' + reason);
+      return operation(71);
+    }
+    async function releaseManualOffAdmissionForManualOn() {
+      const deferredEpochAtRelease = deferredSyncDisableEpoch;
+      calls.push('release:start:' + deferredEpochAtRelease);
+      markReleaseStarted();
+      await releaseGate;
+      calls.push('release:end:' + deferredSyncDisableEpoch);
+      return !deferredSyncDisablePending
+        && deferredSyncDisableEpoch === deferredEpochAtRelease;
+    }
+    async function commitScheduleAndReleaseManualOffAdmission(options = {}) {
+      calls.push('consume:' + options.clearDeferredSyncDisable + ':'
+        + schedule.enabled + ':' + options.ensureCurrent());
+      if (!options.ensureCurrent()
+          || options.clearDeferredSyncDisable !== true) return false;
+      manualOffAutomaticOnBlocked = false;
+      manualOffAdmissionToken = '';
+      deferredSyncDisablePending = false;
+      deferredSyncDisableEpoch += 1;
+      return true;
+    }
+    async function resetDisabledPwmRuntime() {
+      calls.push('reset-disabled');
+    }
+    function releaseExplicitDisableAdmission(epoch) {
+      calls.push('release-disable-admission:' + epoch);
+    }
+    async function toggleNowAndSync(action, options = {}) {
+      calls.push('toggle:' + action + ':' + options.phaseAdmissionEpoch
+        + ':' + options.ensureCurrent());
+      return { success: true, physicalOn: true };
+    }
+    async function syncScheduleToSync(reason) {
+      calls.push('sync:' + reason + ':' + schedule.enabled);
+      return true;
+    }
+    async function recoverSafetyAfterFailedUserAuthority() {
+      calls.push('unexpected-recovery');
+      return null;
+    }
+    async function finalizeCompletedManualToggleAuthority(epoch, action) {
+      calls.push('complete:' + epoch + ':' + action);
+      return isManualToggleIntentCurrent(epoch, action);
+    }
+    function finishManualTogglePhaseCommit(epoch) {
+      calls.push('finish-phase:' + epoch);
+    }
+    async function commitLocalScheduleMutationAuthority(
+      generation,
+      reason = ''
+    ) {
+      calls.push('commit-mutation:' + generation + ':' + reason);
+      return generation === localScheduleMutationGenerationAtArrival;
+    }
+    function finishLocalScheduleMutationCommit(generation) {
+      calls.push('finish-mutation:' + generation);
+    }
+    function sendResponse(value) { response = value; }
+    async function dispatch() {
+      ${manualToggleMessageBody16}
+    }
+    return {
+      dispatch,
+      arriveDeferredDisable() {
+        deferredSyncDisablePending = true;
+        deferredSyncDisableEpoch += 1;
+        remoteDisableArrivalGeneration += 1;
+        calls.push('deferred-arrival:' + deferredSyncDisableEpoch);
+      },
+      state: () => ({
+        schedule: { ...schedule },
+        manualOffAutomaticOnBlocked,
+        manualOffAdmissionToken,
+        deferredSyncDisablePending,
+        deferredSyncDisableEpoch,
+        response
+      }),
+      calls
+    };`
+  )(
+    manualOnDeferredRaceGate16.promise,
+    () => manualOnDeferredReleaseStarted16.resolve()
+  );
+  const manualOnDeferredRaceRun16 = manualOnDeferredRaceHarness16.dispatch();
+  await manualOnDeferredReleaseStarted16.promise;
+  manualOnDeferredRaceHarness16.arriveDeferredDisable();
+  manualOnDeferredRaceGate16.resolve();
+  await manualOnDeferredRaceRun16;
+  const manualOnDeferredRaceState16 = manualOnDeferredRaceHarness16.state();
+  assertPass(manualOnDeferredRaceState16.response?.phaseStale === true
+      && manualOnDeferredRaceState16.response?.success === false
+      && manualOnDeferredRaceState16.schedule.enabled === true
+      && manualOnDeferredRaceState16.manualOffAutomaticOnBlocked === true
+      && manualOnDeferredRaceState16.manualOffAdmissionToken
+        === 'manual-on-old-off'
+      && manualOnDeferredRaceState16.deferredSyncDisablePending === true
+      && manualOnDeferredRaceHarness16.calls.join(',')
+        === 'schedule-settled,phase:manual-toggle-on,commit-mutation:1:toggleNow-on-local-mutation-intent,sync-preflight,release:start:0,deferred-arrival:1,release:end:1,finish-phase:3,finish-mutation:1'
+      && !manualOnDeferredRaceHarness16.calls.includes(
+        'unexpected-recovery'
+      )
+      && !manualOnDeferredRaceHarness16.calls.some(call =>
+        call.startsWith('toggle:') || call.startsWith('sync:'))
+      && manualToggleMessageBody16.includes(
+        'scheduleAuthorityRemoteDisableGenerationAtArrival')
+      && manualToggleMessageBody16.includes(
+        '=== remoteDisableArrivalGeneration'),
+    '16M-3F-2D: manual ON release await 中 remote disable 换 arrival generation；旧 ON 立即 stale，零 consume/零物理 ON/零 outbound true');
+
+  const freshManualOnAfterRemoteHarness16 = new Function(
+    `const msg = { type: 'toggleNow', action: 'on' };
+    let schedule = { enabled: true };
+    let automaticDisableAdmissionEpoch = 0;
+    let remoteDisableArrivalGeneration = 1;
+    let scheduleAuthorityRemoteDisableGenerationAtArrival = 1;
+    let manualToggleRequestEpoch = 4;
+    const localScheduleMutationGenerationAtArrival = 1;
+    let localScheduleMutationCommittedObservedAt = 1;
+    const localScheduleMutationObservedAtByGeneration = new Map([[1, 1]]);
+    let manualToggleAutomaticAdmissionEpoch = 0;
+    let manualToggleIntentEpoch = 4;
+    let manualToggleIntentAction = 'on';
+    let manualOffAutomaticOnBlocked = true;
+    let manualOffAdmissionToken = 'remote-disable-predecessor-off';
+    let deferredSyncDisablePending = true;
+    let deferredSyncDisableEpoch = 1;
+    const explicitDisableDurableWriteChain = Promise.resolve();
+    const calls = [];
+    let response = null;
+    function isManualToggleIntentCurrent(epoch, action) {
+      return epoch === manualToggleIntentEpoch
+        && action === manualToggleIntentAction;
+    }
+    async function waitForScheduleUpdatesToSettle() {
+      calls.push('schedule-settled');
+    }
+    async function refreshRemoteDisableBeforeLocalRelease() {
+      calls.push('sync-preflight');
+      return true;
+    }
+    function runSerializedSchedulePhaseOperation(operation, reason) {
+      calls.push('phase:' + reason);
+      return operation(72);
+    }
+    async function releaseManualOffAdmissionForManualOn() {
+      throw new Error('pending remote disable must use consume path');
+    }
+    async function commitScheduleAndReleaseManualOffAdmission(options = {}) {
+      calls.push('consume:' + options.clearDeferredSyncDisable + ':'
+        + schedule.enabled + ':' + options.ensureCurrent());
+      if (!options.ensureCurrent()
+          || options.clearDeferredSyncDisable !== true) return false;
+      manualOffAutomaticOnBlocked = false;
+      manualOffAdmissionToken = '';
+      deferredSyncDisablePending = false;
+      deferredSyncDisableEpoch += 1;
+      return true;
+    }
+    async function resetDisabledPwmRuntime() {
+      calls.push('reset-disabled');
+    }
+    function releaseExplicitDisableAdmission(epoch) {
+      calls.push('release-disable-admission:' + epoch);
+    }
+    async function toggleNowAndSync(action, options = {}) {
+      calls.push('toggle:' + action + ':' + options.phaseAdmissionEpoch
+        + ':' + options.ensureCurrent());
+      return { success: true, physicalOn: true };
+    }
+    async function syncScheduleToSync(reason) {
+      calls.push('sync:' + reason + ':' + schedule.enabled);
+      return true;
+    }
+    async function recoverSafetyAfterFailedUserAuthority() {
+      calls.push('unexpected-recovery');
+      return null;
+    }
+    async function finalizeCompletedManualToggleAuthority(epoch, action) {
+      calls.push('complete:' + epoch + ':' + action);
+      return isManualToggleIntentCurrent(epoch, action);
+    }
+    function finishManualTogglePhaseCommit(epoch) {
+      calls.push('finish-phase:' + epoch);
+    }
+    async function commitLocalScheduleMutationAuthority(
+      generation,
+      reason = ''
+    ) {
+      calls.push('commit-mutation:' + generation + ':' + reason);
+      return generation === localScheduleMutationGenerationAtArrival;
+    }
+    function finishLocalScheduleMutationCommit(generation) {
+      calls.push('finish-mutation:' + generation);
+    }
+    function sendResponse(value) { response = value; }
+    async function dispatch() {
+      ${manualToggleMessageBody16}
+    }
+    return {
+      dispatch,
+      state: () => ({
+        schedule: { ...schedule },
+        manualOffAutomaticOnBlocked,
+        manualOffAdmissionToken,
+        deferredSyncDisablePending,
+        deferredSyncDisableEpoch,
+        response
+      }),
+      calls
+    };`
+  )();
+  await freshManualOnAfterRemoteHarness16.dispatch();
+  const freshManualOnAfterRemoteState16 =
+    freshManualOnAfterRemoteHarness16.state();
+  assertPass(freshManualOnAfterRemoteState16.response?.success === true
+      && freshManualOnAfterRemoteState16.response?.physicalOn === true
+      && freshManualOnAfterRemoteState16.schedule.enabled === false
+      && freshManualOnAfterRemoteState16.manualOffAutomaticOnBlocked === false
+      && freshManualOnAfterRemoteState16.manualOffAdmissionToken === ''
+      && freshManualOnAfterRemoteState16.deferredSyncDisablePending === false
+      && freshManualOnAfterRemoteHarness16.calls.join(',')
+        === 'schedule-settled,phase:manual-toggle-on,commit-mutation:1:toggleNow-on-local-mutation-intent,sync-preflight,consume:true:false:true,reset-disabled,release-disable-admission:0,toggle:on:72:true,sync:toggleNowAndSync-on:false,complete:4:on,finish-phase:4,finish-mutation:1'
+      && !freshManualOnAfterRemoteHarness16.calls.includes(
+        'unexpected-recovery'),
+    '16M-3F-2D-1: remote disable 后到达的新 manual ON 冻结最新 generation；先 durable consume 为 automation=false，再仅执行一次 physical ON/outbound false');
+
+  // startup 旧 manual-OFF token 尚在，但 live onChanged 没送到本 SW；新
+  // manual ON 抢到 intent 后必须在自己的 M barrier 内 fresh-read sync F。
+  // F 作为 safety authority 被 durable consume，manual ON 仅执行一次物理
+  // ON，不能把旧 enabled=true 复活成自动 PWM。
+  const manualOnPreflightFRemote16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 90,
+    onMinutes: 16,
+    offMinutes: 44
+  };
+  const manualOnPreflightFHarness16 = new Function(
+    'remoteF',
+    `const msg = { type: 'toggleNow', action: 'on' };
+    let schedule = { enabled: true };
+    let automaticDisableAdmissionEpoch = 0;
+    let remoteDisableArrivalGeneration = 0;
+    let scheduleAuthorityRemoteDisableGenerationAtArrival = 0;
+    let manualToggleRequestEpoch = 5;
+    const localScheduleMutationGenerationAtArrival = 1;
+    let localScheduleMutationCommittedObservedAt = 1;
+    const localScheduleMutationObservedAtByGeneration = new Map([[1, 1]]);
+    let manualToggleAutomaticAdmissionEpoch = 0;
+    let manualToggleIntentEpoch = 5;
+    let manualToggleIntentAction = 'on';
+    let manualOffAutomaticOnBlocked = true;
+    let manualOffAdmissionToken = 'startup-recovered-old-off-token';
+    let deferredSyncDisablePending = false;
+    let deferredSyncDisableEpoch = 0;
+    const explicitDisableDurableWriteChain = Promise.resolve();
+    const calls = [];
+    let response = null;
+    let physicalOnCount = 0;
+    function isManualToggleIntentCurrent(epoch, action) {
+      return epoch === manualToggleIntentEpoch
+        && action === manualToggleIntentAction;
+    }
+    async function waitForScheduleUpdatesToSettle() {
+      calls.push('schedule-settled');
+    }
+    function runSerializedSchedulePhaseOperation(operation, reason) {
+      calls.push('phase:' + reason);
+      return operation(73);
+    }
+    async function commitLocalScheduleMutationAuthority(
+      generation,
+      reason = ''
+    ) {
+      calls.push('commit-mutation:' + generation + ':' + reason);
+      return generation === localScheduleMutationGenerationAtArrival;
+    }
+    async function refreshRemoteDisableBeforeLocalRelease(
+      ensureCurrent,
+      reason
+    ) {
+      calls.push('sync-preflight:' + reason + ':' + ensureCurrent());
+      if (!ensureCurrent()) return false;
+      deferredSyncDisablePending = true;
+      deferredSyncDisableEpoch += 1;
+      calls.push('defer-F:' + remoteF.syncedAt);
+      return true;
+    }
+    async function releaseManualOffAdmissionForManualOn() {
+      throw new Error('fresh preflight F must use consume path');
+    }
+    async function commitScheduleAndReleaseManualOffAdmission(options = {}) {
+      calls.push('consume:' + options.clearDeferredSyncDisable + ':'
+        + options.preserveDeferredSyncSuccessor + ':'
+        + options.ensureCurrent());
+      if (!options.ensureCurrent()
+          || options.clearDeferredSyncDisable !== true) return false;
+      schedule.enabled = false;
+      manualOffAutomaticOnBlocked = false;
+      manualOffAdmissionToken = '';
+      deferredSyncDisablePending = false;
+      deferredSyncDisableEpoch += 1;
+      return true;
+    }
+    async function resetDisabledPwmRuntime() {
+      calls.push('reset-disabled');
+    }
+    function releaseExplicitDisableAdmission(epoch) {
+      calls.push('release-disable-admission:' + epoch);
+    }
+    async function toggleNowAndSync(action, options = {}) {
+      physicalOnCount += action === 'on' ? 1 : 0;
+      calls.push('toggle:' + action + ':' + options.phaseAdmissionEpoch
+        + ':' + options.ensureCurrent());
+      return { success: true, physicalOn: action === 'on' };
+    }
+    async function syncScheduleToSync(reason) {
+      calls.push('sync:' + reason + ':' + schedule.enabled);
+      return true;
+    }
+    async function recoverSafetyAfterFailedUserAuthority() {
+      calls.push('unexpected-recovery');
+      return null;
+    }
+    async function finalizeCompletedManualToggleAuthority(epoch, action) {
+      calls.push('complete:' + epoch + ':' + action);
+      return isManualToggleIntentCurrent(epoch, action);
+    }
+    function finishManualTogglePhaseCommit(epoch) {
+      calls.push('finish-phase:' + epoch);
+    }
+    function finishLocalScheduleMutationCommit(generation) {
+      calls.push('finish-mutation:' + generation);
+    }
+    function sendResponse(value) { response = value; }
+    async function dispatch() {
+      ${manualToggleMessageBody16}
+    }
+    return {
+      dispatch,
+      state: () => ({
+        schedule: { ...schedule },
+        manualOffAutomaticOnBlocked,
+        manualOffAdmissionToken,
+        deferredSyncDisablePending,
+        deferredSyncDisableEpoch,
+        physicalOnCount,
+        response
+      }),
+      calls
+    };`
+  )(manualOnPreflightFRemote16);
+  await manualOnPreflightFHarness16.dispatch();
+  const manualOnPreflightFState16 = manualOnPreflightFHarness16.state();
+  assertPass(manualOnPreflightFState16.response?.success === true
+      && manualOnPreflightFState16.response?.physicalOn === true
+      && manualOnPreflightFState16.physicalOnCount === 1
+      && manualOnPreflightFState16.schedule.enabled === false
+      && manualOnPreflightFState16.manualOffAutomaticOnBlocked === false
+      && manualOnPreflightFState16.manualOffAdmissionToken === ''
+      && manualOnPreflightFState16.deferredSyncDisablePending === false
+      && manualOnPreflightFHarness16.calls.join(',')
+        === 'schedule-settled,phase:manual-toggle-on,commit-mutation:1:toggleNow-on-local-mutation-intent,sync-preflight:toggleNow-on:true,defer-F:'
+          + manualOnPreflightFRemote16.syncedAt
+          + ',consume:true:true:true,reset-disabled,release-disable-admission:0,toggle:on:73:true,sync:toggleNowAndSync-on:false,complete:5:on,finish-phase:5,finish-mutation:1'
+      && !manualOnPreflightFHarness16.calls.includes(
+        'unexpected-recovery'),
+    '16M-3F-2D-2: startup 旧 OFF token 被新 manual ON 抢占时仍在 M 后 fresh-read/consume sync F；durable automation=false 且仅一次 physical ON');
+
+  const deferredDisableRecord16 = {
+    pending: true,
+    receivedAt: durableManualOffNow16 - 10_000,
+    reason: 'remote-disable-during-manual-off',
+    remote: { enabled: false, syncedAt: durableManualOffNow16 - 20_000 }
+  };
+  const releasedBeforeDeferredInit16 = {
+    schemaVersion: 1,
+    state: 'released',
+    releasedAt: durableManualOffNow16 - 5_000,
+    releasedToken: 'completed-off-before-restart',
+    releasedTokens: ['completed-off-before-restart'],
+    releasedThroughRequestedAt: durableManualOffNow16 - 6_000
+  };
+  const failedDeferredInitHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: releasedBeforeDeferredInit16,
+      enabled: true,
+      deferredSyncDisable: deferredDisableRecord16,
+      syncPending: true,
+      syncPublishFailures: 2
+    });
+  await failedDeferredInitHarness16.runInitDeferredRecovery();
+  const failedDeferredInitState16 = failedDeferredInitHarness16.state();
+  const restartedDeferredInitHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: failedDeferredInitState16.storedMarker,
+      enabled: failedDeferredInitState16.storedSchedule?.enabled,
+      deferredSyncDisable:
+        failedDeferredInitState16.storedDeferredSyncDisable,
+      syncPending: failedDeferredInitState16.syncPublishPending
+    });
+  await restartedDeferredInitHarness16.runInitDeferredRecovery();
+  const restartedDeferredInitState16 = restartedDeferredInitHarness16.state();
+  const failedDeferredFirstPublishIndex16 =
+    failedDeferredInitState16.lifecycleCalls.findIndex(call =>
+      call.startsWith('publish:'));
+  const failedDeferredDurableFalseIndex16 =
+    failedDeferredInitState16.lifecycleCalls.findIndex(call =>
+      call === 'local-set-schedule:false:true');
+  const initDeferredSettleIndex16 = initBody13.indexOf(
+    'else if (deferredSyncDisablePending'
+  );
+  const initPendingPublishIndex16 = initBody13.indexOf(
+    'const pendingSyncPublish = await getSyncPublishPending();'
+  );
+  assertPass(failedDeferredInitState16.storedSchedule?.enabled === false
+      && failedDeferredInitState16.storedDeferredSyncDisable?.pending === false
+      && failedDeferredInitState16.storedMarker?.state === 'released'
+      && failedDeferredInitState16.syncPublishPending === true
+      && failedDeferredInitState16.phaseOwner === 0
+      && failedDeferredInitState16.outboundPublishes.length === 2
+      && failedDeferredInitState16.outboundPublishes.every(payload =>
+        payload.enabled === false && payload.pending === true)
+      && failedDeferredDurableFalseIndex16 >= 0
+      && failedDeferredFirstPublishIndex16
+        > failedDeferredDurableFalseIndex16
+      && !failedDeferredInitState16.lifecycleCalls.includes(
+        'unexpected-pending-off-resume')
+      && restartedDeferredInitState16.outboundPublishes.length === 1
+      && restartedDeferredInitState16.outboundPublishes[0].enabled === false
+      && restartedDeferredInitState16.syncPublishPending === false
+      && restartedDeferredInitState16.deferredSyncDisablePending === false
+      && initDeferredSettleIndex16 >= 0
+      && initPendingPublishIndex16 > initDeferredSettleIndex16,
+    '16M-3F-3: init 读取 released OFF + durable remote disable + syncPending 时，先同 phase 原子落 enabled=false 再允许 outbound；发布连败跨重启仍只重放 false');
+
+  // storage.get 尚未证明 durable F 时，onChanged T 只能先落内存 mailbox。
+  // restore 一旦读到 F，必须在返回前把 early T 迁成 durable successor；
+  // 随后的 manual/startup settle 只清 F，不能把 T 随本机 false publish 丢掉。
+  const startupEarlySuccessorStorageGate16 = makeDeferred9G();
+  const startupEarlySuccessorStorageStarted16 = makeDeferred9G();
+  const startupEarlySuccessorF16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 - 4_000,
+    onMinutes: 18,
+    offMinutes: 42
+  };
+  const startupEarlySuccessorT16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 - 3_000,
+    onMinutes: 21,
+    offMinutes: 39,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 30 * 60_000
+  };
+  const startupEarlySuccessorHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: releasedBeforeDeferredInit16,
+      enabled: true,
+      deferredSyncDisable: {
+        pending: true,
+        receivedAt: durableManualOffNow16 - 5_000,
+        reason: 'startup-durable-F',
+        remote: startupEarlySuccessorF16
+      },
+      syncRemote: startupEarlySuccessorT16,
+      storageGetGate: startupEarlySuccessorStorageGate16.promise,
+      onStorageGetStarted: () =>
+        startupEarlySuccessorStorageStarted16.resolve()
+    });
+  const startupEarlySuccessorRestore16 =
+    startupEarlySuccessorHarness16.restore();
+  await startupEarlySuccessorStorageStarted16.promise;
+  startupEarlySuccessorHarness16.queueEarlySyncRemote(
+    startupEarlySuccessorT16
+  );
+  startupEarlySuccessorStorageGate16.resolve();
+  await startupEarlySuccessorRestore16;
+  const startupEarlySuccessorRestored16 =
+    startupEarlySuccessorHarness16.state();
+  const startupEarlySuccessorSettled16 =
+    await startupEarlySuccessorHarness16.settleDeferredForCurrentUser(
+      'startup-early-successor'
+    );
+  const startupEarlySuccessorAfterSettle16 =
+    startupEarlySuccessorHarness16.state();
+  const startupEarlySuccessorRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: startupEarlySuccessorAfterSettle16.storedMarker,
+      enabled: startupEarlySuccessorAfterSettle16.storedSchedule?.enabled,
+      deferredSyncDisable:
+        startupEarlySuccessorAfterSettle16.storedDeferredSyncDisable,
+      syncPending: startupEarlySuccessorAfterSettle16.syncPublishPending
+    });
+  await startupEarlySuccessorRestartHarness16.restore();
+  const startupEarlySuccessorRestarted16 =
+    startupEarlySuccessorRestartHarness16.state();
+  const startupEarlySuccessorApplied16 = [];
+  const startupEarlySuccessorAdoptHarness16 =
+    loadTryAdoptSyncedStateF90({
+      chrome: { storage: { sync: { async get() { return {}; } } } },
+      applySyncedPhase: async remote => {
+        startupEarlySuccessorApplied16.push(structuredClone(remote));
+        return true;
+      }
+    });
+  startupEarlySuccessorAdoptHarness16.restoreDeferredRecord(
+    startupEarlySuccessorRestarted16.storedDeferredSyncDisable
+  );
+  const startupEarlySuccessorAdopted16 =
+    await startupEarlySuccessorAdoptHarness16(
+      'startup-early-successor-restart'
+    );
+  const startupEarlySuccessorAdoptState16 =
+    startupEarlySuccessorAdoptHarness16.state();
+  assertPass(startupEarlySuccessorRestored16.deferredSyncDisablePending === true
+      && startupEarlySuccessorRestored16
+        .deferredSyncDisableRemoteSnapshot?.enabled === false
+      && startupEarlySuccessorRestored16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && startupEarlySuccessorRestored16.pendingRemote?.syncedAt
+        === startupEarlySuccessorT16.syncedAt
+      && startupEarlySuccessorRestored16.pendingRemoteCausalEnvelope === null
+      && startupEarlySuccessorRestored16
+        .storedDeferredSyncDisable?.pending === true
+      && startupEarlySuccessorRestored16
+        .storedDeferredSyncDisable?.successor === undefined
+      && startupEarlySuccessorSettled16?.remoteDisabled === true
+      && startupEarlySuccessorAfterSettle16.storedSchedule?.enabled === false
+      && startupEarlySuccessorAfterSettle16.deferredSyncDisablePending === false
+      && startupEarlySuccessorAfterSettle16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === startupEarlySuccessorT16.syncedAt
+      && startupEarlySuccessorAfterSettle16
+        .storedDeferredSyncDisable?.safetyCleared === true
+      && startupEarlySuccessorAfterSettle16
+        .storedDeferredSyncDisable?.successor?.remote?.syncedAt
+          === startupEarlySuccessorT16.syncedAt
+      && startupEarlySuccessorRestarted16.deferredSyncDisablePending === false
+      && startupEarlySuccessorRestarted16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === startupEarlySuccessorT16.syncedAt
+      && startupEarlySuccessorAdopted16 === true
+      && startupEarlySuccessorApplied16.length === 1
+      && startupEarlySuccessorApplied16[0]?.enabled === true
+      && startupEarlySuccessorApplied16[0]?.syncedAt
+        === startupEarlySuccessorT16.syncedAt
+      && startupEarlySuccessorAdoptState16
+        .deferredSyncDisableSuccessorSnapshot === null,
+    '16M-3F-3A: startup storage.get await 中 early T 令旧 restore 丧失 owner；旧快照不抢写 mailbox，manual settle fresh sync 后才绑定，T 跨 SW restart 再采纳');
+
+  // 纯 manual-OFF marker（尚无 remote F）期间到达的 T 也必须先落
+  // safetyCleared mailbox。即使旧本机 OFF phase 已写回 sync、随后 SW 在
+  // watermark/drain 前终止，restart 仍要从 local durable successor 恢复 T。
+  const manualOffOnlySuccessorHarness16 =
+    loadDurableManualOffAdmissionHarness16({ enabled: true });
+  const manualOffOnlySuccessorEpoch16 =
+    manualOffOnlySuccessorHarness16.claim('off');
+  const manualOffOnlyAdmission16 =
+    manualOffOnlySuccessorHarness16.begin(manualOffOnlySuccessorEpoch16);
+  const manualOffOnlyAdmissionReceipt16 =
+    await manualOffOnlyAdmission16.durablePromise;
+  const manualOffOnlyRemoteT16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 + 9,
+    onMinutes: 24,
+    offMinutes: 36,
+    pwmState: 'off',
+    nextTriggerAt: durableManualOffNow16 + 20 * 60_000
+  };
+  const manualOffOnlySuccessorPersisted16 =
+    await manualOffOnlySuccessorHarness16.rememberSuccessor(
+      manualOffOnlyRemoteT16,
+      'remote-T-during-manual-off-only',
+      {
+        scheduleAuthorityGeneration: 0,
+        scheduleMutationGeneration: 0
+      }
+    );
+  const manualOffOnlyReleased16 =
+    await manualOffOnlySuccessorHarness16.commit({
+      ensureCurrent: () => true,
+      markSyncPublishPending: true,
+      drainDeferredSync: false,
+      reason: 'manual-off-phase-before-crash'
+    });
+  const manualOffOnlyPublished16 =
+    await manualOffOnlySuccessorHarness16.publishSchedule(
+      'manual-off-phase-before-crash'
+    );
+  const manualOffOnlyBeforeCrash16 =
+    manualOffOnlySuccessorHarness16.state();
+  const manualOffOnlyRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: manualOffOnlyBeforeCrash16.storedMarker,
+      enabled: manualOffOnlyBeforeCrash16.storedSchedule?.enabled,
+      deferredSyncDisable:
+        manualOffOnlyBeforeCrash16.storedDeferredSyncDisable,
+      syncPending: manualOffOnlyBeforeCrash16.syncPublishPending
+    });
+  await manualOffOnlyRestartHarness16.restore();
+  const manualOffOnlyRestarted16 = manualOffOnlyRestartHarness16.state();
+  const manualOffOnlyApplied16 = [];
+  const manualOffOnlyAdoptHarness16 = loadTryAdoptSyncedStateF90({
+    chrome: { storage: { sync: { async get() { return {}; } } } },
+    applySyncedPhase: async remote => {
+      manualOffOnlyApplied16.push(structuredClone(remote));
+      return true;
+    }
+  });
+  manualOffOnlyAdoptHarness16.restoreDeferredRecord(
+    manualOffOnlyRestarted16.storedDeferredSyncDisable
+  );
+  const manualOffOnlyAdopted16 = await manualOffOnlyAdoptHarness16(
+    'manual-off-only-successor-restart'
+  );
+  assertPass(manualOffOnlyAdmissionReceipt16?.persisted === true
+      && manualOffOnlySuccessorPersisted16 === true
+      && manualOffOnlyReleased16 === true
+      && manualOffOnlyPublished16 === true
+      && manualOffOnlyBeforeCrash16.manualOffAutomaticOnBlocked === false
+      && manualOffOnlyBeforeCrash16.storedMarker?.state === 'released'
+      && manualOffOnlyBeforeCrash16
+        .storedDeferredSyncDisable?.safetyCleared === true
+      && manualOffOnlyBeforeCrash16
+        .storedDeferredSyncDisable?.successor?.remote?.syncedAt
+          === manualOffOnlyRemoteT16.syncedAt
+      && manualOffOnlyBeforeCrash16.outboundPublishes.length === 1
+      && manualOffOnlyRestarted16.deferredSyncDisablePending === false
+      && manualOffOnlyRestarted16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === manualOffOnlyRemoteT16.syncedAt
+      && manualOffOnlyAdopted16 === true
+      && manualOffOnlyApplied16.length === 1
+      && manualOffOnlyApplied16[0]?.syncedAt
+        === manualOffOnlyRemoteT16.syncedAt,
+    '16M-3F-3B: pure manual-OFF marker 期间 T 先落 safetyCleared mailbox；旧 OFF sync 成功后 SW crash 仍可在 restart 采纳 T');
+
+  // F 的 retry alarm 可能在 durable clear 后物理删除失败。T 随后 apply
+  // 写 successorApplied tombstone 时仍须携带 released alarm identity；否则
+  // restart 会把残留 alarm 误判成一份新的 synthetic F。
+  const retryTombstoneReceivedAt16 = durableManualOffNow16 - 2_000;
+  const retryTombstoneRemoteF16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 - 1_500
+  };
+  const retryTombstoneCredential16 =
+    loadDurableManualOffAdmissionHarness16()
+      .roundTripDisableRetryCredential(
+        retryTombstoneRemoteF16,
+        retryTombstoneReceivedAt16
+      );
+  const retryTombstoneAlarmName16 = retryTombstoneCredential16.name;
+  const retryTombstoneRemoteT16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 - 1_000,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 30 * 60_000
+  };
+  const retryTombstoneHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: releasedBeforeDeferredInit16,
+      enabled: true,
+      deferredSyncDisable: {
+        pending: true,
+        receivedAt: retryTombstoneReceivedAt16,
+        safetyCutoffObservedAt: retryTombstoneReceivedAt16,
+        successorPredecessorCoverageComplete: true,
+        successorPredecessorCoverageThroughObservedAt:
+          retryTombstoneReceivedAt16,
+        remote: retryTombstoneRemoteF16,
+        retryAlarmName: retryTombstoneAlarmName16,
+        successor: {
+          observedAt: retryTombstoneReceivedAt16 + 1,
+          remote: retryTombstoneRemoteT16
+        }
+      },
+      retryAlarms: [{
+        name: retryTombstoneAlarmName16,
+        scheduledTime: retryTombstoneReceivedAt16 + 60_000,
+        periodInMinutes: 1
+      }],
+      retryClearFailures: 1
+    });
+  await retryTombstoneHarness16.restore();
+  const retryTombstoneSettled16 =
+    await retryTombstoneHarness16.settleDeferredForCurrentUser(
+      'retry-tombstone-F'
+    );
+  const retryTombstoneAfterF16 = retryTombstoneHarness16.state();
+  const retryTombstoneSuccessorCleared16 =
+    await retryTombstoneHarness16.clearSuccessor(
+      retryTombstoneRemoteT16
+    );
+  const retryTombstoneAfterT16 = retryTombstoneHarness16.state();
+  const retryTombstoneRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: retryTombstoneAfterT16.storedMarker,
+      enabled: retryTombstoneAfterT16.storedSchedule?.enabled,
+      deferredSyncDisable: retryTombstoneAfterT16.storedDeferredSyncDisable,
+      retryAlarms: retryTombstoneAfterT16.retryAlarms
+    });
+  await retryTombstoneRestartHarness16.restore();
+  await Promise.resolve();
+  const retryTombstoneRestarted16 = retryTombstoneRestartHarness16.state();
+  assertPass(retryTombstoneSettled16?.remoteDisabled === true
+      && retryTombstoneCredential16.receivedAt
+        === retryTombstoneReceivedAt16
+      && retryTombstoneCredential16.remote?.syncedAt
+        === retryTombstoneRemoteF16.syncedAt
+      && retryTombstoneAfterF16.deferredSyncDisablePending === false
+      && retryTombstoneAfterF16.retryAlarms.some(alarm =>
+        alarm.name === retryTombstoneAlarmName16)
+      && retryTombstoneAfterF16
+        .storedDeferredSyncDisable?.releasedRetryAlarmNames
+          ?.includes(retryTombstoneAlarmName16)
+      && retryTombstoneAfterF16
+        .deferredSyncDisableReleasedRetryAlarmNames
+          .includes(retryTombstoneAlarmName16)
+      && retryTombstoneSuccessorCleared16 === true
+      && retryTombstoneAfterT16
+        .storedDeferredSyncDisable?.successorAppliedAt > 0
+      && retryTombstoneAfterT16
+        .storedDeferredSyncDisable?.releasedRetryAlarmNames
+          ?.includes(retryTombstoneAlarmName16)
+      && retryTombstoneRestarted16.deferredSyncDisablePending === false
+      && retryTombstoneRestarted16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && retryTombstoneRestarted16.retryAlarms.length === 0,
+    '16M-3F-3C: F retry alarm clear reject 后 T apply tombstone 继续携 released identity；restart 清残钟而不复活 synthetic F');
+
+  // F 的 local marker 两次都失败时，专用 immutable alarm 是唯一跨 SW
+  // 凭证。restart 必须把它恢复成 synthetic F（payload 不可信时 syncedAt=0），
+  // 继续 fail-close，而不是因 local.set 失败放行旧自动 ON。
+  const failedDeferredMarkerHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredMarkerSetFailures: 2
+    });
+  const failedDeferredMarkerRemoteF16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 30,
+    onMinutes: 11,
+    offMinutes: 49
+  };
+  const failedDeferredMarkerPersisted16 =
+    await failedDeferredMarkerHarness16.deferRemote(
+      failedDeferredMarkerRemoteF16,
+      'F-marker-double-write-failure'
+    );
+  await Promise.resolve();
+  const failedDeferredMarkerBeforeRestart16 =
+    failedDeferredMarkerHarness16.state();
+  const failedDeferredMarkerRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      retryAlarms: failedDeferredMarkerBeforeRestart16.retryAlarms
+    });
+  await failedDeferredMarkerRestartHarness16.restore();
+  const failedDeferredMarkerRestarted16 =
+    failedDeferredMarkerRestartHarness16.state();
+  assertPass(failedDeferredMarkerPersisted16 === false
+      && failedDeferredMarkerBeforeRestart16.deferredSyncDisablePending === true
+      && failedDeferredMarkerBeforeRestart16.storedDeferredSyncDisable === null
+      && failedDeferredMarkerBeforeRestart16.retryAlarms.length === 1
+      && failedDeferredMarkerBeforeRestart16.retryAlarms[0]?.name
+        .startsWith('ac-deferred-sync-disable-retry-test:')
+      && failedDeferredMarkerRestarted16.deferredSyncDisablePending === true
+      && failedDeferredMarkerRestarted16
+        .deferredSyncDisableRemoteSnapshot?.enabled === false
+      && failedDeferredMarkerRestarted16
+        .deferredSyncDisableRemoteSnapshot?.syncedAt
+          === failedDeferredMarkerRemoteF16.syncedAt
+      && failedDeferredMarkerRestarted16
+        .deferredSyncDisableRemoteSnapshotComplete === true
+      && failedDeferredMarkerRestarted16.manualOffAutomaticOnBlocked === false
+      && failedDeferredMarkerRestarted16.retryAlarms.length === 1,
+    '16M-3F-3D: F marker 双写失败但 compact payload alarm 成功时，restart 恢复 exact F 与完整 receipt 并保持自动 ON fail-close');
+
+  // startup get 本身 reject 时，catch 会建立 synthetic F；但 await 期间
+  // 到达且已经 durable 的 early T 不能被 catch 的 fail-close 初始化抹掉。
+  // F settle 后 T 仍须留在 safetyCleared receipt，供下一 SW 先于旧 publish 读取。
+  const rejectedStartupEarlyTGate16 = makeDeferred9G();
+  const rejectedStartupEarlyTStarted16 = makeDeferred9G();
+  const rejectedStartupEarlyTHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      storageGetGate: rejectedStartupEarlyTGate16.promise,
+      onStorageGetStarted: () => rejectedStartupEarlyTStarted16.resolve(),
+      storageGetFailures: 1
+    });
+  const rejectedStartupEarlyTRestore16 =
+    rejectedStartupEarlyTHarness16.restore();
+  await rejectedStartupEarlyTStarted16.promise;
+  const rejectedStartupRemoteT16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 + 40,
+    onMinutes: 26,
+    offMinutes: 34,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 35 * 60_000
+  };
+  rejectedStartupEarlyTHarness16.queueEarlySyncRemote(
+    rejectedStartupRemoteT16
+  );
+  const rejectedStartupEarlyTPersisted16 =
+    await rejectedStartupEarlyTHarness16.rememberSuccessor(
+      rejectedStartupRemoteT16,
+      'early-T-before-startup-get-reject',
+      {
+        scheduleAuthorityGeneration: 0,
+        scheduleMutationGeneration: 0
+      }
+    );
+  rejectedStartupEarlyTGate16.resolve();
+  await rejectedStartupEarlyTRestore16;
+  const rejectedStartupEarlyTRestored16 =
+    rejectedStartupEarlyTHarness16.state();
+  const rejectedStartupEarlyTSettled16 =
+    await rejectedStartupEarlyTHarness16.settleDeferredForCurrentUser(
+      'startup-get-reject-synthetic-F'
+    );
+  const rejectedStartupEarlyTAfterSettle16 =
+    rejectedStartupEarlyTHarness16.state();
+  assertPass(rejectedStartupEarlyTPersisted16 === true
+      && rejectedStartupEarlyTRestored16.deferredSyncDisablePending === true
+      && rejectedStartupEarlyTRestored16
+        .deferredSyncDisableRemoteSnapshot?.syncedAt === 0
+      && rejectedStartupEarlyTRestored16
+        .deferredSyncDisableRemoteSnapshotComplete === false
+      && rejectedStartupEarlyTRestored16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && rejectedStartupEarlyTRestored16.pendingRemote?.syncedAt
+        === rejectedStartupRemoteT16.syncedAt
+      && rejectedStartupEarlyTRestored16
+        .storedDeferredSyncDisable?.successor?.remote?.syncedAt
+          === rejectedStartupRemoteT16.syncedAt
+      && rejectedStartupEarlyTRestored16
+        .deferredSyncDisableSyntheticReadFailure === true
+      && rejectedStartupEarlyTRestored16.manualOffAutomaticOnBlocked === true
+      && rejectedStartupEarlyTSettled16?.success === false
+      && rejectedStartupEarlyTSettled16?.safetyCredentialReleased === true
+      && rejectedStartupEarlyTAfterSettle16
+        .manualOffAutomaticOnBlocked === false
+      && rejectedStartupEarlyTAfterSettle16
+        .deferredSyncDisablePending === false
+      && rejectedStartupEarlyTAfterSettle16
+        .deferredSyncDisableSyntheticReadFailure === false
+      && rejectedStartupEarlyTAfterSettle16
+        .deferredSyncDisableDurableReceiptEpoch === 0
+      && rejectedStartupEarlyTAfterSettle16
+        .storedDeferredSyncDisable?.pending === false
+      && rejectedStartupEarlyTAfterSettle16
+        .storedDeferredSyncDisable?.successor?.remote?.syncedAt
+          === rejectedStartupRemoteT16.syncedAt
+      && rejectedStartupEarlyTAfterSettle16.pendingRemote?.syncedAt
+        === rejectedStartupRemoteT16.syncedAt
+      && rejectedStartupEarlyTAfterSettle16.outboundPublishes.length === 0,
+    '16M-3F-3E: startup get reject 的 synthetic F 只作 volatile admission；source-atomic catch 不抢 early T owner，fresh 无 F 后撤 block 且 durable/pending T 零丢失零 publish');
+
+  // safety bundle 首读失败只能建立 synthetic admission block。随后 schedule
+  // 主存储恢复出的 committed M 必须保持原 config/cutoff；fresh classifier 即使
+  // 找回真实 F receipt，只要 sync preflight 仍失败，就不能先 apply/commit false。
+  const syntheticStartupLocalM16 = {
+    enabled: true,
+    onMinutes: 37,
+    offMinutes: 23,
+    activeHours: { enabled: true, start: '09:30', end: '21:30' },
+    smartMode: { enabled: true, sensitivity: 8 },
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 37 * 60_000,
+    pwmRetryKind: '',
+    pwmRetryBoundaryAt: 0,
+    pwmRetryScheduledAt: 0
+  };
+  const syntheticStartupLocalMCutoff16 = durableManualOffNow16 - 500;
+  const syntheticStartupRealF16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 - 400,
+    onMinutes: 9,
+    offMinutes: 51,
+    activeHours: { enabled: false, start: '08:00', end: '23:00' },
+    smartMode: { enabled: false, sensitivity: 2 },
+    pwmState: 'off',
+    nextTriggerAt: 0
+  };
+  const syntheticStartupHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      schedule: syntheticStartupLocalM16,
+      localMutationCutoff: syntheticStartupLocalMCutoff16,
+      deferredSyncDisable: {
+        pending: true,
+        safetyAuthorityId: 'startup-synthetic-f-real-receipt',
+        receivedAt: durableManualOffNow16 - 399,
+        safetyCutoffObservedAt: durableManualOffNow16 - 399,
+        remote: syntheticStartupRealF16,
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: 0
+      },
+      storageGetFailures: 1,
+      syncGetFailures: 1,
+      syncRemote: syntheticStartupRealF16
+    });
+  await syntheticStartupHarness16.runInitDeferredRecovery();
+  const syntheticStartupBlocked16 = syntheticStartupHarness16.state();
+  syntheticStartupHarness16.setSyncGetFailures(0);
+  const syntheticStartupClassified16 = await syntheticStartupHarness16
+    .settleDeferredForCurrentUser('startup-synthetic-f-classified');
+  const syntheticStartupAfterClassification16 =
+    syntheticStartupHarness16.state();
+  const syntheticStartupSettled16 = await syntheticStartupHarness16
+    .settleDeferredForCurrentUser('startup-real-f-receipt-settle');
+  const syntheticStartupAfterSettle16 = syntheticStartupHarness16.state();
+  const syntheticStartupApplyGuard16 = applySyncedPhaseBody.indexOf(
+    'if (deferredSyncDisableSyntheticReadFailure'
+  );
+  const syntheticStartupReceiptGuard16 = applySyncedPhaseBody.indexOf(
+    '|| !hasCurrentDeferredSyncDisableDurableReceipt()',
+    syntheticStartupApplyGuard16
+  );
+  const syntheticStartupSettledDuringClassification16 =
+    syntheticStartupClassified16?.remoteDisabled === true
+      && syntheticStartupAfterClassification16.liveSchedule.enabled === false
+      && syntheticStartupAfterClassification16.liveSchedule.onMinutes === 37
+      && syntheticStartupAfterClassification16.storedSchedule?.enabled === false
+      && syntheticStartupAfterClassification16
+        .storedLocalScheduleMutationCutoff === syntheticStartupLocalMCutoff16
+      && syntheticStartupAfterClassification16
+        .deferredSyncDisableSyntheticReadFailure === false
+      && syntheticStartupAfterClassification16.deferredSyncDisablePending
+        === false
+      && syntheticStartupAfterClassification16.outboundPublishes.length === 1
+      && syntheticStartupAfterClassification16.outboundPublishes[0]?.enabled
+        === false
+      && syntheticStartupSettled16 === null;
+  const syntheticStartupSettledAfterClassification16 =
+    syntheticStartupClassified16?.success === false
+      && syntheticStartupClassified16?.remoteSafetyReadPending === true
+      && syntheticStartupAfterClassification16.liveSchedule.enabled === true
+      && syntheticStartupAfterClassification16.liveSchedule.onMinutes === 37
+      && syntheticStartupAfterClassification16.storedSchedule?.enabled === true
+      && syntheticStartupAfterClassification16
+        .storedLocalScheduleMutationCutoff === syntheticStartupLocalMCutoff16
+      && syntheticStartupAfterClassification16
+        .deferredSyncDisableSyntheticReadFailure === false
+      && syntheticStartupAfterClassification16
+        .deferredSyncDisableRemoteSnapshot?.syncedAt
+          === syntheticStartupRealF16.syncedAt
+      && syntheticStartupAfterClassification16
+        .deferredSyncDisableDurableReceiptEpoch
+          === syntheticStartupAfterClassification16.deferredSyncDisableEpoch
+      && syntheticStartupAfterClassification16
+        .deferredSyncDisableDurableReceiptIdentity !== ''
+      && syntheticStartupAfterClassification16.outboundPublishes.length === 0
+      && syntheticStartupSettled16?.remoteDisabled === true;
+  assertPass(syntheticStartupBlocked16.liveSchedule.enabled === true
+      && syntheticStartupBlocked16.liveSchedule.onMinutes === 37
+      && syntheticStartupBlocked16.liveSchedule.offMinutes === 23
+      && syntheticStartupBlocked16.liveSchedule.smartMode?.sensitivity === 8
+      && syntheticStartupBlocked16.storedSchedule?.enabled === true
+      && syntheticStartupBlocked16.storedSchedule?.onMinutes === 37
+      && syntheticStartupBlocked16.storedLocalScheduleMutationCutoff
+        === syntheticStartupLocalMCutoff16
+      && syntheticStartupBlocked16.deferredSyncDisablePending === true
+      && syntheticStartupBlocked16
+        .deferredSyncDisableRemoteSnapshot?.syncedAt === 0
+      && syntheticStartupBlocked16
+        .deferredSyncDisableSyntheticReadFailure === true
+      && syntheticStartupBlocked16
+        .deferredSyncDisableDurableReceiptEpoch === 0
+      && syntheticStartupBlocked16
+        .deferredSyncDisableDurableReceiptIdentity === ''
+      && syntheticStartupBlocked16.lifecycleCalls.includes('sync-retry:adopt')
+      && !syntheticStartupBlocked16.lifecycleCalls.includes(
+        'local-set-schedule:false:true'
+      )
+      && syntheticStartupBlocked16.outboundPublishes.length === 0
+      && syntheticStartupBlocked16.adoptedRemotes.length === 0
+      && (syntheticStartupSettledDuringClassification16
+        || syntheticStartupSettledAfterClassification16)
+      && syntheticStartupAfterSettle16.liveSchedule.enabled === false
+      && syntheticStartupAfterSettle16.liveSchedule.onMinutes === 37
+      && syntheticStartupAfterSettle16.storedSchedule?.enabled === false
+      && syntheticStartupAfterSettle16.storedSchedule?.onMinutes === 37
+      && syntheticStartupAfterSettle16.storedLocalScheduleMutationCutoff
+        === syntheticStartupLocalMCutoff16
+      && syntheticStartupApplyGuard16 >= 0
+      && syntheticStartupReceiptGuard16 > syntheticStartupApplyGuard16,
+    '16M-3F-3E-1: startup partial-read synthetic F 只阻断 admission；durable M config/cutoff 在 fresh preflight 失败时零 apply/false publish，真实 F exact receipt 后才可收口 disabled');
+
+  // T 的恢复 credential 与 F 分离：apply receipt 必须先把 exact alarm identity
+  // durable 到 tombstone，再尝试物理 clear。clear reject 只能留下无害残钟；
+  // restart 不得把它重新解释成可采纳的 remote true。
+  const successorClearRejectHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      retryClearFailures: 1
+    });
+  const successorClearRejectRemoteT16 = {
+    enabled: true,
+    onMinutes: 27,
+    offMinutes: 33,
+    activeHours: {
+      enabled: true,
+      start: '08:30',
+      end: '19:30'
+    },
+    smartMode: { enabled: true, sensitivity: 6 },
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 31 * 60_000,
+    smartClockPlannedAt: durableManualOffNow16 + 30 * 60_000,
+    syncedAt: durableManualOffNow16 + 50
+  };
+  const successorClearRejectPersisted16 =
+    await successorClearRejectHarness16.rememberSuccessor(
+      successorClearRejectRemoteT16,
+      'T-credential-before-apply'
+    );
+  await successorClearRejectHarness16.waitForRetryOperationsToSettle();
+  const successorClearRejectBeforeApply16 =
+    successorClearRejectHarness16.state();
+  let successorClearRejectOutcome16 = null;
+  let successorClearRejectError16 = null;
+  try {
+    successorClearRejectOutcome16 =
+      await successorClearRejectHarness16.clearSuccessor(
+        successorClearRejectRemoteT16
+      );
+  } catch (error) {
+    successorClearRejectError16 = error;
+  }
+  await successorClearRejectHarness16.waitForRetryOperationsToSettle();
+  const successorClearRejectAfterApply16 =
+    successorClearRejectHarness16.state();
+  const successorClearRejectAlarm16 =
+    successorClearRejectBeforeApply16.retryAlarms.find(alarm =>
+      alarm.name.startsWith('ac-deferred-sync-successor-retry-test:'));
+  const successorClearRejectRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable:
+        successorClearRejectAfterApply16.storedDeferredSyncDisable,
+      retryAlarms: successorClearRejectAfterApply16.retryAlarms
+    });
+  await successorClearRejectRestartHarness16.restore();
+  await Promise.resolve();
+  await Promise.resolve();
+  const successorClearRejectRestarted16 =
+    successorClearRejectRestartHarness16.state();
+  assertPass(successorClearRejectPersisted16 === true
+      && !!successorClearRejectAlarm16
+      && successorClearRejectBeforeApply16
+        .deferredSyncSuccessorRetryAlarmEntries
+        .some(([name, entry]) =>
+          name === successorClearRejectAlarm16.name
+          && entry?.remote?.syncedAt
+            === successorClearRejectRemoteT16.syncedAt)
+      && successorClearRejectError16 === null
+      && successorClearRejectOutcome16 === true
+      && successorClearRejectAfterApply16
+        .storedDeferredSyncDisable?.successorAppliedAt > 0
+      && successorClearRejectAfterApply16
+        .storedDeferredSyncDisable?.releasedSuccessorRetryAlarmNames
+          ?.includes(successorClearRejectAlarm16.name)
+      && successorClearRejectAfterApply16.retryAlarms.some(alarm =>
+        alarm.name === successorClearRejectAlarm16.name)
+      && successorClearRejectRestarted16.deferredSyncDisablePending === false
+      && successorClearRejectRestarted16
+        .deferredSyncDisableSuccessorSnapshot === null,
+    '16M-3F-3F: T apply 先 durable exact retry tombstone；物理 clear reject 后 restart 不得复活旧 T');
+
+  // T0 先拥有恢复钟，随后更新的 safety F 才是真正 predecessor。即使 F 的
+  // local marker 双写失败且 T0 清钟失败，F immutable alarm 的单调 observedAt
+  // 也必须在 restart 截断 T0，不能先恢复一次过期 ON。
+  const successorBeforeFailedDisableHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      retryClearFailures: 1,
+      deferredMarkerSetFailures: 2
+    });
+  const successorBeforeFailedDisableT016 = {
+    enabled: true,
+    onMinutes: 18,
+    syncedAt: durableManualOffNow16 + 60
+  };
+  const successorBeforeFailedDisableStored16 =
+    await successorBeforeFailedDisableHarness16.rememberSuccessor(
+      successorBeforeFailedDisableT016,
+      'T0-before-newer-F'
+    );
+  await successorBeforeFailedDisableHarness16
+    .waitForRetryOperationsToSettle();
+  const successorBeforeFailedDisableF16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 70
+  };
+  const successorBeforeFailedDisablePersisted16 =
+    await successorBeforeFailedDisableHarness16.deferRemote(
+      successorBeforeFailedDisableF16,
+      'newer-F-after-T0'
+    );
+  await successorBeforeFailedDisableHarness16
+    .waitForRetryOperationsToSettle();
+  const successorBeforeFailedDisableBeforeRestart16 =
+    successorBeforeFailedDisableHarness16.state();
+  const successorBeforeFailedDisableRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable:
+        successorBeforeFailedDisableBeforeRestart16
+          .storedDeferredSyncDisable,
+      retryAlarms:
+        successorBeforeFailedDisableBeforeRestart16.retryAlarms
+    });
+  await successorBeforeFailedDisableRestartHarness16.restore();
+  await Promise.resolve();
+  await Promise.resolve();
+  const successorBeforeFailedDisableRestarted16 =
+    successorBeforeFailedDisableRestartHarness16.state();
+  assertPass(successorBeforeFailedDisableStored16 === true
+      && successorBeforeFailedDisablePersisted16 === false
+      && successorBeforeFailedDisableBeforeRestart16.retryAlarms
+        .some(alarm => alarm.name.startsWith(
+          'ac-deferred-sync-successor-retry-test:'
+        ))
+      && successorBeforeFailedDisableBeforeRestart16.retryAlarms
+        .some(alarm => alarm.name.startsWith(
+          'ac-deferred-sync-disable-retry-test:'
+        ))
+      && successorBeforeFailedDisableRestarted16
+        .deferredSyncDisablePending === true
+      && successorBeforeFailedDisableRestarted16
+        .deferredSyncDisableRemoteSnapshot?.enabled === false
+      && successorBeforeFailedDisableRestarted16
+        .deferredSyncDisableRemoteSnapshot?.syncedAt
+          === successorBeforeFailedDisableF16.syncedAt
+      && successorBeforeFailedDisableRestarted16
+        .deferredSyncDisableRemoteSnapshotComplete === true
+      && successorBeforeFailedDisableRestarted16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && successorBeforeFailedDisableRestarted16
+        .deferredSyncSuccessorRetryAlarmEntries.length === 0,
+    '16M-3F-3G: T0 后到更新 F；F marker 双失败且 T0 clear reject 时 restart 以 compact F payload 单调截断旧 T0');
+
+  // Alarm name 是 T marker 两次失败后的最后 durable 载体。presence mask 必须
+  // 区分“字段缺失”和合法的 0/false/off，不能在 restart 扩展时补造配置。
+  const compactSuccessorHarness16 =
+    loadDurableManualOffAdmissionHarness16();
+  const compactSuccessorPayload16 = {
+    enabled: true,
+    onMinutes: 0,
+    activeHours: {
+      enabled: false,
+      start: '00:00',
+      end: '23:59'
+    },
+    smartMode: { enabled: false, sensitivity: 0 },
+    pwmState: 'off',
+    nextTriggerAt: 0,
+    smartClockPlannedAt: 0,
+    syncedAt: 0
+  };
+  const compactSuccessorRoundTrip16 =
+    compactSuccessorHarness16.roundTripSuccessorRetryCredential(
+      compactSuccessorPayload16,
+      durableManualOffNow16 + 80
+    );
+  const invalidCompactSuccessorRoundTrip16 =
+    compactSuccessorHarness16.roundTripSuccessorRetryCredential({
+      enabled: true,
+      activeHours: { enabled: true, start: '08:30' }
+    }, durableManualOffNow16 + 81);
+  assertPass(compactSuccessorRoundTrip16.name.startsWith(
+      'ac-deferred-sync-successor-retry-test:'
+    )
+      && compactSuccessorRoundTrip16.observedAt
+        === durableManualOffNow16 + 80
+      && JSON.stringify(compactSuccessorRoundTrip16.remote)
+        === JSON.stringify(compactSuccessorPayload16)
+      && !Object.hasOwn(compactSuccessorRoundTrip16.remote, 'offMinutes')
+      && invalidCompactSuccessorRoundTrip16.name === ''
+      && invalidCompactSuccessorRoundTrip16.remote === null,
+    '16M-3F-3H: T retry credential compact presence mask 精确保留缺失字段与合法 0/false/off，拒绝残缺 payload');
+
+  // Later explicit local authority 与成功 apply 共用同一 terminal 规则：先写
+  // discard tombstone 再 best-effort 清钟。物理 clear 失败后，旧 T alarm 仍
+  // 不能在 restart 越过本机最终决定。
+  const successorDiscardRejectHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      retryClearFailures: 1
+    });
+  const successorDiscardRejectRemoteT16 = {
+    enabled: true,
+    onMinutes: 29,
+    offMinutes: 31,
+    pwmState: 'off',
+    nextTriggerAt: durableManualOffNow16 + 32 * 60_000,
+    syncedAt: durableManualOffNow16 + 90
+  };
+  const successorDiscardRejectPersisted16 =
+    await successorDiscardRejectHarness16.rememberSuccessor(
+      successorDiscardRejectRemoteT16,
+      'T-credential-before-local-L'
+    );
+  await successorDiscardRejectHarness16.waitForRetryOperationsToSettle();
+  const successorDiscardRejectBeforeL16 =
+    successorDiscardRejectHarness16.state();
+  const successorDiscardRejectAlarm16 =
+    successorDiscardRejectBeforeL16.retryAlarms.find(alarm =>
+      alarm.name.startsWith('ac-deferred-sync-successor-retry-test:'));
+  let successorDiscardRejectOutcome16 = null;
+  let successorDiscardRejectError16 = null;
+  try {
+    successorDiscardRejectOutcome16 =
+      await successorDiscardRejectHarness16.discardSuccessor(
+        successorDiscardRejectRemoteT16,
+        'later-local-L-terminal'
+      );
+  } catch (error) {
+    successorDiscardRejectError16 = error;
+  }
+  await successorDiscardRejectHarness16.waitForRetryOperationsToSettle();
+  const successorDiscardRejectAfterL16 =
+    successorDiscardRejectHarness16.state();
+  const successorDiscardRejectRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable:
+        successorDiscardRejectAfterL16.storedDeferredSyncDisable,
+      retryAlarms: successorDiscardRejectAfterL16.retryAlarms
+    });
+  await successorDiscardRejectRestartHarness16.restore();
+  await Promise.resolve();
+  await Promise.resolve();
+  const successorDiscardRejectRestarted16 =
+    successorDiscardRejectRestartHarness16.state();
+  assertPass(successorDiscardRejectPersisted16 === true
+      && !!successorDiscardRejectAlarm16
+      && successorDiscardRejectError16 === null
+      && successorDiscardRejectOutcome16 === true
+      && successorDiscardRejectAfterL16
+        .storedDeferredSyncDisable?.successorDiscardedAt > 0
+      && successorDiscardRejectAfterL16
+        .storedDeferredSyncDisable?.releasedSuccessorRetryAlarmNames
+          ?.includes(successorDiscardRejectAlarm16.name)
+      && successorDiscardRejectAfterL16.retryAlarms.some(alarm =>
+        alarm.name === successorDiscardRejectAlarm16.name)
+      && successorDiscardRejectRestarted16.deferredSyncDisablePending === false
+      && successorDiscardRejectRestarted16
+        .deferredSyncDisableSuccessorSnapshot === null,
+    '16M-3F-3I: later local L discard 先 durable exact T tombstone；clear reject 后 restart 不复活被淘汰 successor');
+
+  // Tpre 的 alarm 可能从未进入本 SW 的 map，且 startup 首轮恰好只有 successor
+  // getAll reject。F terminal 必须另写 numeric cutoff；下一次 clean restart 即使
+  // 重新看见旧 Tpre，也只能恢复 F，不能短暂执行 ON。
+  const unknownTBeforeFTimestamp16 = durableManualOffNow16 - 20;
+  const unknownTBeforeFRemote16 = {
+    enabled: true,
+    onMinutes: 13,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 2 * 60_000,
+    syncedAt: durableManualOffNow16 - 10
+  };
+  const unknownTBeforeFCredential16 =
+    compactSuccessorHarness16.roundTripSuccessorRetryCredential(
+      unknownTBeforeFRemote16,
+      unknownTBeforeFTimestamp16
+    );
+  const unknownTBeforeFAlarm16 = {
+    name: unknownTBeforeFCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  const unknownTBeforeFTerminalHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      retryAlarms: [unknownTBeforeFAlarm16]
+    });
+  const unknownTBeforeFRemoteF16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 - 5
+  };
+  const unknownTBeforeFPersisted16 =
+    await unknownTBeforeFTerminalHarness16.deferRemote(
+      unknownTBeforeFRemoteF16,
+      'F-terminal-with-unobserved-Tpre'
+    );
+  await unknownTBeforeFTerminalHarness16
+    .waitForRetryOperationsToSettle();
+  const unknownTBeforeFTerminal16 =
+    unknownTBeforeFTerminalHarness16.state();
+  const unknownTBeforeFFailedReadRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable:
+        unknownTBeforeFTerminal16.storedDeferredSyncDisable,
+      retryAlarms: unknownTBeforeFTerminal16.retryAlarms,
+      retryGetAllFailureCalls: [3]
+    });
+  await unknownTBeforeFFailedReadRestartHarness16.restore();
+  const unknownTBeforeFFailedReadRestarted16 =
+    unknownTBeforeFFailedReadRestartHarness16.state();
+  const unknownTBeforeFCleanRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable:
+        unknownTBeforeFTerminal16.storedDeferredSyncDisable,
+      retryAlarms: unknownTBeforeFTerminal16.retryAlarms
+    });
+  await unknownTBeforeFCleanRestartHarness16.restore();
+  const unknownTBeforeFCleanRestarted16 =
+    unknownTBeforeFCleanRestartHarness16.state();
+  assertPass(unknownTBeforeFPersisted16 === true
+      && unknownTBeforeFTerminal16
+        .storedDeferredSyncDisable?.safetyCutoffObservedAt
+          > unknownTBeforeFTimestamp16
+      && unknownTBeforeFTerminal16
+        .storedDeferredSyncDisable?.releasedSuccessorThroughObservedAt
+          > unknownTBeforeFTimestamp16
+      && unknownTBeforeFFailedReadRestarted16.retryGetAllCallCount === 3
+      && unknownTBeforeFFailedReadRestarted16
+        .deferredSyncDisablePending === true
+      && unknownTBeforeFFailedReadRestarted16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && unknownTBeforeFCleanRestarted16.deferredSyncDisablePending === true
+      && unknownTBeforeFCleanRestarted16
+        .deferredSyncDisableRemoteSnapshot?.enabled === false
+      && unknownTBeforeFCleanRestarted16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && unknownTBeforeFCleanRestarted16
+        .deferredSyncSuccessorRetryAlarmEntries.length === 0,
+    '16M-3F-3J: successor getAll reject 也不削弱 F numeric cutoff；下一 restart 看见旧未知 Tpre 时仍只恢复 safety F');
+
+  // Explicit enable/disable 的 local L terminal 同样需要 numeric cutoff，不能
+  // 依赖 terminal 当时恰好枚举到全部 T alarm。这里让 L 写完后首次 startup 的
+  // successor getAll 失败，再次启动才暴露旧 alarm，验证它仍低于 L。
+  const unknownTBeforeLTimestamp16 = durableManualOffNow16 - 15;
+  const unknownTBeforeLRemote16 = {
+    enabled: true,
+    offMinutes: 44,
+    pwmState: 'off',
+    nextTriggerAt: durableManualOffNow16 + 2 * 60_000,
+    syncedAt: durableManualOffNow16 - 4
+  };
+  const unknownTBeforeLCredential16 =
+    compactSuccessorHarness16.roundTripSuccessorRetryCredential(
+      unknownTBeforeLRemote16,
+      unknownTBeforeLTimestamp16
+    );
+  const unknownTBeforeLAlarm16 = {
+    name: unknownTBeforeLCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  const unknownTBeforeLTerminalHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      retryAlarms: [unknownTBeforeLAlarm16]
+    });
+  const unknownTBeforeLAuthority16 =
+    unknownTBeforeLTerminalHarness16.claimLocalScheduleAuthority({
+      enabled: false
+    });
+  const unknownTBeforeLInitialCommit16 =
+    await unknownTBeforeLTerminalHarness16.commitAuthority({
+      ensureCurrent: () => true,
+      markSyncPublishPending: true,
+      clearDeferredSyncDisable: true,
+      reason: 'explicit-disable-L-terminal-with-unobserved-Tpre'
+    });
+  await unknownTBeforeLTerminalHarness16.waitForRetryOperationsToSettle();
+  const unknownTBeforeLInitialState16 =
+    unknownTBeforeLTerminalHarness16.state();
+  // stable scan 只能报告 delta；typed wake 重建 original delivery 后，已完成
+  // 的 L generation 才能 exact terminal 旧 T，再重试同一 authority commit。
+  await unknownTBeforeLTerminalHarness16.deliverSuccessorRetryAlarm(
+    unknownTBeforeLAlarm16
+  );
+  await unknownTBeforeLTerminalHarness16.waitForRetryOperationsToSettle();
+  const unknownTBeforeLCommitted16 =
+    await unknownTBeforeLTerminalHarness16.commitAuthority({
+      ensureCurrent: () => true,
+      markSyncPublishPending: true,
+      clearDeferredSyncDisable: true,
+      reason: 'explicit-disable-L-terminal-after-typed-Tpre-read'
+    });
+  await unknownTBeforeLTerminalHarness16.waitForRetryOperationsToSettle();
+  const unknownTBeforeLTerminal16 =
+    unknownTBeforeLTerminalHarness16.state();
+  const unknownTBeforeLFailedReadRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable:
+        unknownTBeforeLTerminal16.storedDeferredSyncDisable,
+      retryAlarms: unknownTBeforeLTerminal16.retryAlarms,
+      retryGetAllFailureCalls: [3]
+    });
+  await unknownTBeforeLFailedReadRestartHarness16.restore();
+  const unknownTBeforeLFailedReadRestarted16 =
+    unknownTBeforeLFailedReadRestartHarness16.state();
+  const unknownTBeforeLCleanRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable:
+        unknownTBeforeLTerminal16.storedDeferredSyncDisable,
+      retryAlarms: unknownTBeforeLTerminal16.retryAlarms
+    });
+  await unknownTBeforeLCleanRestartHarness16.restore();
+  const unknownTBeforeLCleanRestarted16 =
+    unknownTBeforeLCleanRestartHarness16.state();
+  assertPass(unknownTBeforeLAuthority16.localScheduleAuthorityObservedAt
+        > unknownTBeforeLTimestamp16
+      && unknownTBeforeLInitialCommit16 === false
+      && unknownTBeforeLInitialState16.lifecycleCalls.includes(
+        'sync-retry:adopt'
+      )
+      && unknownTBeforeLCommitted16 === true
+      && unknownTBeforeLTerminal16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(unknownTBeforeLAlarm16.name)
+      && unknownTBeforeLTerminal16
+        .storedDeferredSyncDisable?.releasedSuccessorThroughObservedAt
+          >= unknownTBeforeLAuthority16.localScheduleAuthorityObservedAt
+      && unknownTBeforeLFailedReadRestarted16.retryGetAllCallCount === 3
+      && unknownTBeforeLFailedReadRestarted16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && unknownTBeforeLCleanRestarted16.deferredSyncDisablePending === false
+      && unknownTBeforeLCleanRestarted16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && unknownTBeforeLCleanRestarted16
+        .deferredSyncSuccessorRetryAlarmEntries.length === 0,
+    '16M-3F-3K: explicit local L final scan 见未 hydrate Tpre 时先 abort/retry；stable store 复判后同一 L exact terminal，后续 restart 不复活');
+
+  // pending F 期间 ordinary config M 会重写 mailbox 的 publish barrier。它
+  // 只能追加 local mutation 元数据，不能把 F 的 immutable receivedAt/cutoff
+  // 或已释放 T tombstone 擦掉，否则下一 SW 会倒退 authority 顺序。
+  const ordinaryMutationFReceivedAt16 = durableManualOffNow16 - 100;
+  const ordinaryMutationReleasedT16 =
+    'ac-deferred-sync-successor-retry-test:released-by-F';
+  const ordinaryMutationMailboxHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable: {
+        pending: true,
+        receivedAt: ordinaryMutationFReceivedAt16,
+        safetyCutoffObservedAt: ordinaryMutationFReceivedAt16,
+        remote: { enabled: false, syncedAt: durableManualOffNow16 - 101 },
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [ordinaryMutationReleasedT16],
+        releasedSuccessorThroughObservedAt:
+          ordinaryMutationFReceivedAt16
+      }
+    });
+  await ordinaryMutationMailboxHarness16.restore();
+  const ordinaryMutationRecorded16 =
+    await ordinaryMutationMailboxHarness16.rememberLocalMutation(
+      'ordinary-config-M-after-F'
+    );
+  const ordinaryMutationMailbox16 = ordinaryMutationMailboxHarness16.state();
+  const ordinaryMutationDerivedBarrier16 =
+    ordinaryMutationMailboxHarness16.derivedLocalMutationBarrier();
+  assertPass(ordinaryMutationRecorded16 === true
+      && ordinaryMutationMailbox16.storedDeferredSyncDisable?.pending === true
+      && ordinaryMutationMailbox16
+        .storedDeferredSyncDisable?.receivedAt
+          === ordinaryMutationFReceivedAt16
+      && ordinaryMutationMailbox16
+        .storedDeferredSyncDisable?.safetyCutoffObservedAt
+          === ordinaryMutationFReceivedAt16
+      && ordinaryMutationMailbox16
+        .storedDeferredSyncDisable?.releasedSuccessorThroughObservedAt
+          === ordinaryMutationFReceivedAt16
+      && ordinaryMutationMailbox16
+        .storedDeferredSyncDisable?.releasedSuccessorRetryAlarmNames
+          ?.includes(ordinaryMutationReleasedT16)
+      && ordinaryMutationMailbox16.storedLocalScheduleMutationCutoff
+        === ordinaryMutationMailbox16
+          .storedDeferredSyncDisable?.localMutationCutoffObservedAt
+      && ordinaryMutationMailbox16.storedLocalScheduleMutationCutoff
+        > ordinaryMutationFReceivedAt16
+      && ordinaryMutationDerivedBarrier16 === true,
+    '16M-3F-3L: pending F 后 ordinary M mailbox rewrite 保留 F receivedAt/cutoff 与 released T tombstone，并用同批 committed-M cutoff 建立派生屏障');
+
+  // T credential 可能在 init getAll 完成后才物理可见。若它的 observedAt
+  // 高于仍 pending 的 F cutoff，它是合法后继而非 stale alarm；delivery 必须
+  // 用 credential 原 identity 恢复 mailbox，不能因 F 尚未 settle 而 tombstone。
+  const orphanSuccessorAfterFHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable: {
+        pending: true,
+        safetyAuthorityId: 'f-test-orphan-successor-after-F',
+        receivedAt: durableManualOffNow16 - 200,
+        safetyCutoffObservedAt: durableManualOffNow16 - 200,
+        successorPredecessorCoverageComplete: true,
+        successorPredecessorCoverageThroughObservedAt:
+          durableManualOffNow16 - 200,
+        remote: { enabled: false, syncedAt: durableManualOffNow16 - 201 },
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: durableManualOffNow16 - 200
+      }
+    });
+  await orphanSuccessorAfterFHarness16.restore();
+  const orphanSuccessorAfterFRemoteT16 = {
+    enabled: true,
+    onMinutes: 21,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 2 * 60_000,
+    syncedAt: durableManualOffNow16 - 150
+  };
+  const orphanSuccessorAfterFCredential16 =
+    orphanSuccessorAfterFHarness16.roundTripSuccessorRetryCredential(
+      orphanSuccessorAfterFRemoteT16,
+      durableManualOffNow16 - 150,
+      'f-test-orphan-successor-after-F'
+    );
+  const orphanSuccessorAfterFAlarm16 = {
+    name: orphanSuccessorAfterFCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  orphanSuccessorAfterFHarness16.injectRetryAlarm(
+    orphanSuccessorAfterFAlarm16
+  );
+  await orphanSuccessorAfterFHarness16.deliverSuccessorRetryAlarm(
+    orphanSuccessorAfterFAlarm16
+  );
+  await orphanSuccessorAfterFHarness16.waitForRetryOperationsToSettle();
+  const orphanSuccessorAfterFRecovered16 =
+    orphanSuccessorAfterFHarness16.state();
+  let orphanSuccessorAfterFSettled16 =
+    await orphanSuccessorAfterFHarness16.settleDeferredForCurrentUser(
+      'orphan-successor-after-F'
+    );
+  if (orphanSuccessorAfterFSettled16?.remoteDisabled !== true) {
+    await orphanSuccessorAfterFHarness16.waitForRetryOperationsToSettle();
+    orphanSuccessorAfterFSettled16 =
+      await orphanSuccessorAfterFHarness16.settleDeferredForCurrentUser(
+        'orphan-successor-after-F-retry'
+      );
+  }
+  const orphanSuccessorAfterFBeforeRestart16 =
+    orphanSuccessorAfterFHarness16.state();
+  const orphanSuccessorAfterFRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: orphanSuccessorAfterFBeforeRestart16.storedSchedule?.enabled,
+      deferredSyncDisable:
+        orphanSuccessorAfterFBeforeRestart16.storedDeferredSyncDisable,
+      retryAlarms: orphanSuccessorAfterFBeforeRestart16.retryAlarms
+    });
+  await orphanSuccessorAfterFRestartHarness16.restore();
+  const orphanSuccessorAfterFRestarted16 =
+    orphanSuccessorAfterFRestartHarness16.state();
+  const orphanSuccessorAfterFApplied16 = [];
+  const orphanSuccessorAfterFAdoptHarness16 =
+    loadTryAdoptSyncedStateF90({
+      // F 的本机 publish 已可能覆盖 sync store；exact alarm/mailbox 是
+      // 唯一后继证据，不能把测试建立在 fresh read 恰好仍看见 T 上。
+      chrome: { storage: { sync: { async get() { return {}; } } } },
+      applySyncedPhase: async remote => {
+        orphanSuccessorAfterFApplied16.push(structuredClone(remote));
+        return true;
+      }
+    });
+  orphanSuccessorAfterFAdoptHarness16.restoreDeferredRecord(
+    orphanSuccessorAfterFRestarted16.storedDeferredSyncDisable
+  );
+  const orphanSuccessorAfterFAdopted16 =
+    await orphanSuccessorAfterFAdoptHarness16(
+      'orphan-successor-after-F-restart'
+    );
+  assertPass(orphanSuccessorAfterFRecovered16.deferredSyncDisablePending === true
+      && orphanSuccessorAfterFRecovered16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && orphanSuccessorAfterFRecovered16
+        .deferredSyncSuccessorRetryAlarmEntries.length === 0
+      && orphanSuccessorAfterFRecovered16
+        .deferredSyncSuccessorReleasedRetryAlarmNames.includes(
+          orphanSuccessorAfterFAlarm16.name
+        )
+      && !orphanSuccessorAfterFRecovered16.retryAlarms.some(alarm =>
+        alarm.name === orphanSuccessorAfterFAlarm16.name)
+      && orphanSuccessorAfterFRecovered16.lifecycleCalls.includes(
+        'adopt:deferred-sync-successor-alarm-classified'
+      )
+      && orphanSuccessorAfterFSettled16?.remoteDisabled === true
+      && orphanSuccessorAfterFBeforeRestart16
+        .storedSchedule?.enabled === false
+      && orphanSuccessorAfterFRestarted16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && orphanSuccessorAfterFAdopted16 === false
+      && orphanSuccessorAfterFApplied16.length === 0,
+    '16M-3F-3M: matching-F lineage 只证明 T 晚于 F；fresh stable store 已是 F 时 exact alarm tombstone，settle/restart 均不复活旧 ON');
+
+  const deterministicWakeSafetyId16 = 'f-test-deterministic-T-wake';
+  const deterministicWakeFObservedAt16 = durableManualOffNow16 - 500;
+  const deterministicWakeRemoteF16 = {
+    enabled: false,
+    syncedAt: deterministicWakeFObservedAt16 - 1
+  };
+  const deterministicWakeHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable: {
+        pending: true,
+        safetyAuthorityId: deterministicWakeSafetyId16,
+        receivedAt: deterministicWakeFObservedAt16,
+        safetyCutoffObservedAt: deterministicWakeFObservedAt16,
+        successorPredecessorCoverageComplete: true,
+        successorPredecessorCoverageThroughObservedAt:
+          deterministicWakeFObservedAt16,
+        remote: structuredClone(deterministicWakeRemoteF16),
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: deterministicWakeFObservedAt16
+      },
+      syncRemote: deterministicWakeRemoteF16
+    });
+  await deterministicWakeHarness16.restore();
+  const deterministicWakeRemoteT16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 + 1,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 4 * 60_000
+  };
+  const deterministicWakeCredential16 = deterministicWakeHarness16
+    .roundTripSuccessorRetryCredential(
+      deterministicWakeRemoteT16,
+      durableManualOffNow16 - 400,
+      deterministicWakeSafetyId16
+    );
+  const deterministicWakeOriginalAlarm16 = {
+    name: deterministicWakeCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  deterministicWakeHarness16.injectRetryAlarm(
+    deterministicWakeOriginalAlarm16
+  );
+  deterministicWakeHarness16.setSyncGetFailures(3);
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    await deterministicWakeHarness16.deliverSuccessorRetryAlarm(
+      deterministicWakeOriginalAlarm16
+    );
+  }
+  await deterministicWakeHarness16.waitForRetryOperationsToSettle();
+  const deterministicWakeFailedState16 = deterministicWakeHarness16.state();
+  const deterministicTypedWakes16 = deterministicWakeFailedState16
+    .retryAlarms.filter(alarm =>
+      alarm.name.startsWith('ac-schedule-read-retry:')
+      && alarm.name.includes(encodeURIComponent(
+        deterministicWakeOriginalAlarm16.name
+      )));
+  deterministicWakeHarness16.setSyncGetFailures(0);
+  await deterministicWakeHarness16.deliverScheduleReadRetryAlarm(
+    deterministicTypedWakes16[0]
+  );
+  await deterministicWakeHarness16.waitForRetryOperationsToSettle();
+  const deterministicWakeTerminalState16 = deterministicWakeHarness16.state();
+  assertPass(deterministicTypedWakes16.length === 1
+      && deterministicWakeFailedState16.retryAlarms.some(alarm =>
+        alarm.name === deterministicWakeOriginalAlarm16.name)
+      && deterministicWakeTerminalState16
+        .deferredSyncSuccessorReleasedRetryAlarmNames.includes(
+          deterministicWakeOriginalAlarm16.name
+        )
+      && !deterministicWakeTerminalState16.retryAlarms.some(alarm =>
+        alarm.name === deterministicWakeOriginalAlarm16.name
+        || alarm.name.startsWith('ac-schedule-read-retry:')),
+    '16M-3F-3M-2: 同一 unknown exact T 连续 classifier/read 失败只保留一枚 deterministic typed wake；stable terminal 后 original 与 typed wake 一并清理');
+
+  // stable release 的 base receipt 之后、critical commit 之前还有一次物理
+  // alarm scan。该窗口出现的新 F2/T2 是独立 durable credential；本轮只能
+  // abort 并留下 near-term typed wake，绝不能顺手加入 released union。
+  const stableDeltaBaseRemoteF16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 - 500
+  };
+  const createStableDeltaHarness16 = () => {
+    const credentialHarness = loadDurableManualOffAdmissionHarness16();
+    const baseCredential = credentialHarness.roundTripDisableRetryCredential(
+      stableDeltaBaseRemoteF16,
+      durableManualOffNow16 - 400
+    );
+    return {
+      baseCredential,
+      harness: loadDurableManualOffAdmissionHarness16({
+        marker: standaloneReleasedMarker16,
+        syncRemote: stableDeltaBaseRemoteF16,
+        deferredSyncDisable: {
+          pending: true,
+          receivedAt: baseCredential.receivedAt,
+          safetyCutoffObservedAt: baseCredential.receivedAt,
+          successorPredecessorCoverageComplete: true,
+          successorPredecessorCoverageThroughObservedAt:
+            baseCredential.receivedAt,
+          remote: structuredClone(stableDeltaBaseRemoteF16),
+          releasedRetryAlarmNames: [baseCredential.name],
+          releasedSuccessorRetryAlarmNames: [],
+          releasedSuccessorThroughObservedAt: baseCredential.receivedAt
+        },
+        retryAlarms: [{
+          name: baseCredential.name,
+          scheduledTime: durableManualOffNow16 + 60_000,
+          periodInMinutes: 1
+        }]
+      })
+    };
+  };
+  const stableFDeltaFixture16 = createStableDeltaHarness16();
+  await stableFDeltaFixture16.harness.restore();
+  const stableFDeltaBefore16 = stableFDeltaFixture16.harness.state();
+  const stableFDeltaBaseReceipt16 =
+    await stableFDeltaFixture16.harness.prepareStableRelease(
+      () => true,
+      'stable-base-before-new-F2'
+    );
+  const stableF2Remote16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 + 3_100
+  };
+  const stableF2Credential16 =
+    stableFDeltaFixture16.harness.roundTripDisableRetryCredential(
+      stableF2Remote16,
+      durableManualOffNow16 + 10
+    );
+  const stableF2Alarm16 = {
+    name: stableF2Credential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  stableFDeltaFixture16.harness.injectRetryAlarm(stableF2Alarm16);
+  const stableFDeltaValidated16 =
+    await stableFDeltaFixture16.harness.validateStableRelease(
+      stableFDeltaBaseReceipt16
+    );
+  const stableFDeltaAfter16 = stableFDeltaFixture16.harness.state();
+
+  const stableTDeltaFixture16 = createStableDeltaHarness16();
+  await stableTDeltaFixture16.harness.restore();
+  const stableTDeltaBefore16 = stableTDeltaFixture16.harness.state();
+  const stableTDeltaBaseReceipt16 =
+    await stableTDeltaFixture16.harness.prepareStableRelease(
+      () => true,
+      'stable-base-before-new-T2'
+    );
+  const stableT2Remote16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 + 3_200,
+    onMinutes: 23,
+    offMinutes: 37,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 5 * 60_000
+  };
+  const stableT2Credential16 =
+    stableTDeltaFixture16.harness.roundTripSuccessorRetryCredential(
+      stableT2Remote16,
+      durableManualOffNow16 + 20,
+      stableTDeltaBefore16.deferredSyncDisableSafetyAuthorityId
+    );
+  const stableT2Alarm16 = {
+    name: stableT2Credential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  stableTDeltaFixture16.harness.injectRetryAlarm(stableT2Alarm16);
+  const stableTDeltaValidated16 =
+    await stableTDeltaFixture16.harness.validateStableRelease(
+      stableTDeltaBaseReceipt16
+    );
+  const stableTDeltaAfter16 = stableTDeltaFixture16.harness.state();
+  const stableDeltaHasTypedWake16 = (state, originalName) =>
+    state.retryAlarms.some(alarm =>
+      alarm.name.startsWith('ac-schedule-read-retry:')
+        && alarm.name.includes(encodeURIComponent(originalName)));
+  assertPass(stableFDeltaBaseReceipt16?.pending === true
+      && stableFDeltaValidated16 === false
+      && stableFDeltaAfter16.deferredSyncDisablePending === true
+      && stableFDeltaAfter16.retryAlarms.some(alarm =>
+        alarm.name === stableF2Alarm16.name)
+      && !stableFDeltaAfter16.deferredSyncDisableReleasedRetryAlarmNames
+        .includes(stableF2Alarm16.name)
+      && stableDeltaHasTypedWake16(
+        stableFDeltaAfter16,
+        stableF2Alarm16.name
+      )
+      && stableFDeltaAfter16.outboundPublishes.length === 0
+      && stableTDeltaBaseReceipt16?.pending === true
+      && stableTDeltaValidated16 === false
+      && stableTDeltaAfter16.deferredSyncDisablePending === true
+      && stableTDeltaAfter16.retryAlarms.some(alarm =>
+        alarm.name === stableT2Alarm16.name)
+      && !stableTDeltaAfter16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(stableT2Alarm16.name)
+      && stableTDeltaAfter16.outboundPublishes.length === 0,
+    '16M-3F-3M-1: stable release base receipt 后 final scan 新增 F2/T2 均使 validation abort；exact alarm 保留，F 建 typed wake，二者均不误写 released tombstone/publish');
+
+  // 同理，T1 mailbox 已存在时后来才可见的 orphan T2 若 observedAt 更高，
+  // 应用 exact credential 接棒；“已有任意 successor”不能把 T2 当 stale，
+  // 否则乱序 alarm visibility 会永久锁住旧 T1。
+  const orphanSuccessorT2Harness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable: {
+        pending: false,
+        safetyCleared: true,
+        releasedSafetyAuthorityId: 'f-test-orphan-T1-T2-lineage',
+        safetyCutoffObservedAt: durableManualOffNow16 - 200,
+        localMutationCutoffObservedAt: 0,
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: durableManualOffNow16 - 200
+      }
+    });
+  await orphanSuccessorT2Harness16.restore();
+  const orphanSuccessorT1Remote16 = {
+    enabled: true,
+    offMinutes: 38,
+    pwmState: 'off',
+    nextTriggerAt: durableManualOffNow16 + 4 * 60_000,
+    syncedAt: durableManualOffNow16 - 120
+  };
+  const orphanSuccessorT1Credential16 =
+    orphanSuccessorT2Harness16.roundTripSuccessorRetryCredential(
+      orphanSuccessorT1Remote16,
+      durableManualOffNow16 - 120,
+      'f-test-orphan-T1-T2-lineage'
+    );
+  orphanSuccessorT2Harness16.injectRetryAlarm({
+    name: orphanSuccessorT1Credential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  });
+  const orphanSuccessorT1Persisted16 =
+    await orphanSuccessorT2Harness16.rememberSuccessor(
+      orphanSuccessorT1Remote16,
+      'current-T1-before-orphan-T2',
+      {
+        credentialObservedAt: orphanSuccessorT1Credential16.observedAt,
+        credentialRetryAlarmName: orphanSuccessorT1Credential16.name,
+        recoverFromRetryCredential: true
+      }
+    );
+  await orphanSuccessorT2Harness16.waitForRetryOperationsToSettle();
+  orphanSuccessorT2Harness16.setManualOffBlocked(false);
+  const orphanSuccessorT1State16 = orphanSuccessorT2Harness16.state();
+  const orphanSuccessorT2Remote16 = {
+    ...orphanSuccessorT1Remote16,
+    offMinutes: 42,
+    nextTriggerAt: durableManualOffNow16 + 5 * 60_000,
+    syncedAt: durableManualOffNow16 - 110
+  };
+  const orphanSuccessorT2Credential16 =
+    orphanSuccessorT2Harness16.roundTripSuccessorRetryCredential(
+      orphanSuccessorT2Remote16,
+      orphanSuccessorT1State16.deferredSyncDisableSuccessorObservedAt + 1,
+      'f-test-orphan-T1-T2-lineage'
+    );
+  const orphanSuccessorT2Alarm16 = {
+    name: orphanSuccessorT2Credential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  orphanSuccessorT2Harness16.setSyncRemote(orphanSuccessorT2Remote16);
+  orphanSuccessorT2Harness16.injectRetryAlarm(orphanSuccessorT2Alarm16);
+  await orphanSuccessorT2Harness16.deliverSuccessorRetryAlarm(
+    orphanSuccessorT2Alarm16
+  );
+  await orphanSuccessorT2Harness16.waitForRetryOperationsToSettle();
+  await drainTypedScheduleReadWakes16(orphanSuccessorT2Harness16);
+  const orphanSuccessorT2Recovered16 = orphanSuccessorT2Harness16.state();
+  assertPass(orphanSuccessorT1Persisted16 === true
+      && orphanSuccessorT2Recovered16.deferredSyncDisablePending === false
+      && orphanSuccessorT2Recovered16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === orphanSuccessorT1Remote16.syncedAt
+      && orphanSuccessorT2Recovered16
+        .deferredSyncSuccessorReleasedRetryAlarmNames.includes(
+          orphanSuccessorT2Alarm16.name
+        )
+      && !orphanSuccessorT2Recovered16.retryAlarms.some(alarm =>
+        alarm.name === orphanSuccessorT2Alarm16.name)
+      && orphanSuccessorT2Recovered16.adoptedRemotes.some(remote =>
+        remote?.enabled === true
+        && remote?.syncedAt === orphanSuccessorT2Remote16.syncedAt)
+      && orphanSuccessorT2Recovered16.lifecycleCalls.includes(
+        'adopt:deferred-sync-successor-after-clear-fresh-store'
+      ),
+    '16M-3F-3N: fresh stable store=T2 时 tombstone旧 T2 credential 并显式采纳 canonical T2，不改写当前 T1 mailbox 身份');
+
+  // observedAt 是单机单调凭证，不是可跨 SW 信任的墙钟。旧 SW 留下的 Tpre
+  // 即使带着远未来 observedAt，新 SW 在 startup 首轮漏读它、随后才收到 F，
+  // F 写 durable record 时仍须按物理 identity 捕获并 tombstone Tpre。否则再
+  // 启动会把时钟回拨前的旧 true 误当 F 后继，在 safety settle 后复活 ON。
+  const rollbackTpreObservedAt16 =
+    durableManualOffNow16 + 7 * 24 * 60 * 60_000;
+  const rollbackTpreRemote16 = {
+    enabled: true,
+    onMinutes: 24,
+    offMinutes: 6,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 2 * 60_000,
+    syncedAt: durableManualOffNow16 - 300
+  };
+  const rollbackTpreCredential16 =
+    compactSuccessorHarness16.roundTripSuccessorRetryCredential(
+      rollbackTpreRemote16,
+      rollbackTpreObservedAt16
+    );
+  const rollbackTpreAlarm16 = {
+    name: rollbackTpreCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  const rollbackSwBHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      retryAlarms: [rollbackTpreAlarm16],
+      // restore 的第三个 getAll 是 successor 枚举；模拟 SW-B 首次漏读。
+      retryGetAllFailureCalls: [3],
+      // F durable tombstone 已足以收口；保留物理旧钟供 SW-C 验证。
+      retryClearFailures: 4
+    });
+  await rollbackSwBHarness16.restore();
+  const rollbackSwBAfterStartup16 = rollbackSwBHarness16.state();
+  const rollbackRemoteF16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 - 200
+  };
+  const rollbackFPersisted16 = await rollbackSwBHarness16.deferRemote(
+    rollbackRemoteF16,
+    'clock-rollback-F-after-startup-successor-miss'
+  );
+  await rollbackSwBHarness16.waitForRetryOperationsToSettle();
+  const rollbackSwBBeforeCrash16 = rollbackSwBHarness16.state();
+  const rollbackSwCHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable:
+        rollbackSwBBeforeCrash16.storedDeferredSyncDisable,
+      retryAlarms: rollbackSwBBeforeCrash16.retryAlarms
+    });
+  await rollbackSwCHarness16.restore();
+  const rollbackSwCRestored16 = rollbackSwCHarness16.state();
+  const rollbackFSettled16 =
+    await rollbackSwCHarness16.settleDeferredForCurrentUser(
+      'clock-rollback-F-settle'
+    );
+  const rollbackSwCAfterSettle16 = rollbackSwCHarness16.state();
+  const rollbackUnexpectedSuccessorApplies16 = [];
+  const rollbackSuccessorAdoptHarness16 = loadTryAdoptSyncedStateF90({
+    chrome: { storage: { sync: { async get() { return {}; } } } },
+    applySyncedPhase: async remote => {
+      rollbackUnexpectedSuccessorApplies16.push(structuredClone(remote));
+      return true;
+    }
+  });
+  rollbackSuccessorAdoptHarness16.restoreDeferredRecord(
+    rollbackSwCAfterSettle16.storedDeferredSyncDisable
+  );
+  await rollbackSuccessorAdoptHarness16(
+    'clock-rollback-after-F-settle'
+  );
+  assertPass(rollbackSwBAfterStartup16.retryGetAllCallCount === 3
+      && rollbackSwBAfterStartup16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && rollbackFPersisted16 === true
+      && rollbackSwBBeforeCrash16
+        .storedDeferredSyncDisable?.pending === true
+      && rollbackSwBBeforeCrash16
+        .storedDeferredSyncDisable?.releasedSuccessorRetryAlarmNames
+          ?.includes(rollbackTpreAlarm16.name)
+      && rollbackSwBBeforeCrash16.retryAlarms.some(alarm =>
+        alarm.name === rollbackTpreAlarm16.name)
+      && rollbackSwCRestored16.deferredSyncDisablePending === true
+      && rollbackSwCRestored16
+        .deferredSyncDisableRemoteSnapshot?.enabled === false
+      && rollbackSwCRestored16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && rollbackFSettled16?.remoteDisabled === true
+      && rollbackSwCAfterSettle16.storedSchedule?.enabled === false
+      && rollbackSwCAfterSettle16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && !rollbackUnexpectedSuccessorApplies16.some(remote =>
+        remote?.enabled === true),
+    '16M-3F-3O: startup 漏读的远未来 Tpre 仍由后到 F 按 identity durable 截断；SW restart/settle 后不复活 ON');
+
+  const seedPreMutationSuccessor16 = async (
+    harness,
+    reason,
+    syncedAtOffset = -90
+  ) => {
+    const remote = {
+      enabled: true,
+      onMinutes: 26,
+      offMinutes: 4,
+      pwmState: 'on',
+      nextTriggerAt: durableManualOffNow16 + 2 * 60_000,
+      syncedAt: durableManualOffNow16 + syncedAtOffset
+    };
+    const persisted = await harness.rememberSuccessor(remote, reason);
+    await harness.waitForRetryOperationsToSettle();
+    const seeded = harness.state();
+    const alarm = seeded.retryAlarms.find(item =>
+      item.name.startsWith('ac-deferred-sync-successor-retry-test:'));
+    return { remote, persisted, alarm, seeded };
+  };
+
+  // Manual OFF 的 durable admission 已完成后，immediate timer 与 M intent
+  // 并行。M 一旦成功，哪怕 SW 在 phase finalizer 前立刻终止，旧 T 的 exact
+  // credential 也必须与用户 schedule 同一事务 tombstone，不能靠尾部 commit。
+  const firstCommitOffHarness16 =
+    loadDurableManualOffAdmissionHarness16({ retryClearFailures: 1 });
+  const firstCommitOffSeed16 = await seedPreMutationSuccessor16(
+    firstCommitOffHarness16,
+    'pre-manual-OFF-T'
+  );
+  const firstCommitOffMutation16 =
+    firstCommitOffHarness16.beginLocalMutation({
+      pwmState: 'off',
+      nextTriggerAt: durableManualOffNow16 + 30 * 60_000
+    });
+  const firstCommitOffIntentEpoch16 = firstCommitOffHarness16.claim('off');
+  const firstCommitOffAdmission16 = firstCommitOffHarness16.begin(
+    firstCommitOffIntentEpoch16,
+    firstCommitOffMutation16.generation
+  );
+  await firstCommitOffAdmission16.durablePromise;
+  const firstCommitOffDurable16 = await firstCommitOffHarness16
+    .commitLocalMutation(
+      firstCommitOffMutation16.generation,
+      'toggleNow-off-local-mutation-intent'
+    );
+  const firstCommitOffCrash16 = firstCommitOffHarness16.state();
+  const firstCommitOffRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: firstCommitOffCrash16.storedMarker,
+      enabled: firstCommitOffCrash16.storedSchedule?.enabled,
+      deferredSyncDisable:
+        firstCommitOffCrash16.storedDeferredSyncDisable,
+      retryAlarms: firstCommitOffCrash16.retryAlarms
+    });
+  await firstCommitOffRestartHarness16.restore();
+  const firstCommitOffRestarted16 = firstCommitOffRestartHarness16.state();
+  assertPass(firstCommitOffSeed16.persisted === true
+      && !!firstCommitOffSeed16.alarm
+      && firstCommitOffDurable16 === true
+      && firstCommitOffCrash16.storedSchedule?.pwmState === 'off'
+      && firstCommitOffCrash16.storedSchedule?.nextTriggerAt
+        === durableManualOffNow16 + 30 * 60_000
+      && firstCommitOffCrash16.storedLocalScheduleMutationCutoff
+        === firstCommitOffMutation16.observedAt
+      && firstCommitOffCrash16
+        .storedDeferredSyncDisable?.localMutationCutoffObservedAt
+          === firstCommitOffMutation16.observedAt
+      && firstCommitOffCrash16
+        .storedDeferredSyncDisable?.releasedSuccessorRetryAlarmNames
+        ?.includes(firstCommitOffSeed16.alarm.name)
+      && firstCommitOffCrash16.storedMarker?.localMutationObservedAt
+        === firstCommitOffMutation16.observedAt
+      && firstCommitOffCrash16.storedMarker
+        ?.localMutationPredecessorCoverageComplete === true
+      && firstCommitOffCrash16.storedMarker
+        ?.localMutationPredecessorRetryAlarmNames
+        ?.includes(firstCommitOffSeed16.alarm.name)
+      && firstCommitOffCrash16.retryAlarms.some(alarm =>
+        alarm.name === firstCommitOffSeed16.alarm.name)
+      && firstCommitOffRestarted16.manualOffAutomaticOnBlocked === true
+      && firstCommitOffRestarted16.deferredSyncDisableSuccessorSnapshot === null
+      && firstCommitOffRestarted16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(firstCommitOffSeed16.alarm.name),
+    '16M-3F-3P: manual OFF 的 admission 后首次 durable M 原子保存 schedule/cutoff/exact T tombstone；phase finalizer 前 crash/restart 不恢复旧 T');
+
+  // Manual ON 在取得 phase owner 后先 durable M，再释放旧 OFF admission、物理
+  // ON 与 outbound。模拟尾部 finish 前终止，重启仍只能看到本次 phase 状态。
+  const firstCommitOnMarker16 = {
+    schemaVersion: 1,
+    token: 'manual-ON-first-commit-predecessor',
+    requestedAt: durableManualOffNow16 - 1_000
+  };
+  const firstCommitOnHarness16 = loadDurableManualOffAdmissionHarness16({
+    marker: firstCommitOnMarker16,
+    retryClearFailures: 1
+  });
+  await firstCommitOnHarness16.restore();
+  firstCommitOnHarness16.setManualOffBlocked(true);
+  const firstCommitOnSeed16 = await seedPreMutationSuccessor16(
+    firstCommitOnHarness16,
+    'pre-manual-ON-T',
+    -80
+  );
+  const firstCommitOnMutation16 =
+    firstCommitOnHarness16.beginLocalMutation({
+      pwmState: 'on',
+      nextTriggerAt: durableManualOffNow16 + 60 * 60_000
+    });
+  const firstCommitOnIntentEpoch16 = firstCommitOnHarness16.claim('on');
+  const firstCommitOnDurable16 = await firstCommitOnHarness16
+    .commitLocalMutation(
+      firstCommitOnMutation16.generation,
+      'toggleNow-on-local-mutation-intent'
+    );
+  const firstCommitOnReleased16 = await firstCommitOnHarness16.releaseForOn(
+    firstCommitOnIntentEpoch16
+  );
+  const firstCommitOnPublished16 = await firstCommitOnHarness16
+    .publishSchedule('toggleNowAndSync-on');
+  const firstCommitOnCrash16 = firstCommitOnHarness16.state();
+  const firstCommitOnRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: firstCommitOnCrash16.storedMarker,
+      enabled: firstCommitOnCrash16.storedSchedule?.enabled,
+      deferredSyncDisable:
+        firstCommitOnCrash16.storedDeferredSyncDisable,
+      retryAlarms: firstCommitOnCrash16.retryAlarms
+    });
+  await firstCommitOnRestartHarness16.restore();
+  const firstCommitOnRestarted16 = firstCommitOnRestartHarness16.state();
+  const manualOnIntentSourceIndex16 = manualToggleMessageBody16.indexOf(
+    "'toggleNow-on-local-mutation-intent'"
+  );
+  const manualOnPhysicalSourceIndex16 = manualToggleMessageBody16.indexOf(
+    "const toggleResult = await toggleNowAndSync('on'"
+  );
+  const manualOnOutboundSourceIndex16 = manualToggleMessageBody16.indexOf(
+    "await syncScheduleToSync('toggleNowAndSync-on')"
+  );
+  assertPass(firstCommitOnSeed16.persisted === true
+      && !!firstCommitOnSeed16.alarm
+      && firstCommitOnDurable16 === true
+      && firstCommitOnReleased16 === true
+      && firstCommitOnPublished16 === true
+      && firstCommitOnCrash16.storedSchedule?.pwmState === 'on'
+      && firstCommitOnCrash16.storedSchedule?.nextTriggerAt
+        === durableManualOffNow16 + 60 * 60_000
+      && firstCommitOnCrash16.storedLocalScheduleMutationCutoff
+        === firstCommitOnMutation16.observedAt
+      && firstCommitOnCrash16.outboundPublishes.length === 1
+      && firstCommitOnCrash16.outboundPublishes[0]?.enabled === true
+      && firstCommitOnRestarted16.deferredSyncDisableSuccessorSnapshot === null
+      && firstCommitOnRestarted16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(firstCommitOnSeed16.alarm.name)
+      && manualOnIntentSourceIndex16 >= 0
+      && manualOnIntentSourceIndex16 < manualOnPhysicalSourceIndex16
+      && manualOnPhysicalSourceIndex16 < manualOnOutboundSourceIndex16,
+    '16M-3F-3Q: manual ON 在 phase 内先 durable M，再释放/物理 ON/outbound；尾部 finish 前 crash/restart 保留 +60m phase 且不恢复早 T');
+
+  // 普通 update 的合并目标必须在 setup/页面/闹钟之前成为首个 durable
+  // schedule+M 事务；没有 automation authority 的 config 也不能在中途 crash
+  // 后被旧 T 的 phase/clock 覆写。
+  const firstCommitUpdateHarness16 =
+    loadDurableManualOffAdmissionHarness16({ retryClearFailures: 1 });
+  firstCommitUpdateHarness16.setManualOffBlocked(true);
+  const firstCommitUpdateSeed16 = await seedPreMutationSuccessor16(
+    firstCommitUpdateHarness16,
+    'pre-ordinary-update-T',
+    -70
+  );
+  const firstCommitUpdateMutation16 =
+    firstCommitUpdateHarness16.beginLocalMutation({
+      onMinutes: 27,
+      offMinutes: 33,
+      pwmState: 'off',
+      nextTriggerAt: durableManualOffNow16 + 45 * 60_000
+    });
+  const firstCommitUpdateDurable16 = await firstCommitUpdateHarness16
+    .commitLocalMutation(
+      firstCommitUpdateMutation16.generation,
+      'updateSchedule-local-mutation-intent'
+    );
+  firstCommitUpdateHarness16.setManualOffBlocked(false);
+  const firstCommitUpdateCrash16 = firstCommitUpdateHarness16.state();
+  const firstCommitUpdateRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: firstCommitUpdateCrash16.storedSchedule?.enabled,
+      deferredSyncDisable:
+        firstCommitUpdateCrash16.storedDeferredSyncDisable,
+      retryAlarms: firstCommitUpdateCrash16.retryAlarms
+    });
+  await firstCommitUpdateRestartHarness16.restore();
+  const firstCommitUpdateRestarted16 =
+    firstCommitUpdateRestartHarness16.state();
+  const updateMergeSourceIndex16 = updateScheduleBody.indexOf('schedule = {');
+  const updateMutationSourceIndex16 = updateScheduleBody.indexOf(
+    "'updateSchedule-local-mutation-intent'"
+  );
+  const updateSetupSourceIndex16 = updateScheduleBody.indexOf(
+    'await setupAlarms('
+  );
+  assertPass(firstCommitUpdateSeed16.persisted === true
+      && !!firstCommitUpdateSeed16.alarm
+      && firstCommitUpdateDurable16 === true
+      && firstCommitUpdateCrash16.storedSchedule?.onMinutes === 27
+      && firstCommitUpdateCrash16.storedSchedule?.offMinutes === 33
+      && firstCommitUpdateCrash16.storedSchedule?.pwmState === 'off'
+      && firstCommitUpdateCrash16.storedSchedule?.nextTriggerAt
+        === durableManualOffNow16 + 45 * 60_000
+      && firstCommitUpdateCrash16.storedLocalScheduleMutationCutoff
+        === firstCommitUpdateMutation16.observedAt
+      && firstCommitUpdateRestarted16.manualOffAutomaticOnBlocked === false
+      && firstCommitUpdateRestarted16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && firstCommitUpdateRestarted16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(firstCommitUpdateSeed16.alarm.name)
+      && updateMergeSourceIndex16 >= 0
+      && updateMergeSourceIndex16 < updateMutationSourceIndex16
+      && updateMutationSourceIndex16 < updateSetupSourceIndex16,
+    '16M-3F-3R: ordinary update 合并目标后、setup/长 I/O 前首次 durable schedule+M；中窗 crash/restart 保留 config/phase 并淘汰早 T');
+
+  // 若首次 durable M 本身失败，finish 必须撤销 transient generation 并触发
+  // 既有 T 重放；失败请求不能把 mailbox 永久卡在 committing。
+  const failedFirstCommitHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      localMutationSetFailures: 1
+    });
+  failedFirstCommitHarness16.setManualOffBlocked(true);
+  const failedFirstCommitSeed16 = await seedPreMutationSuccessor16(
+    failedFirstCommitHarness16,
+    'pre-failed-local-M-T',
+    -60
+  );
+  const failedFirstCommitMutation16 =
+    failedFirstCommitHarness16.beginLocalMutation({ onMinutes: 29 });
+  let failedFirstCommitError16 = null;
+  try {
+    await failedFirstCommitHarness16.commitLocalMutation(
+      failedFirstCommitMutation16.generation,
+      'failed-local-mutation-intent'
+    );
+  } catch (error) {
+    failedFirstCommitError16 = error;
+  }
+  failedFirstCommitHarness16.setManualOffBlocked(false);
+  failedFirstCommitHarness16.finishLocalMutation(
+    failedFirstCommitMutation16.generation
+  );
+  await Promise.resolve();
+  const failedFirstCommitState16 = failedFirstCommitHarness16.state();
+
+  const failedMutationTerminalApplied16 = [];
+  const failedMutationTerminalHarness16 = loadTryAdoptSyncedStateF90({
+    chrome: { storage: { sync: { async get() { return {}; } } } },
+    applySyncedPhase: async remote => {
+      failedMutationTerminalApplied16.push(structuredClone(remote));
+      return true;
+    }
+  });
+  failedMutationTerminalHarness16.restoreDeferredRecord({
+    pending: false,
+    safetyCleared: true,
+    successor: {
+      observedAt: durableManualOffNow16 - 60,
+      remote: structuredClone(failedFirstCommitSeed16.remote)
+    }
+  });
+  const failedMutationTerminalGeneration16 =
+    failedMutationTerminalHarness16.claimLocalMutationForTest();
+  failedMutationTerminalHarness16
+    .finishClaimedLocalMutationWithActualSemanticsForTest({ committed: false });
+  await failedMutationTerminalHarness16.waitForBackgroundTasks();
+  const failedMutationTerminalState16 =
+    failedMutationTerminalHarness16.state();
+  assertPass(failedFirstCommitSeed16.persisted === true
+      && failedFirstCommitError16?.message
+        === 'synthetic local mutation intent rejection'
+      && failedFirstCommitState16.localScheduleMutationCommitPendingGeneration
+        === 0
+      && failedFirstCommitState16.localScheduleMutationCommittedObservedAt
+        < failedFirstCommitMutation16.observedAt
+      && failedFirstCommitState16.storedLocalScheduleMutationCutoff === 0
+      && failedFirstCommitState16.storedSchedule === null
+      && failedFirstCommitState16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === failedFirstCommitSeed16.remote.syncedAt
+      && failedFirstCommitState16.lifecycleCalls.includes(
+        'adopt:local-schedule-mutation-aborted'
+      )
+      && failedMutationTerminalGeneration16 === 1
+      && failedMutationTerminalApplied16.length === 1
+      && failedMutationTerminalApplied16[0]?.syncedAt
+        === failedFirstCommitSeed16.remote.syncedAt
+      && failedMutationTerminalState16.successorTombstones.length === 0
+      && failedMutationTerminalState16.outboundReasons.length === 0
+      && failedMutationTerminalState16
+        .deferredSyncDisableSuccessorSnapshot === null,
+    '16M-3F-3S: 首次 durable M 写拒绝时 finish 撤销 pending 并 rebase/replay 既有 T；不能误落 later-local tombstone 或 local outbound');
+
+  const ordinaryRollbackResponses16 = [];
+  const ordinaryRollbackAttemptedSchedules16 = [];
+  const ordinaryRollbackHarness16 = makeActualUpdateHarnessF90(
+    runSerializedScheduleUpdateF90,
+    async () => true,
+    async () => true,
+    async () => true,
+    async () => {},
+    async () => ({ success: true }),
+    async () => true,
+    () => {},
+    undefined,
+    undefined,
+    '',
+    undefined,
+    undefined,
+    async ({ schedule: attemptedSchedule }) => {
+      ordinaryRollbackAttemptedSchedules16.push(
+        structuredClone(attemptedSchedule)
+      );
+      throw new Error('synthetic ordinary M first-write rejection');
+    }
+  );
+  try {
+    await ordinaryRollbackHarness16.dispatch({
+      type: 'updateSchedule',
+      data: {
+        onMinutes: 29,
+        offMinutes: 31,
+        activeHours: { enabled: true, start: '09:00', end: '18:00' },
+        smartMode: { enabled: false, sensitivity: 7 }
+      }
+    }, response => ordinaryRollbackResponses16.push(response));
+  } catch (error) {
+    // makeActualUpdateHarness 提取的是 listener 内层 async body；真实 listener
+    // 的外层 catch 负责把 rejection 规范化为 sendResponse。
+    ordinaryRollbackResponses16.push({
+      success: false,
+      error: error?.message || String(error)
+    });
+  }
+  const ordinaryRollbackState16 = ordinaryRollbackHarness16.state();
+  assertPass(ordinaryRollbackAttemptedSchedules16.length === 1
+      && ordinaryRollbackAttemptedSchedules16[0]?.onMinutes === 29
+      && ordinaryRollbackAttemptedSchedules16[0]?.offMinutes === 31
+      && ordinaryRollbackAttemptedSchedules16[0]?.activeHours?.enabled === true
+      && ordinaryRollbackResponses16.length === 1
+      && ordinaryRollbackResponses16[0]?.success === false
+      && ordinaryRollbackResponses16[0]?.error
+        === 'synthetic ordinary M first-write rejection'
+      && ordinaryRollbackState16.enabled === false
+      && ordinaryRollbackState16.onMinutes === 15
+      && ordinaryRollbackState16.offMinutes === 45
+      && ordinaryRollbackState16.activeHours?.enabled === false
+      && ordinaryRollbackState16.activeHours?.start === '08:00'
+      && ordinaryRollbackState16.activeHours?.end === '23:00'
+      && ordinaryRollbackState16.smartMode?.enabled === false
+      && ordinaryRollbackState16.smartMode?.sensitivity === 5,
+    '16M-3F-3S-1: ordinary config 首次 durable M 写拒绝时回滚完整内存 config；失败半状态不能被后续 partial persist 洗入');
+
+  // coverage 是特定 F cutoff 的证明，不能作为永真 boolean 被更晚仅凭 retry
+  // credential 合成的 F2 继承。F1 coverage=t1，F2=t2 无 record 时，future-clock
+  // Tpre 即使 numeric observedAt>t2 仍须按 F2 枚举 predecessor 淘汰。
+  const coverageF1ObservedAt16 = durableManualOffNow16 - 500;
+  const coverageF2ObservedAt16 = durableManualOffNow16 - 400;
+  const coverageTpreRemote16 = {
+    enabled: true,
+    onMinutes: 25,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 2 * 60_000,
+    syncedAt: durableManualOffNow16 - 450
+  };
+  const coverageCredentialHarness16 =
+    loadDurableManualOffAdmissionHarness16();
+  const coverageTpreCredential16 = coverageCredentialHarness16
+    .roundTripSuccessorRetryCredential(
+      coverageTpreRemote16,
+      durableManualOffNow16 + 7 * 24 * 60 * 60_000
+    );
+  const coverageF2AlarmName16 = [
+    'ac-deferred-sync-disable-retry-test',
+    coverageF2ObservedAt16,
+    'later-F2-without-record',
+    ''
+  ].join(':');
+  const coverageRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable: {
+        pending: true,
+        safetyAuthorityId: 'f-test-coverage-F1',
+        receivedAt: coverageF1ObservedAt16,
+        safetyCutoffObservedAt: coverageF1ObservedAt16,
+        successorPredecessorCoverageComplete: true,
+        successorPredecessorCoverageThroughObservedAt:
+          coverageF1ObservedAt16,
+        remote: { enabled: false, syncedAt: coverageF1ObservedAt16 - 1 },
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: coverageF1ObservedAt16
+      },
+      syncRemote: {
+        enabled: false,
+        syncedAt: coverageF2ObservedAt16 - 1
+      },
+      retryAlarms: [
+        {
+          name: coverageF2AlarmName16,
+          scheduledTime: durableManualOffNow16 + 60_000,
+          periodInMinutes: 1
+        },
+        {
+          name: coverageTpreCredential16.name,
+          scheduledTime: durableManualOffNow16 + 60_000,
+          periodInMinutes: 1
+        }
+      ]
+    });
+  await coverageRestartHarness16.restore();
+  const coverageBeforeClassifier16 = coverageRestartHarness16.state();
+  await coverageRestartHarness16.deliverSuccessorRetryAlarm({
+    name: coverageTpreCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  });
+  await coverageRestartHarness16.waitForRetryOperationsToSettle();
+  await drainTypedScheduleReadWakes16(coverageRestartHarness16);
+  const coverageRestarted16 = coverageRestartHarness16.state();
+  assertPass(coverageBeforeClassifier16.deferredSyncDisablePending === true
+      && coverageBeforeClassifier16.deferredSyncDisableObservedAt
+        === coverageF2ObservedAt16
+      && coverageBeforeClassifier16
+        .deferredSyncSuccessorEnumerationPendingEpoch > 0
+      && coverageBeforeClassifier16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && coverageRestarted16.deferredSyncDisablePending === true
+      && coverageRestarted16.deferredSyncDisableSuccessorSnapshot === null
+      && coverageRestarted16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(coverageTpreCredential16.name)
+      && !coverageRestarted16.retryAlarms.some(alarm =>
+        alarm.name === coverageTpreCredential16.name),
+    '16M-3F-3T: F1 coverage-through 不跨 F2 credential ABA 继承；F2 无 record 时先 fail-closed，typed original Tpre 经 fresh sync=false classifier 后 exact 淘汰');
+
+  // 新 SW 恢复 pending OFF 时，durable M1 之后才到达的 T 是合法后继。
+  // recovery 不能无条件 claim 新 M2 并把 T 重新解释成 predecessor；用第二次
+  // restart 验证 durable mailbox，而不是只看同 SW 尚未清掉的内存 snapshot。
+  const recoveryPostM1Harness16 =
+    loadDurableManualOffAdmissionHarness16({ retryClearFailures: 1 });
+  const recoveryPostM1Mutation16 =
+    recoveryPostM1Harness16.beginLocalMutation({
+      pwmState: 'off',
+      nextTriggerAt: durableManualOffNow16 + 30 * 60_000
+    });
+  const recoveryPostM1OffEpoch16 = recoveryPostM1Harness16.claim('off');
+  const recoveryPostM1Admission16 = recoveryPostM1Harness16.begin(
+    recoveryPostM1OffEpoch16,
+    recoveryPostM1Mutation16.generation
+  );
+  await recoveryPostM1Admission16.durablePromise;
+  const recoveryPostM1Committed16 = await recoveryPostM1Harness16
+    .commitLocalMutation(
+      recoveryPostM1Mutation16.generation,
+      'manual-off-M1-before-crash'
+    );
+  const recoveryPostM1Successor16 = await seedPreMutationSuccessor16(
+    recoveryPostM1Harness16,
+    'post-manual-OFF-M1-T',
+    10
+  );
+  const recoveryPostM1Crash16 = recoveryPostM1Harness16.state();
+  const recoveryPostM1RestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: recoveryPostM1Crash16.storedMarker,
+      enabled: recoveryPostM1Crash16.storedSchedule?.enabled,
+      deferredSyncDisable:
+        recoveryPostM1Crash16.storedDeferredSyncDisable,
+      retryAlarms: recoveryPostM1Crash16.retryAlarms,
+      retryClearFailures: 1
+    });
+  await recoveryPostM1RestartHarness16.restore();
+  const recoveryPostM1BeforeResume16 =
+    recoveryPostM1RestartHarness16.state();
+  const recoveryPostM1Result16 = await recoveryPostM1RestartHarness16
+    .resumePending('init-recovery-after-durable-M1');
+  const recoveryPostM1AfterResume16 =
+    recoveryPostM1RestartHarness16.state();
+  const recoveryPostM1SecondRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: recoveryPostM1AfterResume16.storedMarker,
+      enabled: recoveryPostM1AfterResume16.storedSchedule?.enabled,
+      deferredSyncDisable:
+        recoveryPostM1AfterResume16.storedDeferredSyncDisable,
+      retryAlarms: recoveryPostM1AfterResume16.retryAlarms
+    });
+  await recoveryPostM1SecondRestartHarness16.restore();
+  const recoveryPostM1SecondRestarted16 =
+    recoveryPostM1SecondRestartHarness16.state();
+  assertPass(recoveryPostM1Committed16 === true
+      && recoveryPostM1Successor16.persisted === true
+      && recoveryPostM1BeforeResume16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === recoveryPostM1Successor16.remote.syncedAt
+      && recoveryPostM1Result16?.success === true
+      && recoveryPostM1SecondRestarted16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === recoveryPostM1Successor16.remote.syncedAt
+      && !recoveryPostM1SecondRestarted16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(recoveryPostM1Successor16.alarm.name),
+    '16M-3F-3U: pending OFF 的 durable M1 后到 T 跨 crash；startup resume 不另 claim M2 把合法 post-M1 successor durable tombstone');
+
+  // onMessage listener 在任何 init await 前已 claim ordinary config M1。若 init
+  // 恰在其后恢复旧 OFF marker，recovery 必须借用/等待该 M，而不能用 M2 清掉
+  // M1；否则 popup 最终收到“intent 未持久化”，尽管 recovery 偷写了半状态。
+  const recoveryVsEarlyConfigMarker16 = {
+    schemaVersion: 1,
+    token: 'startup-recovery-before-early-config',
+    requestedAt: durableManualOffNow16 - 2_000
+  };
+  const recoveryVsEarlyConfigHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: recoveryVsEarlyConfigMarker16
+    });
+  await recoveryVsEarlyConfigHarness16.restore();
+  const earlyConfigMutation16 = recoveryVsEarlyConfigHarness16
+    .beginLocalMutation({
+      onMinutes: 28,
+      offMinutes: 32,
+      pwmState: 'off',
+      nextTriggerAt: durableManualOffNow16 + 40 * 60_000
+    });
+  const recoveryDuringEarlyConfig16 = await recoveryVsEarlyConfigHarness16
+    .resumePending('init-recovery-during-early-config-M1');
+  const earlyConfigCommitted16 = await recoveryVsEarlyConfigHarness16
+    .commitLocalMutation(
+      earlyConfigMutation16.generation,
+      'updateSchedule-local-mutation-intent'
+    );
+  recoveryVsEarlyConfigHarness16.finishLocalMutation(
+    earlyConfigMutation16.generation
+  );
+  const recoveryAfterEarlyConfig16 = await recoveryVsEarlyConfigHarness16
+    .resumePending('init-recovery-after-early-config-M1');
+  const recoveryVsEarlyConfigState16 =
+    recoveryVsEarlyConfigHarness16.state();
+  assertPass(recoveryDuringEarlyConfig16?.success === false
+      && recoveryDuringEarlyConfig16?.localMutationCoveragePending === true
+      && earlyConfigCommitted16 === true
+      && recoveryAfterEarlyConfig16?.success === true
+      && recoveryVsEarlyConfigState16.storedSchedule?.onMinutes === 28
+      && recoveryVsEarlyConfigState16.storedSchedule?.offMinutes === 32
+      && recoveryVsEarlyConfigState16.storedSchedule?.nextTriggerAt
+        === durableManualOffNow16 + 40 * 60_000
+      && recoveryVsEarlyConfigState16.localScheduleMutationGeneration
+        === earlyConfigMutation16.generation
+      && recoveryVsEarlyConfigState16
+        .localScheduleMutationCommitPendingGeneration
+          === 0,
+    '16M-3F-3V: initReady 前 ordinary config 已 claim M1 时 startup OFF recovery 先保持阻断不抢 M2；M1 durable/finish 后同 token 恢复并保留 config');
+
+  // restore 入口必须冻结 read-time generation。若 storage/getAll 尚未返回时
+  // ordinary config 才 claim M1，启动前已存在的 alarm T0 仍属于 gen0；只有
+  // 真正在 M1 后由 onChanged 进入 early mailbox 的 T1 才能携带 gen1。
+  const startupLineageT0Remote16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 + 51,
+    onMinutes: 24,
+    offMinutes: 36,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 20 * 60_000
+  };
+  const startupLineageT0SafetyAuthorityId16 =
+    'f-test-startup-lineage-T0';
+  const startupLineageCredentialHarness16 =
+    loadDurableManualOffAdmissionHarness16();
+  const startupLineageT0Credential16 =
+    startupLineageCredentialHarness16.roundTripSuccessorRetryCredential(
+      startupLineageT0Remote16,
+      durableManualOffNow16 + 50,
+      startupLineageT0SafetyAuthorityId16
+    );
+  const startupLineageT0Alarm16 = {
+    name: startupLineageT0Credential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  const startupLineageT0Gate16 = makeDeferred9G();
+  const startupLineageT0Started16 = makeDeferred9G();
+  const startupLineageT0Harness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable: {
+        pending: false,
+        safetyCleared: true,
+        releasedSafetyAuthorityId:
+          startupLineageT0SafetyAuthorityId16,
+        safetyCutoffObservedAt: 0,
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: 0
+      },
+      retryAlarms: [startupLineageT0Alarm16],
+      storageGetGate: startupLineageT0Gate16.promise,
+      onStorageGetStarted: () => startupLineageT0Started16.resolve()
+    });
+  const startupLineageT0Restore16 = startupLineageT0Harness16.restore();
+  await startupLineageT0Started16.promise;
+  const startupLineageT0M1Claim16 =
+    startupLineageT0Harness16.beginLocalMutation({ onMinutes: 31 });
+  startupLineageT0Gate16.resolve();
+  await startupLineageT0Restore16;
+  const startupLineageT0State16 = startupLineageT0Harness16.state();
+
+  const startupLineageT1Gate16 = makeDeferred9G();
+  const startupLineageT1Started16 = makeDeferred9G();
+  const startupLineageFObservedAt16 = durableManualOffNow16 + 60;
+  const startupLineageT1Remote16 = {
+    ...startupLineageT0Remote16,
+    syncedAt: durableManualOffNow16 + 62,
+    onMinutes: 26,
+    nextTriggerAt: durableManualOffNow16 + 25 * 60_000
+  };
+  const startupLineageT1Harness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable: {
+        pending: true,
+        receivedAt: startupLineageFObservedAt16,
+        safetyCutoffObservedAt: startupLineageFObservedAt16,
+        successorPredecessorCoverageComplete: true,
+        successorPredecessorCoverageThroughObservedAt:
+          startupLineageFObservedAt16,
+        remote: { enabled: false, syncedAt: durableManualOffNow16 + 59 },
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: startupLineageFObservedAt16
+      },
+      storageGetGate: startupLineageT1Gate16.promise,
+      onStorageGetStarted: () => startupLineageT1Started16.resolve()
+    });
+  const startupLineageT1Restore16 = startupLineageT1Harness16.restore();
+  await startupLineageT1Started16.promise;
+  const startupLineageT1M1Claim16 =
+    startupLineageT1Harness16.beginLocalMutation({ onMinutes: 32 });
+  const startupLineageT1Persisted16 =
+    await startupLineageT1Harness16.rememberSuccessor(
+      startupLineageT1Remote16,
+      'startup-lineage-T1-after-M1',
+      {
+        scheduleAuthorityGeneration: 0,
+        scheduleMutationGeneration: startupLineageT1M1Claim16.generation
+      }
+    );
+  await startupLineageT1Harness16.waitForRetryOperationsToSettle();
+  startupLineageT1Harness16.queueEarlySyncRemote(
+    startupLineageT1Remote16
+  );
+  startupLineageT1Gate16.resolve();
+  await startupLineageT1Restore16;
+  const startupLineageT1State16 = startupLineageT1Harness16.state();
+  const startupLineageT0PreservedAsPredecessor16 =
+    startupLineageT0State16.deferredSyncDisableSuccessorSnapshot
+      ? startupLineageT0State16
+        .deferredSyncDisableSuccessorMutationGeneration === 0
+        && startupLineageT0State16.deferredSyncSuccessorRetryAlarmEntries
+          .some(([name, entry]) => (
+            name === startupLineageT0Alarm16.name
+            && entry?.scheduleMutationGeneration === 0
+          ))
+      : startupLineageT0State16.retryAlarms.some(alarm =>
+          alarm.name === startupLineageT0Alarm16.name)
+        && !startupLineageT0State16
+          .deferredSyncSuccessorReleasedRetryAlarmNames
+          .includes(startupLineageT0Alarm16.name);
+  assertPass(startupLineageT0M1Claim16.generation === 1
+      && startupLineageT0State16.localScheduleMutationGeneration === 1
+      && startupLineageT0State16
+        .localScheduleMutationCommitPendingGeneration === 1
+      && startupLineageT0PreservedAsPredecessor16
+      && startupLineageT1M1Claim16.generation === 1
+      && startupLineageT1Persisted16 === true
+      && startupLineageT1State16.localScheduleMutationGeneration === 1
+      && startupLineageT1State16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === startupLineageT1Remote16.syncedAt
+      && startupLineageT1State16
+        .deferredSyncDisableSuccessorMutationGeneration === 1
+      && startupLineageT1State16
+        .storedDeferredSyncDisable?.successor?.remote?.syncedAt
+          === startupLineageT1Remote16.syncedAt,
+    '16M-3F-3W: restore 冻结 read-time gen0 给 pre-existing T0；await 中 M1 后真实 T1 先建 credential+causal envelope 才携 gen1，启动恢复不伪造 lineage');
+
+  // base marker 两次写拒绝时，manual retry alarm 是唯一跨 SW credential。
+  // restart recovery 必须先把其 M cutoff 与 pre-M T0 exact identity 补成
+  // durable coverage，再在 release/schedule 同批留下 publishPending；即使物理
+  // alarm clear 失败且 SW 在 outbound 前终止，下一实例也不能采纳旧 sync T0。
+  const alarmOnlyRecoveryHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      pendingMarkerSetFailures: 2
+    });
+  const alarmOnlyPreMSeed16 = await seedPreMutationSuccessor16(
+    alarmOnlyRecoveryHarness16,
+    'alarm-only-pre-M-T0',
+    -40
+  );
+  const alarmOnlyM1Claim16 = alarmOnlyRecoveryHarness16.beginLocalMutation({
+    pwmState: 'off',
+    nextTriggerAt: durableManualOffNow16 + 30 * 60_000
+  });
+  const alarmOnlyOffEpoch16 = alarmOnlyRecoveryHarness16.claim('off');
+  const alarmOnlyAdmission16 = alarmOnlyRecoveryHarness16.begin(
+    alarmOnlyOffEpoch16,
+    alarmOnlyM1Claim16.generation
+  );
+  const alarmOnlyAdmissionReceipt16 =
+    await alarmOnlyAdmission16.durablePromise;
+  const alarmOnlyCrash16 = alarmOnlyRecoveryHarness16.state();
+  const alarmOnlyRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: alarmOnlyCrash16.storedMarker,
+      enabled: alarmOnlyCrash16.storedSchedule?.enabled,
+      deferredSyncDisable: alarmOnlyCrash16.storedDeferredSyncDisable,
+      retryAlarms: alarmOnlyCrash16.retryAlarms,
+      retryClearFailures: 10
+    });
+  await alarmOnlyRestartHarness16.restore();
+  const alarmOnlyRestored16 = alarmOnlyRestartHarness16.state();
+  const alarmOnlyRecovered16 = await alarmOnlyRestartHarness16.resumePending(
+    'alarm-only-before-outbound-crash'
+  );
+  const alarmOnlyReleasedBeforePublish16 = alarmOnlyRestartHarness16.state();
+  const alarmOnlySecondRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      marker: alarmOnlyReleasedBeforePublish16.storedMarker,
+      enabled: alarmOnlyReleasedBeforePublish16.storedSchedule?.enabled,
+      deferredSyncDisable:
+        alarmOnlyReleasedBeforePublish16.storedDeferredSyncDisable,
+      syncPending: alarmOnlyReleasedBeforePublish16.syncPublishPending,
+      retryAlarms: alarmOnlyReleasedBeforePublish16.retryAlarms
+    });
+  await alarmOnlySecondRestartHarness16.restore();
+  const alarmOnlySecondRestarted16 =
+    alarmOnlySecondRestartHarness16.state();
+  const alarmOnlyOldSyncApplies16 = [];
+  const alarmOnlyOldSyncAdoptHarness16 = loadTryAdoptSyncedStateF90({
+    chrome: {
+      storage: {
+        sync: {
+          async get(key) {
+            return { [key]: structuredClone(alarmOnlyPreMSeed16.remote) };
+          }
+        }
+      }
+    },
+    initialPendingPublish: alarmOnlyReleasedBeforePublish16.syncPublishPending,
+    applySyncedPhase: async remote => {
+      alarmOnlyOldSyncApplies16.push(structuredClone(remote));
+      return true;
+    }
+  });
+  const alarmOnlyOldSyncOutcome16 = await alarmOnlyOldSyncAdoptHarness16(
+    'alarm-only-old-sync-before-publish'
+  );
+  assertPass(alarmOnlyPreMSeed16.persisted === true
+      && alarmOnlyAdmissionReceipt16?.persisted === false
+      && alarmOnlyAdmissionReceipt16?.retryAlarmPending === true
+      && alarmOnlyCrash16.storedMarker === null
+      && alarmOnlyRestored16.manualOffAdmissionLocalMutationObservedAt
+        === alarmOnlyM1Claim16.observedAt
+      && alarmOnlyRestored16.manualOffAdmissionMutationCoverageComplete
+        === false
+      && alarmOnlyRecovered16?.success === true
+      && alarmOnlyReleasedBeforePublish16.storedMarker?.state === 'released'
+      && alarmOnlyReleasedBeforePublish16.syncPublishPending === true
+      && alarmOnlyReleasedBeforePublish16.storedLocalScheduleMutationCutoff
+        >= alarmOnlyM1Claim16.observedAt
+      && alarmOnlyReleasedBeforePublish16
+        .storedDeferredSyncDisable?.releasedSuccessorRetryAlarmNames
+        ?.includes(alarmOnlyPreMSeed16.alarm.name)
+      && alarmOnlyReleasedBeforePublish16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && alarmOnlySecondRestarted16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && alarmOnlySecondRestarted16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(alarmOnlyPreMSeed16.alarm.name)
+      && alarmOnlyOldSyncOutcome16 === false
+      && alarmOnlyOldSyncApplies16.length === 0,
+    '16M-3F-3X: alarm-only OFF recovery 补 M/exact coverage 后先原子 release+publishPending；outbound 前 crash/restart 不采纳旧 T0');
+
+  // legacy/alarm-only identity 的 M observedAt=0 不能在后到 ordinary M1
+  // durable 后继续保持 0；commit 必须同批抬升 pending marker cutoff/coverage，
+  // 否则下一次 recovery 会把 M1 后的 T 重新枚举成 predecessor。
+  const alarmOnlyZeroObservedHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      retryAlarms: failedDurableArrivalState16.retryAlarms
+    });
+  await alarmOnlyZeroObservedHarness16.restore();
+  const alarmOnlyZeroBeforeM16 = alarmOnlyZeroObservedHarness16.state();
+  const alarmOnlyZeroM1Claim16 =
+    alarmOnlyZeroObservedHarness16.beginLocalMutation({ onMinutes: 34 });
+  const alarmOnlyZeroM1Committed16 =
+    await alarmOnlyZeroObservedHarness16.commitLocalMutation(
+      alarmOnlyZeroM1Claim16.generation,
+      'alarm-only-zero-observed-M1'
+    );
+  const alarmOnlyZeroAfterM16 = alarmOnlyZeroObservedHarness16.state();
+  assertPass(alarmOnlyZeroBeforeM16.manualOffAdmissionLocalMutationObservedAt
+        === 0
+      && alarmOnlyZeroBeforeM16.manualOffAdmissionMutationCoverageComplete
+        === false
+      && alarmOnlyZeroM1Committed16 === true
+      && alarmOnlyZeroAfterM16.storedMarker?.state === 'pending'
+      && alarmOnlyZeroAfterM16.storedMarker?.localMutationObservedAt
+        === alarmOnlyZeroM1Claim16.observedAt
+      && alarmOnlyZeroAfterM16.storedMarker
+        ?.localMutationPredecessorCoverageComplete === true
+      && alarmOnlyZeroAfterM16.manualOffAdmissionLocalMutationObservedAt
+        === alarmOnlyZeroM1Claim16.observedAt
+      && alarmOnlyZeroAfterM16.manualOffAdmissionMutationCoverageComplete
+        === true,
+    '16M-3F-3Y: alarm-only obs0 marker 遇后到 ordinary M1 commit 时同批抬升 cutoff/exact coverage，不留下一轮恢复 ABA');
+
+  // Tpre 的 wall clock 可位于 M cutoff 未来，不能靠 numeric cutoff 判先后。
+  // 只要它在 M 首次 durable 前已同时存在于 mailbox+credential，M 的原子
+  // exact receipt 就必须终止 durable payload；在 finish/discard 前 crash 也
+  // 不得复活。反之真正 post-M T1 仍应跨 restart 保留。
+  const futurePreMRemote16 = {
+    enabled: true,
+    syncedAt: durableManualOffNow16 - 10,
+    onMinutes: 23,
+    offMinutes: 37,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 22 * 60_000
+  };
+  const futurePreMObservedAt16 =
+    durableManualOffNow16 + 7 * 24 * 60 * 60_000;
+  const futurePreMHarness16 =
+    loadDurableManualOffAdmissionHarness16({ retryClearFailures: 10 });
+  const futurePreMCredential16 =
+    futurePreMHarness16.roundTripSuccessorRetryCredential(
+      futurePreMRemote16,
+      futurePreMObservedAt16
+    );
+  const futurePreMAlarm16 = {
+    name: futurePreMCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  const futurePreMInjected16 =
+    futurePreMHarness16.injectDurableSuccessorBeforeLocalMutation(
+      futurePreMRemote16,
+      futurePreMObservedAt16,
+      futurePreMAlarm16
+    );
+  const futurePreMMutation16 = futurePreMHarness16.beginLocalMutation({
+    onMinutes: 35,
+    offMinutes: 25
+  });
+  const futurePreMCommitted16 = await futurePreMHarness16.commitLocalMutation(
+    futurePreMMutation16.generation,
+    'future-clock-pre-M-exact-terminal'
+  );
+  const futurePreMCrash16 = futurePreMHarness16.state();
+  const futurePreMRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: futurePreMCrash16.storedSchedule?.enabled,
+      deferredSyncDisable: futurePreMCrash16.storedDeferredSyncDisable,
+      retryAlarms: futurePreMCrash16.retryAlarms
+    });
+  await futurePreMRestartHarness16.restore();
+  const futurePreMRestarted16 = futurePreMRestartHarness16.state();
+
+  const postMControlHarness16 = loadDurableManualOffAdmissionHarness16();
+  const postMControlMutation16 = postMControlHarness16.beginLocalMutation({
+    onMinutes: 36,
+    offMinutes: 24
+  });
+  const postMControlCommitted16 = await postMControlHarness16
+    .commitLocalMutation(
+      postMControlMutation16.generation,
+      'post-M-control-intent'
+    );
+  postMControlHarness16.finishLocalMutation(
+    postMControlMutation16.generation
+  );
+  postMControlHarness16.setManualOffBlocked(true);
+  const postMControlRemote16 = {
+    ...futurePreMRemote16,
+    syncedAt: durableManualOffNow16 + 80,
+    onMinutes: 27,
+    nextTriggerAt: durableManualOffNow16 + 27 * 60_000
+  };
+  const postMControlPersisted16 = await postMControlHarness16.rememberSuccessor(
+    postMControlRemote16,
+    'post-M-control-T1',
+    {
+      scheduleAuthorityGeneration: 0,
+      scheduleMutationGeneration: postMControlMutation16.generation
+    }
+  );
+  const postMControlCrash16 = postMControlHarness16.state();
+  const postMControlRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: postMControlCrash16.storedSchedule?.enabled,
+      deferredSyncDisable: postMControlCrash16.storedDeferredSyncDisable,
+      retryAlarms: postMControlCrash16.retryAlarms
+    });
+  await postMControlRestartHarness16.restore();
+  const postMControlRestarted16 = postMControlRestartHarness16.state();
+  assertPass(futurePreMInjected16 === true
+      && futurePreMCommitted16 === true
+      && futurePreMMutation16.observedAt < futurePreMObservedAt16
+      && futurePreMCrash16.storedLocalScheduleMutationCutoff
+        === futurePreMMutation16.observedAt
+      && futurePreMCrash16
+        .storedDeferredSyncDisable?.releasedSuccessorRetryAlarmNames
+        ?.includes(futurePreMAlarm16.name)
+      && futurePreMRestarted16.deferredSyncDisableSuccessorSnapshot === null
+      && futurePreMRestarted16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(futurePreMAlarm16.name)
+      && postMControlCommitted16 === true
+      && postMControlPersisted16 === true
+      && postMControlRestarted16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === postMControlRemote16.syncedAt,
+    '16M-3F-3Z: future-clock pre-M durable T0 由 exact receipt 在首次 M set 同批终止，finish 前 crash 不复活；真正 post-M T1 仍保留');
+
+  // M commit 在 critical set 前冻结的 terminal receipt 只能清同 identity T0。
+  // set await 中后到 T1 会先换内存 mailbox、再排队持久化；旧 continuation
+  // 若无条件清 snapshot，就会把真正后继从内存和下一次 crash 恢复里抹掉。
+  const capturedSuccessorSetGate16 = makeDeferred9G();
+  const capturedSuccessorSetStarted16 = makeDeferred9G();
+  const capturedSuccessorHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      retryClearFailures: 10,
+      localMutationSetGate: capturedSuccessorSetGate16.promise,
+      onLocalMutationSetStarted: () =>
+        capturedSuccessorSetStarted16.resolve()
+    });
+  const capturedT0Remote16 = {
+    ...futurePreMRemote16,
+    syncedAt: durableManualOffNow16 + 90,
+    onMinutes: 22
+  };
+  const capturedT0ObservedAt16 = durableManualOffNow16 - 20;
+  const capturedT0Credential16 = capturedSuccessorHarness16
+    .roundTripSuccessorRetryCredential(
+      capturedT0Remote16,
+      capturedT0ObservedAt16
+    );
+  const capturedT0Alarm16 = {
+    name: capturedT0Credential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  capturedSuccessorHarness16.injectDurableSuccessorBeforeLocalMutation(
+    capturedT0Remote16,
+    capturedT0ObservedAt16,
+    capturedT0Alarm16
+  );
+  const capturedSuccessorM1Claim16 =
+    capturedSuccessorHarness16.beginLocalMutation({ onMinutes: 33 });
+  const capturedSuccessorM1Commit16 = capturedSuccessorHarness16
+    .commitLocalMutation(
+      capturedSuccessorM1Claim16.generation,
+      'captured-successor-T0-terminal'
+    );
+  await capturedSuccessorSetStarted16.promise;
+  const capturedT1Remote16 = {
+    ...capturedT0Remote16,
+    syncedAt: durableManualOffNow16 + 91,
+    onMinutes: 28,
+    nextTriggerAt: durableManualOffNow16 + 28 * 60_000
+  };
+  const capturedT1Persist16 = capturedSuccessorHarness16.rememberSuccessor(
+    capturedT1Remote16,
+    'captured-successor-post-capture-T1',
+    {
+      scheduleAuthorityGeneration: 0,
+      scheduleMutationGeneration: capturedSuccessorM1Claim16.generation
+    }
+  );
+  const capturedSuccessorDuringSet16 = capturedSuccessorHarness16.state();
+  capturedSuccessorSetGate16.resolve();
+  const [capturedSuccessorM1Committed16, capturedT1Persisted16] =
+    await Promise.all([capturedSuccessorM1Commit16, capturedT1Persist16]);
+  const capturedSuccessorAfterSet16 = capturedSuccessorHarness16.state();
+  const capturedSuccessorRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: capturedSuccessorAfterSet16.storedSchedule?.enabled,
+      deferredSyncDisable:
+        capturedSuccessorAfterSet16.storedDeferredSyncDisable,
+      retryAlarms: capturedSuccessorAfterSet16.retryAlarms
+    });
+  await capturedSuccessorRestartHarness16.restore();
+  const capturedSuccessorRestarted16 =
+    capturedSuccessorRestartHarness16.state();
+  assertPass(capturedSuccessorDuringSet16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === capturedT1Remote16.syncedAt
+      && capturedSuccessorM1Committed16 === true
+      && capturedT1Persisted16 === true
+      && capturedSuccessorAfterSet16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === capturedT1Remote16.syncedAt
+      && capturedSuccessorAfterSet16
+        .storedDeferredSyncDisable?.successor?.remote?.syncedAt
+          === capturedT1Remote16.syncedAt
+      && capturedSuccessorAfterSet16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(capturedT0Alarm16.name)
+      && !capturedSuccessorAfterSet16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .some(name => name !== capturedT0Alarm16.name)
+      && capturedSuccessorRestarted16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === capturedT1Remote16.syncedAt,
+    '16M-3F-3Z-1: M set await 中 T0→T1 identity 换主；captured receipt 只 terminal T0，T1 内存/durable/restart 均保留');
+
+  // 派生屏障只认 committed M cutoff 与当前 effective F/T observedAt。
+  // arrival/pending generation 本身没有 authority；用四种顺序同时锁住
+  // normal、predecessor、successor、throw 与 commit 后 crash/restart。
+  const derivedBarrierRemoteF16 = {
+    enabled: false,
+    onMinutes: 11,
+    offMinutes: 49,
+    pwmState: 'off',
+    nextTriggerAt: 0,
+    syncedAt: durableManualOffNow16 - 1_000
+  };
+  const derivedBarrierRemoteTpre16 = {
+    enabled: true,
+    onMinutes: 12,
+    offMinutes: 48,
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 12 * 60_000,
+    syncedAt: durableManualOffNow16 - 999
+  };
+  const derivedBarrierRemoteTpost16 = {
+    enabled: true,
+    onMinutes: 13,
+    offMinutes: 47,
+    pwmState: 'off',
+    nextTriggerAt: durableManualOffNow16 + 13 * 60_000,
+    syncedAt: durableManualOffNow16 - 998
+  };
+
+  const derivedFThenMHarness16 = loadDurableManualOffAdmissionHarness16();
+  await derivedFThenMHarness16.deferRemote(
+    derivedBarrierRemoteF16,
+    'derived-F-then-M'
+  );
+  await derivedFThenMHarness16.waitForRetryOperationsToSettle();
+  const derivedFThenMBefore16 = derivedFThenMHarness16
+    .derivedLocalMutationBarrier();
+  const derivedFThenMClaim16 = derivedFThenMHarness16.beginLocalMutation({
+    onMinutes: 31
+  });
+  const derivedFThenMCommitted16 = await derivedFThenMHarness16
+    .commitLocalMutation(
+      derivedFThenMClaim16.generation,
+      'derived-F-then-M-commit'
+    );
+  const derivedFThenMAfter16 = derivedFThenMHarness16
+    .derivedLocalMutationBarrier();
+  const derivedFThenMCrashState16 = derivedFThenMHarness16.state();
+  const derivedFThenMRestartHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      enabled: derivedFThenMCrashState16.storedSchedule?.enabled,
+      deferredSyncDisable:
+        derivedFThenMCrashState16.storedDeferredSyncDisable,
+      retryAlarms: derivedFThenMCrashState16.retryAlarms
+    });
+  await derivedFThenMRestartHarness16.restore();
+  const derivedFThenMRestartBarrier16 = derivedFThenMRestartHarness16
+    .derivedLocalMutationBarrier();
+
+  const derivedTpreHarness16 = loadDurableManualOffAdmissionHarness16();
+  await derivedTpreHarness16.deferRemote(
+    derivedBarrierRemoteF16,
+    'derived-F-before-Tpre-M'
+  );
+  await derivedTpreHarness16.rememberSuccessor(
+    derivedBarrierRemoteTpre16,
+    'derived-Tpre-before-M'
+  );
+  await derivedTpreHarness16.waitForRetryOperationsToSettle();
+  const derivedTpreBeforeM16 = derivedTpreHarness16.state();
+  const derivedTpreMClaim16 = derivedTpreHarness16.beginLocalMutation({
+    onMinutes: 32
+  });
+  const derivedTpreMCommitted16 = await derivedTpreHarness16
+    .commitLocalMutation(
+      derivedTpreMClaim16.generation,
+      'derived-F-Tpre-M-commit'
+    );
+  const derivedTpreAfterM16 = derivedTpreHarness16.state();
+  const derivedTpreBarrierAfterM16 = derivedTpreHarness16
+    .derivedLocalMutationBarrier();
+
+  const derivedTpostHarness16 = loadDurableManualOffAdmissionHarness16();
+  await derivedTpostHarness16.deferRemote(
+    derivedBarrierRemoteF16,
+    'derived-F-before-M-Tpost'
+  );
+  const derivedTpostMClaim16 = derivedTpostHarness16.beginLocalMutation({
+    onMinutes: 33
+  });
+  const derivedTpostMCommitted16 = await derivedTpostHarness16
+    .commitLocalMutation(
+      derivedTpostMClaim16.generation,
+      'derived-F-M-before-Tpost-commit'
+    );
+  derivedTpostHarness16.finishLocalMutation(
+    derivedTpostMClaim16.generation
+  );
+  const derivedTpostBarrierBeforeT16 = derivedTpostHarness16
+    .derivedLocalMutationBarrier();
+  const derivedTpostPersisted16 = await derivedTpostHarness16
+    .rememberSuccessor(
+      derivedBarrierRemoteTpost16,
+      'derived-post-M-Tpost',
+      { scheduleMutationGeneration: derivedTpostMClaim16.generation }
+    );
+  await derivedTpostHarness16.waitForRetryOperationsToSettle();
+  const derivedTpostAfter16 = derivedTpostHarness16.state();
+  const derivedTpostBarrierAfterT16 = derivedTpostHarness16
+    .derivedLocalMutationBarrier();
+
+  const derivedThrowHarness16 = loadDurableManualOffAdmissionHarness16({
+    localMutationSetFailures: 1
+  });
+  await derivedThrowHarness16.deferRemote(
+    derivedBarrierRemoteF16,
+    'derived-F-before-Tpre-M-throw'
+  );
+  await derivedThrowHarness16.rememberSuccessor(
+    derivedBarrierRemoteTpre16,
+    'derived-Tpre-before-M-throw'
+  );
+  await derivedThrowHarness16.waitForRetryOperationsToSettle();
+  const derivedThrowClaim16 = derivedThrowHarness16.beginLocalMutation({
+    onMinutes: 34
+  });
+  let derivedThrowError16 = null;
+  try {
+    await derivedThrowHarness16.commitLocalMutation(
+      derivedThrowClaim16.generation,
+      'derived-M-first-set-throw'
+    );
+  } catch (error) {
+    derivedThrowError16 = error;
+  }
+  const derivedThrowBarrierBeforeFinish16 = derivedThrowHarness16
+    .derivedLocalMutationBarrier();
+  derivedThrowHarness16.finishLocalMutation(derivedThrowClaim16.generation);
+  await Promise.resolve();
+  const derivedThrowAfter16 = derivedThrowHarness16.state();
+  const derivedThrowBarrierAfterFinish16 = derivedThrowHarness16
+    .derivedLocalMutationBarrier();
+
+  assertPass(derivedFThenMBefore16 === false
+      && derivedFThenMCommitted16 === true
+      && derivedFThenMAfter16 === true
+      && derivedFThenMCrashState16
+        .localScheduleMutationCommitPendingGeneration
+          === derivedFThenMClaim16.generation
+      && derivedFThenMRestartBarrier16 === true
+      && derivedTpreBeforeM16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === derivedBarrierRemoteTpre16.syncedAt
+      && derivedTpreMCommitted16 === true
+      && derivedTpreBarrierAfterM16 === true
+      && derivedTpreAfterM16.deferredSyncDisableSuccessorSnapshot === null
+      && derivedTpreAfterM16
+        .deferredSyncSuccessorReleasedRetryAlarmNames.length > 0
+      && derivedTpostMCommitted16 === true
+      && derivedTpostBarrierBeforeT16 === true
+      && derivedTpostPersisted16 === true
+      && derivedTpostBarrierAfterT16 === false
+      && derivedTpostAfter16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === derivedBarrierRemoteTpost16.syncedAt
+      && derivedThrowError16?.message
+        === 'synthetic local mutation intent rejection'
+      && derivedThrowBarrierBeforeFinish16 === false
+      && derivedThrowBarrierAfterFinish16 === false
+      && derivedThrowAfter16.localScheduleMutationCommitPendingGeneration === 0
+      && derivedThrowAfter16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === derivedBarrierRemoteTpre16.syncedAt,
+    '16M-3F-3Z-1A: 派生屏障矩阵仅认 committed cutoff：F→M 与 F→Tpre→M 为 true，F→M→Tpost/首写 throw 为 false，M commit 后 crash/restart 仍为 true');
+
+  // 首次启动读取 durable M cutoff 时，sync onChanged 仍可能先收到 F→T。
+  // exact observedAt 属于 alarm credential，不能因 future cutoff 改写；仅用
+  // pre-baseline arrival sequence 派生逻辑 authority order，并把它与 mailbox
+  // 同批持久化。applySyncedPhase 必须用逻辑 order 判断 M predecessor，完整
+  // 采纳 F/T config + phase，而不是只放行 enabled。
+  const preBaselineCutoffC16 =
+    durableManualOffNow16 + 30 * 24 * 60 * 60_000;
+  const preBaselineStorageGate16 = makeDeferred9G();
+  const preBaselineStorageStarted16 = makeDeferred9G();
+  const preBaselineRemoteF16 = {
+    enabled: false,
+    onMinutes: 7,
+    offMinutes: 53,
+    activeHours: { enabled: true, start: '04:00', end: '05:00' },
+    smartMode: { enabled: false, sensitivity: 2 },
+    pwmState: 'off',
+    nextTriggerAt: 0,
+    smartClockPlannedAt: 0,
+    syncedAt: durableManualOffNow16 - 200
+  };
+  const preBaselineRemoteTAt16 = durableManualOffNow16 + 21 * 60_000;
+  const preBaselineRemoteT16 = {
+    enabled: true,
+    onMinutes: 27,
+    offMinutes: 33,
+    activeHours: { enabled: false, start: '09:00', end: '22:00' },
+    smartMode: { enabled: false, sensitivity: 8 },
+    pwmState: 'off',
+    nextTriggerAt: preBaselineRemoteTAt16,
+    smartClockPlannedAt: durableManualOffNow16 - 1_000,
+    syncedAt: durableManualOffNow16 - 199
+  };
+  const preBaselineHarness16 = loadDurableManualOffAdmissionHarness16({
+    syncAuthorityBaselineLoaded: false,
+    localMutationCutoff: preBaselineCutoffC16,
+    storageGetGate: preBaselineStorageGate16.promise,
+    onStorageGetStarted: () => preBaselineStorageStarted16.resolve()
+  });
+  const preBaselineLoad16 = preBaselineHarness16
+    .ensureSyncAuthorityBaseline();
+  await preBaselineStorageStarted16.promise;
+  const preBaselineFPersisted16 = await preBaselineHarness16.deferRemote(
+    preBaselineRemoteF16,
+    'future-cutoff-pre-baseline-F'
+  );
+  const preBaselineTPersisted16 = await preBaselineHarness16.rememberSuccessor(
+    preBaselineRemoteT16,
+    'future-cutoff-pre-baseline-T'
+  );
+  await preBaselineHarness16.waitForRetryOperationsToSettle();
+  const preBaselineBeforeLoad16 = preBaselineHarness16.state();
+  preBaselineStorageGate16.resolve();
+  const preBaselineLoaded16 = await preBaselineLoad16;
+  const preBaselineAfterLoad16 = preBaselineHarness16.state();
+
+  const preBaselineApplyHarness16 = loadActualSyncApply16({
+    ...syncCfg16,
+    enabled: true,
+    onMinutes: 44,
+    offMinutes: 16,
+    activeHours: { enabled: true, start: '10:00', end: '18:00' },
+    smartMode: { enabled: false, sensitivity: 5 },
+    pwmState: 'on',
+    nextTriggerAt: durableManualOffNow16 + 44 * 60_000,
+    smartClockPlannedAt: durableManualOffNow16 - 2_000,
+    alarmCreatedAt: durableManualOffNow16 - 2_000,
+    alarmDelayMinutes: 44
+  }, durableManualOffNow16 + 44 * 60_000, 0, {
+    faithfulDisabledReset: true,
+    Date: DurableManualOffDate16,
+    initialLocalMutationCutoff: preBaselineCutoffC16
+  });
+  preBaselineApplyHarness16.seedDeferredDisableAuthority(
+    preBaselineRemoteF16,
+    preBaselineAfterLoad16.deferredSyncDisableObservedAt,
+    preBaselineAfterLoad16.deferredSyncDisableAuthorityOrderObservedAt
+  );
+  const preBaselineEffectiveF16 = preBaselineApplyHarness16
+    .effectiveDeferredRemoteAuthorityObservedAt();
+  const preBaselineFApplied16 = await preBaselineApplyHarness16.apply(
+    preBaselineRemoteF16,
+    'future-cutoff-pre-baseline-F-apply'
+  );
+  const preBaselineAfterFApply16 = preBaselineApplyHarness16.snapshot();
+  preBaselineApplyHarness16.seedDeferredSuccessorAuthority(
+    preBaselineRemoteT16,
+    preBaselineAfterLoad16.deferredSyncDisableSuccessorObservedAt,
+    preBaselineAfterLoad16
+      .deferredSyncDisableSuccessorAuthorityOrderObservedAt
+  );
+  const preBaselineEffectiveT16 = preBaselineApplyHarness16
+    .effectiveDeferredRemoteAuthorityObservedAt();
+  const preBaselineTApplied16 = await preBaselineApplyHarness16.apply(
+    preBaselineRemoteT16,
+    'future-cutoff-pre-baseline-T-apply'
+  );
+  const preBaselineAfterTApply16 = preBaselineApplyHarness16.snapshot();
+  const preBaselineDurableT16 = preBaselineApplyHarness16.durable();
+  assertPass(preBaselineFPersisted16 === true
+      && preBaselineTPersisted16 === true
+      && preBaselineBeforeLoad16.syncAuthorityDurableBaselineLoaded === false
+      && preBaselineBeforeLoad16.deferredSyncDisableObservedAt
+        < preBaselineCutoffC16
+      && preBaselineBeforeLoad16.deferredSyncDisableSuccessorObservedAt
+        < preBaselineCutoffC16
+      && preBaselineBeforeLoad16.deferredSyncDisableObservedAt
+        <= preBaselineBeforeLoad16.deferredSyncDisableSuccessorObservedAt
+      && preBaselineBeforeLoad16
+        .deferredSyncDisableAuthorityPreBaselineSequence === 1
+      && preBaselineBeforeLoad16
+        .deferredSyncDisableSuccessorAuthorityPreBaselineSequence === 2
+      && preBaselineLoaded16 === true
+      && preBaselineAfterLoad16.syncAuthorityDurableBaselineLoaded === true
+      && preBaselineAfterLoad16.deferredSyncDisableObservedAt
+        === preBaselineBeforeLoad16.deferredSyncDisableObservedAt
+      && preBaselineAfterLoad16.deferredSyncDisableSuccessorObservedAt
+        === preBaselineBeforeLoad16.deferredSyncDisableSuccessorObservedAt
+      && preBaselineAfterLoad16.deferredSyncDisableAuthorityOrderObservedAt
+        === preBaselineCutoffC16 + 1
+      && preBaselineAfterLoad16
+        .deferredSyncDisableSuccessorAuthorityOrderObservedAt
+          === preBaselineCutoffC16 + 2
+      && preBaselineAfterLoad16
+        .deferredSyncDisableAuthorityPreBaselineSequence === 0
+      && preBaselineAfterLoad16
+        .deferredSyncDisableSuccessorAuthorityPreBaselineSequence === 0
+      && preBaselineAfterLoad16.remoteSyncAuthorityObservedAt
+        === preBaselineCutoffC16 + 2
+      && preBaselineHarness16.effectiveDeferredRemoteAuthorityObservedAt()
+        === preBaselineCutoffC16 + 2
+      && preBaselineAfterLoad16.storedDeferredSyncDisable?.receivedAt
+        === preBaselineBeforeLoad16.deferredSyncDisableObservedAt
+      && preBaselineAfterLoad16.storedDeferredSyncDisable
+        ?.authorityOrderObservedAt === preBaselineCutoffC16 + 1
+      && preBaselineAfterLoad16.storedDeferredSyncDisable
+        ?.successor?.observedAt
+          === preBaselineBeforeLoad16.deferredSyncDisableSuccessorObservedAt
+      && preBaselineAfterLoad16.storedDeferredSyncDisable
+        ?.successor?.authorityOrderObservedAt === preBaselineCutoffC16 + 2
+      && preBaselineEffectiveF16 === preBaselineCutoffC16 + 1
+      && preBaselineFApplied16 === true
+      && preBaselineAfterFApply16.enabled === false
+      && preBaselineAfterFApply16.onMinutes === 7
+      && preBaselineAfterFApply16.offMinutes === 53
+      && preBaselineAfterFApply16.activeHours?.start === '04:00'
+      && preBaselineAfterFApply16.smartMode?.sensitivity === 2
+      && preBaselineAfterFApply16.pwmState === 'off'
+      && preBaselineAfterFApply16.nextTriggerAt === 0
+      && preBaselineEffectiveT16 === preBaselineCutoffC16 + 2
+      && preBaselineTApplied16 === true
+      && preBaselineAfterTApply16.enabled === true
+      && preBaselineAfterTApply16.onMinutes === 27
+      && preBaselineAfterTApply16.offMinutes === 33
+      && preBaselineAfterTApply16.activeHours?.enabled === false
+      && preBaselineAfterTApply16.smartMode?.sensitivity === 8
+      && preBaselineAfterTApply16.pwmState === 'off'
+      && preBaselineAfterTApply16.nextTriggerAt === preBaselineRemoteTAt16
+      && preBaselineDurableT16.onMinutes === 27
+      && preBaselineDurableT16.nextTriggerAt === preBaselineRemoteTAt16,
+    '16M-3F-3Z-1B: future durable M cutoff 加载中 F→T 保持 exact credential 不变；逻辑 order 依次重排到 C+1/C+2 并 durable，实际 apply 完整采纳两次 config/phase');
+
+  // T alarm 已 durable、mailbox writer 尚未成功时可发生 SW crash。重启只
+  // 保留 immutable credential；future M cutoff 不能靠 raw wall clock 把它
+  // 判旧，fresh stable sync 分类后才消费旧 alarm 并采纳当前 T。
+  const alarmOnlyTCutoffC16 = durableManualOffNow16 + 60 * 60_000;
+  const alarmOnlyTGate16 = makeDeferred9G();
+  const alarmOnlyTStarted16 = makeDeferred9G();
+  const alarmOnlyTRemote16 = {
+    ...preBaselineRemoteT16,
+    syncedAt: durableManualOffNow16 + 601,
+    onMinutes: 32,
+    offMinutes: 28,
+    nextTriggerAt: durableManualOffNow16 + 32 * 60_000
+  };
+  const alarmOnlyTOrigin16 = loadDurableManualOffAdmissionHarness16({
+    syncAuthorityBaselineLoaded: false,
+    localMutationCutoff: alarmOnlyTCutoffC16,
+    storageGetGate: alarmOnlyTGate16.promise,
+    onStorageGetStarted: () => alarmOnlyTStarted16.resolve(),
+    deferredSuccessorSetFailures: 2
+  });
+  const alarmOnlyTOriginBaseline16 = alarmOnlyTOrigin16
+    .ensureSyncAuthorityBaseline();
+  await alarmOnlyTStarted16.promise;
+  const alarmOnlyTPersisted16 = await alarmOnlyTOrigin16.rememberSuccessor(
+    alarmOnlyTRemote16,
+    'alarm-only-T-before-mailbox-crash'
+  );
+  await alarmOnlyTOrigin16.waitForRetryOperationsToSettle();
+  const alarmOnlyTCrashImage16 = alarmOnlyTOrigin16.state();
+  const alarmOnlyTAlarm16 = alarmOnlyTCrashImage16.retryAlarms.find(alarm =>
+    alarm.name.startsWith('ac-deferred-sync-successor-retry-test:'));
+  const alarmOnlyTParsedBeforeRestart16 = alarmOnlyTOrigin16
+    .parseSuccessorRetryCredential(alarmOnlyTAlarm16);
+  const alarmOnlyTRestartHarness16 = loadDurableManualOffAdmissionHarness16({
+    syncAuthorityBaselineLoaded: false,
+    localMutationCutoff: alarmOnlyTCutoffC16,
+    retryAlarms: [alarmOnlyTAlarm16],
+    syncRemote: alarmOnlyTRemote16
+  });
+  await alarmOnlyTRestartHarness16.restore();
+  const alarmOnlyTAfterRestore16 = alarmOnlyTRestartHarness16.state();
+  const alarmOnlyTParsedAfterRestart16 = alarmOnlyTRestartHarness16
+    .parseSuccessorRetryCredential(alarmOnlyTAlarm16);
+  const alarmOnlyTLogicalTuple16 = alarmOnlyTRestartHarness16
+    .rebaseAuthorityTuple(
+      alarmOnlyTParsedAfterRestart16,
+      alarmOnlyTCutoffC16
+    );
+  const alarmOnlyTWronglyPredecessor16 = alarmOnlyTRestartHarness16
+    .authorityTupleAtOrBefore(
+      alarmOnlyTParsedAfterRestart16,
+      { authorityOrderObservedAt: alarmOnlyTCutoffC16 }
+    );
+  const alarmOnlyTBaselineLoaded16 = await alarmOnlyTRestartHarness16
+    .ensureSyncAuthorityBaseline();
+  await alarmOnlyTRestartHarness16.deliverSuccessorRetryAlarm(
+    alarmOnlyTAlarm16
+  );
+  await alarmOnlyTRestartHarness16.waitForRetryOperationsToSettle();
+  const alarmOnlyTAfterFreshClassification16 =
+    alarmOnlyTRestartHarness16.state();
+  alarmOnlyTGate16.resolve();
+  await alarmOnlyTOriginBaseline16;
+  assertPass(alarmOnlyTPersisted16 === false
+      && alarmOnlyTCrashImage16.storedDeferredSyncDisable === null
+      && alarmOnlyTParsedBeforeRestart16?.observedAt
+        === alarmOnlyTCrashImage16.deferredSyncDisableSuccessorObservedAt
+      && alarmOnlyTParsedBeforeRestart16?.authorityPreBaselineSequence === 1
+      && alarmOnlyTParsedBeforeRestart16?.scheduledTime
+        === alarmOnlyTAlarm16?.scheduledTime
+      && alarmOnlyTAfterRestore16.deferredSyncDisableSuccessorSnapshot === null
+      && alarmOnlyTParsedAfterRestart16?.observedAt
+        === alarmOnlyTParsedBeforeRestart16?.observedAt
+      && alarmOnlyTParsedAfterRestart16?.authorityOrderObservedAt
+        === alarmOnlyTParsedBeforeRestart16?.authorityOrderObservedAt
+      && alarmOnlyTParsedAfterRestart16?.authorityPreBaselineSequence === 1
+      && alarmOnlyTParsedAfterRestart16?.scheduledTime
+        === alarmOnlyTParsedBeforeRestart16?.scheduledTime
+      && alarmOnlyTLogicalTuple16.observedAt
+        === alarmOnlyTParsedBeforeRestart16?.observedAt
+      && alarmOnlyTLogicalTuple16.authorityOrderObservedAt
+        === alarmOnlyTCutoffC16 + 1
+      && alarmOnlyTLogicalTuple16.authorityPreBaselineSequence === 0
+      && alarmOnlyTWronglyPredecessor16 === false
+      && alarmOnlyTBaselineLoaded16 === true
+      && alarmOnlyTAfterFreshClassification16.syncGetCalls > 0
+      && alarmOnlyTAfterFreshClassification16.adoptedRemotes.length === 1
+      && alarmOnlyTAfterFreshClassification16.adoptedRemotes[0]?.syncedAt
+        === alarmOnlyTRemote16.syncedAt
+      && alarmOnlyTAfterFreshClassification16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(alarmOnlyTAlarm16?.name)
+      && alarmOnlyTAfterFreshClassification16.retryAlarms.every(alarm =>
+        alarm.name !== alarmOnlyTAlarm16?.name),
+    '16M-3F-3Z-1B-1: alarm-only T 跨 crash 保持 immutable raw/time/seq；future cutoff 只重排 logical，fresh stable sync 后才 terminal 旧 credential');
+
+  // 已经消费 pre-baseline sequence 的 mailbox 是 canonical authority；旧
+  // immutable alarm 里的 sequence 只保留 exact credential，重启不能再加一次。
+  const restartStableCutoffC16 = durableManualOffNow16 + 70 * 60_000;
+  const restartStableGate16 = makeDeferred9G();
+  const restartStableStarted16 = makeDeferred9G();
+  const restartStableF16 = {
+    ...preBaselineRemoteF16,
+    syncedAt: durableManualOffNow16 + 701
+  };
+  const restartStableT16 = {
+    ...preBaselineRemoteT16,
+    syncedAt: durableManualOffNow16 + 702,
+    onMinutes: 31,
+    offMinutes: 29,
+    nextTriggerAt: durableManualOffNow16 + 31 * 60_000
+  };
+  const restartStableOrigin16 = loadDurableManualOffAdmissionHarness16({
+    syncAuthorityBaselineLoaded: false,
+    localMutationCutoff: restartStableCutoffC16,
+    storageGetGate: restartStableGate16.promise,
+    onStorageGetStarted: () => restartStableStarted16.resolve()
+  });
+  const restartStableLoad16 = restartStableOrigin16
+    .ensureSyncAuthorityBaseline();
+  await restartStableStarted16.promise;
+  const restartStableFPersisted16 = await restartStableOrigin16.deferRemote(
+    restartStableF16,
+    'rebase-restart-stable-F'
+  );
+  const restartStableTPersisted16 = await restartStableOrigin16
+    .rememberSuccessor(restartStableT16, 'rebase-restart-stable-T');
+  await restartStableOrigin16.waitForRetryOperationsToSettle();
+  const restartStableBeforeRebase16 = restartStableOrigin16.state();
+  const restartStableImmutableAlarms16 = restartStableBeforeRebase16
+    .retryAlarms.filter(alarm =>
+      alarm.name.startsWith('ac-deferred-sync-disable-retry-test:')
+      || alarm.name.startsWith('ac-deferred-sync-successor-retry-test:'));
+  restartStableGate16.resolve();
+  const restartStableLoaded16 = await restartStableLoad16;
+  const restartStableCanonical16 = restartStableOrigin16.state();
+  const restartStableOnceHarness16 = loadDurableManualOffAdmissionHarness16({
+    syncAuthorityBaselineLoaded: false,
+    deferredSyncDisable:
+      restartStableCanonical16.storedDeferredSyncDisable,
+    localMutationCutoff: restartStableCutoffC16,
+    retryAlarms: restartStableImmutableAlarms16
+  });
+  await restartStableOnceHarness16.restore();
+  const restartStableOnceLoaded16 = await restartStableOnceHarness16
+    .ensureSyncAuthorityBaseline();
+  await restartStableOnceHarness16.waitForRetryOperationsToSettle();
+  const restartStableOnce16 = restartStableOnceHarness16.state();
+  const restartStableTwiceHarness16 = loadDurableManualOffAdmissionHarness16({
+    syncAuthorityBaselineLoaded: false,
+    deferredSyncDisable: restartStableOnce16.storedDeferredSyncDisable,
+    localMutationCutoff: restartStableCutoffC16,
+    retryAlarms: restartStableOnce16.retryAlarms.filter(alarm =>
+      alarm.name.startsWith('ac-deferred-sync-disable-retry-test:')
+      || alarm.name.startsWith('ac-deferred-sync-successor-retry-test:'))
+  });
+  await restartStableTwiceHarness16.restore();
+  const restartStableTwiceLoaded16 = await restartStableTwiceHarness16
+    .ensureSyncAuthorityBaseline();
+  await restartStableTwiceHarness16.waitForRetryOperationsToSettle();
+  const restartStableTwice16 = restartStableTwiceHarness16.state();
+  const immutableAlarmReceipt16 = alarms => alarms
+    .filter(alarm => restartStableImmutableAlarms16.some(original =>
+      original.name === alarm.name))
+    .map(alarm => [alarm.name, alarm.scheduledTime])
+    .sort(([left], [right]) => left.localeCompare(right));
+  const expectedImmutableAlarmReceipt16 = immutableAlarmReceipt16(
+    restartStableImmutableAlarms16
+  );
+  assertPass(restartStableFPersisted16 === true
+      && restartStableTPersisted16 === true
+      && restartStableBeforeRebase16
+        .deferredSyncDisableAuthorityPreBaselineSequence === 1
+      && restartStableBeforeRebase16
+        .deferredSyncDisableSuccessorAuthorityPreBaselineSequence === 2
+      && restartStableLoaded16 === true
+      && restartStableCanonical16
+        .deferredSyncDisableAuthorityOrderObservedAt
+          === restartStableCutoffC16 + 1
+      && restartStableCanonical16
+        .deferredSyncDisableSuccessorAuthorityOrderObservedAt
+          === restartStableCutoffC16 + 2
+      && restartStableCanonical16
+        .storedDeferredSyncDisable?.authorityPreBaselineSequence == null
+      && restartStableCanonical16
+        .storedDeferredSyncDisable?.successor
+          ?.authorityPreBaselineSequence == null
+      && restartStableOnceLoaded16 === true
+      && restartStableTwiceLoaded16 === true
+      && restartStableOnce16.deferredSyncDisableAuthorityOrderObservedAt
+        === restartStableCutoffC16 + 1
+      && restartStableOnce16
+        .deferredSyncDisableSuccessorAuthorityOrderObservedAt
+          === restartStableCutoffC16 + 2
+      && restartStableTwice16.deferredSyncDisableAuthorityOrderObservedAt
+        === restartStableCutoffC16 + 1
+      && restartStableTwice16
+        .deferredSyncDisableSuccessorAuthorityOrderObservedAt
+          === restartStableCutoffC16 + 2
+      && restartStableOnce16
+        .deferredSyncDisableAuthorityPreBaselineSequence === 0
+      && restartStableOnce16
+        .deferredSyncDisableSuccessorAuthorityPreBaselineSequence === 0
+      && restartStableTwice16
+        .deferredSyncDisableAuthorityPreBaselineSequence === 0
+      && restartStableTwice16
+        .deferredSyncDisableSuccessorAuthorityPreBaselineSequence === 0
+      && JSON.stringify(immutableAlarmReceipt16(
+        restartStableOnce16.retryAlarms
+      )) === JSON.stringify(expectedImmutableAlarmReceipt16)
+      && JSON.stringify(immutableAlarmReceipt16(
+        restartStableTwice16.retryAlarms
+      )) === JSON.stringify(expectedImmutableAlarmReceipt16),
+    '16M-3F-3Z-1C: 已 rebase 的 F/T mailbox 连续两次 restart 均保持 canonical order；旧 immutable alarm 的 raw time/sequence 不重新注入');
+
+  // baseline 未完成时本机 M 先取得 seq1，随后到达的 T 取得 seq2 且登记
+  // 同一 mutation generation。M 的 exact capture 只能终止 predecessor，不能
+  // 因 raw wall clock 小于 future cutoff 而误收后到 T。
+  const postMSequenceCutoffC16 = durableManualOffNow16 + 80 * 60_000;
+  const postMSequenceGate16 = makeDeferred9G();
+  const postMSequenceStarted16 = makeDeferred9G();
+  const postMSequenceHarness16 = loadDurableManualOffAdmissionHarness16({
+    syncAuthorityBaselineLoaded: false,
+    localMutationCutoff: postMSequenceCutoffC16,
+    storageGetGate: postMSequenceGate16.promise,
+    onStorageGetStarted: () => postMSequenceStarted16.resolve()
+  });
+  const postMSequenceLoad16 = postMSequenceHarness16
+    .ensureSyncAuthorityBaseline();
+  await postMSequenceStarted16.promise;
+  const postMSequenceMutation16 = postMSequenceHarness16.beginLocalMutation({
+    enabled: true,
+    onMinutes: 41,
+    offMinutes: 19
+  });
+  const postMSequenceRemoteT16 = {
+    ...restartStableT16,
+    syncedAt: durableManualOffNow16 + 801,
+    onMinutes: 42,
+    offMinutes: 18
+  };
+  const postMSequenceTPersisted16 = await postMSequenceHarness16
+    .rememberSuccessor(postMSequenceRemoteT16, 'post-M-seq2-successor');
+  await postMSequenceHarness16.waitForRetryOperationsToSettle();
+  const postMSequenceBeforeLoad16 = postMSequenceHarness16.state();
+  const postMSequenceAlarm16 = postMSequenceBeforeLoad16.retryAlarms.find(
+    alarm => alarm.name.startsWith(
+      'ac-deferred-sync-successor-retry-test:'
+    )
+  );
+  postMSequenceGate16.resolve();
+  const postMSequenceLoaded16 = await postMSequenceLoad16;
+  const postMSequenceAfterLoad16 = postMSequenceHarness16.state();
+  const postMSequenceCaptured16 = await postMSequenceHarness16
+    .captureSuccessorsBeforeLocalMutation(
+      postMSequenceMutation16.generation,
+      postMSequenceAfterLoad16.localScheduleMutationObservedAt
+    );
+  const postMSequenceCommitted16 = await postMSequenceHarness16
+    .commitLocalMutation(
+      postMSequenceMutation16.generation,
+      'post-M-seq2-commit'
+    );
+  const postMSequenceAfterCommit16 = postMSequenceHarness16.state();
+  assertPass(postMSequenceTPersisted16 === true
+      && postMSequenceBeforeLoad16.syncAuthorityPreBaselineSequence === 2
+      && postMSequenceBeforeLoad16
+        .deferredSyncDisableSuccessorAuthorityPreBaselineSequence === 2
+      && postMSequenceLoaded16 === true
+      && postMSequenceAfterLoad16.localScheduleMutationObservedAt
+        === postMSequenceCutoffC16 + 1
+      && postMSequenceAfterLoad16
+        .deferredSyncDisableSuccessorAuthorityOrderObservedAt
+          === postMSequenceCutoffC16 + 2
+      && postMSequenceAfterLoad16
+        .deferredSyncDisableSuccessorMutationGeneration
+          === postMSequenceMutation16.generation
+      && Array.isArray(postMSequenceCaptured16)
+      && postMSequenceCaptured16.length === 0
+      && postMSequenceCommitted16 === true
+      && postMSequenceAfterCommit16
+        .deferredSyncDisableSuccessorSnapshot?.syncedAt
+          === postMSequenceRemoteT16.syncedAt
+      && postMSequenceAfterCommit16
+        .storedDeferredSyncDisable?.successor?.remote?.syncedAt
+          === postMSequenceRemoteT16.syncedAt
+      && !postMSequenceAfterCommit16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(postMSequenceAlarm16?.name),
+    '16M-3F-3Z-1D: M(seq1)→T(seq2) 在 baseline load 后仍按 tuple/generation 判定；local M capture 不误收 post-M exact T');
+
+  // startup restore 的 local/getAll 都已开始后，T 到达并登记 gen0/seq1，
+  // 随后 M claim gen1/seq2。restore replay 必须复用原 alarm/raw/order/generation，
+  // M durable commit 才能把它作为 predecessor terminal，不能重发一份 T。
+  const startupTThenMCutoffC16 = durableManualOffNow16 + 90 * 60_000;
+  const startupTThenMGate16 = makeDeferred9G();
+  const startupTThenMStarted16 = makeDeferred9G();
+  const startupTThenMHarness16 = loadDurableManualOffAdmissionHarness16({
+    syncAuthorityBaselineLoaded: false,
+    localMutationCutoff: startupTThenMCutoffC16,
+    storageGetGate: startupTThenMGate16.promise,
+    onStorageGetStarted: () => startupTThenMStarted16.resolve(),
+    deferredSuccessorSetFailures: 2
+  });
+  const startupTThenMRestore16 = startupTThenMHarness16.restore();
+  await startupTThenMStarted16.promise;
+  const startupTThenMRemoteT16 = {
+    ...restartStableT16,
+    syncedAt: durableManualOffNow16 + 901,
+    onMinutes: 43,
+    offMinutes: 17
+  };
+  const startupTThenMFirstPersist16 = await startupTThenMHarness16
+    .rememberSuccessor(startupTThenMRemoteT16, 'startup-T-before-M');
+  await startupTThenMHarness16.waitForRetryOperationsToSettle();
+  startupTThenMHarness16.queueEarlySyncRemote(startupTThenMRemoteT16);
+  const startupTThenMMutation16 = startupTThenMHarness16.beginLocalMutation({
+    enabled: false,
+    onMinutes: 12,
+    offMinutes: 48
+  });
+  const startupTThenMArrival16 = startupTThenMHarness16.state();
+  const startupTThenMAlarm16 = startupTThenMArrival16.retryAlarms.find(
+    alarm => alarm.name.startsWith(
+      'ac-deferred-sync-successor-retry-test:'
+    )
+  );
+  const startupTThenMEntry16 = startupTThenMArrival16
+    .deferredSyncSuccessorRetryAlarmEntries.find(
+      ([name]) => name === startupTThenMAlarm16?.name
+    )?.[1];
+  startupTThenMGate16.resolve();
+  await startupTThenMRestore16;
+  await startupTThenMHarness16.waitForRetryOperationsToSettle();
+  const startupTThenMReplayed16 = startupTThenMHarness16.state();
+  const startupTThenMReplayedEntry16 = startupTThenMReplayed16
+    .deferredSyncSuccessorRetryAlarmEntries.find(
+      ([name]) => name === startupTThenMAlarm16?.name
+    )?.[1];
+  const startupTThenMLoaded16 = await startupTThenMHarness16
+    .ensureSyncAuthorityBaseline();
+  const startupTThenMAfterLoad16 = startupTThenMHarness16.state();
+  const startupTThenMCommitted16 = await startupTThenMHarness16
+    .commitLocalMutation(
+      startupTThenMMutation16.generation,
+      'startup-T-predecessor-M-commit'
+    );
+  await startupTThenMHarness16.waitForRetryOperationsToSettle();
+  const startupTThenMAfterCommit16 = startupTThenMHarness16.state();
+  assertPass(startupTThenMFirstPersist16 === false
+      && startupTThenMAlarm16?.name
+        === startupTThenMArrival16
+          .pendingRemoteCausalEnvelope?.retryAlarmName
+      && startupTThenMEntry16?.scheduleMutationGeneration === 0
+      && startupTThenMEntry16?.authorityPreBaselineSequence === 1
+      && startupTThenMReplayed16
+        .deferredSyncDisableSuccessorObservedAt
+          === startupTThenMArrival16.deferredSyncDisableSuccessorObservedAt
+      && startupTThenMReplayed16
+        .deferredSyncDisableSuccessorAuthorityOrderObservedAt
+          === startupTThenMArrival16
+            .deferredSyncDisableSuccessorAuthorityOrderObservedAt
+      && startupTThenMReplayed16
+        .deferredSyncDisableSuccessorAuthorityPreBaselineSequence === 1
+      && startupTThenMReplayed16
+        .deferredSyncDisableSuccessorMutationGeneration === 0
+      && startupTThenMReplayedEntry16?.observedAt
+        === startupTThenMEntry16?.observedAt
+      && startupTThenMReplayedEntry16?.authorityOrderObservedAt
+        === startupTThenMEntry16?.authorityOrderObservedAt
+      && startupTThenMReplayedEntry16?.scheduleMutationGeneration === 0
+      && startupTThenMReplayed16.retryAlarms.filter(alarm =>
+        alarm.name.startsWith('ac-deferred-sync-successor-retry-test:'))
+        .length === 1
+      && startupTThenMLoaded16 === true
+      && startupTThenMAfterLoad16
+        .deferredSyncDisableSuccessorObservedAt
+          === startupTThenMArrival16.deferredSyncDisableSuccessorObservedAt
+      && startupTThenMAfterLoad16
+        .deferredSyncDisableSuccessorAuthorityOrderObservedAt
+          > startupTThenMCutoffC16
+      && startupTThenMAfterLoad16.localScheduleMutationObservedAt
+        > startupTThenMAfterLoad16
+          .deferredSyncDisableSuccessorAuthorityOrderObservedAt
+      && startupTThenMCommitted16 === true
+      && startupTThenMAfterCommit16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && startupTThenMAfterCommit16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(startupTThenMAlarm16?.name)
+      && startupTThenMAfterCommit16.retryAlarms.every(alarm =>
+        alarm.name !== startupTThenMAlarm16?.name)
+      && startupTThenMAfterCommit16.outboundPublishes.length === 0,
+    '16M-3F-3Z-1E: startup T→M 的 restore replay 保留原 raw/logical/generation 且不重发 credential；baseline 后 M 把 T 判为 predecessor');
+
+  // startup 多源读取失败只建立 transient synthetic F。baseline completion
+  // 必须在任何 mailbox write 前拒绝；fresh sync classifier 恢复真实 F receipt
+  // 后才能读取 future cutoff 并完成 logical authority baseline。
+  const syntheticBaselineCutoffC16 = durableManualOffNow16 + 100 * 60_000;
+  const syntheticBaselineRemoteF16 = {
+    ...restartStableF16,
+    syncedAt: durableManualOffNow16 + 1001,
+    onMinutes: 6,
+    offMinutes: 54
+  };
+  const syntheticBaselineHarness16 = loadDurableManualOffAdmissionHarness16({
+    syncAuthorityBaselineLoaded: false,
+    schedule: {
+      ...syntheticStartupLocalM16,
+      onMinutes: 38,
+      offMinutes: 22
+    },
+    localMutationCutoff: syntheticBaselineCutoffC16,
+    deferredSyncDisable: {
+      pending: true,
+      safetyAuthorityId: 'synthetic-baseline-real-F',
+      receivedAt: durableManualOffNow16 + 1000,
+      authorityOrderObservedAt: durableManualOffNow16 + 1000,
+      safetyCutoffObservedAt: durableManualOffNow16 + 1000,
+      remote: structuredClone(syntheticBaselineRemoteF16),
+      releasedRetryAlarmNames: [],
+      releasedSuccessorRetryAlarmNames: [],
+      releasedSuccessorThroughObservedAt: 0
+    },
+    storageGetFailures: 1,
+    syncRemote: syntheticBaselineRemoteF16
+  });
+  await syntheticBaselineHarness16.restore();
+  const syntheticBaselineAfterFailure16 = syntheticBaselineHarness16.state();
+  const syntheticBaselinePrematureLoad16 = await syntheticBaselineHarness16
+    .ensureSyncAuthorityBaseline();
+  const syntheticBaselineAfterPrematureLoad16 =
+    syntheticBaselineHarness16.state();
+  const syntheticBaselineFreshClassify16 = await syntheticBaselineHarness16
+    .refreshRemoteSafety(
+      () => true,
+      'startup-synthetic-baseline-fresh-repair'
+    );
+  await syntheticBaselineHarness16.waitForRetryOperationsToSettle();
+  const syntheticBaselineAfterClassify16 = syntheticBaselineHarness16.state();
+  const syntheticBaselineFreshRepair16 = await syntheticBaselineHarness16
+    .refreshRemoteSafety(
+      () => true,
+      'startup-synthetic-baseline-fresh-repair-retry'
+    );
+  await syntheticBaselineHarness16.waitForRetryOperationsToSettle();
+  const syntheticBaselineAfterRepair16 = syntheticBaselineHarness16.state();
+  const syntheticBaselineLoaded16 = await syntheticBaselineHarness16
+    .ensureSyncAuthorityBaseline();
+  const syntheticBaselineAfterLoad16 = syntheticBaselineHarness16.state();
+  const syntheticBaselinePrematureDeferredWrites16 =
+    syntheticBaselineAfterPrematureLoad16.writes.filter(payload =>
+      Object.prototype.hasOwnProperty.call(
+        payload,
+        'ac_deferred_sync_disable_test'
+      ));
+  assertPass(syntheticBaselineAfterFailure16
+        .deferredSyncDisableSyntheticReadFailure === true
+      && syntheticBaselineAfterFailure16.deferredSyncDisablePending === true
+      && syntheticBaselineAfterFailure16
+        .deferredSyncDisableDurableReceiptEpoch === 0
+      && syntheticBaselineAfterFailure16
+        .syncAuthorityDurableBaselineLoaded === false
+      && syntheticBaselineAfterFailure16.liveSchedule.onMinutes === 38
+      && syntheticBaselineAfterFailure16
+        .storedLocalScheduleMutationCutoff === syntheticBaselineCutoffC16
+      && syntheticBaselineHarness16.automationAllowed() === false
+      && syntheticBaselinePrematureLoad16 === false
+      && syntheticBaselineAfterPrematureLoad16
+        .syncAuthorityDurableBaselineLoaded === false
+      && syntheticBaselinePrematureDeferredWrites16.length === 0
+      && syntheticBaselineAfterPrematureLoad16.outboundPublishes.length === 0
+      && typeof syntheticBaselineFreshClassify16 === 'boolean'
+      && syntheticBaselineAfterClassify16
+        .deferredSyncDisableSyntheticReadFailure === false
+      && syntheticBaselineAfterClassify16
+        .deferredSyncDisableDurableReceiptEpoch
+          === syntheticBaselineAfterClassify16.deferredSyncDisableEpoch
+      && syntheticBaselineFreshRepair16 === true
+      && syntheticBaselineAfterRepair16
+        .deferredSyncDisableSyntheticReadFailure === false
+      && syntheticBaselineAfterRepair16
+        .deferredSyncDisableDurableReceiptEpoch
+          === syntheticBaselineAfterRepair16.deferredSyncDisableEpoch
+      && syntheticBaselineAfterRepair16
+        .storedDeferredSyncDisable?.remote?.syncedAt
+          === syntheticBaselineRemoteF16.syncedAt
+      && syntheticBaselineLoaded16 === true
+      && syntheticBaselineAfterLoad16.syncAuthorityDurableBaselineLoaded
+        === true
+      && syntheticBaselineAfterLoad16.localScheduleMutationCommittedObservedAt
+        === syntheticBaselineCutoffC16
+      && syntheticBaselineHarness16.automationAllowed() === false
+      && syntheticBaselineAfterLoad16.outboundPublishes.length === 0
+      && syntheticBaselineAfterLoad16.adoptedRemotes.length === 0,
+    '16M-3F-3Z-1F: startup 多源失败的 synthetic F 不进入 durable baseline；automation 持续关闭，fresh real-F receipt 后才允许 baseline load');
+
+  // F1 在 baseline 前取得 immutable seq；baseline rebase 后到达 F2，F2 的
+  // durable record 必须同批 exact tombstone F1。即使旧 alarm 物理 clear 失败
+  // 且 SW 在后续 receipt/cleanup 前崩溃，restart winner 仍只能是 F2。
+  const resolvedF2CutoffC16 = durableManualOffNow16 + 110 * 60_000;
+  const resolvedF2Gate16 = makeDeferred9G();
+  const resolvedF2Started16 = makeDeferred9G();
+  const resolvedF1Remote16 = {
+    ...restartStableF16,
+    syncedAt: durableManualOffNow16 + 1101,
+    onMinutes: 5,
+    offMinutes: 55
+  };
+  const resolvedF2Remote16 = {
+    ...resolvedF1Remote16,
+    syncedAt: durableManualOffNow16 + 1102,
+    onMinutes: 4,
+    offMinutes: 56
+  };
+  const resolvedF2OriginHarness16 = loadDurableManualOffAdmissionHarness16({
+    syncAuthorityBaselineLoaded: false,
+    localMutationCutoff: resolvedF2CutoffC16,
+    storageGetGate: resolvedF2Gate16.promise,
+    onStorageGetStarted: () => resolvedF2Started16.resolve(),
+    retryClearFailures: 1
+  });
+  const resolvedF2BaselineLoad16 = resolvedF2OriginHarness16
+    .ensureSyncAuthorityBaseline();
+  await resolvedF2Started16.promise;
+  const resolvedF1Persisted16 = await resolvedF2OriginHarness16.deferRemote(
+    resolvedF1Remote16,
+    'pre-baseline-F1'
+  );
+  await resolvedF2OriginHarness16.waitForRetryOperationsToSettle();
+  const resolvedF1BeforeBaseline16 = resolvedF2OriginHarness16.state();
+  const resolvedF1Alarm16 = resolvedF1BeforeBaseline16.retryAlarms.find(
+    alarm => alarm.name.startsWith('ac-deferred-sync-disable-retry-test:')
+  );
+  resolvedF2Gate16.resolve();
+  const resolvedF1BaselineLoaded16 = await resolvedF2BaselineLoad16;
+  const resolvedF1Rebased16 = resolvedF2OriginHarness16.state();
+  const resolvedF2Persisted16 = await resolvedF2OriginHarness16.deferRemote(
+    resolvedF2Remote16,
+    'post-baseline-F2-before-receipt-cleanup-crash'
+  );
+  await resolvedF2OriginHarness16.waitForRetryOperationsToSettle();
+  const resolvedF2CrashImage16 = resolvedF2OriginHarness16.state();
+  const resolvedF2Alarm16 = resolvedF2CrashImage16.retryAlarms.find(
+    alarm => alarm.name !== resolvedF1Alarm16?.name
+      && alarm.name.startsWith('ac-deferred-sync-disable-retry-test:')
+  );
+  const resolvedF2RestartHarness16 = loadDurableManualOffAdmissionHarness16({
+    syncAuthorityBaselineLoaded: false,
+    localMutationCutoff: resolvedF2CutoffC16,
+    deferredSyncDisable: resolvedF2CrashImage16.storedDeferredSyncDisable,
+    retryAlarms: resolvedF2CrashImage16.retryAlarms
+  });
+  await resolvedF2RestartHarness16.restore();
+  const resolvedF2RestartLoaded16 = await resolvedF2RestartHarness16
+    .ensureSyncAuthorityBaseline();
+  await resolvedF2RestartHarness16.waitForRetryOperationsToSettle();
+  const resolvedF2AfterRestart16 = resolvedF2RestartHarness16.state();
+  assertPass(resolvedF1Persisted16 === true
+      && resolvedF1BeforeBaseline16
+        .deferredSyncDisableAuthorityPreBaselineSequence === 1
+      && resolvedF1BaselineLoaded16 === true
+      && resolvedF1Rebased16.deferredSyncDisableObservedAt
+        === resolvedF1BeforeBaseline16.deferredSyncDisableObservedAt
+      && resolvedF1Rebased16.deferredSyncDisableAuthorityOrderObservedAt
+        === resolvedF2CutoffC16 + 1
+      && resolvedF1Rebased16
+        .deferredSyncDisableAuthorityPreBaselineSequence === 0
+      && resolvedF2Persisted16 === true
+      && resolvedF2CrashImage16.storedDeferredSyncDisable?.remote?.syncedAt
+        === resolvedF2Remote16.syncedAt
+      && resolvedF2CrashImage16.storedDeferredSyncDisable
+        ?.releasedRetryAlarmNames?.includes(resolvedF1Alarm16?.name)
+      && resolvedF2Alarm16?.name
+        === resolvedF2CrashImage16.storedDeferredSyncDisable?.retryAlarmName
+      && resolvedF2CrashImage16.retryAlarms.some(alarm =>
+        alarm.name === resolvedF1Alarm16?.name)
+      && resolvedF2RestartLoaded16 === true
+      && resolvedF2AfterRestart16.deferredSyncDisablePending === true
+      && resolvedF2AfterRestart16
+        .deferredSyncDisableRemoteSnapshot?.syncedAt
+          === resolvedF2Remote16.syncedAt
+      && resolvedF2AfterRestart16
+        .deferredSyncDisableRemoteSnapshot?.onMinutes
+          === resolvedF2Remote16.onMinutes
+      && resolvedF2AfterRestart16.deferredSyncDisableSafetyAuthorityId
+        === resolvedF2CrashImage16.storedDeferredSyncDisable?.safetyAuthorityId
+      && resolvedF2AfterRestart16.deferredSyncDisableObservedAt
+        === resolvedF2CrashImage16.storedDeferredSyncDisable?.receivedAt
+      && resolvedF2AfterRestart16.deferredSyncDisableAuthorityOrderObservedAt
+        === resolvedF2CrashImage16.storedDeferredSyncDisable
+          ?.authorityOrderObservedAt
+      && resolvedF2AfterRestart16
+        .deferredSyncDisableReleasedRetryAlarmNames
+        .includes(resolvedF1Alarm16?.name),
+    '16M-3F-3Z-1G: F1 prebaseline rebase 后 F2 durable record 同批 tombstone F1；旧 alarm clear 失败并 crash/restart 仍只恢复 F2 winner');
+
+  // live F credential 但 coverage incomplete 时，startup 会把本轮枚举到的
+  // exact T alarm 动态加入 released set。durable mailbox 里同 identity 的 Tpre
+  // 即使 future-clock observedAt 越过 numeric cutoff，也必须在 union 之后再判
+  // exact released，不能先算 survives=true 后复活副本。
+  const incompleteFObservedAt16 = durableManualOffNow16 - 300;
+  const incompleteFFutureTObservedAt16 =
+    durableManualOffNow16 + 8 * 24 * 60 * 60_000;
+  const incompleteFFutureTRemote16 = {
+    ...futurePreMRemote16,
+    syncedAt: durableManualOffNow16 - 299,
+    onMinutes: 30,
+    nextTriggerAt: durableManualOffNow16 + 30 * 60_000
+  };
+  const incompleteFSafetyAuthorityId16 =
+    'f-test-incomplete-coverage-current';
+  const incompleteFPredecessorSafetyAuthorityId16 =
+    'f-test-incomplete-coverage-predecessor';
+  const incompleteFRemote16 = {
+    enabled: false,
+    syncedAt: durableManualOffNow16 - 301
+  };
+  const incompleteFCredentialHarness16 =
+    loadDurableManualOffAdmissionHarness16();
+  const incompleteFFutureTCredential16 = incompleteFCredentialHarness16
+    .roundTripSuccessorRetryCredential(
+      incompleteFFutureTRemote16,
+      incompleteFFutureTObservedAt16,
+      incompleteFPredecessorSafetyAuthorityId16
+    );
+  const incompleteFCredential16 = incompleteFCredentialHarness16
+    .roundTripDisableRetryCredential(
+      incompleteFRemote16,
+      incompleteFObservedAt16,
+      incompleteFSafetyAuthorityId16
+    );
+  const incompleteFAlarm16 = {
+    name: incompleteFCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  const incompleteFFutureTAlarm16 = {
+    name: incompleteFFutureTCredential16.name,
+    scheduledTime: durableManualOffNow16 + 60_000,
+    periodInMinutes: 1
+  };
+  const incompleteFRestoreHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      syncRemote: incompleteFRemote16,
+      deferredSyncDisable: {
+        pending: true,
+        safetyAuthorityId: incompleteFSafetyAuthorityId16,
+        receivedAt: incompleteFObservedAt16,
+        safetyCutoffObservedAt: incompleteFObservedAt16,
+        successorPredecessorCoverageComplete: false,
+        successorPredecessorCoverageThroughObservedAt: 0,
+        remote: structuredClone(incompleteFRemote16),
+        successor: {
+          observedAt: incompleteFFutureTObservedAt16,
+          predecessorSafetyAuthorityId:
+            incompleteFPredecessorSafetyAuthorityId16,
+          remote: structuredClone(incompleteFFutureTRemote16)
+        },
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: incompleteFObservedAt16
+      },
+      retryAlarms: [incompleteFAlarm16, incompleteFFutureTAlarm16]
+    });
+  await incompleteFRestoreHarness16.restore();
+  const incompleteFRestored16 = incompleteFRestoreHarness16.state();
+  await incompleteFRestoreHarness16.deliverSuccessorRetryAlarm(
+    incompleteFFutureTAlarm16
+  );
+  await incompleteFRestoreHarness16.waitForRetryOperationsToSettle();
+  await drainTypedScheduleReadWakes16(incompleteFRestoreHarness16);
+  const incompleteFAfterTAlarm16 = incompleteFRestoreHarness16.state();
+  assertPass(incompleteFRestored16.deferredSyncDisablePending === true
+      && incompleteFRestored16.deferredSyncDisableObservedAt
+        === incompleteFObservedAt16
+      && incompleteFRestored16.deferredSyncSuccessorEnumerationPendingEpoch
+        > 0
+      && incompleteFRestored16.deferredSyncDisableSuccessorSnapshot === null
+      && incompleteFRestored16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && incompleteFAfterTAlarm16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(incompleteFFutureTAlarm16.name)
+      && !incompleteFAfterTAlarm16.retryAlarms.some(alarm =>
+        alarm.name === incompleteFFutureTAlarm16.name)
+      && incompleteFFutureTObservedAt16 > incompleteFObservedAt16,
+    '16M-3F-3Z-2: live F incomplete coverage 先 union exact T alarm released set，再过滤 future-clock durable Tpre 副本；startup 不复活');
+
+  // T credential 可能已丢，只剩 durable mailbox 副本。只要 live F 的
+  // predecessor coverage 仍不完整，该副本同样不可信；不能把“没有 exact
+  // alarm 可匹配”误当成它是 post-F successor。
+  const incompleteFNoTAlarmHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable: {
+        pending: true,
+        safetyAuthorityId: incompleteFSafetyAuthorityId16,
+        receivedAt: incompleteFObservedAt16,
+        safetyCutoffObservedAt: incompleteFObservedAt16,
+        successorPredecessorCoverageComplete: false,
+        successorPredecessorCoverageThroughObservedAt: 0,
+        remote: structuredClone(incompleteFRemote16),
+        successor: {
+          observedAt: incompleteFFutureTObservedAt16,
+          predecessorSafetyAuthorityId:
+            incompleteFPredecessorSafetyAuthorityId16,
+          remote: structuredClone(incompleteFFutureTRemote16)
+        },
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: incompleteFObservedAt16
+      },
+      retryAlarms: [incompleteFAlarm16]
+    });
+  await incompleteFNoTAlarmHarness16.restore();
+  const incompleteFNoTAlarmRestored16 =
+    incompleteFNoTAlarmHarness16.state();
+  assertPass(incompleteFNoTAlarmRestored16.deferredSyncDisablePending === true
+      && incompleteFNoTAlarmRestored16.deferredSyncDisableObservedAt
+        === incompleteFObservedAt16
+      && incompleteFNoTAlarmRestored16
+        .deferredSyncSuccessorEnumerationPendingEpoch > 0
+      && incompleteFNoTAlarmRestored16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && incompleteFNoTAlarmRestored16
+        .deferredSyncSuccessorRetryAlarmEntries.length === 0
+      && incompleteFNoTAlarmRestored16
+        .deferredSyncSuccessorReleasedRetryAlarmNames.length === 0,
+    '16M-3F-3Z-3: live F incomplete coverage 时即使 T credential 已丢，也不信任 durable future-clock Tpre 副本；startup fail-closed');
+
+  // 反向丢钟也必须安全：durable pending F 仍在，但 F retry credential 已
+  // 丢，仅剩旧 T alarm。coverage incomplete 由 durable F 本身证明，startup
+  // 应 union/tombstone 已见 T，不能把它选作 latest alarm successor。
+  const incompleteFDurableOnlyHarness16 =
+    loadDurableManualOffAdmissionHarness16({
+      deferredSyncDisable: {
+        pending: true,
+        safetyAuthorityId: incompleteFSafetyAuthorityId16,
+        receivedAt: incompleteFObservedAt16,
+        safetyCutoffObservedAt: incompleteFObservedAt16,
+        successorPredecessorCoverageComplete: false,
+        successorPredecessorCoverageThroughObservedAt: 0,
+        remote: structuredClone(incompleteFRemote16),
+        releasedRetryAlarmNames: [],
+        releasedSuccessorRetryAlarmNames: [],
+        releasedSuccessorThroughObservedAt: incompleteFObservedAt16
+      },
+      retryAlarms: [incompleteFFutureTAlarm16]
+    });
+  await incompleteFDurableOnlyHarness16.restore();
+  const incompleteFDurableOnlyRestored16 =
+    incompleteFDurableOnlyHarness16.state();
+  await incompleteFDurableOnlyHarness16.deliverSuccessorRetryAlarm(
+    incompleteFFutureTAlarm16
+  );
+  await incompleteFDurableOnlyHarness16.waitForRetryOperationsToSettle();
+  await drainTypedScheduleReadWakes16(incompleteFDurableOnlyHarness16);
+  const incompleteFDurableOnlyAfterTAlarm16 =
+    incompleteFDurableOnlyHarness16.state();
+  assertPass(incompleteFDurableOnlyRestored16.deferredSyncDisablePending
+        === true
+      && incompleteFDurableOnlyRestored16.deferredSyncDisableObservedAt
+        === incompleteFObservedAt16
+      && incompleteFDurableOnlyRestored16
+        .deferredSyncSuccessorEnumerationPendingEpoch > 0
+      && incompleteFDurableOnlyRestored16
+        .deferredSyncDisableSuccessorSnapshot === null
+      && incompleteFDurableOnlyRestored16
+        .deferredSyncSuccessorRetryAlarmEntries.length === 0
+      && incompleteFDurableOnlyAfterTAlarm16
+        .deferredSyncSuccessorReleasedRetryAlarmNames
+        .includes(incompleteFFutureTAlarm16.name)
+      && !incompleteFDurableOnlyAfterTAlarm16.retryAlarms.some(alarm =>
+        alarm.name === incompleteFFutureTAlarm16.name),
+    '16M-3F-3Z-4: durable pending F coverage incomplete 且 F alarm 已丢时，仅存旧 T alarm 在 typed delivery 后按 predecessor exact tombstone；startup 不复活');
+
+  const manualOffImmediateGate16 = makeDeferred9G();
+  const manualOffPhaseStarted16 = makeDeferred9G();
+  const manualOffSuccessorHarness16 = new Function(
+    'immediateGate', 'markOffPhaseStarted',
+    `let scheduleUpdateChain = Promise.resolve();
+    let syncPhaseAdoptionAdmissionEpoch = 1;
+    let syncPhaseAdoptionAdmissionOwner = 1;
+    const syncPhaseAdoptionAdmissionWaiters = [];
+    let pageTimerMinutes = null;
+    let offPhaseCommitted = false;
+    const calls = [];
+    function claimSyncPhaseAdoptionAdmissionWhenAvailable() {
+      if (syncPhaseAdoptionAdmissionOwner === 0) {
+        const epoch = ++syncPhaseAdoptionAdmissionEpoch;
+        syncPhaseAdoptionAdmissionOwner = epoch;
+        calls.push('phase-claim:' + epoch);
+        return Promise.resolve(epoch);
+      }
+      return new Promise(resolve => {
+        syncPhaseAdoptionAdmissionWaiters.push(epoch => {
+          calls.push('phase-handoff:' + epoch);
+          resolve(epoch);
+        });
+      });
+    }
+    function releaseSyncPhaseAdoptionAdmission(epoch) {
+      calls.push('phase-release:' + epoch);
+      if (syncPhaseAdoptionAdmissionOwner !== epoch) return false;
+      const next = syncPhaseAdoptionAdmissionWaiters.shift();
+      if (next) {
+        const nextEpoch = ++syncPhaseAdoptionAdmissionEpoch;
+        syncPhaseAdoptionAdmissionOwner = nextEpoch;
+        next(nextEpoch);
+      } else {
+        syncPhaseAdoptionAdmissionOwner = 0;
+      }
+      return true;
+    }
+    function drainDeferredScheduleRepair(reason) {
+      calls.push('drain:' + reason);
+      return false;
+    }
+    ${serializedScheduleUpdateSourceF90}
+    function startManualOff() {
+      const immediatePromise = (async () => {
+        pageTimerMinutes = 1;
+        calls.push('immediate-timer:start:1');
+        await immediateGate;
+        calls.push('immediate-timer:settled:1');
+        return { success: true };
+      })();
+      return runSerializedSchedulePhaseOperation(async phaseAdmissionEpoch => {
+        calls.push('manual-off-phase:start:' + phaseAdmissionEpoch);
+        markOffPhaseStarted();
+        await immediatePromise;
+        pageTimerMinutes = 1;
+        offPhaseCommitted = true;
+        calls.push('manual-off-phase:commit:1');
+        return true;
+      }, 'manual-toggle-off');
+    }
+    function startTrailingRepair() {
+      return runSerializedSchedulePhaseOperation(async phaseAdmissionEpoch => {
+        calls.push('repair-phase:start:' + phaseAdmissionEpoch);
+        if (!offPhaseCommitted) {
+          pageTimerMinutes = 30;
+          calls.push('repair-extended-timer:30');
+        } else {
+          calls.push('repair-observed-committed-off');
+        }
+        return true;
+      }, 'watchdog-repair');
+    }
+    return {
+      startManualOff,
+      startTrailingRepair,
+      releaseHeldOwner: () => releaseSyncPhaseAdoptionAdmission(1),
+      owner: () => syncPhaseAdoptionAdmissionOwner,
+      waiters: () => syncPhaseAdoptionAdmissionWaiters.length,
+      pageTimerMinutes: () => pageTimerMinutes,
+      calls
+    };`
+  )(
+    manualOffImmediateGate16.promise,
+    () => manualOffPhaseStarted16.resolve()
+  );
+  const queuedManualOffSuccessor16 = manualOffSuccessorHarness16.startManualOff();
+  const queuedTrailingRepair16 = manualOffSuccessorHarness16.startTrailingRepair();
+  await Promise.resolve();
+  await Promise.resolve();
+  const manualOffSuccessorQueuedBeforeRepair16 =
+    manualOffSuccessorHarness16.owner() === 1
+    && manualOffSuccessorHarness16.waiters() === 1
+    && manualOffSuccessorHarness16.pageTimerMinutes() === 1
+    && !manualOffSuccessorHarness16.calls.some(call =>
+      call.startsWith('repair-phase:start:'));
+  manualOffSuccessorHarness16.releaseHeldOwner();
+  await manualOffPhaseStarted16.promise;
+  const manualOffOwnsBeforeImmediateSettles16 =
+    manualOffSuccessorHarness16.owner() === 2
+    && !manualOffSuccessorHarness16.calls.some(call =>
+      call.startsWith('repair-phase:start:'));
+  manualOffImmediateGate16.resolve();
+  await Promise.all([queuedManualOffSuccessor16, queuedTrailingRepair16]);
+  const manualOffImmediateIndex16 = manualToggleMessageBody16.indexOf(
+    "const immediatePromise = toggleNowAndSync('off', {"
+  );
+  const manualOffFlightIndex16 = manualToggleMessageBody16.indexOf(
+    'const result = await runManualOffAdmissionFlight('
+  );
+  const manualOffSuccessorIndex16 = manualToggleMessageBody16.indexOf(
+    'const finalResult = await runSerializedSchedulePhaseOperation('
+  );
+  const manualOffMutationIndex16 = manualToggleMessageBody16.indexOf(
+    'const mutationIntentPromise ='
+  );
+  const manualOffAwaitIndex16 = manualToggleMessageBody16.indexOf(
+    'await Promise.all(['
+  );
+  assertPass(manualOffSuccessorQueuedBeforeRepair16
+      && manualOffOwnsBeforeImmediateSettles16
+      && manualOffSuccessorHarness16.owner() === 0
+      && manualOffSuccessorHarness16.pageTimerMinutes() === 1
+      && !manualOffSuccessorHarness16.calls.includes('repair-extended-timer:30')
+      && manualOffSuccessorHarness16.calls.join(',')
+        === 'immediate-timer:start:1,phase-release:1,phase-handoff:2,manual-off-phase:start:2,immediate-timer:settled:1,manual-off-phase:commit:1,phase-release:2,drain:manual-toggle-off-complete,phase-claim:3,repair-phase:start:3,repair-observed-committed-off,phase-release:3,drain:watchdog-repair-complete'
+      && manualOffFlightIndex16 >= 0
+      && manualOffFlightIndex16 < manualOffImmediateIndex16
+      && manualOffImmediateIndex16 < manualOffMutationIndex16
+      && manualOffMutationIndex16 < manualOffSuccessorIndex16
+      && manualOffSuccessorIndex16 < manualOffAwaitIndex16
+      && manualToggleMessageBody16.includes('sendResponse(result);'),
+    '16M-3G: OFF immediate 与 durable M intent 同步启动后预约 schedule→phase successor；旧 owner 释放后同时等待两者，后到 watchdog/repair 不能插入并延长 1 分钟 timer');
+
   const shutdownNow16 = 1_700_000_000_000;
   const runShutdownProofCase16 = async (
     targetAt,
@@ -22107,6 +38868,7 @@ return plan;
 
   const runShutdownSwapCase16 = async (statusIsOn, initialHasProof = true) => {
     const initialSchedule = {
+      enabled: false,
       pageTimerMinutes: initialHasProof ? 30 : null,
       pageTimerTargetAt: initialHasProof ? shutdownNow16 + 20 * 60_000 : 0,
       pageTimerError: initialHasProof ? 'old stale proof' : '',
@@ -22114,7 +38876,21 @@ return plan;
       pageTimerRetryMinutes: initialHasProof ? 1 : 0,
       sentinel: 'old'
     };
+    const durableBaseSchedule = {
+      enabled: false,
+      onMinutes: 17,
+      offMinutes: 13,
+      pageTimerMinutes: initialHasProof ? 30 : null,
+      pageTimerTargetAt: initialHasProof ? shutdownNow16 + 20 * 60_000 : 0,
+      pageTimerError: initialHasProof ? 'durable stale proof' : '',
+      pageTimerRetryAt: initialHasProof ? shutdownNow16 + 60_000 : 0,
+      pageTimerRetryMinutes: initialHasProof ? 1 : 0,
+      sentinel: 'durable'
+    };
     const replacementSchedule = {
+      enabled: true,
+      onMinutes: 99,
+      offMinutes: 1,
       pageTimerMinutes: 30,
       pageTimerTargetAt: shutdownNow16 + 20 * 60_000,
       pageTimerError: 'replacement stale proof',
@@ -22123,10 +38899,12 @@ return plan;
       sentinel: 'replacement'
     };
     const harness = new Function(
-      'initialSchedule', 'replacementSchedule', 'statusIsOn',
+      'initialSchedule', 'durableBaseSchedule', 'replacementSchedule',
+      'statusIsOn',
       'clearProofMutation', 'isPageTimerProofFresh',
       'sanitizeMinutes', 'Date', 'console',
       `let schedule = initialSchedule;
+      let durableSchedule = { ...durableBaseSchedule };
       let timerBasedShutdownRevision = 0;
       let pageTimerWriteGeneration = 0;
       const calls = [];
@@ -22144,7 +38922,61 @@ return plan;
         calls.push('proof:' + side(state));
         clearProofMutation(state);
       }
+      function replaceSchedulePageTimerState(state, patch = {}) {
+        state.pageTimerMinutes = patch.minutes ?? null;
+        state.pageTimerTargetAt = Number(patch.targetAt) || 0;
+        state.pageTimerError = patch.error ?? '';
+        state.pageTimerRetryAt = Number(patch.retryAt) || 0;
+        state.pageTimerRetryMinutes = Number(patch.retryMinutes) || 0;
+      }
       ${clearProofFacade16}
+      function snapshotOwnedPageTimerState(owner, source = schedule) {
+        if (!isPageTimerWriteOwnerCurrent(owner)) return null;
+        return Object.freeze({
+          pageTimerMinutes: source.pageTimerMinutes ?? null,
+          pageTimerTargetAt: Number(source.pageTimerTargetAt) || 0,
+          pageTimerError: source.pageTimerError ?? '',
+          pageTimerRetryAt: Number(source.pageTimerRetryAt) || 0,
+          pageTimerRetryMinutes: Number(source.pageTimerRetryMinutes) || 0,
+          pageTimerWriteOwner: owner
+        });
+      }
+      function replayOwnedPageTimerState(pageTimerState) {
+        if (!isPageTimerWriteOwnerCurrent(
+          pageTimerState?.pageTimerWriteOwner
+        )) return false;
+        replaceSchedulePageTimerState(schedule, {
+          minutes: pageTimerState.pageTimerMinutes,
+          targetAt: pageTimerState.pageTimerTargetAt,
+          error: pageTimerState.pageTimerError,
+          retryAt: pageTimerState.pageTimerRetryAt,
+          retryMinutes: pageTimerState.pageTimerRetryMinutes
+        });
+        calls.push('replay:' + side(schedule));
+        return true;
+      }
+      const STORAGE_KEY = 'ac_schedule_test';
+      function runSerializedCriticalLocalStateWrite(operation) {
+        return operation();
+      }
+      const chrome = {
+        alarms: { async clear() { return true; } },
+        storage: { local: {
+          async get(key) {
+            calls.push('local:get');
+            return { [key]: { ...durableSchedule } };
+          },
+          async set(payload) {
+            durableSchedule = { ...payload[STORAGE_KEY] };
+            calls.push('local:set:' + durableSchedule.enabled
+              + ':' + durableSchedule.sentinel);
+            persisted.push({
+              ref: durableSchedule,
+              snapshot: { ...durableSchedule }
+            });
+          }
+        } }
+      };
       function claimTimerBasedShutdown() {
         timerBasedShutdownRevision += 1;
         return timerBasedShutdownRevision;
@@ -22162,15 +38994,6 @@ return plan;
         schedule = replacementSchedule;
         return { isOn: statusIsOn };
       }
-      async function persistSchedule(reason, options) {
-        calls.push('persist:' + reason);
-        persisted.push({
-          reason,
-          options: { ...options },
-          ref: schedule,
-          snapshot: { ...schedule }
-        });
-      }
       async function setPageTimer() {
         calls.push('set-page-timer');
         pageTimerEntries.push({ ref: schedule, snapshot: { ...schedule } });
@@ -22180,12 +39003,14 @@ return plan;
       return {
         run: requestTimerBasedShutdown,
         current: () => schedule,
+        durable: () => ({ ...durableSchedule }),
         calls,
         persisted,
         pageTimerEntries
       };`
     )(
       initialSchedule,
+      durableBaseSchedule,
       replacementSchedule,
       statusIsOn,
       scheduleMutations.clearSchedulePageTimerProofState,
@@ -22204,10 +39029,11 @@ return plan;
   const shutdownSwapOn16 = await runShutdownSwapCase16(true);
   const shutdownSwapEmptyOff16 = await runShutdownSwapCase16(false, false);
   const shutdownSwapPersist16 = shutdownSwapOff16.harness.persisted[0];
+  const shutdownSwapDurable16 = shutdownSwapOff16.harness.durable();
   const shutdownSwapOnEntry16 = shutdownSwapOn16.harness.pageTimerEntries[0];
   assertPass(shutdownSwapOff16.result.alreadyDone === true
       && shutdownSwapOff16.harness.calls.join(',')
-        === 'proof:old,writer:clear:true,proof:old,status,proof:new,persist:active-hours-test-clear-stale-page-timer-proof'
+        === 'proof:old,writer:clear:true,proof:old,status,proof:new,local:get,local:set:false:durable,replay:new'
       && shutdownSwapOff16.harness.current() === shutdownSwapOff16.replacementSchedule
       && shutdownSwapOff16.initialSchedule.pageTimerMinutes === null
       && shutdownSwapOff16.initialSchedule.pageTimerTargetAt === 0
@@ -22216,10 +39042,18 @@ return plan;
       && shutdownSwapOff16.replacementSchedule.pageTimerError === ''
       && shutdownSwapOff16.replacementSchedule.pageTimerRetryAt === 0
       && shutdownSwapOff16.replacementSchedule.pageTimerRetryMinutes === 0
-      && shutdownSwapPersist16?.ref === shutdownSwapOff16.replacementSchedule
-      && shutdownSwapPersist16?.snapshot.sentinel === 'replacement'
-      && shutdownSwapPersist16?.options.syncFromLiveAlarm === false,
-    '16N-2: status await 真换 schedule 后，OFF 收口重清 replacement proof 并 false-sync 持久化');
+      && shutdownSwapDurable16.enabled === false
+      && shutdownSwapDurable16.onMinutes === 17
+      && shutdownSwapDurable16.offMinutes === 13
+      && shutdownSwapDurable16.sentinel === 'durable'
+      && shutdownSwapDurable16.pageTimerMinutes === null
+      && shutdownSwapDurable16.pageTimerTargetAt === 0
+      && shutdownSwapDurable16.pageTimerError === ''
+      && shutdownSwapDurable16.pageTimerRetryAt === 0
+      && shutdownSwapDurable16.pageTimerRetryMinutes === 0
+      && shutdownSwapPersist16?.snapshot.enabled === false
+      && shutdownSwapPersist16?.snapshot.sentinel === 'durable',
+    '16N-2: status await 换成 transient true 后，OFF 收口只向 fresh durable false 合并 page 五字段');
   assertPass(shutdownSwapOn16.harness.calls.join(',')
         === 'proof:old,writer:clear:true,proof:old,status,proof:new,set-page-timer'
       && shutdownSwapOnEntry16?.ref === shutdownSwapOn16.replacementSchedule
@@ -22232,7 +39066,7 @@ return plan;
     '16N-3: status await 真换 schedule 且仍 ON 时，进入 setPageTimer 前先重清 replacement proof');
   assertPass(shutdownSwapEmptyOff16.result.alreadyDone === true
       && shutdownSwapEmptyOff16.harness.calls.join(',')
-        === 'proof:old,writer:clear:true,proof:old,status,proof:new,persist:active-hours-test-clear-stale-page-timer-proof'
+        === 'proof:old,writer:clear:true,proof:old,status,proof:new,local:get,local:set:false:durable,replay:new'
       && shutdownSwapEmptyOff16.harness.current()
         === shutdownSwapEmptyOff16.replacementSchedule
       && shutdownSwapEmptyOff16.replacementSchedule.pageTimerMinutes === null
@@ -22240,10 +39074,11 @@ return plan;
       && shutdownSwapEmptyOff16.replacementSchedule.pageTimerError === ''
       && shutdownSwapEmptyOff16.replacementSchedule.pageTimerRetryAt === 0
       && shutdownSwapEmptyOff16.replacementSchedule.pageTimerRetryMinutes === 0
-      && shutdownSwapEmptyOff16.harness.persisted[0]?.ref
-        === shutdownSwapEmptyOff16.replacementSchedule
-      && shutdownSwapEmptyOff16.harness.persisted[0]?.options.syncFromLiveAlarm === false,
-    '16N-4: 入场 proof 为空但 status await 回灌 replacement 时，仍由统一 owner 清物理钟与 durable 五字段');
+      && shutdownSwapEmptyOff16.harness.durable().enabled === false
+      && shutdownSwapEmptyOff16.harness.durable().sentinel === 'durable'
+      && shutdownSwapEmptyOff16.harness.durable().pageTimerMinutes === null
+      && shutdownSwapEmptyOff16.harness.durable().pageTimerTargetAt === 0,
+    '16N-4: 入场 proof 为空且 status 回灌 transient true 时，字段 owner 仍不覆盖 durable authority/config');
 
   const expiredCommitSource16 = extractSourceSection(
     backgroundSource,
@@ -22284,11 +39119,12 @@ return plan;
   };
   const expiredCommitPostCreate16 = {
     ...expiredCommitOld16,
-    pwmState: 'on',
+    pwmState: 'off',
     nextTriggerAt: expiredTargetAt16,
-    smartClockPlannedAt: 456,
-    alarmCreatedAt: 789,
-    alarmDelayMinutes: 12,
+    smartClockPlannedAt: expiredFirstNow16,
+    alarmCreatedAt: expiredSecondNow16,
+    alarmDelayMinutes: (expiredTargetAt16 - expiredSecondNow16) / 60000,
+    phaseSentinel: 'committed',
     pageTimerMinutes: 27,
     pageTimerTargetAt: expiredTargetAt16 + 27 * 60_000,
     pageTimerError: 'post-create replacement proof',
@@ -22312,7 +39148,7 @@ return plan;
   const expiredCommitHarness16 = new Function(
     'initialSchedule', 'replacementSchedule', 'postCreateSchedule', 'commitPlan',
     'clearProofMutation', 'nextTriggerMutation', 'pwmClockMutation',
-    'verifiedCreatedAt', 'Date', 'console',
+    'replaceSchedulePageTimerState', 'verifiedCreatedAt', 'Date', 'console',
     `let schedule = initialSchedule;
     let pwmRuntimeRevision = 71;
     let pwmAlarmWriteGeneration = 0;
@@ -22328,12 +39164,19 @@ return plan;
     function isPageTimerWriteOwnerCurrent(owner) {
       return owner === pageTimerWriteGeneration;
     }
+    ${ownedPageTimerStateHelpers11D}
     function claimPwmAlarmWriteOwner() {
       pwmAlarmWriteGeneration += 1;
       return pwmAlarmWriteGeneration;
     }
     function isPwmAlarmWriteOwnerCurrent(owner) {
       return owner > 0 && owner === pwmAlarmWriteGeneration;
+    }
+    function isPwmAlarmWriteGenerationCurrent(generation) {
+      const expected = Number(generation);
+      return Number.isSafeInteger(expected)
+        && expected >= 0
+        && expected === pwmAlarmWriteGeneration;
     }
     function clearSchedulePageTimerProofState(state) {
       calls.push('proof:' + side(state));
@@ -22353,6 +39196,9 @@ return plan;
     function isAutomationOperationCurrent(revision) {
       return revision === pwmRuntimeRevision;
     }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) === 65;
+    }
     function planPwmRecovery() { return commitPlan; }
     async function getCurrentACStatus() { throw new Error('commit 不应读 status'); }
     async function setPageTimer() { throw new Error('commit 不应 set timer'); }
@@ -22371,8 +39217,32 @@ return plan;
         snapshot: { ...schedule }
       });
     }
-    async function clearPwmAlarm() { calls.push('clear-pwm'); return true; }
-    async function createPwmAlarmFromPlanWithReceipt(plan) {
+    async function clearPwmAlarmWithReceipt(_revision, _force = false, options = {}) {
+      const expected = Number(options.expectedWriteGeneration);
+      if ((Number.isSafeInteger(expected) && expected >= 0
+            && !isPwmAlarmWriteGenerationCurrent(expected))
+          || (typeof options.ensureCurrent === 'function'
+            && !options.ensureCurrent())) {
+        calls.push('clear-pwm-stale');
+        return { cleared: false, stale: true, writeOwner: 0 };
+      }
+      const writeOwner = claimPwmAlarmWriteOwner();
+      calls.push('clear-pwm');
+      return { cleared: true, writeOwner };
+    }
+    async function createPwmAlarmFromPlanWithReceipt(
+      plan,
+      _tag,
+      _revision,
+      options = {}
+    ) {
+      const expected = Number(options.expectedWriteGeneration);
+      if ((Number.isSafeInteger(expected) && expected >= 0
+            && !isPwmAlarmWriteGenerationCurrent(expected))
+          || (typeof options.ensureCurrent === 'function'
+            && !options.ensureCurrent())) {
+        return { created: false, writeOwner: 0 };
+      }
       calls.push('create-pwm:' + plan.nextTriggerAt);
       const writeOwner = claimPwmAlarmWriteOwner();
       schedule.alarmCreatedAt = verifiedCreatedAt;
@@ -22399,7 +39269,11 @@ return plan;
     async function updateBadge() { calls.push('badge'); }
     ${expiredCommitSource16}
     return {
-      run: expiredAt => executeExpiredIntervalRecovery(expiredAt, 71),
+      run: expiredAt => executeExpiredIntervalRecovery(
+        expiredAt,
+        71,
+        { returnReceipt: true, phaseAdmissionEpoch: 65 }
+      ),
       current: () => schedule,
       verifiedClock: () => verifiedClock,
       calls,
@@ -22413,6 +39287,7 @@ return plan;
     scheduleMutations.clearSchedulePageTimerProofState,
     scheduleMutations.setScheduleNextTrigger,
     scheduleMutations.setSchedulePwmClockIntent,
+    scheduleMutations.replaceSchedulePageTimerState,
     expiredSecondNow16,
     ExpiredCommitDate16,
     testConsole
@@ -22427,7 +39302,19 @@ return plan;
     entry => entry.reason === 'advanceExpiredAlarmToNextBoundary'
   );
   const expiredCommitVerifiedClock16 = expiredCommitHarness16.verifiedClock();
-  assertPass(expiredCommitResult16 === true
+  assertPass(expiredCommitResult16?.advanced === true
+      && expiredCommitResult16?.persisted === true
+      && expiredCommitResult16?.writeOwner > 0
+      && expiredCommitResult16?.pageTimerWriteOwner > 0
+      && expiredCommitResult16?.pageTimerState?.pageTimerMinutes === null
+      && expiredCommitResult16?.pageTimerState?.pageTimerTargetAt === 0
+      && expiredCommitResult16?.pageTimerState?.pageTimerError === ''
+      && expiredCommitResult16?.pageTimerState?.pageTimerRetryAt === 0
+      && expiredCommitResult16?.pageTimerState?.pageTimerRetryMinutes === 0
+      && expiredCommitResult16?.verifiedClockState?.nextTriggerAt
+        === expiredCommitVerifiedClock16?.nextTriggerAt
+      && expiredCommitResult16?.phaseState?.pwmState === 'off'
+      && expiredCommitResult16?.phaseState?.phaseSentinel === 'committed'
       && expiredCommitHarness16.current() === expiredCommitPostCreate16
       && expiredCommitIntent16?.ref === expiredCommitNew16
       && expiredCommitIntent16?.options.syncFromLiveAlarm === false
@@ -22460,9 +39347,20 @@ return plan;
         === expiredCommitVerifiedClock16?.alarmCreatedAt
       && expiredCommitFinal16?.snapshot.alarmDelayMinutes
         === expiredCommitVerifiedClock16?.alarmDelayMinutes
+      && expiredCommitPostCreateTemplate16.nextTriggerAt
+        === expiredCommitVerifiedClock16?.nextTriggerAt
+      && expiredCommitPostCreateTemplate16.smartClockPlannedAt
+        === expiredCommitVerifiedClock16?.smartClockPlannedAt
+      && expiredCommitPostCreateTemplate16.alarmCreatedAt
+        === expiredCommitVerifiedClock16?.alarmCreatedAt
+      && expiredCommitPostCreateTemplate16.alarmDelayMinutes
+        === expiredCommitVerifiedClock16?.alarmDelayMinutes
+      && expiredCommitPostCreateTemplate16.pageTimerMinutes === 27
+      && expiredCommitPostCreateTemplate16.pageTimerError
+        === 'post-create replacement proof'
       && expiredCommitHarness16.calls.indexOf(`create-pwm:${expiredTargetAt16}`)
         < expiredCommitHarness16.calls.indexOf('swap:post-create'),
-    '16N-5: expired commit 建 live 钟后的 badge replacement 保留新配置，并重放 phase/page owner/verified clock');
+    '16N-5: expired commit 的同 revision/同 clock badge-onChanged replacement 不得回灌旧 page 五字段；receipt 完整回传 phase/page/verified clock');
 
   const runExpiredCommitFailureCase16 = async ({
     invalidatePageOwner = false,
@@ -22508,7 +39406,7 @@ return plan;
       'invalidateRevisionAtCreate',
       'invalidatePwmOwnerAtWatchdog',
       'clearProofMutation', 'nextTriggerMutation', 'pwmClockMutation',
-      'Date', 'console',
+      'replaceSchedulePageTimerState', 'Date', 'console',
       `let schedule = initialSchedule;
       let pwmRuntimeRevision = 81;
       let pwmAlarmWriteGeneration = 0;
@@ -22522,12 +39420,19 @@ return plan;
       function isPageTimerWriteOwnerCurrent(owner) {
         return owner > 0 && owner === pageTimerWriteGeneration;
       }
+      ${ownedPageTimerStateHelpers11D}
       function claimPwmAlarmWriteOwner() {
         pwmAlarmWriteGeneration += 1;
         return pwmAlarmWriteGeneration;
       }
       function isPwmAlarmWriteOwnerCurrent(owner) {
         return owner > 0 && owner === pwmAlarmWriteGeneration;
+      }
+      function isPwmAlarmWriteGenerationCurrent(generation) {
+        const expected = Number(generation);
+        return Number.isSafeInteger(expected)
+          && expected >= 0
+          && expected === pwmAlarmWriteGeneration;
       }
       function clearSchedulePageTimerProofState(state) {
         clearProofMutation(state);
@@ -22545,6 +39450,9 @@ return plan;
       function isAutomationOperationCurrent(revision) {
         return revision === pwmRuntimeRevision && schedule.enabled === true;
       }
+      function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+        return Number(epoch) === 66;
+      }
       function planPwmRecovery() { return commitPlan; }
       async function getCurrentACStatus() { throw new Error('commit failure must not read status'); }
       async function setPageTimer() { throw new Error('commit failure must not set timer'); }
@@ -22561,8 +39469,32 @@ return plan;
           snapshot: structuredClone(schedule)
         });
       }
-      async function clearPwmAlarm() { calls.push('clear-pwm'); return true; }
-      async function createPwmAlarmFromPlanWithReceipt(plan) {
+      async function clearPwmAlarmWithReceipt(_revision, _force = false, options = {}) {
+        const expected = Number(options.expectedWriteGeneration);
+        if ((Number.isSafeInteger(expected) && expected >= 0
+              && !isPwmAlarmWriteGenerationCurrent(expected))
+            || (typeof options.ensureCurrent === 'function'
+              && !options.ensureCurrent())) {
+          calls.push('clear-pwm-stale');
+          return { cleared: false, stale: true, writeOwner: 0 };
+        }
+        const writeOwner = claimPwmAlarmWriteOwner();
+        calls.push('clear-pwm');
+        return { cleared: true, writeOwner };
+      }
+      async function createPwmAlarmFromPlanWithReceipt(
+        plan,
+        _tag,
+        _revision,
+        options = {}
+      ) {
+        const expected = Number(options.expectedWriteGeneration);
+        if ((Number.isSafeInteger(expected) && expected >= 0
+              && !isPwmAlarmWriteGenerationCurrent(expected))
+            || (typeof options.ensureCurrent === 'function'
+              && !options.ensureCurrent())) {
+          return { created: false, writeOwner: 0 };
+        }
         calls.push('create-pwm:' + plan.nextTriggerAt);
         const writeOwner = claimPwmAlarmWriteOwner();
         await Promise.resolve();
@@ -22599,7 +39531,11 @@ return plan;
       async function updateBadge() { calls.push('badge'); }
       ${expiredCommitSource16}
       return {
-        run: expiredAt => executeExpiredIntervalRecovery(expiredAt, 81),
+        run: expiredAt => executeExpiredIntervalRecovery(
+          expiredAt,
+          81,
+          { phaseAdmissionEpoch: 66 }
+        ),
         current: () => schedule,
         calls,
         persisted
@@ -22616,6 +39552,7 @@ return plan;
       scheduleMutations.clearSchedulePageTimerProofState,
       scheduleMutations.setScheduleNextTrigger,
       scheduleMutations.setSchedulePwmClockIntent,
+      scheduleMutations.replaceSchedulePageTimerState,
       class ExpiredCommitFailureDate16 extends Date {
         static now() { return expiredSecondNow16; }
       },
@@ -22638,6 +39575,23 @@ return plan;
     };
   };
 
+  const expiredCommitCreateIntentReplayed16 = testCase => (
+    testCase.createReplacement.sentinel === 'failure-create-replacement'
+      && testCase.createReplacement.configSentinel
+        === 'keep-create-failure-config'
+      && testCase.createReplacement.phaseSentinel === 'committed'
+      && testCase.createReplacement.pwmState === 'off'
+      && testCase.createReplacement.nextTriggerAt === expiredTargetAt16
+      && testCase.createReplacement.smartClockPlannedAt === expiredSecondNow16
+      && testCase.createReplacement.alarmCreatedAt === 0
+      && testCase.createReplacement.alarmDelayMinutes === 0
+      && testCase.createReplacement.pageTimerMinutes === null
+      && testCase.createReplacement.pageTimerTargetAt === 0
+      && testCase.createReplacement.pageTimerError === ''
+      && testCase.createReplacement.pageTimerRetryAt === 0
+      && testCase.createReplacement.pageTimerRetryMinutes === 0
+  );
+
   const expiredCommitPhysicalFailure16 = await runExpiredCommitFailureCase16();
   const expiredCommitFailureSnapshot16 = expiredCommitPhysicalFailure16.failurePersist?.snapshot;
   assertPass(expiredCommitPhysicalFailure16.result === false
@@ -22646,8 +39600,7 @@ return plan;
       && expiredCommitPhysicalFailure16.failurePersist?.ref
         === expiredCommitPhysicalFailure16.watchdogReplacement
       && expiredCommitPhysicalFailure16.failurePersist?.options.syncFromLiveAlarm === false
-      && JSON.stringify(expiredCommitPhysicalFailure16.createReplacement)
-        === JSON.stringify(expiredCommitPhysicalFailure16.createReplacementBefore)
+      && expiredCommitCreateIntentReplayed16(expiredCommitPhysicalFailure16)
       && expiredCommitFailureSnapshot16?.sentinel === 'failure-watchdog-replacement'
       && expiredCommitFailureSnapshot16?.configSentinel === 'keep-watchdog-config'
       && expiredCommitFailureSnapshot16?.phaseSentinel === 'committed'
@@ -22697,8 +39650,9 @@ return plan;
         === expiredCommitWatchdogOwnerStale16.watchdogReplacement
       && JSON.stringify(expiredCommitWatchdogOwnerStale16.watchdogReplacement)
         === JSON.stringify(expiredCommitWatchdogOwnerStale16.watchdogReplacementBefore)
-      && JSON.stringify(expiredCommitWatchdogOwnerStale16.createReplacement)
-        === JSON.stringify(expiredCommitWatchdogOwnerStale16.createReplacementBefore)
+      && expiredCommitCreateIntentReplayed16(
+        expiredCommitWatchdogOwnerStale16
+      )
       && expiredCommitWatchdogOwnerStale16.failurePersist === undefined
       && expiredCommitWatchdogOwnerStale16.harness.calls.includes('swap:watchdog')
       && expiredCommitWatchdogOwnerStale16.harness.calls.includes(
@@ -22720,6 +39674,16 @@ return plan;
       pwmState: 'off',
       nextTriggerAt: expiredRetryTargetAt16,
       retryPhaseSentinel: 'owned-retry-phase'
+    }
+  };
+  const expiredRetryHoldPlan16 = {
+    kind: 'hold',
+    prerequisite: 'set-page-timer',
+    timerMinutes: 18,
+    proofAction: 'clear',
+    phasePatch: {
+      pwmState: 'on',
+      nextTriggerAt: 0
     }
   };
   const expiredRetryInitial16 = {
@@ -22760,11 +39724,14 @@ return plan;
     sentinel: 'retry-post-create'
   };
   const expiredRetryHarness16 = new Function(
-    'initialSchedule', 'postCreateSchedule', 'retryPlan',
-    'nextTriggerMutation', 'pwmClockMutation', 'verifiedCreatedAt', 'Date',
+    'initialSchedule', 'postCreateSchedule', 'holdPlan', 'retryPlan',
+    'nextTriggerMutation', 'pwmClockMutation', 'replaceSchedulePageTimerState',
+    'verifiedCreatedAt', 'Date',
     `let schedule = initialSchedule;
     let pwmRuntimeRevision = 72;
     let pwmAlarmWriteGeneration = 0;
+    let pageTimerWriteGeneration = 0;
+    let recoveryPlanCalls = 0;
     const calls = [];
     const persisted = [];
     let verifiedClock = null;
@@ -22775,6 +39742,20 @@ return plan;
     function isPwmAlarmWriteOwnerCurrent(owner) {
       return owner > 0 && owner === pwmAlarmWriteGeneration;
     }
+    function isPwmAlarmWriteGenerationCurrent(generation) {
+      const expected = Number(generation);
+      return Number.isSafeInteger(expected)
+        && expected >= 0
+        && expected === pwmAlarmWriteGeneration;
+    }
+    function isPageTimerWriteOwnerCurrent(owner) {
+      return owner > 0 && owner === pageTimerWriteGeneration;
+    }
+    function invalidatePageTimerWriteOwner() {
+      pageTimerWriteGeneration += 1;
+      return pageTimerWriteGeneration;
+    }
+    ${ownedPageTimerStateHelpers11D}
     function setScheduleNextTrigger(state, value, options) {
       return nextTriggerMutation(state, value, options);
     }
@@ -22784,15 +39765,52 @@ return plan;
     const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
     ${setNextTriggerAtSource16}
     function clearPageTimerProofState() {
-      throw new Error('retry plan must not clear page proof');
+      const pageTimerWriteOwner = invalidatePageTimerWriteOwner();
+      replaceSchedulePageTimerState(schedule, {
+        minutes: null,
+        targetAt: 0,
+        error: '',
+        retryAt: 0,
+        retryMinutes: 0
+      });
+      calls.push('proof-clear:' + pageTimerWriteOwner);
+      return pageTimerWriteOwner;
     }
     ${applyPwmPlanBody}
     function isAutomationOperationCurrent(revision) {
       return revision === pwmRuntimeRevision && schedule.enabled === true;
     }
-    function planPwmRecovery() { return retryPlan; }
-    async function getCurrentACStatus() { throw new Error('retry plan must not read status'); }
-    async function setPageTimer() { throw new Error('retry plan must not set timer'); }
+    function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+      return Number(epoch) === 67;
+    }
+    function planPwmRecovery() {
+      recoveryPlanCalls += 1;
+      calls.push('plan:' + recoveryPlanCalls);
+      return recoveryPlanCalls <= 2 ? holdPlan : retryPlan;
+    }
+    async function getCurrentACStatus() {
+      calls.push('status:on');
+      return { isOn: true };
+    }
+    async function setPageTimer(minutes, options = {}) {
+      const pageTimerWriteOwner = invalidatePageTimerWriteOwner();
+      calls.push('set-page-timer:' + minutes + ':' + pageTimerWriteOwner);
+      options.onWriteOwnerClaimed(pageTimerWriteOwner);
+      replaceSchedulePageTimerState(schedule, {
+        minutes: null,
+        targetAt: 0,
+        error: 'owned retry page failure',
+        retryAt: 0,
+        retryMinutes: 0
+      });
+      const pageTimerState = snapshotOwnedPageTimerState(pageTimerWriteOwner);
+      return {
+        success: false,
+        error: 'owned retry page failure',
+        pageTimerWriteOwner,
+        pageTimerState
+      };
+    }
     async function writePageTimerRetryAlarm() { throw new Error('retry plan must not write page retry alarm'); }
     async function persistSchedule(reason, options) {
       calls.push('persist:' + reason);
@@ -22803,8 +39821,32 @@ return plan;
         snapshot: structuredClone(schedule)
       });
     }
-    async function clearPwmAlarm() { calls.push('clear-pwm'); return true; }
-    async function createPwmAlarmFromPlanWithReceipt(plan) {
+    async function clearPwmAlarmWithReceipt(_revision, _force = false, options = {}) {
+      const expected = Number(options.expectedWriteGeneration);
+      if ((Number.isSafeInteger(expected) && expected >= 0
+            && !isPwmAlarmWriteGenerationCurrent(expected))
+          || (typeof options.ensureCurrent === 'function'
+            && !options.ensureCurrent())) {
+        calls.push('clear-pwm-stale');
+        return { cleared: false, stale: true, writeOwner: 0 };
+      }
+      const writeOwner = claimPwmAlarmWriteOwner();
+      calls.push('clear-pwm');
+      return { cleared: true, writeOwner };
+    }
+    async function createPwmAlarmFromPlanWithReceipt(
+      plan,
+      _tag,
+      _revision,
+      options = {}
+    ) {
+      const expected = Number(options.expectedWriteGeneration);
+      if ((Number.isSafeInteger(expected) && expected >= 0
+            && !isPwmAlarmWriteGenerationCurrent(expected))
+          || (typeof options.ensureCurrent === 'function'
+            && !options.ensureCurrent())) {
+        return { created: false, writeOwner: 0 };
+      }
       calls.push('create-pwm:' + plan.nextTriggerAt);
       const writeOwner = claimPwmAlarmWriteOwner();
       schedule.alarmCreatedAt = verifiedCreatedAt;
@@ -22831,7 +39873,11 @@ return plan;
     async function updateBadge() { calls.push('badge'); }
     ${expiredCommitSource16}
     return {
-      run: expiredAt => executeExpiredIntervalRecovery(expiredAt, 72),
+      run: expiredAt => executeExpiredIntervalRecovery(
+        expiredAt,
+        72,
+        { returnReceipt: true, phaseAdmissionEpoch: 67 }
+      ),
       current: () => schedule,
       verifiedClock: () => verifiedClock,
       calls,
@@ -22840,9 +39886,11 @@ return plan;
   )(
     expiredRetryInitial16,
     expiredRetryPostCreate16,
+    expiredRetryHoldPlan16,
     expiredRetryPlan16,
     scheduleMutations.setScheduleNextTrigger,
     scheduleMutations.setSchedulePwmClockIntent,
+    scheduleMutations.replaceSchedulePageTimerState,
     expiredSecondNow16 + 500,
     ExpiredCommitDate16
   );
@@ -22853,7 +39901,11 @@ return plan;
     entry => entry.reason === 'advanceExpiredAlarmToNextBoundary-pageTimer-failed'
   );
   const expiredRetryVerifiedClock16 = expiredRetryHarness16.verifiedClock();
-  assertPass(expiredRetryResult16 === true
+  assertPass(expiredRetryResult16?.advanced === true
+      && expiredRetryResult16?.persisted === true
+      && expiredRetryResult16?.pageTimerWriteOwner > 0
+      && expiredRetryResult16?.pageTimerState?.pageTimerWriteOwner
+        === expiredRetryResult16?.pageTimerWriteOwner
       && expiredRetryHarness16.current() === expiredRetryPostCreate16
       && expiredRetryFinal16?.ref === expiredRetryPostCreate16
       && expiredRetryFinal16?.options.syncFromLiveAlarm === false
@@ -22862,14 +39914,14 @@ return plan;
       && expiredRetryFinal16?.snapshot.smartMode?.sensitivity === 9
       && expiredRetryFinal16?.snapshot.retryPhaseSentinel === 'owned-retry-phase'
       && expiredRetryFinal16?.snapshot.pwmState === 'off'
-      && expiredRetryFinal16?.snapshot.pageTimerMinutes === 31
-      && expiredRetryFinal16?.snapshot.pageTimerTargetAt
-        === expiredRetryPostCreate16.pageTimerTargetAt
-      && expiredRetryFinal16?.snapshot.pageTimerError
-        === 'new page owner must survive retry replay'
-      && expiredRetryFinal16?.snapshot.pageTimerRetryAt
-        === expiredRetryPostCreate16.pageTimerRetryAt
-      && expiredRetryFinal16?.snapshot.pageTimerRetryMinutes === 31
+      && expiredRetryFinal16?.snapshot.pageTimerMinutes === null
+      && expiredRetryFinal16?.snapshot.pageTimerTargetAt === 0
+      && expiredRetryFinal16?.snapshot.pageTimerError.includes(
+        'owned retry page failure')
+      && expiredRetryFinal16?.snapshot.pageTimerError.includes(
+        '过期闹钟恢复时页面关机定时器未确认')
+      && expiredRetryFinal16?.snapshot.pageTimerRetryAt === 0
+      && expiredRetryFinal16?.snapshot.pageTimerRetryMinutes === 0
       && expiredRetryFinal16?.snapshot.pwmRetryKind === 'smart-on-safety-timer'
       && expiredRetryFinal16?.snapshot.pwmRetryBoundaryAt === 333
       && expiredRetryFinal16?.snapshot.pwmRetryScheduledAt === 444
@@ -22885,7 +39937,7 @@ return plan;
 
   const popupUpdateScheduleSourceF90 = extractSourceSection(
     popupJs,
-    'async function updateSchedule(enabled, restart = false) {',
+    "async function updateSchedule(enabled, restart = false, automationIntent = '') {",
     '\n\nfunction setModeSwitchBusy(busy, message = \'\') {',
     'popup serialized updateSchedule'
   );
@@ -23247,13 +40299,22 @@ return plan;
     'loadScheduleFromStorage stale-read guard'
   );
   let releaseStaleScheduleRead16;
+  let markStaleScheduleReadStarted16;
   let staleStorageReadCount16 = 0;
   const staleScheduleRead16 = new Promise(resolve => {
     releaseStaleScheduleRead16 = resolve;
   });
+  const staleScheduleReadStarted16 = new Promise(resolve => {
+    markStaleScheduleReadStarted16 = resolve;
+  });
   const staleLoadHarness16 = new Function(
     'chrome', 'STORAGE_KEY', 'staleScheduleRead',
     `let pwmRuntimeRevision = 7;
+    let criticalLocalStateWriteChain = Promise.resolve();
+    let schedulePersistenceAuthorityEpoch = 0;
+    let syncPhaseAdoptionAdmissionEpoch = 0;
+    let pageTimerWritesInFlight = 0;
+    let pageTimerWriteGeneration = 0;
     let scheduleLoadBlockedRevision = null;
     function isSyncPhaseAdoptionAdmissionBlocked() { return false; }
     let schedule = {
@@ -23285,6 +40346,7 @@ return plan;
         local: {
           async get() {
             staleStorageReadCount16 += 1;
+            markStaleScheduleReadStarted16();
             await staleScheduleRead16;
             return {
               ac_schedule: {
@@ -23303,6 +40365,7 @@ return plan;
     staleScheduleRead16
   );
   const staleLoadPromise16 = staleLoadHarness16.loadScheduleFromStorage();
+  await staleScheduleReadStarted16;
   staleLoadHarness16.resetRuntime();
   releaseStaleScheduleRead16();
   await staleLoadPromise16;
@@ -23327,6 +40390,11 @@ return plan;
   const phaseLoadHarness16 = new Function(
     'chrome', 'STORAGE_KEY',
     `let pwmRuntimeRevision = 31;
+    let criticalLocalStateWriteChain = Promise.resolve();
+    let schedulePersistenceAuthorityEpoch = 0;
+    let syncPhaseAdoptionAdmissionEpoch = 0;
+    let pageTimerWritesInFlight = 0;
+    let pageTimerWriteGeneration = 0;
     let scheduleLoadBlockedRevision = null;
     let phaseAdoptionBlocked = false;
     let schedule = {
@@ -23344,6 +40412,7 @@ return plan;
       loadScheduleFromStorage,
       claimPhase(nextTriggerAt) {
         phaseAdoptionBlocked = true;
+        syncPhaseAdoptionAdmissionEpoch += 1;
         pwmRuntimeRevision += 1;
         schedule = {
           ...schedule,
@@ -23389,9 +40458,13 @@ return plan;
   const phaseLoadAfter16 = phaseLoadHarness16.getSchedule();
   phaseLoadHarness16.releasePhase();
   assertPass(loadScheduleFromStorageSource16.includes(
-      'if (isSyncPhaseAdoptionAdmissionBlocked()) return schedule;')
+      'const phaseAdmissionEpochAtRead = syncPhaseAdoptionAdmissionEpoch;')
       && loadScheduleFromStorageSource16.includes(
-        'if (isSyncPhaseAdoptionAdmissionBlocked()')
+        'phaseAdmissionEpochAtRead !== syncPhaseAdoptionAdmissionEpoch')
+      && loadScheduleFromStorageSource16.includes(
+        'const pageTimerWriteGenerationAtRead = pageTimerWriteGeneration;')
+      && loadScheduleFromStorageSource16.includes(
+        'pageTimerWriteGenerationAtRead !== pageTimerWriteGeneration')
       && phaseStorageReadCount16 === 1
       && phaseLoadAfter16.pwmState === 'off'
       && phaseLoadAfter16.nextTriggerAt === reservedPhaseClock16
@@ -23451,8 +40524,9 @@ return plan;
       && ensureDiagnosticAlarmsBody.includes(
         'return createDeferredPhaseAdoptionDiagnosticRepair();')
       && ensureDiagnosticAlarmsBody.includes(
-        '|| isSyncPhaseAdoptionAdmissionBlocked()')
-      && ensureDiagnosticAlarmsBody.includes('? null'),
+        'async function createDeferredPhaseAdoptionDiagnosticRepair()')
+      && ensureDiagnosticAlarmsBody.includes(
+        'if (isSyncPhaseAdoptionAdmissionBlocked()) {'),
     '16R-2: ensureDiagnostics 在 phase reservation 内只返回 deferred 证据；不清建闹钟，后续 trigger reconciliation 也跳过');
 
   assertPass(!diagnoseHandlerSource.includes('chrome.storage.local.set(')
@@ -23521,6 +40595,13 @@ return plan;
     'replaceSchedulePwmRetryState',
     `let pwmRuntimeRevision = 19;
     let scheduleLoadBlockedRevision = null;
+    let schedulePersistenceAuthorityEpoch = 0;
+    let criticalLocalStateWriteChain = Promise.resolve();
+    let deferredSyncDisableLocalPublishAfterRemoteAuthority = false;
+    function hasCommittedLocalMutationAfterDeferredRemoteAuthority() {
+      return false;
+    }
+    function snapshotDeferredSyncDisableMailbox() { return null; }
     let automationAllowed = true;
     const STORAGE_KEY = 'ac_schedule';
     const PWM_TRIGGER_NEXT_ONLY_OPTIONS = Object.freeze({
@@ -23536,6 +40617,11 @@ return plan;
     }
     function clearPwmRetryState() {
       replaceSchedulePwmRetryState(schedule);
+    }
+    function runSerializedCriticalLocalStateWrite(operation) {
+      const queued = criticalLocalStateWriteChain.catch(() => {}).then(operation);
+      criticalLocalStateWriteChain = queued.catch(() => {});
+      return queued;
     }
     ${persistScheduleBody}
     return {
@@ -23599,6 +40685,32 @@ return plan;
       && adoptMutationIndex16 > adoptPausedGateIndex16,
     '16T: sync 相位采纳在修改全局运行态前复核当前门禁，暂停态不接纳远端时钟');
 
+  assertPass(backgroundSource.includes(
+      'function isSyncPhaseAdoptionAdmissionOwnerCurrent(admissionEpoch)')
+      && backgroundSource.includes('function snapshotPhaseAdoptionIntentState(')
+      && backgroundSource.includes('function replayPhaseAdoptionIntentState(')
+      && adoptPhaseSource16.includes('clearPwmAlarmWithReceipt(')
+      && adoptPhaseSource16.includes('commitOwnedPwmAlarmPlan({')
+      && adoptPhaseSource16.includes(
+        'previousWriteOwner: clearAlarmWrite.writeOwner')
+      && adoptPhaseSource16.includes('isCurrent: phaseOwnerIsCurrent')
+      && !adoptPhaseSource16.includes('await clearPwmAlarm(')
+      && !adoptPhaseSource16.includes('await createPwmAlarmFromPlan(')
+      && !adoptPhaseSource16.includes('schedule.alarmCreatedAt =')
+      && !adoptPhaseSource16.includes('schedule.alarmDelayMinutes ='),
+    '16T-1: sync phase adoption 以 exact reservation + clear/create receipt 串起同一所有权，不再伪造 verified clock');
+
+  assertPass(pageTimerAdoptionBody16.includes('clearPwmAlarmWithReceipt(')
+      && pageTimerAdoptionBody16.includes('commitOwnedPwmAlarmPlan({')
+      && pageTimerAdoptionBody16.includes(
+        'previousWriteOwner: clearAlarmWrite.writeOwner')
+      && pageTimerAdoptionBody16.includes('isCurrent: phaseOwnerIsCurrent')
+      && !pageTimerAdoptionBody16.includes('await clearPwmAlarm(')
+      && !pageTimerAdoptionBody16.includes('await createPwmAlarmFromPlan(')
+      && !pageTimerAdoptionBody16.includes('schedule.alarmCreatedAt =')
+      && !pageTimerAdoptionBody16.includes('schedule.alarmDelayMinutes ='),
+    '16T-2: page phase adoption 绑定 clear predecessor 与 PWM write owner；旧 continuation 无权清新钟或回写旧状态');
+
   const pwmAlarmCreationBody16 = extractSourceSection(
     backgroundSource,
     'let pwmAlarmWriteChain = Promise.resolve();',
@@ -23608,8 +40720,12 @@ return plan;
   assertPass(pwmAlarmCreationBody16.includes('automationRevision = null')
       && pwmAlarmCreationBody16.includes('isAutomationOperationCurrent(automationRevision)')
       && pwmAlarmCreationBody16.includes('pwmAlarmWriteChain')
-      && countOccurrences(backgroundSource, "chrome.alarms.clear('ac-pwm')") >= 2
-      && countOccurrences(backgroundSource, 'clearPwmAlarm(') >= 11
+      && pwmAlarmCreationBody16.includes(
+        "await chrome.alarms.clear('ac-pwm')")
+      && pwmAlarmCreationBody16.includes(
+        'const result = await clearPwmAlarmWithReceipt(automationRevision, force);')
+      && pwmAlarmCreationBody16.includes(
+        'if (result.error) throw new Error(result.error);')
       && [reapplyBody, advanceBody, applySyncedPhaseBody, adoptTimerBody, pwmBody, repairBody]
         .every(source => source.includes('automationRevision')),
     '16U: PWM alarm 创建串行并绑定调用方 revision，快速暂停后恢复时旧流程不能重建旧时钟');
@@ -23619,6 +40735,7 @@ return plan;
   let pwmAlarmCreateCalls16 = 0;
   let pwmAlarmClearCalls16 = 0;
   let livePwmAlarm16 = null;
+  let rejectPwmAlarmClear16 = false;
   const revisionOwnedSchedule16 = {
     enabled: true,
     nextTriggerAt: 0,
@@ -23636,6 +40753,9 @@ return plan;
       async clear(name) {
         if (name === 'ac-pwm') {
           pwmAlarmClearCalls16 += 1;
+          if (rejectPwmAlarmClear16) {
+            throw new Error('synthetic actual PWM clear rejection');
+          }
           livePwmAlarm16 = null;
         }
         return true;
@@ -23657,6 +40777,7 @@ return plan;
     'isAutomationOperationCurrent', 'setNextTriggerAt',
     `${pwmAlarmCreationBody16}; return {
       clearPwmAlarmWithReceipt,
+      clearPwmAlarm,
       createPwmAlarmFromPlan,
       createPwmAlarmFromPlanWithReceipt
     };`
@@ -23744,6 +40865,62 @@ return plan;
       && stalePredecessorCreate16.writeOwner === 0
       && pwmAlarmCreateCalls16 === createCallsBeforeStalePredecessor16,
     '16U-1C: create receipt 只接续仍 current 的 clear predecessor；旧 clear token 零物理 I/O、零抢占');
+
+  rejectPwmAlarmClear16 = true;
+  const rejectedClearReceipt16 = await revisionOwnedPwmAlarm16
+    .clearPwmAlarmWithReceipt(2);
+  rejectPwmAlarmClear16 = false;
+  const liveAfterRejectedClear16 = livePwmAlarm16?.scheduledTime;
+  const rejectedClearRecoveryTarget16 = Date.now() + 31 * 60_000;
+  const rejectedClearRecovery16 = await revisionOwnedPwmAlarm16
+    .createPwmAlarmFromPlanWithReceipt(
+      { nextTriggerAt: rejectedClearRecoveryTarget16 },
+      'rejected-clear-predecessor-current',
+      2,
+      { previousWriteOwner: rejectedClearReceipt16.writeOwner }
+    );
+  const createCallsBeforeRejectedClearStale16 = pwmAlarmCreateCalls16;
+  const rejectedClearStalePredecessor16 = await revisionOwnedPwmAlarm16
+    .createPwmAlarmFromPlanWithReceipt(
+      { nextTriggerAt: Date.now() + 33 * 60_000 },
+      'rejected-clear-predecessor-stale',
+      2,
+      { previousWriteOwner: rejectedClearReceipt16.writeOwner }
+    );
+  assertPass(rejectedClearReceipt16.cleared === false
+      && rejectedClearReceipt16.writeOwner > predecessorCreate16.writeOwner
+      && rejectedClearReceipt16.error
+        === 'synthetic actual PWM clear rejection'
+      && liveAfterRejectedClear16 === predecessorTarget16
+      && rejectedClearRecovery16.created === true
+      && rejectedClearRecovery16.writeOwner
+        > rejectedClearReceipt16.writeOwner
+      && livePwmAlarm16?.scheduledTime === rejectedClearRecoveryTarget16
+      && revisionOwnedSchedule16.nextTriggerAt
+        === rejectedClearRecoveryTarget16
+      && rejectedClearStalePredecessor16.created === false
+      && rejectedClearStalePredecessor16.writeOwner === 0
+      && pwmAlarmCreateCalls16 === createCallsBeforeRejectedClearStale16,
+    '16U-1D: 真实 clear rejection receipt 保留已 claim owner 与错误；该 token 可接续一次建钟且随后立即 stale');
+
+  rejectPwmAlarmClear16 = true;
+  const legacyRejectedClear16 = await revisionOwnedPwmAlarm16
+    .clearPwmAlarm(2)
+    .then(
+      value => ({ status: 'fulfilled', value }),
+      error => ({ status: 'rejected', error })
+    );
+  const liveAfterLegacyRejectedClear16 = livePwmAlarm16?.scheduledTime;
+  rejectPwmAlarmClear16 = false;
+  const legacyRecoveredClear16 = await revisionOwnedPwmAlarm16
+    .clearPwmAlarm(2);
+  assertPass(legacyRejectedClear16.status === 'rejected'
+      && legacyRejectedClear16.error?.message
+        === 'synthetic actual PWM clear rejection'
+      && liveAfterLegacyRejectedClear16 === rejectedClearRecoveryTarget16
+      && legacyRecoveredClear16 === true
+      && livePwmAlarm16 === null,
+    '16U-1E: legacy clearPwmAlarm 透传物理 clear rejection；内部串行链仍可继续执行下一次 clear 并收口 live alarm');
 
   let guardedPageOwner16 = 1;
   let guardedPwmLiveAlarm16 = null;
@@ -23962,10 +41139,291 @@ return plan;
     '16Y: 暂停/停用关机拥有独立可失效 revision，恢复后旧验证与证明提交不能覆盖新 ON 周期');
   assertPass(pageTimerRetryAlarmBody16.includes('if (isAutomationAllowed())')
       && pageTimerRetryAlarmBody16.includes('clearSupersededTimerBasedShutdownRetry')
-      && pageTimerRetryAlarmBody16.includes("requestTimerBasedShutdown('page-timer-retry', 1)")
+      && pageTimerRetryAlarmBody16.includes("'page-timer-retry',\n        1")
+      && pageTimerRetryAlarmBody16.includes(
+        "await resumePendingManualOffAdmission('page-timer-retry')")
       && pageTimerRetryAlarmBody16.indexOf('clearSupersededTimerBasedShutdownRetry')
-        < pageTimerRetryAlarmBody16.indexOf('requestTimerBasedShutdown('),
-    '16Y-1: 恢复自动控制后触发的旧关机 retry 只清理不重授权，时段外才继续安全停机');
+        < pageTimerRetryAlarmBody16.indexOf('requestTimerBasedShutdown(')
+      && pageTimerRetryAlarmBody16.indexOf('requestTimerBasedShutdown(')
+        < pageTimerRetryAlarmBody16.indexOf('resumePendingManualOffAdmission('),
+    '16Y-1: 普通恢复后的旧关机 retry 只清理；pending durable OFF 的 timer retry 成功后继续原 phase finalizer，不永久锁死');
+
+  const resumePendingManualOffSource16 = extractSourceSection(
+    backgroundSource,
+    "async function resumePendingManualOffAdmission(reason = 'recovery') {",
+    '\n\nasync function toggleNowAndSync(',
+    'pending manual OFF retry liveness'
+  );
+  const manualOffAdmissionFlightSource16 = extractSourceSection(
+    backgroundSource,
+    'function runManualOffAdmissionFlight(token, operation) {',
+    '\n\nasync function ensureManualOffAdmissionRetryAlarm(',
+    'same-token manual OFF retry flight'
+  );
+  const pendingManualOffRetryHarness16 = new Function(
+    'console',
+    `let schedule = { pageTimerRetryAt: 1_900_000_000_000 };
+    let manualToggleIntentEpoch = 4;
+    let manualToggleIntentAction = 'off';
+    let manualOffAutomaticOnBlocked = true;
+    let manualOffAdmissionToken = 'retry-owned-manual-off';
+    let pwmRuntimeRevision = 10;
+    let localScheduleMutationGeneration = 0;
+    let deferredSyncDisablePending = false;
+    let deferredSyncDisableSuccessorSnapshot = null;
+    const calls = [];
+    function isAutomationAllowed() { return false; }
+    async function clearSupersededTimerBasedShutdownRetry() {
+      calls.push('unexpected-clear-superseded');
+    }
+    async function requestTimerBasedShutdown(reason, minutes) {
+      calls.push('retry-timer:' + reason + ':' + minutes);
+      return { success: true };
+    }
+    function isManualToggleIntentCurrent(epoch, action) {
+      return epoch === manualToggleIntentEpoch
+        && action === manualToggleIntentAction;
+    }
+    function invalidateTimerBasedShutdown() {
+      calls.push('resume-invalidate-timer');
+    }
+    async function queueManualOffAutomaticOnCancellation(options = {}) {
+      calls.push('resume-cancel-on:' + (options.claimRevision === false));
+    }
+    async function cancelAutomaticOnRequests() {
+      calls.push('resume-cancel-on');
+    }
+    function runManualOffAdmissionFlight(_token, operation) {
+      return operation();
+    }
+    async function completeRecoveredManualOffLocalMutationCoverage(token) {
+      calls.push('resume-coverage:' + token);
+      return true;
+    }
+    function claimLocalScheduleMutationIntent() {
+      localScheduleMutationGeneration += 1;
+      calls.push('resume-claim-mutation:' + localScheduleMutationGeneration);
+      return localScheduleMutationGeneration;
+    }
+    function rememberLocalScheduleMutationAfterRemoteAuthority() {
+      calls.push('unexpected-remember-local-mutation');
+    }
+    async function commitLocalScheduleMutationAuthority(
+      generation,
+      reason = ''
+    ) {
+      calls.push('resume-commit-mutation:' + generation + ':' + reason);
+      return generation === localScheduleMutationGeneration;
+    }
+    function finishLocalScheduleMutationCommit(generation) {
+      calls.push('resume-finish-mutation:' + generation);
+    }
+    async function toggleNowAndSync(action, options = {}) {
+      calls.push('resume-immediate:' + action + ':'
+        + (typeof options.ensureCurrent !== 'function'
+          || options.ensureCurrent()));
+      return { success: true };
+    }
+    function runSerializedSchedulePhaseOperation(operation, reason) {
+      calls.push('resume-phase:' + reason);
+      return operation(91);
+    }
+    async function finalizeManualOffAutomationPhase(
+      phaseAdmissionEpoch,
+      ensureCurrent,
+      admissionToken
+    ) {
+      calls.push('resume-finalize:' + phaseAdmissionEpoch + ':'
+        + admissionToken + ':' + ensureCurrent());
+      if (!ensureCurrent() || admissionToken !== manualOffAdmissionToken) {
+        return { success: false, shutdownStale: true };
+      }
+      manualOffAdmissionToken = '';
+      manualOffAutomaticOnBlocked = false;
+      return { success: true };
+    }
+    ${resumePendingManualOffSource16}
+    async function run(alarm) {
+      ${pageTimerRetryAlarmBody16}
+    }
+    return {
+      run: () => run({ name: 'ac-page-timer-retry' }),
+      state: () => ({
+        manualOffAutomaticOnBlocked,
+        manualOffAdmissionToken,
+        pwmRuntimeRevision
+      }),
+      calls
+    };`
+  )(testConsole);
+  await pendingManualOffRetryHarness16.run();
+  const pendingManualOffRetryState16 = pendingManualOffRetryHarness16.state();
+  assertPass(pendingManualOffRetryState16.manualOffAutomaticOnBlocked === false
+      && pendingManualOffRetryState16.manualOffAdmissionToken === ''
+      && pendingManualOffRetryState16.pwmRuntimeRevision === 11
+      && !pendingManualOffRetryHarness16.calls.includes(
+        'unexpected-clear-superseded')
+      && pendingManualOffRetryHarness16.calls.join(',')
+        === 'retry-timer:page-timer-retry:1,resume-invalidate-timer,resume-cancel-on:true,resume-immediate:off:true,resume-coverage:retry-owned-manual-off,resume-phase:manual-toggle-off-page-timer-retry,resume-finalize:91:retry-owned-manual-off:true',
+    '16Y-2: pending durable OFF 的页面 retry 成功后执行真实 resume 编排，沿同 token 重写 immediate timer、取得 phase 并完成 finalizer 释放');
+
+  const sameTokenManualOffGate16 = makeDeferred9G();
+  const sameTokenManualOffStarted16 = makeDeferred9G();
+  const sameTokenManualOffHarness16 = new Function(
+    'operationGate', 'markOperationStarted', 'console',
+    `let manualToggleIntentEpoch = 8;
+    let manualToggleIntentAction = 'off';
+    let manualOffAutomaticOnBlocked = true;
+    let manualOffAdmissionToken = 'same-token-long-off';
+    let manualOffAdmissionRequestedAt = 1_900_000_000_000;
+    let manualOffAdmissionFlightToken = '';
+    let manualOffAdmissionFlightPromise = null;
+    let pwmRuntimeRevision = 20;
+    let localScheduleMutationGeneration = 0;
+    let deferredSyncDisablePending = false;
+    let deferredSyncDisableSuccessorSnapshot = null;
+    const manualOffRetryAlarmOperationsInFlight = new Set();
+    const calls = [];
+    function waitUntil(promise) {
+      void Promise.resolve(promise).catch(() => {});
+      return promise;
+    }
+    function trackManualOffRetryAlarmOperation(promise) {
+      const tracked = Promise.resolve(promise);
+      manualOffRetryAlarmOperationsInFlight.add(tracked);
+      void tracked.finally(() => {
+        manualOffRetryAlarmOperationsInFlight.delete(tracked);
+      }).catch(() => {});
+      return tracked;
+    }
+    async function ensureManualOffAdmissionRetryAlarm() {
+      calls.push('ensure-retry-alarm');
+      return true;
+    }
+    function isManualToggleIntentCurrent(epoch, action) {
+      return epoch === manualToggleIntentEpoch
+        && action === manualToggleIntentAction;
+    }
+    function invalidateTimerBasedShutdown() {
+      calls.push('invalidate-timer');
+    }
+    async function queueManualOffAutomaticOnCancellation(options = {}) {
+      calls.push('cancel-on:' + (options.claimRevision === false));
+    }
+    async function completeRecoveredManualOffLocalMutationCoverage(token) {
+      calls.push('coverage:' + token);
+      return true;
+    }
+    function claimLocalScheduleMutationIntent() {
+      localScheduleMutationGeneration += 1;
+      calls.push('claim-mutation:' + localScheduleMutationGeneration);
+      return localScheduleMutationGeneration;
+    }
+    function rememberLocalScheduleMutationAfterRemoteAuthority() {
+      calls.push('unexpected-remember-local-mutation');
+    }
+    async function commitLocalScheduleMutationAuthority(
+      generation,
+      reason = ''
+    ) {
+      calls.push('commit-mutation:' + generation + ':' + reason);
+      return generation === localScheduleMutationGeneration;
+    }
+    function finishLocalScheduleMutationCommit(generation) {
+      calls.push('finish-mutation:' + generation);
+    }
+    async function toggleNowAndSync(action, options = {}) {
+      calls.push('immediate:start:' + action + ':' + options.ensureCurrent());
+      markOperationStarted();
+      await operationGate;
+      calls.push('immediate:end:' + options.ensureCurrent());
+      return { success: true };
+    }
+    function runSerializedSchedulePhaseOperation(operation, reason) {
+      calls.push('phase:' + reason);
+      return operation(91);
+    }
+    async function finalizeManualOffAutomationPhase(
+      phaseAdmissionEpoch,
+      ensureCurrent,
+      admissionToken
+    ) {
+      calls.push('finalize:' + phaseAdmissionEpoch + ':'
+        + ensureCurrent() + ':' + admissionToken);
+      manualOffAutomaticOnBlocked = false;
+      manualOffAdmissionToken = '';
+      return { success: true };
+    }
+    ${manualOffAdmissionFlightSource16}
+    ${resumePendingManualOffSource16}
+    return {
+      resume: resumePendingManualOffAdmission,
+      state: () => ({
+        pwmRuntimeRevision,
+        manualOffAutomaticOnBlocked,
+        manualOffAdmissionToken,
+        flightToken: manualOffAdmissionFlightToken,
+        retryOperationsInFlight: manualOffRetryAlarmOperationsInFlight.size
+      }),
+      calls
+    };`
+  )(
+    sameTokenManualOffGate16.promise,
+    () => sameTokenManualOffStarted16.resolve(),
+    testConsole
+  );
+  const originalLongManualOff16 = sameTokenManualOffHarness16.resume(
+    'original-over-60s'
+  );
+  await sameTokenManualOffStarted16.promise;
+  const sameTokenBeforeRetry16 = sameTokenManualOffHarness16.state();
+  const periodicSameTokenRetry16 = sameTokenManualOffHarness16.resume(
+    'admission-retry'
+  );
+  await Promise.resolve();
+  await Promise.resolve();
+  const sameTokenDuringRetry16 = sameTokenManualOffHarness16.state();
+  const sameTokenEffectsDuringRetry16 =
+    sameTokenManualOffHarness16.calls.join(',');
+  sameTokenManualOffGate16.resolve();
+  const [originalLongManualOffResult16, periodicSameTokenRetryResult16] =
+    await Promise.all([
+      originalLongManualOff16,
+      periodicSameTokenRetry16
+    ]);
+  const sameTokenAfterSettle16 = sameTokenManualOffHarness16.state();
+  assertPass(sameTokenBeforeRetry16.pwmRuntimeRevision === 21
+      && sameTokenDuringRetry16.pwmRuntimeRevision === 21
+      && sameTokenDuringRetry16.flightToken === 'same-token-long-off'
+      && sameTokenEffectsDuringRetry16
+        === 'invalidate-timer,cancel-on:true,immediate:start:off:true,coverage:same-token-long-off,phase:manual-toggle-off-original-over-60s'
+      && originalLongManualOffResult16?.success === true
+      && periodicSameTokenRetryResult16?.success === true
+      && sameTokenManualOffHarness16.calls.filter(call =>
+        call === 'cancel-on:true').length === 1
+      && sameTokenManualOffHarness16.calls.filter(call =>
+        call.startsWith('immediate:start:')).length === 1
+      && sameTokenManualOffHarness16.calls.filter(call =>
+        call.startsWith('phase:')).length === 1
+      && sameTokenManualOffHarness16.calls.filter(call =>
+        call.startsWith('finalize:')).length === 1
+      && !sameTokenManualOffHarness16.calls.some(call =>
+        call.startsWith('claim-mutation:')
+          || call.startsWith('commit-mutation:')
+          || call.startsWith('finish-mutation:'))
+      && !sameTokenManualOffHarness16.calls.includes('ensure-retry-alarm')
+      && sameTokenAfterSettle16.pwmRuntimeRevision === 21
+      && sameTokenAfterSettle16.manualOffAutomaticOnBlocked === false
+      && sameTokenAfterSettle16.flightToken === ''
+      && alarmListenerBody13.includes(
+        'const manualOffRetryIdentity = parseManualOffRetryAlarm(alarm);')
+      && alarmListenerBody13.includes(
+        "await resumePendingManualOffAdmission('admission-retry')")
+      && alarmListenerBody13.includes(
+        'Number(manualOffAdmissionRequestedAt)')
+      && alarmListenerBody13.includes(
+        '=== manualOffRetryIdentity.requestedAt'),
+    '16Y-3: periodic alarm 在原 OFF 页面事务超过一分钟仍未完成时复用 exact-token flight；revision/cancel/immediate/phase/finalizer 均只执行一次');
 
   assertPass(backgroundSource.includes('async function cancelAutomaticOnRequests()')
       && resetDisabledPwmRuntimeSource.includes('await cancelAutomaticOnRequests();')
@@ -24056,6 +41514,154 @@ return plan;
     '\n\nasync function finishExplicitDisablePreemption',
     'comfort start transaction'
   );
+  const comfortAuthorityPolicySource17 = extractSourceSection(
+    backgroundSource,
+    'function parseHHMM(s) {',
+    '\n\nfunction isAutomationAllowed(now = new Date())',
+    'comfort authority-only admission policy'
+  );
+  const loadComfortAuthorityGateHarness17 = ({
+    manualOffBlocked = false,
+    deferredDisablePending = false,
+    automaticAdmissionBlocked = false
+  } = {}) => new Function(
+    'manualOffBlocked', 'initialDeferredDisablePending',
+    'initialAutomaticAdmissionBlocked',
+    `let schedule = {
+      enabled: true,
+      activeHours: { enabled: true, start: '08:00', end: '09:00' },
+      comfortStartUntil: 0,
+      comfortStartOnConfirmedAt: 0,
+      pwmState: 'off',
+      nextTriggerAt: 0,
+      smartClockPlannedAt: 0,
+      alarmCreatedAt: 0,
+      alarmDelayMinutes: 0,
+      pwmRetryKind: '',
+      pwmRetryBoundaryAt: 0,
+      pwmRetryScheduledAt: 0,
+      pageTimerRetryAt: 0,
+      pageTimerRetryMinutes: 0
+    };
+    let pwmRuntimeRevision = 80;
+    let manualToggleIntentEpoch = 12;
+    let syncAuthorityDurableBaselineLoaded = true;
+    let manualOffAdmissionLoaded = true;
+    let manualOffAutomaticOnBlocked = manualOffBlocked;
+    let deferredSyncDisableLoaded = true;
+    let deferredSyncDisablePending = initialDeferredDisablePending;
+    let automaticOnAdmissionBlocked = initialAutomaticAdmissionBlocked;
+    let activeAcToggleAttempt = null;
+    const COMFORT_START_MINUTES = 5;
+    const calls = [];
+    const startSentinel = Object.freeze({ kind: 'comfort-start-entered' });
+    ${comfortAuthorityPolicySource17}
+    function isManualToggleIntentEpochCurrent(epoch) {
+      return epoch === manualToggleIntentEpoch;
+    }
+    function planComfortStart(_schedule, _pageTimer, options = {}) {
+      const minimumTargetAt = Number(options.now) + 5 * 60_000;
+      return { minimumTargetAt, targetAt: minimumTargetAt, timerMinutes: 5 };
+    }
+    function clearPwmRetryState() {
+      schedule.pwmRetryKind = '';
+      schedule.pwmRetryBoundaryAt = 0;
+      schedule.pwmRetryScheduledAt = 0;
+    }
+    function setPwmClockIntent(value) {
+      schedule.nextTriggerAt = Number(value) || 0;
+      schedule.smartClockPlannedAt = 0;
+      schedule.alarmCreatedAt = 0;
+      schedule.alarmDelayMinutes = 0;
+    }
+    function replaceSchedulePageTimerRetryState(state) {
+      state.pageTimerRetryAt = 0;
+      state.pageTimerRetryMinutes = 0;
+    }
+    function invalidateTimerBasedShutdown() {
+      calls.push('invalidate-shutdown');
+    }
+    async function cancelAutomaticOnRequests() {
+      calls.push('cancel-on');
+      throw startSentinel;
+    }
+    ${comfortRunSource17}
+    return {
+      async run() {
+        try {
+          return await runComfortStart('user-enable');
+        } catch (error) {
+          if (error === startSentinel) return { entered: true };
+          throw error;
+        }
+      },
+      outsideHoursAutomationAllowed: () => isAutomationAllowedForSchedule(
+        schedule,
+        new Date(2026, 7, 29, 12, 0, 0, 0)
+      ),
+      authorityAllowed: () => isComfortStartAuthorityAllowed(),
+      revision: () => pwmRuntimeRevision,
+      calls
+    };`
+  )(
+    manualOffBlocked,
+    deferredDisablePending,
+    automaticAdmissionBlocked
+  );
+  const outsideHoursComfortGate17 = loadComfortAuthorityGateHarness17();
+  const manualOffBlockedComfortGate17 = loadComfortAuthorityGateHarness17({
+    manualOffBlocked: true
+  });
+  const deferredDisableBlockedComfortGate17 =
+    loadComfortAuthorityGateHarness17({ deferredDisablePending: true });
+  const automaticAdmissionBlockedComfortGate17 =
+    loadComfortAuthorityGateHarness17({ automaticAdmissionBlocked: true });
+  const outsideHoursAutomationAllowedBeforeComfort17 =
+    outsideHoursComfortGate17.outsideHoursAutomationAllowed();
+  const outsideHoursComfortResult17 = await outsideHoursComfortGate17.run();
+  const manualOffBlockedComfortResult17 =
+    await manualOffBlockedComfortGate17.run();
+  const deferredDisableBlockedComfortResult17 =
+    await deferredDisableBlockedComfortGate17.run();
+  const automaticAdmissionBlockedComfortResult17 =
+    await automaticAdmissionBlockedComfortGate17.run();
+  const comfortAuthorityGateIndex17 = comfortRunSource17.indexOf(
+    '!isComfortStartAuthorityAllowed()'
+  );
+  const comfortRevisionClaimIndex17 = comfortRunSource17.indexOf(
+    'pwmRuntimeRevision += 1;'
+  );
+  const comfortEntryGateSource17 = comfortAuthorityGateIndex17 >= 0
+      && comfortRevisionClaimIndex17 > comfortAuthorityGateIndex17
+    ? comfortRunSource17.slice(
+      comfortAuthorityGateIndex17,
+      comfortRevisionClaimIndex17
+    )
+    : '';
+  assertPass(outsideHoursAutomationAllowedBeforeComfort17 === false
+      && outsideHoursComfortGate17.authorityAllowed() === true
+      && outsideHoursComfortResult17?.entered === true
+      && outsideHoursComfortGate17.revision() === 81
+      && outsideHoursComfortGate17.calls.join(',')
+        === 'invalidate-shutdown,cancel-on'
+      && comfortAuthorityGateIndex17 >= 0
+      && comfortRevisionClaimIndex17 > comfortAuthorityGateIndex17
+      && !comfortEntryGateSource17.includes('isAutomationAllowed()'),
+    '17F-0F: runComfortStart 入口只检查 authority；activeHours 外普通 automation=false 仍可 claim 舒适启动并进入唯一 ON 事务');
+  const blockedComfortGateCases17 = [
+    [manualOffBlockedComfortGate17, manualOffBlockedComfortResult17],
+    [deferredDisableBlockedComfortGate17,
+      deferredDisableBlockedComfortResult17],
+    [automaticAdmissionBlockedComfortGate17,
+      automaticAdmissionBlockedComfortResult17]
+  ];
+  assertPass(blockedComfortGateCases17.every(([harness, result]) => (
+    harness.authorityAllowed() === false
+      && result?.cancelled === true
+      && harness.revision() === 80
+      && harness.calls.length === 0
+  )),
+    '17F-0F-1: authority-only comfort gate 分别阻断 manual-OFF、pending remote F 与 automatic-ON admission，均在 revision/page/actuator 前零动作');
   const comfortActiveSource17 = extractSourceSection(
     comfortSource17,
     'function isComfortStartActive(now = Date.now()) {',
@@ -24123,7 +41729,8 @@ return plan;
         comfortCompletePersist17
       ).includes(comfortRetryReplace17)
       && comfortRunSource17.includes("action: 'clear'")
-      && comfortRunSource17.includes('isCurrent: () => isAutomationOperationCurrent(automationRevision)')
+      && comfortRunSource17.includes(
+        'isAutomationOperationCurrent(automationRevision)\n      && comfortActuatorIsCurrent()')
       && countOccurrences(comfortRunSource17, comfortClaimApply17) === 2,
     '17F-0: comfort claim 重放冻结 state；complete 在建钟后冻结 phase/clock/write-owner 并跨 await 重放，不越权改 page owner');
 
@@ -24174,6 +41781,8 @@ return plan;
       'setSchedulePwmClockIntent', 'Date',
       `let schedule = initialSchedule;
       let pwmRuntimeRevision = 80;
+      let manualToggleIntentEpoch = 0;
+      let manualOffAutomaticOnBlocked = false;
       let activeAcToggleAttempt = null;
       let keepCurrent = true;
       const calls = [];
@@ -24207,8 +41816,19 @@ return plan;
       ${clearPwmRetryFacade16}
       ${setNextTriggerAtSource16}
       function invalidateTimerBasedShutdown() { calls.push('invalidate-shutdown'); }
+      function isAutomationAllowed() {
+        return keepCurrent && schedule.enabled === true;
+      }
+      function isComfortStartAuthorityAllowed() {
+        return keepCurrent
+          && schedule.enabled === true
+          && !manualOffAutomaticOnBlocked;
+      }
       function isAutomationOperationCurrent(revision) {
         return keepCurrent && revision === pwmRuntimeRevision && schedule.enabled === true;
+      }
+      function isManualToggleIntentEpochCurrent(epoch) {
+        return epoch === manualToggleIntentEpoch;
       }
       async function cancelAutomaticOnRequests() { calls.push('cancel-on'); }
       async function clearPwmAlarm() { calls.push('clear-pwm'); return true; }
@@ -24380,6 +42000,8 @@ return plan;
     'setScheduleNextTrigger', 'setSchedulePwmClockIntent', 'Date', 'staleAtBadge',
     `let schedule = initialSchedule;
     let pwmRuntimeRevision = 90;
+    let manualToggleIntentEpoch = 0;
+    let manualOffAutomaticOnBlocked = false;
     let pwmAlarmWriteGeneration = 0;
     let activeAcToggleAttempt = null;
     let pwmCreated = false;
@@ -24401,8 +42023,15 @@ return plan;
     ${comfortActiveSource17}
     ${comfortEndAlarmSource17}
     function invalidateTimerBasedShutdown() { calls.push('invalidate-shutdown'); }
+    function isAutomationAllowed() { return schedule.enabled === true; }
+    function isComfortStartAuthorityAllowed() {
+      return schedule.enabled === true && !manualOffAutomaticOnBlocked;
+    }
     function isAutomationOperationCurrent(revision) {
       return revision === pwmRuntimeRevision && schedule.enabled === true;
+    }
+    function isManualToggleIntentEpochCurrent(epoch) {
+      return epoch === manualToggleIntentEpoch;
     }
     async function cancelAutomaticOnRequests() { calls.push('cancel-on'); }
     async function clearPwmAlarm() { calls.push('clear-pwm'); return true; }
@@ -25074,20 +42703,291 @@ return plan;
       && !updateBranch17.includes('runComfortStart('),
     '17J: 首次安装以本机 marker 只认领一次已有启用配置，重启/安装尾声不抢用户操作；更新绝不触发');
 
+  const serializedComfortPhaseSource17 = extractSourceSection(
+    backgroundSource,
+    'function runSerializedSchedulePhaseOperation(operation, reason = \'schedule-phase\') {',
+    '\n\nasync function runSmartReapplyLoop()',
+    'standalone comfort phase admission wrapper'
+  );
+  const serializedScheduleUpdateSource17 = extractSourceSection(
+    backgroundSource,
+    'function runSerializedScheduleUpdate(operation) {',
+    '\n\nfunction runSerializedSchedulePhaseOperation(',
+    'standalone comfort schedule queue'
+  );
+  let releaseStandaloneComfortOperation17;
+  const standaloneComfortOperationGate17 = new Promise(resolve => {
+    releaseStandaloneComfortOperation17 = resolve;
+  });
+  const standaloneComfortAdmissionHarness17 = new Function(
+    'operationGate',
+    `let scheduleUpdateChain = Promise.resolve();
+    let phaseAdmissionEpoch = 1;
+    let phaseAdmissionOwner = 1;
+    const phaseWaiters = [];
+    const calls = [];
+    function claimSyncPhaseAdoptionAdmissionWhenAvailable() {
+      if (phaseAdmissionOwner === 0) {
+        phaseAdmissionOwner = ++phaseAdmissionEpoch;
+        return Promise.resolve(phaseAdmissionOwner);
+      }
+      return new Promise(resolve => { phaseWaiters.push(resolve); });
+    }
+    function releaseSyncPhaseAdoptionAdmission(epoch) {
+      calls.push({ type: 'release', epoch });
+      if (phaseAdmissionOwner !== epoch) return false;
+      const next = phaseWaiters.shift();
+      if (next) {
+        phaseAdmissionOwner = ++phaseAdmissionEpoch;
+        next(phaseAdmissionOwner);
+      } else {
+        phaseAdmissionOwner = 0;
+      }
+      return true;
+    }
+    function drainDeferredScheduleRepair(reason) {
+      calls.push({ type: 'drain', reason });
+      return false;
+    }
+    ${serializedScheduleUpdateSource17}
+    ${serializedComfortPhaseSource17}
+    return {
+      runStartup: () => runSerializedSchedulePhaseOperation(async epoch => {
+        calls.push({ type: 'operation-start', name: 'startup', epoch });
+        await operationGate;
+        calls.push({ type: 'operation-end', name: 'startup', epoch });
+        return epoch;
+      }, 'startup-comfort-recovery'),
+      runInstall: () => runSerializedSchedulePhaseOperation(async epoch => {
+        calls.push({ type: 'operation-start', name: 'install', epoch });
+        calls.push({ type: 'operation-end', name: 'install', epoch });
+        return epoch;
+      }, 'install-comfort-start'),
+      releaseHeldOwner: () => releaseSyncPhaseAdoptionAdmission(1),
+      owner: () => phaseAdmissionOwner,
+      calls
+    };`
+  )(standaloneComfortOperationGate17);
+  const queuedStartupComfort17 = standaloneComfortAdmissionHarness17.runStartup();
+  const queuedInstallComfort17 = standaloneComfortAdmissionHarness17.runInstall();
+  await Promise.resolve();
+  await Promise.resolve();
+  const standaloneComfortBlocked17 =
+    standaloneComfortAdmissionHarness17.owner() === 1
+    && !standaloneComfortAdmissionHarness17.calls.some(call =>
+      call.type === 'operation-start');
+  standaloneComfortAdmissionHarness17.releaseHeldOwner();
+  await Promise.resolve();
+  await Promise.resolve();
+  const standaloneStartupOwnsPhase17 =
+    standaloneComfortAdmissionHarness17.owner() === 2
+    && standaloneComfortAdmissionHarness17.calls.some(call =>
+      call.type === 'operation-start'
+        && call.name === 'startup'
+        && call.epoch === 2)
+    && !standaloneComfortAdmissionHarness17.calls.some(call =>
+      call.type === 'operation-start' && call.name === 'install');
+  releaseStandaloneComfortOperation17();
+  const [standaloneStartupEpoch17, standaloneInstallEpoch17] =
+    await Promise.all([queuedStartupComfort17, queuedInstallComfort17]);
+  assertPass(serializedComfortPhaseSource17.includes(
+      'return runSerializedScheduleUpdate(async () => {')
+      && serializedComfortPhaseSource17.includes(
+        'await claimSyncPhaseAdoptionAdmissionWhenAvailable()')
+      && serializedComfortPhaseSource17.includes('try {')
+      && serializedComfortPhaseSource17.includes('finally {')
+      && serializedComfortPhaseSource17.includes(
+        'releaseSyncPhaseAdoptionAdmission(phaseAdmissionEpoch);')
+      && serializedComfortPhaseSource17.includes(
+        'drainDeferredScheduleRepair(`${reason}-complete`);')
+      && initBody13.includes('runSerializedSchedulePhaseOperation(')
+      && initBody13.includes("() => runComfortStart('startup-recovery')")
+      && installBranch17.includes('runSerializedSchedulePhaseOperation(')
+      && installBranch17.includes("() => runComfortStart('install')")
+      && backgroundSource.includes(
+        "runSerializedSchedulePhaseOperation(async (\n        phaseAdmissionEpoch\n      ) => {")
+      && standaloneComfortBlocked17
+      && standaloneStartupOwnsPhase17
+      && standaloneStartupEpoch17 === 2
+      && standaloneInstallEpoch17 === 3
+      && standaloneComfortAdmissionHarness17.owner() === 0
+      && standaloneComfortAdmissionHarness17.calls.filter(call =>
+        call.type === 'release').map(call => call.epoch).join(',') === '1,2,3'
+      && standaloneComfortAdmissionHarness17.calls.filter(call =>
+        call.type === 'drain').map(call => call.reason).join(',')
+        === 'startup-comfort-recovery-complete,install-comfort-start-complete',
+    '17J-1: startup/install/comfort-end 独立入口统一 schedule→phase；外层 owner 释放后 FIFO 借 epoch，并在完整 operation 后 finally release/drain');
+
   const alarmComfortBody17 = extractSourceSection(
     backgroundSource,
     "if (alarm.name === 'ac-pwm') {",
     "\n\n  if (alarm.name === 'ac-watchdog')",
     'comfort-aware ac-pwm alarm'
   );
+  const comfortEndAlarmBody17 = extractSourceSection(
+    backgroundSource,
+    "if (alarm.name === 'ac-comfort-end') {",
+    "\n\n  if (alarm.name === 'ac-smart-weather')",
+    'standalone comfort-end phase continuation'
+  );
+  const runStandaloneComfortEndCase17 = async ({
+    futureLiveAfterFinish = false,
+    futureStoredAfterFinish = false,
+    invalidateOwnerAfterRead = false
+  } = {}) => {
+    const nowMs = 2_000_000_000_000;
+    const futureAt = nowMs + 10 * 60_000;
+    const controller = new Function(
+      'nowMs', 'futureAt', 'scenario', 'shouldResumePwmAfterComfortFinish',
+      'console',
+      `let schedule = {
+        enabled: true,
+        pwmState: 'off',
+        comfortStartUntil: 0,
+        nextTriggerAt: 0
+      };
+      let phaseAdmissionOwner = 23;
+      let livePwmAt = 0;
+      let wrapperResult = null;
+      const calls = [];
+      const ownerChecks = [];
+      const executeCalls = [];
+      const Date = { now: () => nowMs };
+      const PWM_RETRY_ALARM_TOLERANCE_MS = 1500;
+      function isSyncPhaseAdoptionAdmissionOwnerCurrent(epoch) {
+        ownerChecks.push(epoch);
+        return epoch === phaseAdmissionOwner;
+      }
+      async function runSerializedSchedulePhaseOperation(operation, reason) {
+        calls.push({ type: 'wrapper-start', reason, epoch: phaseAdmissionOwner });
+        wrapperResult = await operation(phaseAdmissionOwner);
+        calls.push({ type: 'wrapper-end', reason, epoch: phaseAdmissionOwner });
+        return wrapperResult;
+      }
+      function isComfortStartActive() { return false; }
+      async function retryComfortStartAndFinishIfExpired() {
+        throw new Error('expired comfort-end must finish, not retry start');
+      }
+      async function finishComfortStart(reason) {
+        calls.push({ type: 'finish', reason, epoch: phaseAdmissionOwner });
+        if (scenario.futureLiveAfterFinish) livePwmAt = futureAt;
+        if (scenario.futureStoredAfterFinish) schedule.nextTriggerAt = futureAt;
+        return {
+          handled: true,
+          automationAllowed: true,
+          deferred: false,
+          automationRevision: 91
+        };
+      }
+      const chrome = { alarms: {
+        async get(name) {
+          calls.push({ type: 'alarm-get', name, epoch: phaseAdmissionOwner });
+          const result = livePwmAt > 0
+            ? { name, scheduledTime: livePwmAt }
+            : undefined;
+          if (scenario.invalidateOwnerAfterRead) phaseAdmissionOwner = 24;
+          return result;
+        }
+      } };
+      async function executePwmStepWithRecovery(options) {
+        executeCalls.push({ ...options });
+        calls.push({ type: 'execute', options: { ...options } });
+        return true;
+      }
+      async function scheduleComfortStartEndAlarm() {
+        calls.push({ type: 'fallback-comfort-alarm' });
+        return true;
+      }
+      function appendDiagnosticLog() {}
+      async function deliver() {
+        const alarm = { name: 'ac-comfort-end', scheduledTime: nowMs };
+        ${comfortEndAlarmBody17}
+      }
+      return {
+        deliver,
+        result: () => wrapperResult,
+        snapshot: () => structuredClone(schedule),
+        ownerChecks,
+        executeCalls,
+        calls
+      };`
+    )(
+      nowMs,
+      futureAt,
+      {
+        futureLiveAfterFinish,
+        futureStoredAfterFinish,
+        invalidateOwnerAfterRead
+      },
+      shouldResumeComfort17,
+      testConsole
+    );
+    await controller.deliver();
+    return { controller, nowMs, futureAt, result: controller.result() };
+  };
+  const comfortEndFutureLive17 = await runStandaloneComfortEndCase17({
+    futureLiveAfterFinish: true
+  });
+  const comfortEndFutureStored17 = await runStandaloneComfortEndCase17({
+    futureStoredAfterFinish: true
+  });
+  const comfortEndNoFuture17 = await runStandaloneComfortEndCase17();
+  const comfortEndPhaseStale17 = await runStandaloneComfortEndCase17({
+    invalidateOwnerAfterRead: true
+  });
+  const comfortEndFinishIndex17 = comfortEndAlarmBody17.indexOf(
+    "await finishComfortStart('end-alarm')"
+  );
+  const comfortEndLiveReadIndex17 = comfortEndAlarmBody17.indexOf(
+    "(await chrome.alarms.get('ac-pwm'))?.scheduledTime"
+  );
+  const comfortEndStoredReadIndex17 = comfortEndAlarmBody17.indexOf(
+    'const storedPwmAt = Number(schedule.nextTriggerAt) || 0;'
+  );
+  const assertFutureComfortClockPreserved17 = outcome => {
+    const calls = outcome.controller.calls;
+    return outcome.result?.continuePwm === false
+      && outcome.controller.executeCalls.length === 0
+      && calls.filter(call => call.type === 'alarm-get').length === 1
+      && calls.findIndex(call => call.type === 'finish')
+        < calls.findIndex(call => call.type === 'alarm-get');
+  };
   assertPass(alarmComfortBody17.includes('isComfortStartActive(')
       && alarmComfortBody17.includes("retryComfortStartAndFinishIfExpired('retry')")
       && alarmComfortBody17.includes('finishComfortStart(')
       && backgroundSource.includes("if (alarm.name === 'ac-comfort-end')")
       && backgroundSource.includes("retryComfortStartAndFinishIfExpired('retry')")
       && backgroundSource.includes("schedule.pwmState === 'on'")
-      && alarmComfortBody17.includes('comfortEnd?.deferred'),
-    '17K: ac-pwm/comfort fallback 在 marker 内只重试布防；结束事务已 defer 时不继续误跑普通 PWM');
+      && alarmComfortBody17.includes('comfortEnd?.deferred')
+      && comfortEndAlarmBody17.indexOf(
+        'runSerializedSchedulePhaseOperation(async (') >= 0
+      && comfortEndFinishIndex17 >= 0
+      && comfortEndLiveReadIndex17 > comfortEndFinishIndex17
+      && comfortEndStoredReadIndex17 > comfortEndLiveReadIndex17
+      && comfortEndAlarmBody17.indexOf(
+        'isSyncPhaseAdoptionAdmissionOwnerCurrent(phaseAdmissionEpoch)',
+        comfortEndLiveReadIndex17
+      ) > comfortEndLiveReadIndex17
+      && comfortEndAlarmBody17.includes(
+        'phaseAdmissionEpoch,\n            source: \'alarm-comfort-end-resume\'')
+      && assertFutureComfortClockPreserved17(comfortEndFutureLive17)
+      && assertFutureComfortClockPreserved17(comfortEndFutureStored17)
+      && comfortEndFutureLive17.result?.finishResult?.automationRevision === 91
+      && comfortEndFutureStored17.controller.snapshot().nextTriggerAt
+        === comfortEndFutureStored17.futureAt
+      && comfortEndNoFuture17.result?.continuePwm === true
+      && comfortEndNoFuture17.result?.resumed === true
+      && comfortEndNoFuture17.controller.executeCalls.length === 1
+      && comfortEndNoFuture17.controller.executeCalls[0]?.automationRevision === 91
+      && comfortEndNoFuture17.controller.executeCalls[0]?.phaseAdmissionEpoch === 23
+      && !Object.hasOwn(
+        comfortEndNoFuture17.controller.executeCalls[0] || {},
+        'scheduledTime'
+      )
+      && comfortEndNoFuture17.controller.ownerChecks.every(epoch => epoch === 23)
+      && comfortEndPhaseStale17.result?.continuePwm === false
+      && comfortEndPhaseStale17.controller.executeCalls.length === 0,
+    '17K: comfort-end 在同一 admission 内 finish 后复读 live/stored；future 主钟零 scheduledTime=0 抢跑，无 future 才借原 epoch 恢复');
   assertPass(resetDisabledPwmRuntimeSource.includes('schedule.comfortStartUntil = 0;')
       && resetDisabledPwmRuntimeSource.includes("chrome.alarms.clear('ac-comfort-end')")
       && backgroundSource.includes('preemptAutomaticOnForExplicitDisable')
@@ -25097,7 +42997,7 @@ return plan;
   const snapshotSource17 = extractSourceSection(
     backgroundSource,
     'async function getScheduleSnapshot(lite = false) {',
-    '\nasync function toggleNowAndSync(action)',
+    '\nasync function toggleNowAndSync(',
     'comfort-aware schedule snapshot'
   );
   assertPass(snapshotSource17.includes('snapshot._comfortStartActive = isComfortStartActive()')
@@ -25156,6 +43056,17 @@ return plan;
   const rawTimerBody18 = rawTimerStart18 >= 0 && rawTimerEnd18 > rawTimerStart18
     ? backgroundSource.slice(rawTimerStart18, rawTimerEnd18)
     : '';
+  const sendToggleStart18 = backgroundSource.indexOf(
+    'async function sendACToggleMessage('
+  );
+  const sendToggleEnd18 = backgroundSource.indexOf(
+    '\nasync function _toggleOnNewTab(',
+    sendToggleStart18
+  );
+  const sendToggleBody18 = sendToggleStart18 >= 0
+      && sendToggleEnd18 > sendToggleStart18
+    ? backgroundSource.slice(sendToggleStart18, sendToggleEnd18)
+    : '';
 
   const prearmIndex18 = preparedOnBody18.indexOf('writePageTimerOnExactHomeTab(');
   const exactTabRecheckIndex18 = preparedOnBody18.indexOf(
@@ -25178,8 +43089,28 @@ return plan;
       && verifiedTimerIndex18 > toggleIndex18
       && countOccurrences(preparedOnBody18, 'attemptACToggleWithRecovery(') === 1
       && /attemptACToggleWithRecovery\([\s\S]*?0,/.test(preparedOnBody18)
+      && preparedOnBody18.includes(
+        'pageTimerWriteOwner: provisionalWriteLease.owner'
+      )
+      && preparedOnBody18.includes(
+        'ensureCurrent: provisionalWriteIsCurrent'
+      )
       && !preparedOnBody18.includes('refreshACControlPage('),
     '18A: 同一精确 tab 先预置 timer、再以零刷新预算开机，成功后才走正式新鲜页证明');
+
+  assertPass(sendToggleBody18.includes(
+      '? await sendSerializedPageTimerMessage('
+    )
+      && sendToggleBody18.includes(
+        'pageTimerWriteOwner,\n        ensureCurrent'
+      )
+      && sendToggleBody18.includes(
+        'pageTimerStale: result?.pageTimerStale === true'
+      )
+      && sendToggleBody18.includes(
+        'automationStale: result?.automationStale === true'
+      ),
+    '18A-1: provisional ON 以 exact page owner + ensureCurrent 进入 page writer FIFO，stale 分类原样传回上层');
 
   assertPass(setTimerBody.includes('preferredTabId = null')
       && setTimerBody.includes('getExactACHomeTab(preferredTabId)')
@@ -25203,13 +43134,28 @@ return plan;
       preparedResult = { success: true, value: '12:21', targetAt: 1_800_000 },
       exactTab = { id: 7, url: 'https://w5.ab.ust.hk/njggt/app/home' },
       toggleResult = { success: true },
-      timerResult = { success: true, verified: true, targetAt: 1_800_000 }
+      timerResult = { success: true, verified: true, targetAt: 1_800_000 },
+      deferPreparedResult = false
     } = {}) => {
       const calls = [];
       const queue = [...statuses];
+      const prepareGate = makeDeferred9G();
+      const prepareStarted = makeDeferred9G();
+      let prepareOptionsSeen = null;
+      let toggleOptionsSeen = null;
+      let toggleOwnerWasCurrent = false;
+      const pageOwnerCoordinator = new Function(
+        `${pageTimerOwnerSource11D}
+        return {
+          claimPageTimerWriteLease,
+          writesInFlight: () => pageTimerWritesInFlight
+        };`
+      )();
       const fn = new Function(
         'sanitizeMinutes', 'getACStatusFromExactHomeTab', 'writePageTimerOnExactHomeTab',
         'getExactACHomeTab', 'attemptACToggleWithRecovery', 'setPageTimer',
+        'pwmRuntimeRevision', 'isAutomationOperationCurrent',
+        'isAutomationAllowed', 'claimPageTimerWriteLease',
         `${preparedOnBody18}; return turnOnWithPreparedPageTimer;`
       )(
         (value, fallback) => {
@@ -25221,23 +43167,48 @@ return plan;
           return queue.shift() || { isOn: null };
         },
         async (tabId, minutes, options) => {
+          prepareOptionsSeen = options;
           calls.push(`prepare:${tabId}:${minutes}:${options.targetAt}`);
+          prepareStarted.resolve(options);
+          if (deferPreparedResult) await prepareGate.promise;
           return preparedResult;
         },
         async tabId => {
           calls.push(`exact:${tabId}`);
           return exactTab;
         },
-        async (tabId, action, refreshesRemaining) => {
+        async (tabId, action, refreshesRemaining, _initialError, options) => {
+          toggleOptionsSeen = options;
+          toggleOwnerWasCurrent = options?.ensureCurrent?.() === true;
           calls.push(`toggle:${tabId}:${action}:${refreshesRemaining}`);
           return toggleResult;
         },
         async (minutes, options) => {
           calls.push(`verify:${options.preferredTabId}:${minutes}:${options.targetAt}`);
           return timerResult;
-        }
+        },
+        9,
+        revision => revision === 9,
+        () => true,
+        pageOwnerCoordinator.claimPageTimerWriteLease
       );
-      return { fn, calls };
+      return {
+        fn,
+        calls,
+        prepareStarted: prepareStarted.promise,
+        releasePreparedResult: prepareGate.resolve,
+        prepareOptions: () => prepareOptionsSeen,
+        toggleOptions: () => toggleOptionsSeen,
+        toggleOwnerWasCurrent: () => toggleOwnerWasCurrent,
+        writesInFlight: pageOwnerCoordinator.writesInFlight,
+        claimSuccessorWriter() {
+          const lease = pageOwnerCoordinator.claimPageTimerWriteLease(() => true);
+          if (!lease) throw new Error('successor page writer lease missing');
+          const successorOwner = lease.owner;
+          const released = lease.release();
+          return { successorOwner, released };
+        }
+      };
     };
     const options18 = {
       pageTimerMinutes: 21,
@@ -25268,6 +43239,17 @@ return plan;
     const alreadyOn18 = makePreparedOnHarness18({ statuses: [{ isOn: true }] });
     const alreadyOnResult18 = await alreadyOn18.fn({ id: 7 }, options18);
 
+    const stolenBeforeOn18 = makePreparedOnHarness18({
+      statuses: [{ isOn: false }],
+      deferPreparedResult: true
+    });
+    const stolenBeforeOnRun18 = stolenBeforeOn18.fn({ id: 7 }, options18);
+    const stalePrepareOptions18 = await stolenBeforeOn18.prepareStarted;
+    const successorWriter18 = stolenBeforeOn18.claimSuccessorWriter();
+    const inFlightBeforeOldSettle18 = stolenBeforeOn18.writesInFlight();
+    stolenBeforeOn18.releasePreparedResult();
+    const stolenBeforeOnResult18 = await stolenBeforeOnRun18;
+
     preparedOnBehaviorPass18 = prearmFailureResult18?.success === false
       && prearmFailureResult18?.pageTimerPrepared === false
       && prearmFailure18.calls.join(',') === 'status:7,prepare:7:21:1800000'
@@ -25277,14 +43259,84 @@ return plan;
       && ambiguousOnResult18?.success === true
       && ambiguousOnResult18?.toggleAmbiguous === true
       && ambiguousOnResult18?.actualOn === true
+      && ambiguousOn18.toggleOwnerWasCurrent() === true
+      && ambiguousOn18.toggleOptions()?.pageTimerWriteOwner
+        === ambiguousOn18.prepareOptions()?.pageTimerWriteOwner
+      && ambiguousOn18.toggleOptions()?.ensureCurrent
+        === ambiguousOn18.prepareOptions()?.ensureCurrent
       && ambiguousOn18.calls.join(',')
         === 'status:7,prepare:7:21:1800000,exact:7,toggle:7:on:0,status:7,verify:7:21:1800000'
       && alreadyOnResult18?.success === true
       && alreadyOnResult18?.alreadyDone === true
-      && alreadyOn18.calls.join(',') === 'status:7,verify:7:21:1800000';
+      && alreadyOn18.calls.join(',') === 'status:7,verify:7:21:1800000'
+      && stalePrepareOptions18.pageTimerWriteOwner === 1
+      && typeof stalePrepareOptions18.ensureCurrent === 'function'
+      && successorWriter18.successorOwner === 2
+      && successorWriter18.released === true
+      && inFlightBeforeOldSettle18 === 1
+      && stolenBeforeOnResult18?.success === false
+      && stolenBeforeOnResult18?.pageTimerStale === true
+      && stolenBeforeOnResult18?.pageTimerPrepared === true
+      && stolenBeforeOnResult18?.pageTimerWriteOwner === 1
+      && stolenBeforeOn18.calls.join(',')
+        === 'status:7,prepare:7:21:1800000'
+      && stolenBeforeOn18.writesInFlight() === 0;
   }
   assertPass(preparedOnBehaviorPass18,
-    '18D: 预置失败/URL 漂移均零点击；含糊但实际 ON 只验证保险；已 ON 零点击直设 timer');
+    '18D: 预置失败/URL 漂移均零点击；provisional owner 在 ON 入队前失权时零 ON/终态 set 且 lease 归零');
+
+  let serializedPreparedOnPass18 = false;
+  if (sendToggleBody18) {
+    let serializedCall18 = null;
+    let directSendCalls18 = 0;
+    const sendToggle18 = new Function(
+      'isAutomationAllowed', 'isAutomationOperationCurrent',
+      'sendSerializedPageTimerMessage', 'sendMessageToExactACHome', 'console',
+      `${sendToggleBody18}; return sendACToggleMessage;`
+    )(
+      () => true,
+      revision => revision === 9,
+      async (...args) => {
+        serializedCall18 = args;
+        return args[5]()
+          ? { success: true }
+          : {
+            success: false,
+            pageTimerStale: true,
+            automationStale: true,
+            error: 'synthetic provisional owner stale'
+          };
+      },
+      async () => {
+        directSendCalls18 += 1;
+        return { success: true };
+      },
+      testConsole
+    );
+    const staleOnGuard18 = () => false;
+    const serializedStaleResult18 = await sendToggle18(7, 'on', {
+      notAfterAt: 1_900_000,
+      requireAutomationAllowed: true,
+      automationRevision: 9,
+      pageTimerWriteOwner: 41,
+      ensureCurrent: staleOnGuard18
+    });
+    serializedPreparedOnPass18 = directSendCalls18 === 0
+      && serializedCall18?.[0] === 7
+      && serializedCall18?.[1]?.action === 'on'
+      && serializedCall18?.[1]?.notAfterAt === 1_900_000
+      && serializedCall18?.[2] === 9
+      && serializedCall18?.[3] === null
+      && serializedCall18?.[4] === 41
+      && serializedCall18?.[5] === staleOnGuard18
+      && serializedStaleResult18.success === false
+      && serializedStaleResult18.pageTimerStale === true
+      && serializedStaleResult18.automationStale === true
+      && serializedStaleResult18.result?.error
+        === 'synthetic provisional owner stale';
+  }
+  assertPass(serializedPreparedOnPass18,
+    '18E: 真实 sendACToggleMessage 把 provisional ON 与 exact owner/guard 一起交给 serialized writer，page/automation stale 完整传回');
 
   // 汇总
   const passCount = results.filter(r => r.pass).length;
@@ -25298,6 +43350,7 @@ return plan;
     console.log(`${status} ${suite}: ${suitePassCount}/${suiteResults.length}`);
   }
   console.log(`=== 测试汇总: ${passCount}/${totalCount} 通过 ===`);
+  testSummaryReached = true;
   if (passCount !== totalCount) {
     console.log('失败项:');
     for (const suite of suiteOrder) {
