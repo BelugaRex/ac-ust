@@ -1,7 +1,7 @@
 /* AC-UST popup: restrained pre-Liquid-Glass macOS settings language. */
 :root {
   color-scheme: light;
-  --popup-width: 280px;
+  --popup-width: 250px;
   /* ============================================================
    * v0.6.3 设计转向：以 UST 页面色板为主、Apple HIG 为辅
    * （2026-08-04 从 .vscode/开机+已设置好定时.md 与关机.md 两份
@@ -40,7 +40,7 @@
   --danger: #d70015;
   --radius-group: 10px;
   --radius-control: 7px;
-  --font: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
+  --font: "Inter Variable", "Inter", -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", "Segoe UI Variable Text", "Segoe UI", "PingFang SC", "Microsoft YaHei UI", "Microsoft YaHei", "Noto Sans CJK SC", system-ui, sans-serif;
 }
 
 * {
@@ -59,7 +59,6 @@ body {
   background: var(--bg);
   color: var(--text);
   font-family: var(--font);
-  font-optical-sizing: auto;
   font-size: 13px;
   line-height: 1.45;
   letter-spacing: 0;
@@ -362,116 +361,6 @@ input {
 .settings-card {
   margin-bottom: 0;
 }
-.automation-heading {
-  padding: 9px 14px 8px;
-  background: var(--surface);
-  border-bottom: 1px solid var(--separator);
-}
-
-.automation-title-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.automation-heading h2 {
-  color: var(--text);
-  font-size: 15px;
-  font-weight: 600;
-  line-height: 20px;
-}
-
-.automation-heading p {
-  margin-top: 2px;
-  color: var(--text-secondary);
-  font-size: 11px;
-  line-height: 15px;
-}
-
-.active-hours-section {
-  border-bottom: 1px solid var(--separator);
-}
-
-#activeHoursSectionHeader {
-  min-height: 34px;
-  padding-top: 6px;
-  padding-bottom: 4px;
-  border-bottom: 0;
-}
-
-#activeHoursSectionHeader h3 {
-  font-size: 13px;
-  line-height: 18px;
-}
-
-#activeHoursBody {
-  padding-top: 2px;
-}
-
-.mode-section {
-  min-width: 0;
-  padding: 9px 14px 10px;
-  border: 0;
-}
-
-.mode-segment {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 2px;
-  padding: 2px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-control);
-  background: var(--surface-secondary);
-}
-
-.mode-choice {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 0;
-  height: 32px;
-  padding: 0 7px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text-secondary);
-  cursor: pointer;
-  font-size: 12px;
-  font-weight: 600;
-  line-height: 16px;
-  white-space: nowrap;
-  transition: background var(--transition), box-shadow var(--transition), color var(--transition), transform var(--transition);
-}
-
-.mode-choice:hover:not(:disabled):not([aria-pressed="true"]) {
-  background: var(--field);
-  color: var(--text);
-}
-
-.mode-choice[aria-pressed="true"] {
-  background: var(--surface);
-  color: var(--accent);
-  box-shadow: 0 0 0 1px var(--border);
-}
-
-.mode-choice:active:not(:disabled) {
-  transform: scale(0.98);
-}
-
-.mode-choice:disabled {
-  cursor: wait;
-  opacity: 0.5;
-}
-
-.mode-choice:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-
-.mode-detail {
-  margin-top: 8px;
-}
 
 .settings-header,
 .section-heading {
@@ -611,7 +500,7 @@ input {
   color: var(--text-tertiary);
 }
 
-.field input[type="text"],
+.field input[type="time"],
 .field input[type="number"] {
   width: 100%;
   min-width: 0;
@@ -633,6 +522,14 @@ input {
   padding-right: 42px;
   appearance: textfield;
   -moz-appearance: textfield;
+}
+
+.field input[type="time"]::-webkit-calendar-picker-indicator {
+  width: 15px;
+  height: 15px;
+  padding: 0;
+  margin: 0;
+  opacity: 0.72;
 }
 
 .field input[type="number"]::-webkit-inner-spin-button,
@@ -690,8 +587,8 @@ input {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 5px;
-  padding-top: 4px;
+  gap: 7px;
+  padding-top: 6px;
 }
 
 .status {
@@ -971,46 +868,14 @@ a:focus-visible,
   font-weight: 400;
 }
 
+/* 三个平级设置区段：各 body 与下一段 header 之间使用同一软分隔线。 */
+#activeHoursBody,
+#timerBody {
+  border-bottom: 1px solid var(--separator);
+}
+
 #activeHoursBody[hidden],
-.mode-detail[hidden] {
+#timerBody[hidden],
+#smartBody[hidden] {
   display: none;
-}
-
-/* CJK glyphs read smaller than Latin at the same nominal size. */
-html:lang(zh) :is(
-  #activeHoursSectionHeader h3,
-  .section-title
-) {
-  font-size: 14px;
-}
-
-html:lang(zh) :is(
-  .ac-indicator,
-  .balance-estimate-prefix,
-  .hero-caption,
-  .hero-idle,
-  .safetynet-warning,
-  .mode-choice,
-  .btn-diagnose,
-  .diag-copy
-) {
-  font-size: 13px;
-}
-
-html:lang(zh) :is(
-  .balance-estimate,
-  .automation-heading p,
-  .field-label,
-  .settings-hint,
-  .status,
-  .diagnose-result,
-  .diag-bar-title,
-  .smart-end,
-  .smart-readout-label
-) {
-  font-size: 12px;
-}
-
-html:lang(zh) .field-unit {
-  font-size: 11px;
 }

@@ -5,6 +5,7 @@ const getPwmRetryDescriptorForPhase = typeof module !== 'undefined' && module.ex
 const PWM_PHASE_MINUTE_MS = 60_000;
 const PWM_PHASE_RETRY_MINUTES = 1;
 const SMART_MODE_ON_HARD_MAX_MINUTES = 25;
+const SMART_MODE_MIN_STABLE_MINUTES = 5;
 const PWM_ALARM_BOUNDARY_TOLERANCE_MS = 1500;
 
 function pwmPhaseNow(opts) {
@@ -93,24 +94,8 @@ function planPwmTargetStep(schedule, targetAction, observations, now, durations)
   return pwmPhaseRetryPlan('off-proof-retry', 'off', now);
 }
 
-// 提取（Fowler Extract Function）：ON 相位目标步决策——开机确认链 → 页面定时器链 → 提交 OFF。
+// 提取（Fowler Extract Function）：ON 相位目标步决策——页面定时器链 → 开机确认链 → 提交 OFF。
 function planPwmOnTargetStep(schedule, observations, now, durations) {
-  const onConfirmed = observations?.acIsOn === true
-    || observations?.toggleSucceeded === true;
-  if (!onConfirmed) {
-    if (observations?.toggleSucceeded === false) {
-      return pwmPhaseRetryPlan('toggle-on-failed', 'on', now, 'clear');
-    }
-    return {
-      kind: 'hold',
-      reason: 'toggle-on-required',
-      nextAction: 'on',
-      proofAction: 'clear',
-      prerequisite: 'toggle-on',
-      phasePatch: { pwmState: 'on', nextTriggerAt: 0 }
-    };
-  }
-
   if (typeof observations?.pageTimerSucceeded !== 'boolean') {
     return {
       kind: 'hold',
@@ -125,6 +110,21 @@ function planPwmOnTargetStep(schedule, observations, now, durations) {
 
   if (!observations.pageTimerSucceeded) {
     return pwmPhaseRetryPlan('page-timer-failed', 'on', now, 'clear');
+  }
+
+  const onConfirmed = observations?.acIsOn === true
+    || observations?.toggleSucceeded === true;
+  if (!onConfirmed) {
+    if (observations?.toggleSucceeded === false) {
+      return pwmPhaseRetryPlan('toggle-on-failed', 'on', now, 'clear');
+    }
+    return {
+      kind: 'hold',
+      reason: 'toggle-on-required',
+      nextAction: 'on',
+      prerequisite: 'toggle-on',
+      phasePatch: { pwmState: 'on', nextTriggerAt: 0 }
+    };
   }
 
   const nextTriggerAt = pwmPhasePageTimerTarget(
@@ -375,6 +375,29 @@ function halfHourBoundaryAtOrBefore(now = Date.now()) {
   return d.getTime();
 }
 
+function planComfortSmartCycle(planningNow, minimumTargetAt, opts = {}) {
+  const now = Number(planningNow);
+  const minimum = Number(minimumTargetAt);
+  const requestedStableMinutes = Number(opts.minimumStableMinutes);
+  const minimumStableMinutes = Number.isFinite(requestedStableMinutes)
+    ? Math.max(0, requestedStableMinutes)
+    : SMART_MODE_MIN_STABLE_MINUTES;
+  if (!Number.isFinite(now) || !Number.isFinite(minimum)) {
+    return { boundaryAt: 0, rollsIntoNextBoundary: false };
+  }
+  const nextBoundaryAt = nextHalfHourBoundary(now);
+  const shortOffGapMs = nextBoundaryAt - minimum;
+  const rollsIntoNextBoundary = minimum >= nextBoundaryAt
+    || (shortOffGapMs > 0
+      && shortOffGapMs < minimumStableMinutes * PWM_PHASE_MINUTE_MS);
+  return {
+    boundaryAt: rollsIntoNextBoundary
+      ? nextBoundaryAt
+      : halfHourBoundaryAtOrBefore(now),
+    rollsIntoNextBoundary
+  };
+}
+
 function isHalfHourBoundary(timestamp) {
   const value = Number(timestamp);
   if (!Number.isSafeInteger(value)) return false;
@@ -429,6 +452,15 @@ function nextSafePageTimerTargetAt(now = Date.now()) {
   if (!Number.isFinite(nowMs)) return 0;
   return Math.ceil((nowMs + PWM_PHASE_MINUTE_MS) / PWM_PHASE_MINUTE_MS)
     * PWM_PHASE_MINUTE_MS;
+}
+
+function hasMinimumSmartOnRunway(targetAt, actionAt) {
+  const target = Number(targetAt);
+  const action = Number(actionAt);
+  return Number.isFinite(target)
+    && Number.isFinite(action)
+    && target - action
+      >= SMART_MODE_MIN_STABLE_MINUTES * PWM_PHASE_MINUTE_MS;
 }
 
 // 智能控制自动 ON 门禁：普通调用只允许在 HH:00/HH:30 这一分钟内启动；
@@ -503,7 +535,8 @@ function planSmartModeOnWindow(schedule, opts = {}) {
 
   // 只有真正的 ac-pwm 半点 alarm（或启动期从其绝对 storage 时刻补执行）可以
   // 越过首分钟继续当前 ON 相位；截止仍锁在原半点 + onMinutes，不把延迟补到末尾。
-  if (hasTriggeredBoundary) {
+  if (hasTriggeredBoundary
+      && hasMinimumSmartOnRunway(pageTimerTargetAt, now)) {
     return {
       kind: 'allow',
       reason: 'smart-on-scheduled-boundary',
@@ -513,8 +546,8 @@ function planSmartModeOnWindow(schedule, opts = {}) {
     };
   }
 
-  if (recoverCurrentCycle
-      && pageTimerTargetAt >= nextSafePageTimerTargetAt(now)) {
+    if (recoverCurrentCycle
+      && hasMinimumSmartOnRunway(pageTimerTargetAt, now)) {
     return {
       kind: 'allow',
       reason: 'smart-on-current-cycle-recovery',
@@ -524,8 +557,8 @@ function planSmartModeOnWindow(schedule, opts = {}) {
     };
   }
 
-  if (now - boundaryAt < PWM_PHASE_MINUTE_MS
-      && pageTimerTargetAt >= nextSafePageTimerTargetAt(now)) {
+    if (now - boundaryAt < PWM_PHASE_MINUTE_MS
+      && hasMinimumSmartOnRunway(pageTimerTargetAt, now)) {
     return {
       kind: 'allow',
       reason: 'smart-on-window',
@@ -562,7 +595,7 @@ function planSmartOnRetryExceptionRecovery(schedule, boundaryAt, opts = {}) {
     && isHalfHourBoundary(normalizedBoundaryAt)
     && normalizedBoundaryAt > 0
     && requestedRetryAt > now
-    && targetAt >= nextSafePageTimerTargetAt(requestedRetryAt);
+    && hasMinimumSmartOnRunway(targetAt, requestedRetryAt);
   if (canRetry) {
     return {
       kind: 'retry-smart-on-exception',
@@ -764,7 +797,10 @@ function classifySmartOnClock(schedule, candidateAt, opts = {}) {
     && Number.isFinite(retryScheduledAt)
     && Math.abs(candidate - retryScheduledAt) <= toleranceMs
     && candidate >= retryBoundaryAt
-    && retryTargetAt >= nextSafePageTimerTargetAt(Math.max(now, candidate));
+    && hasMinimumSmartOnRunway(
+      retryTargetAt,
+      Math.max(now, candidate)
+    );
   if (validTypedRetry) {
     return {
       applicable: true,
@@ -816,7 +852,10 @@ function classifySmartOnClock(schedule, candidateAt, opts = {}) {
   );
   const safetySkipDueSafe = onMinutes === 0
     ? now - candidate < PWM_PHASE_MINUTE_MS
-    : safetySkipTargetAt >= nextSafePageTimerTargetAt(now);
+    : hasMinimumSmartOnRunway(
+      safetySkipTargetAt,
+      Math.max(now, candidate)
+    );
   if (validSafetySkip
       && (candidate > now - toleranceMs || (allowDue && safetySkipDueSafe))) {
     return {
@@ -868,7 +907,10 @@ function classifySmartOnClock(schedule, candidateAt, opts = {}) {
   );
   const expectedDueSafe = onMinutes === 0
     ? now - candidate < PWM_PHASE_MINUTE_MS
-    : expectedPageTimerTargetAt >= nextSafePageTimerTargetAt(now);
+    : hasMinimumSmartOnRunway(
+      expectedPageTimerTargetAt,
+      Math.max(now, candidate)
+    );
   if (!Number.isFinite(candidate)
       || (candidate <= now - toleranceMs
         && !(allowDue && candidateMatchesExpected && expectedDueSafe))) {
@@ -942,6 +984,7 @@ if (typeof module !== 'undefined' && module.exports) {
     smartWeatherTargetBoundaryAt,
     nextHalfHourBoundary,
     halfHourBoundaryAtOrBefore,
+    planComfortSmartCycle,
     smartModePageTimerTargetAt,
     nextSafePageTimerTargetAt,
     planSmartModeOnWindow,

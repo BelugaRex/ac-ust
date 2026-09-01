@@ -55,6 +55,28 @@ export function runRecoveryPolicyCases(assertPass) {
       && lateSmartRecovery.reason === 'wait-for-smart-on-window',
     '智能恢复模块在页面定时器安全余量不足时拒绝补开');
 
+  const exactFiveMinuteRecovery = planSmartRecovery({
+    ...smartSchedule,
+    onMinutes: 23
+  }, {
+    now: at(17, 48),
+    plannedActionAt: at(18, 0),
+    maxOnMinutes: 25
+  });
+  const shortFiveMinuteRecovery = planSmartRecovery({
+    ...smartSchedule,
+    onMinutes: 23
+  }, {
+    now: at(17, 48) + 1,
+    plannedActionAt: at(18, 0),
+    maxOnMinutes: 25
+  });
+  assertPass(exactFiveMinuteRecovery.kind === 'recover-smart-current-cycle'
+      && exactFiveMinuteRecovery.pageTimerTargetAt === at(17, 53)
+      && shortFiveMinuteRecovery.kind === 'pass'
+      && shortFiveMinuteRecovery.reason === 'wait-for-smart-on-window',
+    '智能恢复模块仅在实际 ON 余量至少五分钟时补开；不足五分钟折叠短 ON，恰好五分钟保留');
+
   assertPass(planSmartRecovery({ ...smartSchedule, enabled: false }, {
     now,
     plannedActionAt: at(18, 0),
@@ -158,6 +180,20 @@ export function runRecoveryPolicyCases(assertPass) {
     missingClockAction: 'repair-clock'
   });
   const ownedSmartRetryClock = planPwmLifecycleRecovery({
+    ...smartSchedule,
+    pwmState: 'on',
+    pwmRetryKind: 'smart-on',
+    pwmRetryBoundaryAt: at(22, 0),
+    pwmRetryScheduledAt: at(22, 18)
+  }, {
+    now: at(22, 17),
+    plannedActionAt: at(22, 18),
+    liveAlarmAt: 0,
+    storedAlarmAt: at(22, 18),
+    maxOnMinutes: 25,
+    missingClockAction: 'repair-clock'
+  });
+  const shortSmartRetryClock = planPwmLifecycleRecovery({
     ...smartSchedule,
     pwmState: 'on',
     pwmRetryKind: 'smart-on',
@@ -287,7 +323,9 @@ export function runRecoveryPolicyCases(assertPass) {
   assertPass(untrustedSmartStoredClock.kind === 'repair-clock'
       && untrustedSmartStoredClock.reason === 'untrusted-smart-on-clock'
       && ownedSmartRetryClock.kind === 'restore-stored-alarm'
-      && ownedSmartRetryClock.scheduledTime === at(22, 22)
+      && ownedSmartRetryClock.scheduledTime === at(22, 18)
+      && shortSmartRetryClock.kind === 'repair-clock'
+      && shortSmartRetryClock.reason === 'untrusted-smart-on-clock'
       && driftedSmartBoundary.kind === 'preserve-live-alarm'
       && driftedSmartBoundary.scheduledTime === at(22, 30) + 500.5
       && preparedWeatherProjectedOff.kind === 'repair-clock'
@@ -307,5 +345,5 @@ export function runRecoveryPolicyCases(assertPass) {
       && badClockDue.expectedAt === at(19, 0)
       && badClockExpired.kind === 'repair-clock'
       && badClockExpired.expectedAt === at(19, 0),
-    '智能 ON 拒绝非半点与跳过最近周期的精确半点钟；天气临时投影 OFF 仍沿用原 ON 所有权；真实 OFF、typed retry、最近边界与 1500ms 漂移可保留');
+    '智能 ON 拒绝非半点、跳周期钟与不足五分钟的 typed retry；恰好五分钟、真实 OFF、最近边界与 1500ms 漂移可保留');
 }

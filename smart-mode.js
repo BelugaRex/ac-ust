@@ -8,9 +8,8 @@
 //   2) 水汽压 e (hPa) = 6.112 * exp((17.67 * Td) / (Td + 243.5))
 //   3) 等效室外温度 Teq = T + 0.33*e - 0.70*Wind - 4.00
 //   4) 原始开启分钟数 t_raw = K * Teq
-//   5) 降雨修正：0~30 mm/h 按后段更陡的指数曲线逐步降到 50%，30 mm/h 以上保持 50%
-//   6) 限幅到 [0, 25] 并四舍五入取整（30 分钟周期至少保留 5 分钟关闭窗口）
-//   7) 压缩机保护：结果落在 1~4 分钟时强制设为 0（避免频繁启停）
+//   5) 限幅到 [0, 25] 并四舍五入取整（30 分钟周期至少保留 5 分钟关闭窗口）
+//   6) 压缩机保护：结果落在 1~4 分钟时强制设为 0（避免频繁启停）
 //
 // 所有中间计算均使用浮点数，仅在最终输出时取整。
 // 关键参数定义为常量，方便日后调整。
@@ -38,9 +37,6 @@
     ON_MIN: 0,                   // 开启分钟数下限
     ON_MAX: 25,                  // 开启分钟数上限（30 分钟周期至少关闭 5 分钟）
     MIN_OFF_MINUTES: 5,          // 相邻智能 ON 周期之间的最短关闭窗口
-    RAIN_FULL_EFFECT_MM: 30,     // 香港天文台黄雨阈值：过去 1 小时雨量 30 mm
-    RAIN_MIN_FACTOR: 0.5,        // 达黄雨阈值后的最大修正：开启时间减半
-    RAIN_CURVE_ALPHA: 2,         // 归一化指数曲率：雨势越强，每毫米的边际影响越大
     WEATHER_PLAN_MAX_AGE_MS: 60 * 60 * 1000,
     COMPRESSOR_DEADBAND_MIN: 1,  // 压缩机保护死区下界
     COMPRESSOR_DEADBAND_MAX: 4,  // 压缩机保护死区上界
@@ -118,25 +114,6 @@
     return k * teq * (SMART_MODE.CYCLE_MINUTES / SMART_MODE.REFERENCE_CYCLE_MINUTES);
   }
 
-  // 从无雨到黄雨阈值采用归一化指数影响曲线；后段斜率更大，使暴雨影响强于小雨。
-  // impact = (exp(alpha*x)-1)/(exp(alpha)-1)，factor = 1-(1-minFactor)*impact。
-  function rainOnTimeFactor(rainMm) {
-    const rain = finiteNumber(rainMm);
-    if (rain === null || rain <= 0) return 1;
-    const normalizedRain = clamp(rain, 0, SMART_MODE.RAIN_FULL_EFFECT_MM)
-      / SMART_MODE.RAIN_FULL_EFFECT_MM;
-    const normalizedImpact = Math.expm1(SMART_MODE.RAIN_CURVE_ALPHA * normalizedRain)
-      / Math.expm1(SMART_MODE.RAIN_CURVE_ALPHA);
-    return 1 - (1 - SMART_MODE.RAIN_MIN_FACTOR) * normalizedImpact;
-  }
-
-  // 降雨修正作用于已经满足 25 分钟硬上限的基础开启时间，确保“最多减半”
-  // 是对真实开启时间的约束，而不是对可能远超上限的中间值进行修正。
-  function applyRainOnTimeAdjustment(tRaw, rainMm) {
-    const baseOnMinutes = clamp(Number(tRaw), SMART_MODE.ON_MIN, SMART_MODE.ON_MAX);
-    return baseOnMinutes * rainOnTimeFactor(rainMm);
-  }
-
   // 限幅到 [0, 25] → 四舍五入 → 压缩机保护（1~4 → 0）。
   function clampAndRoundOnMinutes(tRaw) {
     const clamped = clamp(Number(tRaw), SMART_MODE.ON_MIN, SMART_MODE.ON_MAX);
@@ -148,23 +125,9 @@
     return rounded;
   }
 
-  // 最终分钟数同时满足两条硬边界：降雨最多把无雨建议减半，非零开启不得落入 1~4 分钟死区。
-  function finalizeRainAdjustedOnMinutes(tRaw, rainMm) {
-    const dryOnMinutes = clampAndRoundOnMinutes(tRaw);
-    const rainAdjustedOnMinutes = clampAndRoundOnMinutes(
-      applyRainOnTimeAdjustment(tRaw, rainMm)
-    );
-    if (dryOnMinutes === 0) return 0;
-    const minimumOnMinutes = Math.max(
-      SMART_MODE.COMPRESSOR_DEADBAND_MAX + 1,
-      Math.ceil(dryOnMinutes * SMART_MODE.RAIN_MIN_FACTOR)
-    );
-    return Math.max(rainAdjustedOnMinutes, minimumOnMinutes);
-  }
-
   // ---- 将军澳 JKB 独立实时数据源解析 ----
-  // 香港天文台分别提供气温、相对湿度、10 分钟平均风与站点过去 1 小时雨量；
-  // 四个源都按站名精确选 Tseung Kwan O，避免把天文台湿度、静风或整个西贡区雨量混入。
+  // 香港天文台分别提供气温、相对湿度与 10 分钟平均风；
+  // 三个源都按站名精确选 Tseung Kwan O，避免把天文台湿度或静风混入。
   const HKO_SMART_STATION = 'Tseung Kwan O';
 
   function parseSimpleCsv(csvText) {
@@ -188,25 +151,18 @@
       .find(row => row[1] === HKO_SMART_STATION) || null;
   }
 
-  // 返回 { temperature, relativeHumidity, dewPoint, windSpeedMs, rainMm }；
+  // 返回 { temperature, relativeHumidity, dewPoint, windSpeedMs }；
   // 气温或同站湿度缺失时返回 null，调用方沿用旧缓存或退化为手动时长。
   function parseTseungKwanOWeather({
     temperatureCsv,
     humidityCsv,
-    windCsv,
-    rainfallData
+    windCsv
   } = {}) {
     const temperature = finiteNumber(findStationCsvRow(temperatureCsv)?.[2]);
     const relativeHumidity = finiteNumber(findStationCsvRow(humidityCsv)?.[2]);
     if (temperature === null || relativeHumidity === null) return null;
 
     const windSpeedKmh = finiteNumber(findStationCsvRow(windCsv)?.[3]);
-    const rainfallEntries = Array.isArray(rainfallData?.hourlyRainfall)
-      ? rainfallData.hourlyRainfall
-      : [];
-    const rainMm = finiteNumber(rainfallEntries.find(entry => (
-      entry?.automaticWeatherStation === HKO_SMART_STATION
-    ))?.value);
     const dewPoint = deriveDewPoint(temperature, relativeHumidity);
     if (dewPoint === null) return null;
 
@@ -214,16 +170,15 @@
       temperature,
       relativeHumidity,
       dewPoint,
-      windSpeedMs: windSpeedKmh === null ? 0 : windSpeedKmh / 3.6,
-      rainMm: rainMm ?? 0
+      windSpeedMs: windSpeedKmh === null ? 0 : windSpeedKmh / 3.6
     };
   }
 
   // 主入口：由天气观测 + 灵敏度计算建议开启分钟数。
-  // weather: { temperature, dewPoint, windSpeedMs, rainMm }（气温/露点 °C，风速 m/s，雨量 mm）
+  // weather: { temperature, dewPoint, windSpeedMs }（气温/露点 °C，风速 m/s）
   // 返回 { valid, onMinutes, offMinutes, k, teq, tRaw, reason }。
   //   valid=false 表示天气数据非法，调用方应退化为手动时长。
-  function computeSmartOnMinutes({ sensitivity, temperature, dewPoint, windSpeedMs, rainMm } = {}) {
+  function computeSmartOnMinutes({ sensitivity, temperature, dewPoint, windSpeedMs } = {}) {
     const k = sensitivityToK(sensitivity);
     const teq = equivalentTemperature(temperature, dewPoint, windSpeedMs);
     if (teq === null) {
@@ -236,16 +191,12 @@
       };
     }
     const tRaw = rawOnMinutes(k, teq);
-    const rainFactor = rainOnTimeFactor(rainMm);
-    const rainAdjustedMinutes = applyRainOnTimeAdjustment(tRaw, rainMm);
-    const onMinutes = finalizeRainAdjustedOnMinutes(tRaw, rainMm);
+    const onMinutes = clampAndRoundOnMinutes(tRaw);
     return {
       valid: true,
       k,
       teq,
       tRaw,
-      rainFactor,
-      rainAdjustedMinutes,
       onMinutes,
       offMinutes: SMART_MODE.CYCLE_MINUTES - onMinutes
     };
@@ -286,8 +237,7 @@
       temperature: finiteNumber(weather?.temperature),
       relativeHumidity: finiteNumber(weather?.relativeHumidity),
       dewPoint: finiteNumber(weather?.dewPoint),
-      windSpeedMs: finiteNumber(weather?.windSpeedMs),
-      rainMm: finiteNumber(weather?.rainMm)
+      windSpeedMs: finiteNumber(weather?.windSpeedMs)
     };
     const decision = computeSmartOnMinutes({
       sensitivity: normalizedSensitivity,
@@ -306,8 +256,7 @@
       offMinutes: decision.offMinutes,
       k: decision.k,
       teq: decision.teq,
-      tRaw: decision.tRaw,
-      rainFactor: decision.rainFactor
+      tRaw: decision.tRaw
     };
   }
 
@@ -334,8 +283,7 @@
       sensitivity: normalizedSensitivity,
       temperature: plan.weather.temperature,
       dewPoint: plan.weather.dewPoint,
-      windSpeedMs: plan.weather.windSpeedMs,
-      rainMm: plan.weather.rainMm
+      windSpeedMs: plan.weather.windSpeedMs
     });
     if (!decision.valid) return null;
     return {
@@ -368,8 +316,7 @@
       sensitivity: normalizeSmartSensitivity(sensitivity),
       temperature: weather.temperature,
       dewPoint: weather.dewPoint,
-      windSpeedMs: weather.windSpeedMs,
-      rainMm: weather.rainMm
+      windSpeedMs: weather.windSpeedMs
     });
     if (!decision.valid) return null;
     return {
@@ -388,10 +335,7 @@
     deriveDewPoint,
     equivalentTemperature,
     rawOnMinutes,
-    rainOnTimeFactor,
-    applyRainOnTimeAdjustment,
     clampAndRoundOnMinutes,
-    finalizeRainAdjustedOnMinutes,
     computeSmartOnMinutes,
     prepareSmartWeatherDecision,
     consumeSmartWeatherDecision,

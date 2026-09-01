@@ -19,23 +19,6 @@ const staticPreviewSchedule = {
   nextTriggerAt: Date.now() + 30 * 60 * 1000
 };
 
-function isPwmPageTimerRetryActive(pageTimerError, scheduledTime, now = Date.now()) {
-  const retryAt = Number(scheduledTime);
-  const nowMs = Number(now);
-  const remainingMs = retryAt - nowMs;
-  return !!pageTimerError
-    && Number.isFinite(retryAt)
-    && Number.isFinite(nowMs)
-    && remainingMs > 0
-    && remainingMs <= 90 * 1000;
-}
-
-function isDiagnosticPageTimerRequired(schedule, actualIsOn, pausedByActiveHours) {
-  if (schedule?.enabled !== true || pausedByActiveHours === true) return false;
-  if (typeof actualIsOn === 'boolean') return actualIsOn;
-  return schedule?.pwmState === 'off';
-}
-
 if (IS_STATIC_PREVIEW) {
   document.documentElement.classList.add('static-preview');
 }
@@ -70,7 +53,6 @@ const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const onMinutesInput = document.getElementById('onMinutes');
 const offMinutesInput = document.getElementById('offMinutes');
-const automationToggle = document.getElementById('automationToggle');
 const activeHoursToggle = document.getElementById('activeHoursToggle');
 const activeHoursStart = document.getElementById('activeHoursStart');
 const activeHoursEnd = document.getElementById('activeHoursEnd');
@@ -117,18 +99,11 @@ try {
 
 // ----- 加载已保存的设置 -----
 let currentScheduleEnabled = false;
-let currentManualMinutes = { onMinutes: 60, offMinutes: 60 };
 let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
 let currentSmartMode = { enabled: false, sensitivity: 5 };
 let lastAnnouncedState = '';
-let scheduleUpdateChain = Promise.resolve();
-let scheduleUpdateRevision = 0;
-let pendingScheduleUpdates = 0;
-let modeSwitchInFlight = false;
-
-function hasPendingScheduleUpdate() {
-  return pendingScheduleUpdates > 0;
-}
+let _toggleProgrammatic = false; // 防止程序同步 timerToggle 时触发 onChange 循环
+let _smartProgrammatic = false;  // 防止程序同步 smartModeToggle 时触发 onChange 循环
 
 function updateSmartSensitivityBubble() {
   const value = Number(smartSensitivity.value);
@@ -148,12 +123,8 @@ async function loadSettings() {
     ? staticPreviewSchedule
     : (await chrome.storage.local.get('ac_schedule')).ac_schedule || {};
   currentScheduleEnabled = !!schedule.enabled;
-  currentManualMinutes = {
-    onMinutes: parsePositiveMinutes(schedule.onMinutes) ?? 60,
-    offMinutes: parsePositiveMinutes(schedule.offMinutes) ?? 60
-  };
-  onMinutesInput.value = String(currentManualMinutes.onMinutes);
-  offMinutesInput.value = String(currentManualMinutes.offMinutes);
+  onMinutesInput.value = schedule.onMinutes ?? 60;
+  offMinutesInput.value = schedule.offMinutes ?? 60;
   // activeHours
   const ah = schedule.activeHours || {};
   currentActiveHours = {
@@ -181,55 +152,43 @@ function syncActiveHoursUI() {
 }
 
 function syncModeUI() {
-  const smartSelected = currentSmartMode.enabled;
-  const timerSelected = !smartSelected;
-  automationToggle.checked = currentScheduleEnabled;
+  const smartOn = currentSmartMode.enabled;
+  const timerOn = currentScheduleEnabled && !smartOn;
 
-  timerToggle.setAttribute('aria-pressed', String(timerSelected));
-  timerToggleState.textContent = timerSelected ? t('modeSelected') : t('modeNotSelected');
+  _toggleProgrammatic = true;
+  timerToggle.checked = timerOn;
+  timerToggleState.textContent = timerOn ? t('timerEnabled') : t('timerDisabled');
+  _toggleProgrammatic = false;
 
-  smartModeToggle.setAttribute('aria-pressed', String(smartSelected));
-  smartModeToggleState.textContent = smartSelected ? t('modeSelected') : t('modeNotSelected');
+  _smartProgrammatic = true;
+  smartModeToggle.checked = smartOn;
+  smartModeToggleState.textContent = smartOn ? t('timerEnabled') : t('timerDisabled');
+  _smartProgrammatic = false;
 
   // 灵敏度滑块始终可调，便于在开启智能控制前预设偏好
   smartSensitivity.value = String(currentSmartMode.sensitivity);
   requestAnimationFrame(updateSmartSensitivityBubble);
 
-  // 总开关只控制运行；分段控件始终保留一个模式，关闭时仍可预设参数。
-  timerBody.hidden = !timerSelected;
-  smartBody.hidden = !smartSelected;
-}
-
-function normalize24HourTime(value) {
-  const match = String(value || '').trim().match(/^(\d{1,2})(?::?(\d{2}))$/);
-  if (!match) return '';
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  if (!Number.isInteger(hours) || !Number.isInteger(minutes)
-      || hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return '';
-  return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  // 折叠：各自开关关闭时隐藏对应 body。智能控制开 → 循环定时关（其 body 折叠）；
+  // 循环定时开 → 智能控制关（其 body 折叠）；两者都关 → 两个 body 都折叠。
+  timerBody.hidden = !timerOn;
+  smartBody.hidden = !smartOn;
 }
 
 function commitActiveHours() {
   // 读取 UI 值并提交到 background
-  const startVal = normalize24HourTime(activeHoursStart.value);
-  const endVal = normalize24HourTime(activeHoursEnd.value);
-  const startInvalid = activeHoursToggle.checked && !startVal;
-  const endInvalid = activeHoursToggle.checked && !endVal;
+  const startVal = activeHoursStart.value || '08:00';
+  const endVal = activeHoursEnd.value || '23:00';
+  const timePattern = /^(?:[01]\d|2[0-3]):[0-5]\d$/;
   const invalidRange = activeHoursToggle.checked
-    && !startInvalid && !endInvalid && startVal >= endVal;
-  activeHoursStart.setCustomValidity(startInvalid
-    ? t('time24Invalid')
-    : invalidRange ? t('activeHoursInvalid') : '');
-  activeHoursEnd.setCustomValidity(endInvalid
-    ? t('time24Invalid')
-    : invalidRange ? t('activeHoursInvalid') : '');
-  if (startInvalid || endInvalid || invalidRange) {
-    (startInvalid ? activeHoursStart : activeHoursEnd).reportValidity();
+    && (!timePattern.test(startVal) || !timePattern.test(endVal) || startVal >= endVal);
+  const validationMessage = invalidRange ? t('activeHoursInvalid') : '';
+  activeHoursStart.setCustomValidity(validationMessage);
+  activeHoursEnd.setCustomValidity(validationMessage);
+  if (invalidRange) {
+    activeHoursEnd.reportValidity();
     return;
   }
-  activeHoursStart.value = startVal;
-  activeHoursEnd.value = endVal;
   currentActiveHours = {
     enabled: activeHoursToggle.checked,
     start: startVal,
@@ -242,27 +201,6 @@ function commitActiveHours() {
 activeHoursToggle.addEventListener('change', commitActiveHours);
 activeHoursStart.addEventListener('change', commitActiveHours);
 activeHoursEnd.addEventListener('change', commitActiveHours);
-
-automationToggle.addEventListener('change', async () => {
-  if (modeSwitchInFlight) return;
-  const previousEnabled = currentScheduleEnabled;
-  const enabled = automationToggle.checked;
-  currentScheduleEnabled = enabled;
-  syncModeUI();
-  const pendingMessage = t(enabled ? 'timerEnabling' : 'timerDisabling');
-  setModeSwitchBusy(true, pendingMessage);
-  try {
-    const result = await updateSchedule(
-      enabled,
-      true,
-      enabled ? 'enable' : 'disable'
-    );
-    if (!result?.success) currentScheduleEnabled = previousEnabled;
-  } finally {
-    syncModeUI();
-    setModeSwitchBusy(false);
-  }
-});
 
 // ----- 智能模式：开关 + 灵敏度滑块 + 实时读数 -----
 function renderSmartReadout(suggested, weather) {
@@ -310,8 +248,7 @@ async function updateSmartReadout() {
       sensitivity: currentSmartMode.sensitivity,
       temperature: 30,
       dewPoint: 24,
-      windSpeedMs: 1.5,
-      rainMm: 0
+      windSpeedMs: 1.5
     }), { fetchedAt: Date.now(), stale: false });
     return;
   }
@@ -320,7 +257,7 @@ async function updateSmartReadout() {
     const stored = await chrome.storage.local.get('ac_smart_weather');
     const weather = stored.ac_smart_weather;
 
-    // 天气只由后台 :20/:50 one-shot 预取，popup 仅读缓存展示。
+    // 天气只由后台 :10/:50 one-shot 预取，popup 仅读缓存展示。
     if (!weather || !Number.isFinite(Number(weather.temperature))) {
       renderSmartReadout(null, weather || null);
       return;
@@ -329,8 +266,7 @@ async function updateSmartReadout() {
       sensitivity: currentSmartMode.sensitivity,
       temperature: weather.temperature,
       dewPoint: weather.dewPoint,
-      windSpeedMs: weather.windSpeedMs,
-      rainMm: weather.rainMm
+      windSpeedMs: weather.windSpeedMs
     });
     renderSmartReadout(suggested, weather);
   } catch (e) {
@@ -338,26 +274,14 @@ async function updateSmartReadout() {
   }
 }
 
-smartModeToggle.addEventListener('click', async () => {
-  if (modeSwitchInFlight) return;
-  if (currentSmartMode.enabled) return;
-  currentSmartMode.enabled = true;
+smartModeToggle.addEventListener('change', async () => {
+  if (_smartProgrammatic) return;
+  const enabled = smartModeToggle.checked;
+  currentSmartMode.enabled = enabled;
+  currentScheduleEnabled = enabled;  // 智能控制开 = 自动控制开；关 = 自动控制全关（与循环定时互斥）
   syncModeUI();
-  const pendingMessage = t('modeChanging');
-  smartModeToggleState.textContent = pendingMessage;
-  setModeSwitchBusy(true, pendingMessage);
-  try {
-    const result = await updateSchedule(currentScheduleEnabled, currentScheduleEnabled);
-    if (result?.success) {
-      showStatus(t('statusModeSaved'), 'success');
-      await updateSmartReadout();
-    } else {
-      currentSmartMode.enabled = false;
-    }
-  } finally {
-    syncModeUI();
-    setModeSwitchBusy(false);
-  }
+  await updateSchedule(enabled, true);
+  await updateSmartReadout();
 });
 
 smartSensitivity.addEventListener('input', () => {
@@ -367,31 +291,13 @@ smartSensitivity.addEventListener('input', () => {
   void updateSmartReadout();
 });
 
-async function requestSmartReapplyNow() {
-  try {
-    const result = await chrome.runtime.sendMessage({ type: 'reapplySmartNow' });
-    if (!result?.success || result.accepted !== true) {
-      showStatus(t('statusError'), 'error');
-    }
-    return result;
-  } catch (error) {
-    showStatus(t('statusError'), 'error');
-    return { success: false, accepted: false, error: error?.message || String(error) };
-  }
-}
-
 smartSensitivity.addEventListener('change', async () => {
   // 释放滑块：先持久化灵敏度，再通知后台立即重设当前 ON 相位的 Power-off after。
   currentSmartMode.sensitivity = normalizeSmartSensitivity(smartSensitivity.value);
   syncModeUI();
-  let updateResult = await updateSchedule(currentScheduleEnabled, false);
-  if (!updateResult?.success) return;
-  if (updateResult.superseded) {
-    updateResult = await waitForLatestScheduleUpdateResult();
-  }
-  if (!updateResult?.success || updateResult.superseded) return;
+  await updateSchedule(currentScheduleEnabled, false);
   if (!IS_STATIC_PREVIEW && currentSmartMode.enabled && currentScheduleEnabled) {
-    await requestSmartReapplyNow();
+    chrome.runtime.sendMessage({ type: 'reapplySmartNow' }).catch(() => {});
   }
 });
 
@@ -434,11 +340,6 @@ function attachCachedActualStatus(schedule) {
 
 function isAutomationPausedByActiveHours(schedule, now = new Date()) {
   if (!schedule?.enabled || schedule.activeHours?.enabled !== true) return false;
-  const nowMs = now instanceof Date ? now.getTime() : Number(now);
-  if (schedule._comfortStartActive === true
-      || (Number.isFinite(nowMs) && Number(schedule.comfortStartUntil) > nowMs)) {
-    return false;
-  }
   const start = String(schedule.activeHours.start || '').match(/^(\d{2}):(\d{2})$/);
   const end = String(schedule.activeHours.end || '').match(/^(\d{2}):(\d{2})$/);
   if (!start || !end) return true;
@@ -450,9 +351,6 @@ function isAutomationPausedByActiveHours(schedule, now = new Date()) {
 }
 
 async function refreshStatus() {
-  if (hasPendingScheduleUpdate()) return;
-  const refreshRevision = scheduleUpdateRevision;
-
   if (IS_STATIC_PREVIEW) {
     updateCountdownDisplay(staticPreviewSchedule, {
       scheduledTime: staticPreviewSchedule.nextTriggerAt
@@ -465,11 +363,13 @@ async function refreshStatus() {
     const useLite = pollCount++ % 10 !== 0;
     const msgType = useLite ? 'getScheduleLite' : 'getSchedule';
 
-    const [response, alarm] = await Promise.all([
+    const [response, alarm, controlAudit] = await Promise.all([
       chrome.runtime.sendMessage({ type: msgType }),
-      chrome.alarms.get('ac-pwm')
+      chrome.alarms.get('ac-pwm'),
+      typeof readCurrentBuildControlAudit === 'function'
+        ? readCurrentBuildControlAudit()
+        : null
     ]);
-    if (hasPendingScheduleUpdate() || refreshRevision !== scheduleUpdateRevision) return;
 
     // getSchedule 正常返回 snapshot；异常时后台可能返回 { success:false, schedule }。
     const schedule = response?.success === false && response?.schedule
@@ -483,19 +383,21 @@ async function refreshStatus() {
     // Charge Mode 才清除。这样 SW 重启或单次消息异常不会让 Est 闪退。
     attachCachedActualStatus(schedule);
 
-    updateCountdownDisplay(schedule, alarm);
+    updateCountdownDisplay(schedule, alarm, controlAudit);
   } catch (e) {
-    if (hasPendingScheduleUpdate() || refreshRevision !== scheduleUpdateRevision) return;
     const stored = await chrome.storage.local.get("ac_schedule");
-    if (hasPendingScheduleUpdate() || refreshRevision !== scheduleUpdateRevision) return;
     if (stored.ac_schedule) {
-      const alarm = await chrome.alarms.get("ac-pwm");
-      if (hasPendingScheduleUpdate() || refreshRevision !== scheduleUpdateRevision) return;
+      const [alarm, controlAudit] = await Promise.all([
+        chrome.alarms.get("ac-pwm"),
+        typeof readCurrentBuildControlAudit === 'function'
+          ? readCurrentBuildControlAudit()
+          : null
+      ]);
       const fallbackSchedule = attachCachedActualStatus({ ...stored.ac_schedule });
       const pausedByActiveHours = isAutomationPausedByActiveHours(fallbackSchedule);
       fallbackSchedule._insideActiveHours = !pausedByActiveHours;
       fallbackSchedule._automationPausedByActiveHours = pausedByActiveHours;
-      updateCountdownDisplay(fallbackSchedule, alarm);
+      updateCountdownDisplay(fallbackSchedule, alarm, controlAudit);
     }
   }
 
@@ -524,10 +426,7 @@ function renderBalanceEstimate(schedule) {
     offMinutes: schedule?.offMinutes
   });
   const displayAt = Number(estimate?.displayAt);
-  const pausedByActiveHours = schedule?._automationPausedByActiveHours === true
-    || isAutomationPausedByActiveHours(schedule);
-  if (!schedule?.enabled || pausedByActiveHours
-      || !Number.isFinite(balance) || balance < 0
+  if (!schedule?.enabled || !Number.isFinite(balance) || balance < 0
       || !Number.isFinite(displayAt)) {
     hideBalanceEstimate();
     return;
@@ -592,33 +491,7 @@ function formatBalanceExhaustionAt(displayAt, locale) {
   };
 }
 
-// hero 的动作属于 scheduler phase；页面真实状态只用于状态灯和检测失配。
-// 不能用“实际 OFF”反推“下一步 ON”，否则人工关机时会把 19:23 的计划 OFF
-// 错写成“17 分钟后自动开启”。
-function classifyCountdownPresentation(schedule = {}) {
-  const action = schedule?._nextAction === 'on' || schedule?._nextAction === 'off'
-    ? schedule._nextAction
-    : (schedule?.pwmState === 'off' ? 'off' : 'on');
-  const actualIsOn = typeof schedule?.actualStatus?.isOn === 'boolean'
-    ? schedule.actualStatus.isOn
-    : null;
-  const retryPresentation = getPwmRetryDescriptor(schedule?.pwmRetryKind);
-  if (retryPresentation?.presentation && retryPresentation.presentationAlways) {
-    return { kind: retryPresentation.presentation, action, actualIsOn };
-  }
-  if (actualIsOn === null || actualIsOn === (action === 'off')) {
-    if (retryPresentation?.presentation) {
-      return { kind: retryPresentation.presentation, action: 'on', actualIsOn };
-    }
-    return { kind: 'normal-action', action, actualIsOn };
-  }
-  if (schedule?.pageTimerError && actualIsOn && action === 'on') {
-    return { kind: 'safety-retry', action, actualIsOn };
-  }
-  return { kind: 'phase-reconcile', action, actualIsOn };
-}
-
-function updateCountdownDisplay(schedule, alarm) {
+function updateCountdownDisplay(schedule, alarm, controlAudit = null) {
   renderBalanceEstimate(schedule);
   idleDisplay.textContent = t('acIdle');
   // 同步智能模式启用状态（跨设备 sync / 后台变更后保持 UI 一致；不覆盖灵敏度，避免拖动滑块时跳回）
@@ -647,8 +520,20 @@ function updateCountdownDisplay(schedule, alarm) {
     idleDisplay.textContent = t('activeHoursOutside');
   }
 
-  const presentation = classifyCountdownPresentation(schedule);
-  const inferredACOn = presentation.action !== 'on';
+  // 优先级：full 路径 _effectivePwmState（页面真实状态反推）> lite 路径合并的
+  // cached actualStatus 反推 > 兜底 pwmState。fallback 加 cached 反推是为了
+  // ON 路径 setPageTimer 失败的故障态：background.js 故意保持 pwmState='on' 让
+  // 1 分钟后整轮幂等 ON + 重试 setPageTimer（见 background.js runPwmStep 顶部
+  // "PWM ON 失败重试" 注释），此时 pwmState='on' 既不代表"AC 当前 OFF"也不代表
+  // "用户应看到分钟后自动开启"。状态行已通过 refreshStatus() 合并的 cached
+  // actualStatus 显示"冷气运行中"，hero caption 必须同源取 cached actualStatus
+  // 反推，否则会出现"运行中、分钟后自动开启"这种自相矛盾文案。
+  const nextAction = schedule._effectivePwmState
+    || schedule._nextAction
+    || (typeof schedule.actualStatus?.isOn === 'boolean'
+      ? (schedule.actualStatus.isOn ? 'off' : 'on')
+      : schedule.pwmState);
+  const inferredACOn = nextAction !== 'on';
   const currentACOn = typeof schedule.actualStatus?.isOn === 'boolean'
     ? schedule.actualStatus.isOn
     : inferredACOn;
@@ -680,11 +565,17 @@ function updateCountdownDisplay(schedule, alarm) {
   }
 
   // 计算并渲染 hero 倒计时（提取自 updateCountdownDisplay，Fowler Extract Function）
-  renderCountdown(schedule, alarm, presentation);
+  renderCountdown(schedule, alarm, nextAction, controlAudit);
 }
 
 // 提取（Fowler Extract Function）：倒计时来源链（_nextBoundary → live alarm → alarmCreatedAt 推算）与 hero 渲染。
-function renderCountdown(schedule, alarm, presentation) {
+function renderCountdown(schedule, alarm, nextAction, controlAudit = null) {
+  if (isAutomaticOnUnconfirmed(controlAudit)) {
+    countdownNumber.style.display = 'none';
+    countdownText.textContent = t('automaticOnUnconfirmed');
+    return;
+  }
+
   // 计算倒计时（v0.5.x 起只保留间隔模式）
   let remainingMs = 0;
   if (schedule._nextBoundary) {
@@ -700,217 +591,101 @@ function renderCountdown(schedule, alarm, presentation) {
     // hero 结构：大数字独立元素，下方 caption 说明动作；文本节点写入不带 HTML
     countdownNumber.textContent = String(minutes);
     countdownNumber.style.display = '';
-    switch (presentation.kind) {
-      case 'safety-retry':
-        countdownText.textContent = t('countdownSafetyRetry');
-        break;
-      case 'smart-safe-delay':
-        countdownText.textContent = t('countdownSmartSafeDelay');
-        break;
-      case 'smart-safety-skip':
-        countdownText.textContent = t('countdownSmartSafetySkip');
-        break;
-      case 'phase-reconcile':
-        countdownText.textContent = t(
-          'countdownPhaseReconcile',
-          t(presentation.action === 'on' ? 'actionOn' : 'actionOff')
-        );
-        break;
-      default:
-        countdownText.textContent = t('countdownCaption',
-          t(presentation.action === 'on' ? 'actionOn' : 'actionOff')
-        );
-    }
+    countdownText.textContent = t('countdownCaption', t(nextAction === 'on' ? 'actionOn' : 'actionOff'));
   } else {
     countdownNumber.style.display = 'none';
-    countdownText.textContent = t(
-      presentation.kind === 'normal-action' ? 'countdownSoon' : 'countdownPhasePending',
-      t(presentation.action === 'on' ? 'actionOn' : 'actionOff')
-    );
+    countdownText.textContent = t('countdownSoon', t(nextAction === 'on' ? 'actionOn' : 'actionOff'));
   }
 }
 
-function parsePositiveMinutes(value) {
-  const parsed = Number(value);
-  return Number.isInteger(parsed) && parsed >= 1 ? parsed : null;
-}
-
-function validateManualMinutes({ report = false } = {}) {
-  const onMinutes = parsePositiveMinutes(onMinutesInput.value);
-  const offMinutes = parsePositiveMinutes(offMinutesInput.value);
-  const message = t('minutesInvalid');
-  onMinutesInput.setCustomValidity(onMinutes === null ? message : '');
-  offMinutesInput.setCustomValidity(offMinutes === null ? message : '');
-  const invalidInput = onMinutes === null ? onMinutesInput : offMinutes === null ? offMinutesInput : null;
-  if (invalidInput) {
-    if (report) invalidInput.reportValidity();
-    return null;
-  }
-  currentManualMinutes = { onMinutes, offMinutes };
-  return currentManualMinutes;
+function readPositiveMinutes(input, fallback) {
+  const value = Number.parseInt(input.value, 10);
+  return Number.isFinite(value) && value >= 1 ? value : fallback;
 }
 
 // ----- 更新定时设置 -----
-async function updateSchedule(enabled, restart = false, automationIntent = '') {
-  const manualMinutes = validateManualMinutes({ report: enabled && !currentSmartMode.enabled });
-  if (!manualMinutes && enabled && !currentSmartMode.enabled) {
-    showStatus(t('minutesInvalid'), 'error');
-    return { success: false, validationError: true, superseded: false };
-  }
-  const updateRevision = ++scheduleUpdateRevision;
+async function updateSchedule(enabled, restart = false) {
   const data = {
     enabled,
     mode: 'pwm',
     clockMode: false,  // v0.5.x 起固定间隔模式
-    onMinutes: manualMinutes?.onMinutes ?? currentManualMinutes.onMinutes,
-    offMinutes: manualMinutes?.offMinutes ?? currentManualMinutes.offMinutes,
+    onMinutes: readPositiveMinutes(onMinutesInput, 30),
+    offMinutes: readPositiveMinutes(offMinutesInput, 30),
     activeHours: { ...currentActiveHours },  // 两种自动控制共用的运行时段
     smartMode: { ...currentSmartMode },      // v0.8.0: 智能模式（灵敏度 + 开关）
-    restart,
-    // 只有用户点自动控制总开关才携带 authority。普通 enabled=true 的
-    // 时长／模式／灵敏度保存不得抢占正在收口的手动 OFF。
-    automationIntent: automationIntent === 'enable'
-      ? 'enable'
-      : automationIntent === 'disable'
-        ? 'disable'
-        : ''
+    restart
   };
 
-  pendingScheduleUpdates += 1;
+  onMinutesInput.value = data.onMinutes;
+  offMinutesInput.value = data.offMinutes;
 
-  const operation = scheduleUpdateChain
-    .catch(() => {})
-    .then(async () => {
-      try {
-        if (IS_STATIC_PREVIEW) {
-          Object.assign(staticPreviewSchedule, data, {
-            actualStatus: { isOn: data.enabled },
-            pwmState: data.enabled ? 'off' : 'on',
-            nextTriggerAt: data.enabled ? Date.now() + data.onMinutes * 60 * 1000 : 0
-          });
-          const superseded = updateRevision !== scheduleUpdateRevision;
-          if (!superseded) {
-            currentScheduleEnabled = data.enabled;
-            updateCountdownDisplay(staticPreviewSchedule, {
-              scheduledTime: staticPreviewSchedule.nextTriggerAt
-            });
-            showStatus(
-              t(data.enabled
-                ? (data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK')
-                : 'statusClosedOK'),
-              'success'
-            );
-          }
-          return { success: true, superseded };
-        }
-
-        const response = await chrome.runtime.sendMessage({
-          type: 'updateSchedule',
-          data
-        });
-        const superseded = updateRevision !== scheduleUpdateRevision;
-        if (superseded) return { ...response, superseded: true };
-        if (!response?.success) {
-          showStatus(t('statusError'), 'error');
-          return { ...response, success: false, superseded: false };
-        }
-
-        currentScheduleEnabled = data.enabled;
-        // background 已负责关闭路径；popup 不再发送第二次 toggleNow。
-        if (data.enabled && response.comfortStart) {
-          const comfortSucceeded = response.comfortStart?.success === true;
-          if (comfortSucceeded) {
-            showStatus(t('statusComfortStartOK'), 'success');
-          } else {
-            showStatus(t('statusComfortStartRetry'), 'error');
-          }
-        } else {
-          showStatus(
-            t(data.enabled
-              ? (data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK')
-              : 'statusClosedOK'),
-            'success'
-          );
-        }
-
-        const alarm = await chrome.alarms.get('ac-pwm');
-        if (updateRevision === scheduleUpdateRevision) {
-          updateCountdownDisplay(attachCachedActualStatus(response.schedule), alarm);
-        }
-        return { ...response, superseded: updateRevision !== scheduleUpdateRevision };
-      } catch (error) {
-        const superseded = updateRevision !== scheduleUpdateRevision;
-        if (!superseded) showStatus(t('statusError'), 'error');
-        return {
-          success: false,
-          superseded,
-          error: error?.message || String(error)
-        };
-      }
+  if (IS_STATIC_PREVIEW) {
+    Object.assign(staticPreviewSchedule, data, {
+      actualStatus: { isOn: enabled },
+      pwmState: enabled ? 'off' : 'on',
+      nextTriggerAt: enabled ? Date.now() + data.onMinutes * 60 * 1000 : 0
     });
-
-  scheduleUpdateChain = operation.catch(() => {});
-  try {
-    return await operation;
-  } finally {
-    pendingScheduleUpdates -= 1;
+    currentScheduleEnabled = enabled;
+    updateCountdownDisplay(staticPreviewSchedule, {
+      scheduledTime: staticPreviewSchedule.nextTriggerAt
+    });
+    showStatus(enabled ? t('statusOnOK') : t('statusClosedOK'), 'success');
+    return;
   }
-}
 
-async function waitForLatestScheduleUpdateResult() {
-  while (true) {
-    const observedRevision = scheduleUpdateRevision;
-    const observedOperation = scheduleUpdateChain;
-    const result = await observedOperation;
-    if (observedRevision === scheduleUpdateRevision
-        && observedOperation === scheduleUpdateChain) {
-      return result;
+  // 提取（Fowler Extract Function）：后台 updateSchedule 响应的本地应用——状态文案与倒计时刷新。
+  async function applyScheduleUpdateResponse(response) {
+    if (!response?.success) {
+      showStatus(t('statusError'), 'error');
+      return;
     }
+
+    currentScheduleEnabled = data.enabled;
+
+    // 手动开关冷气（定时已关时会自动关机）
+    if (!data.enabled) {
+      // B1: background 的 updateSchedule handler 已经负责关机，
+      // popup 不再发第二次 toggleNow（避免双击噪音）
+      showStatus(t('statusClosedOK'), 'success');
+    } else {
+      showStatus(t(data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK'), 'success');
+    }
+
+    const alarm = await chrome.alarms.get('ac-pwm');
+    updateCountdownDisplay(attachCachedActualStatus(response.schedule), alarm);
   }
+
+  const response = await chrome.runtime.sendMessage({
+    type: 'updateSchedule',
+    data: data
+  });
+  await applyScheduleUpdateResponse(response);
 }
 
-function setModeSwitchBusy(busy, message = '') {
-  modeSwitchInFlight = busy;
-  for (const toggle of [automationToggle, timerToggle, smartModeToggle]) {
-    toggle.disabled = busy;
-    if (busy) toggle.setAttribute('aria-busy', 'true');
-    else toggle.removeAttribute('aria-busy');
+// ----- 定时拨动开关（双向同步 toggle） -----
+timerToggle.addEventListener('change', async () => {
+  if (_toggleProgrammatic) return; // 程序同步，不触发 updateSchedule
+  const enabled = timerToggle.checked;
+  currentScheduleEnabled = enabled;
+  if (enabled) {
+    currentSmartMode.enabled = false;  // 平级互斥：开循环定时 → 关智能控制
   }
-  if (busy) {
-    statusDiv.setAttribute('aria-busy', 'true');
-    showStatus(message, '');
-  } else {
-    statusDiv.removeAttribute('aria-busy');
-  }
-}
-
-// ----- 自动模式分段选择（循环定时与智能控制互斥） -----
-timerToggle.addEventListener('click', async () => {
-  if (modeSwitchInFlight) return;
-  if (!currentSmartMode.enabled) return;
-  currentSmartMode.enabled = false;
   syncModeUI();
-  const pendingMessage = t('modeChanging');
-  timerToggleState.textContent = pendingMessage;
-  setModeSwitchBusy(true, pendingMessage);
+  timerToggle.disabled = true; // 防止双击
+  timerToggleState.textContent = enabled ? t('timerEnabling') : t('timerDisabling');
+  timerToggle.setAttribute('aria-busy', 'true');
   try {
-    const result = await updateSchedule(currentScheduleEnabled, currentScheduleEnabled);
-    if (result?.success) showStatus(t('statusModeSaved'), 'success');
-    else currentSmartMode.enabled = true;
+    await updateSchedule(enabled, true);
   } finally {
-    syncModeUI();
-    setModeSwitchBusy(false);
+    timerToggle.disabled = false;
+    timerToggle.removeAttribute('aria-busy');
   }
 });
 
-// ----- 修改分钟数自动保存；运行中则重启当前周期 -----
+// ----- 已启用时修改分钟数自动重启 -----
 for (const input of [onMinutesInput, offMinutesInput]) {
-  input.addEventListener('change', async () => {
-    if (!validateManualMinutes({ report: true })) return;
-    const result = await updateSchedule(currentScheduleEnabled, currentScheduleEnabled);
-    if (result?.success && !currentScheduleEnabled) {
-      showStatus(t('statusSettingsSaved'), 'success');
-    }
+  input.addEventListener('change', () => {
+    if (currentScheduleEnabled) updateSchedule(true, true);
   });
 }
 
@@ -933,91 +708,12 @@ startup().then(setupStaticPreviewFit);
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：硬编码须与 manifest.json 版本同步，build.sh 会在 dist/ 中再次核对并注入）
-const APP_VERSION = '0.8.2';
+const APP_VERSION = '0.8.3';
 // BUILD_TIME 由 build.sh 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
 const BUILD_TIME_EPOCH_MS = 0;
-
-function isMatchingServiceWorkerBuild(sw) {
-  const popupBuildEpoch = Number(BUILD_TIME_EPOCH_MS);
-  if (!Number.isSafeInteger(popupBuildEpoch) || popupBuildEpoch <= 0) return null;
-  const swBuildEpoch = Number(sw?.buildTimeEpochMs);
-  return Number.isSafeInteger(swBuildEpoch)
-    && swBuildEpoch === popupBuildEpoch
-    && String(sw?.buildTime || '') === BUILD_TIME;
-}
-
-// schema v2 的 after 快照包含“明确为空”的状态；null 代表已结算，不能用
-// truthy fallback 重新拾回 before 中的历史 in-flight。旧 schema 才回退 before。
-function selectDiagnosticRuntimeValue(afterSnapshot, beforeSnapshot, key) {
-  if (afterSnapshot) return afterSnapshot.runtime?.[key] ?? null;
-  return beforeSnapshot?.runtime?.[key] ?? null;
-}
-
-function classifyDiagnosticEvidence(envelope) {
-  if (Number(envelope?.schemaVersion) !== 2) return 'absent';
-  const before = envelope?.evidence?.before;
-  const after = envelope?.evidence?.after;
-  const hasSnapshotShape = snapshot => !!snapshot
-    && typeof snapshot === 'object'
-    && Object.hasOwn(snapshot, 'complete')
-    && Object.hasOwn(snapshot, 'coherent')
-    && snapshot.memorySchedule && typeof snapshot.memorySchedule === 'object'
-    && snapshot.storedSchedule && typeof snapshot.storedSchedule === 'object'
-    && snapshot.alarms && typeof snapshot.alarms === 'object'
-    && snapshot.owner && typeof snapshot.owner === 'object'
-    && snapshot.runtime && typeof snapshot.runtime === 'object'
-    && Array.isArray(snapshot.readErrors);
-  if (!hasSnapshotShape(before)
-      || !hasSnapshotShape(after)
-      || before.complete !== true
-      || after.complete !== true) {
-    return 'incomplete';
-  }
-  if (before.coherent !== true || after.coherent !== true) return 'incoherent';
-  return 'usable';
-}
-
-function readDiagnosticEvidence(envelope) {
-  const status = classifyDiagnosticEvidence(envelope);
-  const before = envelope?.evidence?.before || null;
-  const after = envelope?.evidence?.after || null;
-  if (status !== 'usable') {
-    return {
-      status,
-      usable: false,
-      before,
-      after,
-      owner: null,
-      currentAttempt: null,
-      currentAttempts: [],
-      lastOutcome: null,
-      pwmStepRunning: null
-    };
-  }
-  const currentAttempt = selectDiagnosticRuntimeValue(
-    after,
-    before,
-    'currentAttempt'
-  );
-  return {
-    status,
-    usable: true,
-    before,
-    after,
-    owner: before.owner || null,
-    currentAttempt,
-    currentAttempts: Array.isArray(after.runtime?.currentAttempts)
-      ? after.runtime.currentAttempts
-      : (currentAttempt ? [currentAttempt] : []),
-    lastOutcome: selectDiagnosticRuntimeValue(after, before, 'lastOutcome'),
-    pwmStepRunning: after.runtime?.pwmStepRunning === true
-      || currentAttempt != null
-      || (Array.isArray(after.runtime?.currentAttempts)
-        && after.runtime.currentAttempts.length > 0)
-  };
-}
+const BUILD_SOURCE_SHA256 = 'dev';
 
 function formatBuildTimeShort(buildTime) {
   const match = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):\d{2}$/.exec(buildTime);
@@ -1068,7 +764,7 @@ function areDiagnosticTriggersAligned(...triggerTimes) {
   if (times.length < 2 || times.some(time => !Number.isFinite(time) || time <= 0)) {
     return false;
   }
-  return Math.max(...times) - Math.min(...times) <= DIAGNOSTIC_TRIGGER_TOLERANCE_MS;
+  return Math.max(...times) - Math.min(...times) < DIAGNOSTIC_TRIGGER_TOLERANCE_MS;
 }
 
 async function sendDiagnosticRuntimeMessage(message) {
@@ -1125,6 +821,188 @@ function renderDiagnoseResult(lines) {
   document.getElementById('diagContent').replaceChildren(fragment);
 }
 
+function sanitizeControlAuditToken(value, maxLength = 220) {
+  if (typeof value !== 'string') return '';
+  if (/<[^>]{1,200}>/.test(value)
+      || /(?:https?|chrome-extension|file):\/\/\S+/i.test(value)
+      || /[\w.+-]+@[\w.-]+\.[a-z]{2,}/i.test(value)) {
+    return '';
+  }
+  return value
+    .replace(/[\u0000-\u001f\u007f]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, maxLength);
+}
+
+function sanitizeControlAuditInteger(value, { positive = false } = {}) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < (positive ? 1 : 0)) return 0;
+  return number;
+}
+
+function selectCurrentBuildControlAudit(envelope, currentBuild, nowMs = Date.now()) {
+  const build = sanitizeControlAuditToken(currentBuild);
+  const now = sanitizeControlAuditInteger(nowMs);
+  if (!build
+      || !now
+      || !envelope
+      || typeof envelope !== 'object'
+      || envelope.schemaVersion !== 1
+      || envelope.build !== build
+      || !envelope.active
+      || typeof envelope.active !== 'object') {
+    return null;
+  }
+
+  const controlId = sanitizeControlAuditToken(envelope.active.controlId);
+  const action = sanitizeControlAuditToken(envelope.active.action, 16);
+  const attempt = sanitizeControlAuditInteger(
+    envelope.active.attempt,
+    { positive: true }
+  );
+  if (!controlId || action !== 'on' || !attempt) return null;
+
+  const active = {
+    controlId,
+    action,
+    attempt,
+    scheduledAt: sanitizeControlAuditInteger(envelope.active.scheduledAt),
+    originBoundaryAt: sanitizeControlAuditInteger(envelope.active.originBoundaryAt),
+    targetAt: sanitizeControlAuditInteger(envelope.active.targetAt),
+    retryAt: sanitizeControlAuditInteger(envelope.active.retryAt),
+    deliveryAt: sanitizeControlAuditInteger(envelope.active.deliveryAt),
+    confirmedAt: sanitizeControlAuditInteger(envelope.active.confirmedAt),
+    awaitingRetry: envelope.active.awaitingRetry === true,
+    attention: envelope.active.attention === true,
+    lastStage: sanitizeControlAuditToken(envelope.active.lastStage, 80)
+  };
+
+  const events = Array.isArray(envelope.events)
+    ? envelope.events
+      .filter(event => event
+        && typeof event === 'object'
+        && event.build === build
+        && event.controlId === controlId)
+      .map(event => ({
+        seq: sanitizeControlAuditInteger(event.seq, { positive: true }),
+        at: sanitizeControlAuditInteger(event.at),
+        controlId: sanitizeControlAuditToken(event.controlId),
+        attempt: sanitizeControlAuditInteger(event.attempt, { positive: true }),
+        stage: sanitizeControlAuditToken(event.stage, 80),
+        result: sanitizeControlAuditToken(event.result, 80),
+        code: sanitizeControlAuditToken(event.code, 80),
+        action: sanitizeControlAuditToken(event.action, 16),
+        scheduledAt: sanitizeControlAuditInteger(event.scheduledAt),
+        originBoundaryAt: sanitizeControlAuditInteger(event.originBoundaryAt),
+        targetAt: sanitizeControlAuditInteger(event.targetAt),
+        retryAt: sanitizeControlAuditInteger(event.retryAt),
+        build: sanitizeControlAuditToken(event.build)
+      }))
+      .filter(event => event.seq
+        && event.at
+        && event.at <= now
+        && event.controlId === controlId
+        && event.attempt
+        && event.stage
+        && event.result
+        && event.action === 'on'
+        && event.build === build)
+      .sort((left, right) => left.seq - right.seq || left.at - right.at)
+    : [];
+
+  return {
+    schemaVersion: 1,
+    build,
+    controlId,
+    active,
+    events,
+    capturedAt: now
+  };
+}
+
+function isAutomaticOnUnconfirmed(controlAudit, nowMs = Date.now()) {
+  const now = sanitizeControlAuditInteger(nowMs);
+  const active = controlAudit?.active;
+  if (!now
+      || !controlAudit?.build
+      || !active
+      || active.action !== 'on'
+      || !Number.isSafeInteger(active.scheduledAt)
+      || active.scheduledAt <= 0
+      || active.scheduledAt > now
+      || Number(active.confirmedAt) > 0) {
+    return false;
+  }
+  return !controlAudit.events?.some(event => (
+    event.stage === 'terminal'
+    && (event.result === 'confirmed' || event.result === 'disabled')
+  ));
+}
+
+function appendControlAuditDiagnosticLines(lines, controlAudit, nowMs = Date.now()) {
+  if (!Array.isArray(lines)) return;
+  if (!controlAudit) {
+    lines.push(`ℹ️ ${t('diagnoseControlAuditEmpty')}`);
+    return;
+  }
+
+  if (isAutomaticOnUnconfirmed(controlAudit, nowMs)) {
+    lines.push(
+      `❌ [AC-START-MISSED] ${t(
+        'diagnoseStartMissed',
+        new Date(controlAudit.active.scheduledAt).toLocaleString()
+      )}`
+    );
+  }
+  lines.push(`ℹ️ ${t('diagnoseControlAuditCurrent', controlAudit.controlId)}`);
+  controlAudit.events.forEach((event) => {
+    lines.push(
+      `ℹ️ [AC-START-LIFECYCLE] seq=${event.seq}`
+      + ` attempt=${event.attempt}`
+      + ` stage=${event.stage}`
+      + ` result=${event.result}`
+      + `${event.code ? ` code=${event.code}` : ''}`
+      + ` at=${new Date(event.at).toLocaleString()}`
+    );
+  });
+}
+
+function getCurrentPopupControlAuditBuild() {
+  const epoch = Number(BUILD_TIME_EPOCH_MS);
+  const buildTime = String(BUILD_TIME || '');
+  const sha256 = String(BUILD_SOURCE_SHA256 || '').toLowerCase();
+  let version = '';
+  try {
+    version = String(chrome.runtime.getManifest().version || '');
+  } catch (_) {
+    return '';
+  }
+  if (!Number.isSafeInteger(epoch)
+      || epoch <= 0
+      || !/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(buildTime)
+      || !/^[a-f0-9]{64}$/.test(sha256)
+      || !/^(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){0,3}$/.test(version)) {
+    return '';
+  }
+  return `${version}|${buildTime}|${epoch}|${sha256}`;
+}
+
+async function readCurrentBuildControlAudit() {
+  const build = getCurrentPopupControlAuditBuild();
+  if (!build) return null;
+  try {
+    const stored = await chrome.storage.local.get('ac_dist_control_audit_v1');
+    return selectCurrentBuildControlAudit(
+      stored?.ac_dist_control_audit_v1,
+      build,
+      Date.now()
+    );
+  } catch (_) {
+    return null;
+  }
+}
+
 function selectRecentDiagnosticEntries(entries, nowMs = Date.now()) {
   const now = Number(nowMs);
   const buildEpoch = Number(BUILD_TIME_EPOCH_MS);
@@ -1164,907 +1042,8 @@ function appendRecentDiagnosticLogLines(lines, entries, nowMs = Date.now()) {
     const level = entry.level === 'warn' ? 'WARN' : 'ERROR';
     const source = String(entry.source || 'unknown').slice(0, 80);
     const message = String(entry.message || '').slice(0, 300);
-    lines.push(`🕘 ${time} [HISTORY ${level}/${source}] ${message}`);
+    lines.push(`⚠️ ${time} [${level}/${source}] ${message}`);
   });
-}
-
-function evaluatePopupPageState(snapshot, schedule) {
-  const page = snapshot && typeof snapshot === 'object' ? snapshot : {};
-  const config = schedule && typeof schedule === 'object' ? schedule : {};
-  const controls = page.controls && typeof page.controls === 'object'
-    ? page.controls
-    : {};
-  const expected = {
-    automation: config.enabled === true,
-    activeHours: config.activeHours?.enabled === true,
-    timer: config.smartMode?.enabled !== true,
-    smart: config.smartMode?.enabled === true,
-    activeHoursStart: typeof config.activeHours?.start === 'string'
-      ? config.activeHours.start
-      : '08:00',
-    activeHoursEnd: typeof config.activeHours?.end === 'string'
-      ? config.activeHours.end
-      : '23:00'
-  };
-  const dimensionsValid = Number(page.viewportWidth) > 0
-    && Number(page.viewportHeight) > 0
-    && Number(page.contentWidth) > 0
-    && Number(page.contentHeight) > 0;
-  const controlMismatches = [
-    ['automationChecked', expected.automation],
-    ['activeHoursChecked', expected.activeHours],
-    ['activeHoursStart', expected.activeHoursStart],
-    ['activeHoursEnd', expected.activeHoursEnd],
-    ['activeHoursBodyHidden', !expected.activeHours],
-    ['activeHoursStartDisabled', !expected.activeHours],
-    ['activeHoursEndDisabled', !expected.activeHours],
-    ['timerPressed', expected.timer],
-    ['timerBodyHidden', !expected.timer],
-    ['smartPressed', expected.smart],
-    ['smartBodyHidden', !expected.smart]
-  ]
-    .filter(([field, expectedValue]) => controls[field] !== expectedValue)
-    .map(([field, expectedValue]) => (
-      `${field}(expected=${expectedValue}, actual=${String(controls[field])})`
-    ));
-  const controlSync = page.updatePending === true
-    ? null
-    : controlMismatches.length === 0;
-
-  return {
-    documentReady: page.readyState === 'interactive' || page.readyState === 'complete',
-    documentVisible: page.visibilityState === 'visible',
-    dimensionsValid,
-    horizontalOverflow: dimensionsValid
-      && Number(page.contentWidth) > Number(page.viewportWidth) + 1,
-    controlSync,
-    controlMismatches,
-    expected
-  };
-}
-
-function readPopupPageSnapshot() {
-  const root = document.documentElement;
-  const body = document.body;
-  const shellRect = appShell?.getBoundingClientRect();
-  const viewportWidth = Math.round(root?.clientWidth || window.innerWidth || 0);
-  const viewportHeight = Math.round(root?.clientHeight || window.innerHeight || 0);
-  const contentWidth = Math.round(Math.max(
-    root?.scrollWidth || 0,
-    body?.scrollWidth || 0,
-    appShell?.scrollWidth || 0,
-    shellRect?.width || 0
-  ));
-  const contentHeight = Math.round(Math.max(
-    root?.scrollHeight || 0,
-    body?.scrollHeight || 0,
-    appShell?.scrollHeight || 0,
-    shellRect?.height || 0
-  ));
-
-  return {
-    readyState: document.readyState,
-    visibilityState: document.visibilityState,
-    language: root?.lang || '?',
-    viewportWidth,
-    viewportHeight,
-    contentWidth,
-    contentHeight,
-    keepaliveConnected: keepalivePort !== null,
-    updatePending: hasPendingScheduleUpdate() || modeSwitchInFlight,
-    controls: {
-      automationChecked: automationToggle?.checked === true,
-      timerPressed: timerToggle?.getAttribute('aria-pressed') === 'true',
-      smartPressed: smartModeToggle?.getAttribute('aria-pressed') === 'true',
-      activeHoursChecked: activeHoursToggle?.checked === true,
-      activeHoursStart: activeHoursStart?.value,
-      activeHoursEnd: activeHoursEnd?.value,
-      activeHoursBodyHidden: activeHoursBody?.hidden === true,
-      activeHoursStartDisabled: activeHoursStart?.disabled === true,
-      activeHoursEndDisabled: activeHoursEnd?.disabled === true,
-      timerBodyHidden: timerBody?.hidden === true,
-      smartBodyHidden: smartBody?.hidden === true
-    }
-  };
-}
-
-const DIAGNOSTIC_LEVEL_SYMBOLS = Object.freeze({
-  ok: '✅',
-  info: 'ℹ️',
-  warning: '⚠️',
-  repaired: '🛠️',
-  error: '❌'
-});
-
-function createDiagnosticReport(translate) {
-  const detailLines = [];
-  const findings = [];
-
-  function add(ok, message, metadata = {}) {
-    const requestedLevel = String(metadata.level || '');
-    const level = Object.hasOwn(DIAGNOSTIC_LEVEL_SYMBOLS, requestedLevel)
-      ? requestedLevel
-      : (ok ? 'ok' : 'error');
-    const isFinding = level === 'error' || level === 'warning' || level === 'repaired';
-    const code = String(metadata.code || (isFinding ? 'DIAG-UNCLASSIFIED' : '')).slice(0, 80);
-    const codeLabel = code && level !== 'ok' ? ` [${code}]` : '';
-    detailLines.push(`${DIAGNOSTIC_LEVEL_SYMBOLS[level]}${codeLabel} ${message}`);
-
-    if (isFinding && !findings.some(item => item.code === code)) {
-      findings.push({
-        code,
-        level,
-        domain: String(metadata.domain || translate('diagnoseDomainGeneral')),
-        message: String(message),
-        action: String(metadata.action || ''),
-        priority: Number.isFinite(Number(metadata.priority)) ? Number(metadata.priority) : 100
-      });
-    }
-  }
-
-  function getSummaryLines() {
-    const errorCount = findings.filter(item => item.level === 'error').length;
-    const warningCount = findings.filter(item => item.level === 'warning').length;
-    const repairedCount = findings.filter(item => item.level === 'repaired').length;
-    const summaryLines = [translate('diagnoseSummary', errorCount, warningCount, repairedCount)];
-    const activeIssues = findings
-      .filter(item => item.level === 'error' || item.level === 'warning')
-      .sort((left, right) => (
-        (left.level === right.level ? 0 : (left.level === 'error' ? -1 : 1))
-        || left.priority - right.priority
-      ));
-    const primary = activeIssues[0];
-    if (primary) {
-      summaryLines.push(translate(
-        'diagnosePrimaryIssue',
-        primary.code,
-        primary.domain,
-        primary.message
-      ));
-      if (primary.action) summaryLines.push(translate('diagnoseNextStep', primary.action));
-    } else if (repairedCount > 0) {
-      const repaired = findings
-        .filter(item => item.level === 'repaired')
-        .sort((left, right) => left.priority - right.priority)[0];
-      summaryLines.push(translate(
-        'diagnosePrimaryRepair',
-        repaired.code,
-        repaired.domain,
-        repaired.message
-      ));
-    } else {
-      summaryLines.push(translate('diagnoseSummaryHealthy'));
-    }
-    summaryLines.push(translate('diagnoseDetails'));
-    return summaryLines;
-  }
-
-  function getCompletionLevel() {
-    if (findings.some(item => item.level === 'error')) return 'error';
-    if (findings.some(item => item.level === 'warning')) return 'warning';
-    return 'success';
-  }
-
-  return { detailLines, findings, add, getSummaryLines, getCompletionLevel };
-}
-
-async function capturePopupDiagnosticInputs(report, runtime = {}) {
-  const add = report.add;
-  const translate = report.translate;
-  const sendMessage = runtime.sendMessage || sendDiagnosticRuntimeMessage;
-  const matchServiceWorkerBuild = runtime.matchServiceWorkerBuild
-    || isMatchingServiceWorkerBuild;
-  const buildTimeEpochMs = runtime.buildTimeEpochMs ?? BUILD_TIME_EPOCH_MS;
-  const readStoredSchedule = runtime.readStoredSchedule
-    || (() => chrome.storage.local.get('ac_schedule'));
-  const warn = runtime.warn || ((...args) => console.warn(...args));
-
-  // 先冻结只读 runtime 身份。Popup/SW 已混版时绝不能先让旧 SW 执行
-  // ensureDiagnostics；否则“诊断”会改写本应保留的首现场。
-  let sw = null;
-  try {
-    sw = await sendMessage({ type: 'getSwStatus' });
-  } catch (error) {
-    warn('getSwStatus preflight 异常:', error?.message);
-  }
-  const preflightSwBuildMatch = sw?.success === true
-    ? matchServiceWorkerBuild(sw)
-    : false;
-  const runtimeBuildCompatible = Number(buildTimeEpochMs) > 0
-    ? preflightSwBuildMatch === true
-    : true;
-
-  let contentRuntimeBefore = null;
-  if (runtimeBuildCompatible) {
-    try {
-      contentRuntimeBefore = await sendMessage({ type: 'inspectContentRuntime' });
-    } catch (error) {
-      contentRuntimeBefore = { success: false, error: error?.message || String(error) };
-    }
-  }
-
-  let ensured = null;
-  if (runtimeBuildCompatible) {
-    try {
-      ensured = await sendMessage({ type: 'ensureDiagnostics' });
-      if (ensured?.success === false && ensured.error) {
-        add(false, translate('diagnoseEnsureFailed') + String(ensured.error).slice(0, 80), {
-          code: 'SCHED-REPAIR-FAILED',
-          domain: translate('diagnoseDomainScheduler'),
-          action: translate('diagnoseActionReloadExtension'),
-          priority: 10
-        });
-      }
-    } catch (error) {
-      add(false, translate('diagnoseEnsureFailed') + (error.message || '').slice(0, 80), {
-        code: 'SCHED-REPAIR-FAILED',
-        domain: translate('diagnoseDomainScheduler'),
-        action: translate('diagnoseActionReloadExtension'),
-        priority: 10
-      });
-    }
-  }
-
-  let bg = null;
-  let bgProbeFailed = false;
-  try {
-    bg = await sendMessage({ type: 'getSchedule' });
-    if (bg?.success === false) {
-      bgProbeFailed = true;
-      add(false, translate('diagnoseScheduleReadFailed') + String(bg.error || '?').slice(0, 80), {
-        code: 'SW-SNAPSHOT-FAILED',
-        domain: translate('diagnoseDomainBackground'),
-        action: translate('diagnoseActionReloadExtension'),
-        priority: 5
-      });
-    }
-  } catch (error) {
-    bgProbeFailed = true;
-    add(false, translate('diagnoseScheduleReadFailed') + (error.message || '').slice(0, 80), {
-      code: 'SW-SNAPSHOT-FAILED',
-      domain: translate('diagnoseDomainBackground'),
-      action: translate('diagnoseActionReloadExtension'),
-      priority: 5
-    });
-  }
-
-  let contentRuntimeAfter = contentRuntimeBefore;
-  if (runtimeBuildCompatible) {
-    try {
-      contentRuntimeAfter = await sendMessage({ type: 'inspectContentRuntime' });
-    } catch (error) {
-      contentRuntimeAfter = { success: false, error: error?.message || String(error) };
-    }
-  }
-
-  let stored = {};
-  let storageReadOk = false;
-  try {
-    stored = await readStoredSchedule();
-    storageReadOk = true;
-    add(true, translate('diagnoseStorageRW'));
-  } catch (error) {
-    add(false, translate('diagnoseStorageReadFailed') + (error.message || '').slice(0, 80), {
-      code: 'CFG-STORAGE-READ-FAILED',
-      domain: translate('diagnoseDomainConfig'),
-      action: translate('diagnoseActionReloadExtension'),
-      priority: 0
-    });
-  }
-  const storedScheduleExists = storageReadOk
-    && stored?.ac_schedule
-    && typeof stored.ac_schedule === 'object';
-  const storedSchedule = storedScheduleExists ? stored.ac_schedule : {};
-  if (storageReadOk && !storedScheduleExists) {
-    add(false, translate('diagnoseScheduleMissing'), {
-      level: 'warning',
-      code: 'CFG-SCHEDULE-MISSING',
-      domain: translate('diagnoseDomainConfig'),
-      action: translate('diagnoseActionReloadExtension'),
-      priority: 20
-    });
-  }
-
-  return {
-    sw,
-    runtimeBuildCompatible,
-    contentRuntimeBefore,
-    ensured,
-    bg,
-    bgProbeFailed,
-    contentRuntimeAfter,
-    storedSchedule
-  };
-}
-
-function derivePopupDiagnosticState(inputs, runtime = {}) {
-  const isPausedByActiveHours = runtime.isPausedByActiveHours
-    || isAutomationPausedByActiveHours;
-  const { ensured, bg, storedSchedule } = inputs;
-  const bgSchedule = bg?.success === false && bg?.schedule
-    ? bg.schedule
-    : (bg || {});
-  const evidence = readDiagnosticEvidence(ensured);
-  const before = evidence.before;
-  const after = evidence.after;
-  const preRepairSchedule = (evidence.usable
-    ? before?.memorySchedule || before?.storedSchedule
-    : null)
-    || storedSchedule;
-  const schedule = {
-    ...storedSchedule,
-    ...(evidence.usable ? after?.memorySchedule || {} : {}),
-    ...(evidence.usable ? ensured?.schedule || {} : {}),
-    ...bgSchedule
-  };
-  const automationPausedByActiveHours = schedule._automationPausedByActiveHours === true
-    || isPausedByActiveHours(schedule);
-  const owner = evidence.owner;
-  const currentAttempt = evidence.currentAttempt;
-  const currentAttempts = evidence.currentAttempts;
-  const lastOutcome = evidence.lastOutcome;
-  const ownerScheduledAt = Number(owner?.scheduledAt) || 0;
-  const ownerMatchesLastOutcome = ownerScheduledAt > 0
-    && Math.abs(Number(lastOutcome?.scheduledAt) - ownerScheduledAt) < 1500
-    && lastOutcome?.action === owner?.action;
-  const pwmBoundaryDuePending = !currentAttempt
-    && !ownerMatchesLastOutcome
-    && ownerScheduledAt > 0
-    && Math.abs(Number(
-      before?.capturedAt || (runtime.nowMs ?? Date.now())
-    ) - ownerScheduledAt) <= 60000;
-  const repairItems = Object.freeze([...new Set(
-    Array.isArray(ensured?.evidence?.repair?.items)
-      ? ensured.evidence.repair.items
-      : (Array.isArray(ensured?.repairs) ? ensured.repairs : [])
-  )]);
-
-  return Object.freeze({
-    bgSchedule,
-    evidence,
-    before,
-    after,
-    preRepairSchedule,
-    schedule,
-    automationPausedByActiveHours,
-    automationEnabled: schedule.enabled === true,
-    owner,
-    currentAttempt,
-    currentAttempts,
-    lastOutcome,
-    pwmBoundaryDuePending,
-    pwmStepInFlight: evidence.usable
-      ? evidence.pwmStepRunning
-      : schedule._pwmStepRunning === true,
-    repairItems,
-    clearedAlarmCount: repairItems.filter(item => item.endsWith('-alarm-cleared')).length,
-    effectiveNextTriggerAt: schedule.nextTriggerAt || 0,
-    pwmTriggerRepaired: repairItems.includes('pwm-trigger')
-  });
-}
-
-function appendPwmDiagnosticEvidence(report, state, formatTime) {
-  const add = report.add;
-  const translate = report.translate;
-  const {
-    evidence,
-    before,
-    after,
-    owner,
-    currentAttempt,
-    currentAttempts,
-    lastOutcome,
-    pwmBoundaryDuePending,
-    repairItems
-  } = state;
-
-  if (evidence.status === 'incomplete') {
-    const readErrors = [
-      ...(before?.readErrors || []),
-      ...(after?.readErrors || [])
-    ];
-    add(false, translate(
-      'diagnosePwmEvidenceIncomplete',
-      readErrors.join('; ').slice(0, 240) || '?'
-    ), {
-      level: 'warning',
-      code: 'SCHED-EVIDENCE-INCOMPLETE',
-      domain: translate('diagnoseDomainScheduler'),
-      action: translate('diagnoseActionRecheckRecovery'),
-      priority: 15
-    });
-    return;
-  }
-  if (evidence.status === 'incoherent') {
-    add(false, translate('diagnosePwmEvidenceIncoherent'), {
-      level: 'warning',
-      code: 'SCHED-EVIDENCE-INCOHERENT',
-      domain: translate('diagnoseDomainScheduler'),
-      action: translate('diagnoseActionRecheckRecovery'),
-      priority: 15
-    });
-    return;
-  }
-  if (!evidence.usable) return;
-
-  add(true, translate(
-    'diagnosePwmEvidenceBefore',
-    owner?.action || '?',
-    owner?.kind || '?',
-    formatTime(owner?.boundaryAt),
-    formatTime(owner?.scheduledAt),
-    formatTime(owner?.liveAlarmAt)
-  ), {
-    level: 'info',
-    code: 'SCHED-EVIDENCE-BEFORE',
-    domain: translate('diagnoseDomainScheduler')
-  });
-  const currentAttemptText = currentAttempts.length
-    ? currentAttempts.map(attempt => (
-        `#${attempt.attemptId} ${attempt.source}`
-          + ` ${attempt.action}@${formatTime(attempt.scheduledAt)}`
-      )).join(' | ')
-    : (pwmBoundaryDuePending ? 'due-pending' : 'idle');
-  add(true, translate('diagnosePwmEvidenceRuntime', currentAttemptText), {
-    level: 'info',
-    code: currentAttempt
-      ? 'SCHED-PWM-IN-FLIGHT'
-      : (pwmBoundaryDuePending ? 'SCHED-PWM-DUE-PENDING' : 'SCHED-PWM-IDLE'),
-    domain: translate('diagnoseDomainScheduler')
-  });
-  const lastOutcomeText = lastOutcome
-    ? `#${lastOutcome.attemptId} ${lastOutcome.status}`
-      + ` ${lastOutcome.action}@${formatTime(lastOutcome.scheduledAt)}`
-      + `${lastOutcome.reason ? ` (${lastOutcome.reason})` : ''}`
-    : 'none';
-  add(true, translate('diagnosePwmEvidenceLastOutcome', lastOutcomeText), {
-    level: 'info',
-    code: 'SCHED-EVIDENCE-LAST-OUTCOME',
-    domain: translate('diagnoseDomainScheduler')
-  });
-  add(true, translate(
-    'diagnosePwmEvidenceRepair',
-    repairItems.length ? repairItems.join(',') : 'none'
-  ), {
-    level: repairItems.length ? 'repaired' : 'info',
-    code: repairItems.length ? 'SCHED-EVIDENCE-REPAIRED' : 'SCHED-EVIDENCE-NO-REPAIR',
-    domain: translate('diagnoseDomainScheduler')
-  });
-  add(true, translate(
-    'diagnosePwmEvidenceAfter',
-    after?.owner?.action || '?',
-    after?.owner?.kind || '?',
-    formatTime(after?.owner?.scheduledAt),
-    formatTime(after?.owner?.liveAlarmAt)
-  ), {
-    level: 'info',
-    code: 'SCHED-EVIDENCE-AFTER',
-    domain: translate('diagnoseDomainScheduler')
-  });
-}
-
-function appendPopupSelfDiagnostics(report, schedule, runtime = {}) {
-  const { add, translate } = report;
-  const readPageSnapshot = runtime.readPageSnapshot ?? readPopupPageSnapshot;
-  const evaluatePageState = runtime.evaluatePageState ?? evaluatePopupPageState;
-  const readCapturedErrors = runtime.readCapturedErrors ?? (() => (
-    globalThis.ACPopupDiagnosticFallback?.getCapturedErrors?.() || []
-  ));
-
-  // Popup 自身也属于诊断链路：报告当前文档、布局、控件投影和保活连接。
-  // 只记录结构化状态与尺寸，不读取 URL、DOM 文本、账号或冷气页面内容。
-  const popupPage = readPageSnapshot();
-  const popupState = evaluatePageState(popupPage, schedule);
-  const popupDocumentMessage = popupState.documentReady && popupState.documentVisible
-    ? translate(
-        'diagnosePopupDocumentReady',
-        popupPage.readyState,
-        popupPage.visibilityState,
-        popupPage.language
-      )
-    : translate(
-        'diagnosePopupDocumentState',
-        popupPage.readyState,
-        popupPage.visibilityState,
-        popupPage.language
-      );
-  add(popupState.documentReady && popupState.documentVisible, popupDocumentMessage,
-    popupState.documentReady && popupState.documentVisible ? {} : {
-      level: 'warning',
-      code: popupState.documentReady ? 'POPUP-DOCUMENT-HIDDEN' : 'POPUP-DOCUMENT-NOT-READY',
-      domain: translate('diagnoseDomainPopup'),
-      action: translate('diagnoseActionReopenPopup'),
-      priority: 60
-    });
-
-  const popupSizeArgs = [
-    popupPage.viewportWidth,
-    popupPage.viewportHeight,
-    popupPage.contentWidth,
-    popupPage.contentHeight
-  ];
-  if (!popupState.dimensionsValid) {
-    add(false, translate('diagnosePopupLayoutUnmeasurable', ...popupSizeArgs), {
-      level: 'warning',
-      code: 'POPUP-LAYOUT-UNMEASURABLE',
-      domain: translate('diagnoseDomainPopup'),
-      action: translate('diagnoseActionReopenPopup'),
-      priority: 65
-    });
-  } else if (popupState.horizontalOverflow) {
-    add(false, translate('diagnosePopupLayoutOverflow', ...popupSizeArgs), {
-      level: 'warning',
-      code: 'POPUP-HORIZONTAL-OVERFLOW',
-      domain: translate('diagnoseDomainPopup'),
-      action: translate('diagnoseActionReopenPopup'),
-      priority: 65
-    });
-  } else {
-    add(true, translate('diagnosePopupLayoutOK', ...popupSizeArgs));
-  }
-
-  if (popupState.controlSync === null) {
-    add(true, translate('diagnosePopupControlsPending'), {
-      level: 'info',
-      code: 'POPUP-UPDATE-IN-FLIGHT',
-      domain: translate('diagnoseDomainPopup')
-    });
-  } else if (popupState.controlSync) {
-    add(true, translate(
-      'diagnosePopupControlsSync',
-      popupState.expected.automation,
-      popupState.expected.activeHours,
-      popupState.expected.timer,
-      popupState.expected.smart
-    ));
-  } else {
-    add(false, translate(
-      'diagnosePopupControlsDesync',
-      popupState.controlMismatches.join(' | ')
-    ), {
-      level: 'warning',
-      code: 'POPUP-CONTROLS-DESYNC',
-      domain: translate('diagnoseDomainPopup'),
-      action: translate('diagnoseActionReopenPopup'),
-      priority: 55
-    });
-  }
-
-  add(popupPage.keepaliveConnected, popupPage.keepaliveConnected
-    ? translate('diagnosePopupKeepaliveOK')
-    : translate('diagnosePopupKeepaliveDisconnected'), popupPage.keepaliveConnected ? {} : {
-    level: 'warning',
-    code: 'POPUP-KEEPALIVE-DISCONNECTED',
-    domain: translate('diagnoseDomainPopup'),
-    action: translate('diagnoseActionReopenPopup'),
-    priority: 50
-  });
-
-  const capturedPopupErrors = readCapturedErrors();
-  if (capturedPopupErrors.length) {
-    const latestPopupError = capturedPopupErrors[capturedPopupErrors.length - 1];
-    add(false, translate(
-      'diagnosePopupRuntimeErrors',
-      capturedPopupErrors.length,
-      latestPopupError.message
-    ), {
-      level: 'warning',
-      code: 'POPUP-RUNTIME-ERROR',
-      domain: translate('diagnoseDomainPopup'),
-      action: translate('diagnoseActionReopenPopup'),
-      priority: 45
-    });
-  } else {
-    add(true, translate('diagnosePopupRuntimeErrorsEmpty'));
-  }
-}
-
-function appendScheduleConfigurationDiagnostics(report, state, storedNextTriggerAt) {
-  const { add, translate } = report;
-  const {
-    schedule,
-    automationPausedByActiveHours,
-    automationEnabled,
-    pwmStepInFlight,
-    effectiveNextTriggerAt,
-    pwmTriggerRepaired
-  } = state;
-
-  add(true, translate('diagnoseEnabledPrefix') + schedule.enabled + ' ('
-    + (schedule.enabled ? translate('diagnoseOn') : translate('diagnoseOff')) + ')',
-    automationEnabled ? {} : {
-      level: 'info',
-      code: 'CFG-AUTOMATION-OFF',
-      domain: translate('diagnoseDomainConfig')
-    });
-  add(!!schedule.mode, translate('diagnoseMode') + (schedule.mode || '?'), {
-    code: 'CFG-MODE-MISSING',
-    domain: translate('diagnoseDomainConfig'),
-    action: translate('diagnoseActionReloadExtension'),
-    priority: 15
-  });
-  add(schedule.clockMode !== undefined, translate('diagnoseClockMode')
-    + (schedule.clockMode === undefined
-      ? '?'
-      : (schedule.clockMode ? translate('diagnoseClock') : translate('diagnoseInterval'))), {
-    code: 'CFG-CLOCK-MISSING',
-    domain: translate('diagnoseDomainConfig'),
-    action: translate('diagnoseActionReloadExtension'),
-    priority: 15
-  });
-  if (schedule.clockMode === false && schedule.enabled
-      && !automationPausedByActiveHours
-      && !pwmStepInFlight
-      && !effectiveNextTriggerAt) {
-    add(false, translate('diagnoseMissingTrigger'), {
-      code: 'SCHED-TRIGGER-MISSING',
-      domain: translate('diagnoseDomainScheduler'),
-      action: translate('diagnoseActionReloadExtension'),
-      priority: 10
-    });
-  } else if (effectiveNextTriggerAt) {
-    const repairedLabel = pwmTriggerRepaired
-      || storedNextTriggerAt !== effectiveNextTriggerAt
-      ? translate('diagnoseBgWriteback')
-      : '';
-    add(true, translate('diagnoseTriggerTime')
-      + new Date(effectiveNextTriggerAt).toLocaleTimeString()
-      + repairedLabel, pwmTriggerRepaired ? {
-      level: 'repaired',
-      code: 'SCHED-TRIGGER-REPAIRED',
-      domain: translate('diagnoseDomainScheduler'),
-      priority: 20
-    } : {});
-  }
-}
-
-function appendSmartWeatherDiagnostics(report, state, alarms, runtime = {}) {
-  const { add, translate } = report;
-  const { schedule, automationEnabled, repairItems } = state;
-  const readWeatherCache = runtime.readWeatherCache ?? (() => (
-    chrome.storage.local.get('ac_smart_weather')
-  ));
-  const readTimestampAgeMs = runtime.getTimestampAgeMs ?? getTimestampAgeMs;
-
-  const smartOnDiag = !!schedule.smartMode?.enabled;
-  if (!automationEnabled && smartOnDiag) {
-    add(true, translate('diagnoseSmartModeDormant'), {
-      level: 'info',
-      code: 'WEATHER-SMART-MODE-DORMANT',
-      domain: translate('diagnoseDomainWeather')
-    });
-    return;
-  }
-  if (!smartOnDiag) {
-    add(true, translate('diagnoseSmartModeOff'), {
-      level: 'info',
-      code: 'WEATHER-SMART-MODE-OFF',
-      domain: translate('diagnoseDomainWeather')
-    });
-    return;
-  }
-
-  add(true, translate('diagnoseSmartModeOn'));
-  const smartWeatherAlarm = alarms.find(a => a.name === 'ac-smart-weather');
-  const smartWeatherWasRepaired = repairItems.includes('smart-weather-alarm');
-  const smartWeatherAt = Number(smartWeatherAlarm?.scheduledTime) || 0;
-  const smartWeatherDate = smartWeatherAt ? new Date(smartWeatherAt) : null;
-  const smartWeatherSlotValid = !!smartWeatherDate
-    && smartWeatherDate.getSeconds() === 0
-    && smartWeatherDate.getMilliseconds() === 0
-    && (smartWeatherDate.getMinutes() === 20 || smartWeatherDate.getMinutes() === 50);
-  if (!smartWeatherAlarm) {
-    add(false, translate('diagnoseSmartWeatherAlarm') + ' '
-      + translate('diagnoseSmartWeatherAlarmMissing'), {
-      code: 'WEATHER-ALARM-MISSING',
-      domain: translate('diagnoseDomainWeather'),
-      action: translate('diagnoseActionReloadExtension'),
-      priority: 20
-    });
-  } else if (!smartWeatherSlotValid) {
-    add(false, translate(
-      'diagnoseSmartWeatherSlotMismatch',
-      smartWeatherDate.toLocaleTimeString()
-    ), {
-      level: 'warning',
-      code: 'WEATHER-SLOT-MISMATCH',
-      domain: translate('diagnoseDomainWeather'),
-      action: translate('diagnoseActionReloadExtension'),
-      priority: 30
-    });
-  } else {
-    add(true, translate('diagnoseSmartWeatherAlarm')
-      + translate(smartWeatherWasRepaired ? 'diagnoseAlarmRebuilt' : 'diagnoseAlarmScheduled')
-      + smartWeatherDate.toLocaleTimeString() + ')', smartWeatherWasRepaired ? {
-      level: 'repaired',
-      code: 'WEATHER-ALARM-REPAIRED',
-      domain: translate('diagnoseDomainWeather'),
-      priority: 30
-    } : {});
-  }
-
-  return Promise.resolve(readWeatherCache()).then((weatherRes) => {
-    const weatherCache = weatherRes.ac_smart_weather;
-    const fetchedAt = Number(weatherCache?.fetchedAt) || 0;
-    const ageMs = readTimestampAgeMs(fetchedAt);
-    if (ageMs !== null) {
-      const ageMin = Math.round(ageMs / 60000);
-      if (ageMs <= 60 * 60000) {
-        add(true, translate('diagnoseSmartWeatherFresh', ageMin));
-      } else {
-        add(false, translate('diagnoseSmartWeatherStale', ageMin), {
-          level: 'warning',
-          code: 'WEATHER-CACHE-STALE',
-          domain: translate('diagnoseDomainWeather'),
-          action: translate('diagnoseActionWaitWeather'),
-          priority: 50
-        });
-      }
-    } else {
-      add(false, translate('diagnoseSmartWeatherNoCache'), {
-        level: 'warning',
-        code: 'WEATHER-CACHE-MISSING',
-        domain: translate('diagnoseDomainWeather'),
-        action: translate('diagnoseActionWaitWeather'),
-        priority: 50
-      });
-    }
-  });
-}
-
-function appendServiceWorkerRuntimeDiagnostics(
-  report,
-  captured,
-  state,
-  formatTime
-) {
-  const { add, translate: t } = report;
-  const {
-    sw,
-    runtimeBuildCompatible,
-    contentRuntimeBefore,
-    contentRuntimeAfter,
-    storedSchedule
-  } = captured;
-  const {
-    automationEnabled,
-    automationPausedByActiveHours,
-    pwmStepInFlight,
-    pwmTriggerRepaired
-  } = state;
-  const fmt = formatTime;
-
-  // sw 已在任何诊断修复之前只读取得；这里复用首现场，禁止为了展示
-  // 状态再次用后置快照覆盖其 runtime/lastOutcome。
-  if (sw && sw.success === true) {
-    // SW 响应成功:显示三方一致校验
-    const swAgeSec = Math.round((sw.swAgeMs || 0) / 1000);
-    const initAgeSec = sw.initAgeMs >= 0 ? Math.round(sw.initAgeMs / 1000) : -1;
-    const swBuildMatches = isMatchingServiceWorkerBuild(sw);
-    if (swBuildMatches === true) {
-      add(true, t('diagnoseSWBuildMatch', BUILD_TIME));
-    } else if (swBuildMatches === false) {
-      add(false, t('diagnoseSWBuildMismatch', BUILD_TIME, sw.buildTime || '?'), {
-        code: 'SW-BUILD-MISMATCH',
-        domain: t('diagnoseDomainBackground'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 1
-      });
-    } else {
-      add(true, t('diagnoseSWBuildUnknown'), {
-        level: 'info',
-        code: 'SW-BUILD-DEV',
-        domain: t('diagnoseDomainBackground')
-      });
-    }
-    const contentBeforeAssessment = contentRuntimeBefore?.runtimeIdentityAssessment;
-    const contentAfterAssessment = contentRuntimeAfter?.runtimeIdentityAssessment;
-    if (contentRuntimeAfter?.found === false) {
-      add(true, t('diagnoseContentBuildPending'), {
-        level: 'info',
-        code: 'CONTENT-BUILD-NOT-CHECKED',
-        domain: t('diagnoseDomainPage')
-      });
-    } else if (contentAfterAssessment?.valid === true) {
-      const runtimeWasReinjected = contentBeforeAssessment?.valid === false;
-      add(true, t(
-        runtimeWasReinjected
-          ? 'diagnoseContentBuildReinjected'
-          : 'diagnoseContentBuildMatch',
-        contentAfterAssessment.actual?.content?.buildTime || '?',
-        contentAfterAssessment.actual?.main?.buildTime || '?'
-      ), runtimeWasReinjected ? {
-        level: 'repaired',
-        code: 'CONTENT-RUNTIME-REINJECTED',
-        domain: t('diagnoseDomainPage')
-      } : {});
-    } else if (runtimeBuildCompatible) {
-      add(false, t(
-        'diagnoseContentBuildMismatch',
-        contentAfterAssessment?.actual?.content?.buildTime || '?',
-        contentAfterAssessment?.actual?.main?.buildTime || '?',
-        BUILD_TIME
-      ), {
-        code: 'CONTENT-RUNTIME-MISMATCH',
-        domain: t('diagnoseDomainPage'),
-        action: t('diagnoseActionReloadACPage'),
-        priority: 1
-      });
-    }
-    add(sw.initCompleted, t(sw.initCompleted ? 'diagnoseSWInitDone' : 'diagnoseSWInitPending', swAgeSec, initAgeSec), {
-      code: 'SW-INIT-INCOMPLETE',
-      domain: t('diagnoseDomainBackground'),
-      action: t('diagnoseActionReloadExtension'),
-      priority: 5
-    });
-    // L2 offscreen 长连接保活页(阶段58):每分钟 badge-tick 顺带 ensureOffscreen 重建。
-    // 三态兼容:v0.6.7+ SW 返回 offscreenAlive 真值(true/false);旧 SW 不返回该字段(undefined),
-    // 视为 SW 跑旧代码,不打红灯避免误导用户以为 offscreen 失效。
-    if (sw.offscreenAlive === true) {
-      add(true, t('diagnoseOffscreenPresent'));
-    } else if (sw.offscreenAlive === false) {
-      add(false, t('diagnoseOffscreenMissing'), {
-        level: 'warning',
-        code: 'SW-OFFSCREEN-MISSING',
-        domain: t('diagnoseDomainBackground'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 70
-      });
-    } else {
-      add(true, t('diagnoseOffscreenUnknown'), {
-        level: 'info',
-        code: 'SW-OFFSCREEN-UNKNOWN',
-        domain: t('diagnoseDomainBackground')
-      });
-    }
-    const memNext = sw.memorySchedule?.nextTriggerAt || 0;
-    const storedNext = storedSchedule.nextTriggerAt || 0;
-    const memLive = sw.liveAlarmScheduledTime || 0;
-    if (!automationEnabled || automationPausedByActiveHours) {
-      // 停用／暂停态预期没有 PWM 时钟，不把三方全空误报为失步。
-    } else if (pwmStepInFlight && !memLive) {
-      // 前面的 alarm 检查已经显示一次“边界处理中”；此处只跳过瞬态三方校验。
-    } else if (areDiagnosticTriggersAligned(memLive, memNext, storedNext)) {
-      add(true, t('diagnoseTriMatch', fmt(memLive)));
-    } else {
-      add(false, t('diagnoseTriMismatch', fmt(memLive), fmt(memNext), fmt(storedNext)), {
-        code: 'SCHED-THREE-WAY-DESYNC',
-        domain: t('diagnoseDomainScheduler'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 5
-      });
-    }
-  } else if (pwmTriggerRepaired) {
-    add(false, t('diagnoseBgRepairedSw'), {
-      level: 'warning',
-      code: 'SW-STATUS-DEGRADED',
-      domain: t('diagnoseDomainBackground'),
-      action: t('diagnoseActionReloadExtension'),
-      priority: 50
-    });
-  } else if (sw && sw.success === false) {
-    add(false, t('diagnoseGetSwFailed') + (sw.error||'?').slice(0,80), {
-      code: 'SW-STATUS-FAILED',
-      domain: t('diagnoseDomainBackground'),
-      action: t('diagnoseActionReloadExtension'),
-      priority: 0
-    });
-  } else if (sw) {
-    add(false, t('diagnoseGetSwAbnormal') + JSON.stringify(sw).slice(0,80), {
-      code: 'SW-STATUS-FAILED',
-      domain: t('diagnoseDomainBackground'),
-      action: t('diagnoseActionReloadExtension'),
-      priority: 0
-    });
-  } else {
-    // SW 完全无响应且 popup 未自愈 — 这是真问题
-    add(false, t('diagnoseGetSwNone'), {
-      code: 'SW-STATUS-FAILED',
-      domain: t('diagnoseDomainBackground'),
-      action: t('diagnoseActionReloadExtension'),
-      priority: 0
-    });
-  }
 }
 
 btnDiagnose.addEventListener('click', async () => {
@@ -2075,9 +1054,8 @@ btnDiagnose.addEventListener('click', async () => {
   showStatus(t('diagnoseInProgress'), '');
   btnDiagnose.disabled = true;
   
-  const report = createDiagnosticReport(t);
-  const lines = report.detailLines;
-  const add = report.add;
+  const lines = [];
+  function add(ok, msg) { lines.push((ok ? '✅' : '❌') + ' ' + msg); }
   // fmt 提升到顶层:此前 4.5 段局部 const fmt (if 块作用域) + 5 段 const fmt2 typo (调用写 fmt) 双声明
   // 引致 SW success 分支 ReferenceError。手里 mock 没跑该分支,潜伏至 v0.6.7 实测。
   const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';
@@ -2092,268 +1070,103 @@ btnDiagnose.addEventListener('click', async () => {
   lines.push(t('diagnoseBrowser') + browserName + ' ' + browserVer);
   
   try {
-    const captured = await capturePopupDiagnosticInputs({ add, translate: t });
-    const {
-      ensured,
-      bg,
-      bgProbeFailed,
-      storedSchedule
-    } = captured;
+    const controlAudit = await readCurrentBuildControlAudit();
+    appendControlAuditDiagnosticLines(lines, controlAudit);
+    const ensured = await sendDiagnosticRuntimeMessage({ type: 'ensureDiagnostics' });
+    const bg = await sendDiagnosticRuntimeMessage({ type: 'getSchedule' });
 
     // 1. 检查 storage / 后台权威快照
-    const diagnosticState = derivePopupDiagnosticState({ ensured, bg, storedSchedule });
-    const {
-      bgSchedule,
-      evidence: diagnosticEvidence,
-      before: diagnosticBefore,
-      after: diagnosticAfter,
-      preRepairSchedule,
-      schedule: s,
-      automationPausedByActiveHours,
-      automationEnabled,
-      pwmBoundaryDuePending,
-      pwmStepInFlight,
-      repairItems,
-      clearedAlarmCount,
-      effectiveNextTriggerAt,
-      pwmTriggerRepaired
-    } = diagnosticState;
-    if (repairItems.includes('smart-current-cycle-started')) {
-      add(false, t('diagnoseSmartCurrentCycleRecoveryStarted'), {
-        level: 'warning',
-        code: 'SMART-CURRENT-CYCLE-RECOVERY-STARTED',
-        domain: t('diagnoseDomainScheduler'),
-        action: t('diagnoseActionRecheckRecovery'),
-        priority: 15
-      });
+    const stored = await chrome.storage.local.get('ac_schedule');
+    const storedSchedule = stored.ac_schedule || {};
+    const bgSchedule = bg?.success === false && bg?.schedule
+      ? bg.schedule
+      : (bg || {});
+    const s = { ...storedSchedule, ...(ensured?.schedule || {}), ...bgSchedule };
+    const automationPausedByActiveHours = s._automationPausedByActiveHours === true
+      || isAutomationPausedByActiveHours(s);
+    const effectiveNextTriggerAt = s.nextTriggerAt || 0;
+    const diagnosticRepairs = Array.isArray(ensured?.repairs)
+      ? ensured.repairs
+      : [];
+    const backgroundClockRepaired = diagnosticRepairs.some(repair => (
+      repair === 'pwm-trigger'
+      || repair === 'pwm-alarm'
+      || repair === 'smart-on-clock'
+    ));
+
+    add(!!storedSchedule, t('diagnoseStorageRW'));
+    add(s.enabled === true, t('diagnoseEnabledPrefix') + s.enabled + ' (' + (s.enabled ? t('diagnoseOn') : t('diagnoseOff')) + ')');
+    add(!!s.mode, t('diagnoseMode') + (s.mode || '?'));
+    add(s.clockMode !== undefined, t('diagnoseClockMode') + (s.clockMode ? t('diagnoseClock') : t('diagnoseInterval')));
+    if (s.clockMode === false && s.enabled
+      && !automationPausedByActiveHours && !effectiveNextTriggerAt) {
+      add(false, t('diagnoseMissingTrigger'));
+    } else if (effectiveNextTriggerAt) {
+      const repairedLabel = backgroundClockRepaired
+        ? t('diagnoseBgWriteback')
+        : (storedSchedule.nextTriggerAt === effectiveNextTriggerAt ? '' : t('diagnoseBgWriteback'));
+      add(true, t('diagnoseTriggerTime') + new Date(effectiveNextTriggerAt).toLocaleTimeString() + repairedLabel);
     }
-    let leakedRuntimeAlarmCount = 0;
-
-    // 修复只允许后台执行。Popup 消费 before/repair/after，不再直接写 storage，
-    // 因而复制报告能同时保留事故首现场与修复后的收敛状态。
-    const nowMs = Date.now();
-    appendPwmDiagnosticEvidence({ add, translate: t }, diagnosticState, fmt);
-
-    appendPopupSelfDiagnostics({ add, translate: t }, s);
-    appendScheduleConfigurationDiagnostics(
-      { add, translate: t },
-      diagnosticState,
-      storedSchedule.nextTriggerAt
-    );
 
     // 2. 检查闹钟 — 运行闹钟只允许后台自愈，确保创建前后都复核运行时段门禁。
     let alarms = await chrome.alarms.getAll();
-    const pwmAlarm = alarms.find(a => a.name === 'ac-pwm');
-    leakedRuntimeAlarmCount = [
-      pwmAlarm,
-      alarms.find(a => a.name === 'ac-badge-tick'),
-      alarms.find(a => a.name === 'ac-watchdog'),
-      ...(!automationEnabled
-        ? [alarms.find(a => a.name === 'ac-smart-weather')]
-        : [])
-    ].filter(Boolean).length;
-    if (!automationEnabled) {
-      if (leakedRuntimeAlarmCount) {
-        add(false, t('diagnoseRuntimeAlarmsLeaked', leakedRuntimeAlarmCount), {
-          code: 'SCHED-RUNTIME-ALARMS-LEAKED',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 0
-        });
-      } else {
-        add(true, clearedAlarmCount
-          ? t('diagnoseRuntimeAlarmsCleared', clearedAlarmCount)
-          : t('diagnoseRuntimeAlarmsInactive'), {
-          level: clearedAlarmCount ? 'repaired' : 'info',
-          code: clearedAlarmCount ? 'SCHED-RUNTIME-ALARMS-CLEARED' : 'SCHED-RUNTIME-INACTIVE',
-          domain: t('diagnoseDomainScheduler')
-        });
-      }
-    } else if (automationPausedByActiveHours) {
-      if (leakedRuntimeAlarmCount) {
-        add(false, t('diagnoseRuntimeAlarmsLeaked', leakedRuntimeAlarmCount), {
-          code: 'SCHED-RUNTIME-ALARMS-LEAKED',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 0
-        });
-      } else {
-        add(true, clearedAlarmCount
-          ? t('diagnoseRuntimeAlarmsCleared', clearedAlarmCount)
-          : t('diagnoseAutomationPaused'), {
-          level: clearedAlarmCount ? 'repaired' : 'info',
-          code: clearedAlarmCount ? 'SCHED-RUNTIME-ALARMS-CLEARED' : 'SCHED-ACTIVE-HOURS-PAUSED',
-          domain: t('diagnoseDomainScheduler')
-        });
-      }
+    const pwmAlarm = ensured?.alarms?.pwm || alarms.find(a => a.name === 'ac-pwm');
+    if (automationPausedByActiveHours) {
+      add(true, t('diagnoseAutomationPaused'));
     } else {
-      const pwmWasRepaired = repairItems.includes('pwm-alarm');
-      if (pwmAlarm) {
-        add(true, t('diagnosePwmExists') + t('diagnosePwmTrigger')
-          + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')', pwmWasRepaired ? {
-          level: 'repaired',
-          code: 'SCHED-PWM-REPAIRED',
-          domain: t('diagnoseDomainScheduler'),
-          priority: 10
-        } : {});
-      } else if (pwmStepInFlight) {
-        add(true, t('diagnosePwmInFlight'), {
-          level: 'info',
-          code: 'SCHED-PWM-IN-FLIGHT',
-          domain: t('diagnoseDomainScheduler')
-        });
-      } else {
-        add(false, t('diagnosePwmMissing'), {
-          code: 'SCHED-PWM-MISSING',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 5
-        });
-      }
+      add(!!pwmAlarm, t('diagnosePwmExists') + (pwmAlarm ? t('diagnosePwmTrigger') + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
       if (pwmAlarm && s.clockMode === false && !effectiveNextTriggerAt) {
-        add(false, t('diagnosePwmDesync'), {
-          code: 'SCHED-PWM-DESYNC',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 5
-        });
+        add(false, t('diagnosePwmSync'));
       } else if (pwmAlarm && effectiveNextTriggerAt) {
-        const pwmAligned = areDiagnosticTriggersAligned(pwmAlarm.scheduledTime, effectiveNextTriggerAt);
-        add(pwmAligned, t(pwmAligned ? 'diagnosePwmSync' : 'diagnosePwmDesync')
-          + (pwmTriggerRepaired ? t('diagnoseBgWriteback') : ''), {
-          code: 'SCHED-PWM-DESYNC',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 5
-        });
+        add(areDiagnosticTriggersAligned(pwmAlarm.scheduledTime, effectiveNextTriggerAt), t('diagnosePwmSync') + (backgroundClockRepaired ? t('diagnoseBgWriteback') : ''));
       }
 
-      const currentSmartClockAssessment = classifySmartOnClock(
-        s,
-        pwmAlarm?.scheduledTime || effectiveNextTriggerAt,
-        {
-          now: nowMs,
-          plannedAt: Number(s._clockPlannedAt)
-            || Number(storedSchedule.alarmCreatedAt)
-            || 0,
-          nextAction: s._nextAction || s.pwmState,
-          requirePlannedAt: true
-        }
-      );
-      const smartClockRepairVerified = repairItems.includes('smart-on-clock')
-        && (!currentSmartClockAssessment.applicable
-          || currentSmartClockAssessment.valid);
-      if (smartClockRepairVerified) {
-        add(true, t('diagnoseSmartOnClockRepaired'), {
-          level: 'repaired',
-          code: 'SCHED-SMART-ON-CLOCK-REPAIRED',
-          domain: t('diagnoseDomainScheduler'),
-          priority: 5
-        });
-      } else if (currentSmartClockAssessment.applicable
-          && !currentSmartClockAssessment.valid) {
-        const skippedNearest = currentSmartClockAssessment.kind
-          === 'skipped-nearest-boundary';
-        const invalidClockMetadata = skippedNearest ? {
-          code: 'SCHED-SMART-ON-CLOCK-SKIPPED',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionRecheckRecovery'),
-          priority: 0
-        } : {
-          code: 'SCHED-SMART-ON-CLOCK-INVALID',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionRecheckRecovery'),
-          priority: 0
-        };
-        add(false, t(
-          skippedNearest
-            ? 'diagnoseSmartOnClockSkipped'
-            : 'diagnoseSmartOnClockInvalid',
-          fmt(currentSmartClockAssessment.expectedAt),
-          fmt(currentSmartClockAssessment.candidateAt)
-        ), invalidClockMetadata);
-      }
+      const badgeAlarm = ensured?.alarms?.badge
+        || alarms.find(a => a.name === 'ac-badge-tick');
+      add(!!badgeAlarm, t('diagnoseBadgeAlarm') + (badgeAlarm ? t('diagnoseBadgeRebuilt') + new Date(badgeAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
 
-      const countdownPresentation = classifyCountdownPresentation(s);
-      if (countdownPresentation.kind === 'phase-reconcile' && !pwmStepInFlight) {
-        add(false, t(
-          'diagnosePhaseStatusDesync',
-          t(countdownPresentation.action === 'on' ? 'actionOn' : 'actionOff')
-        ), {
-          level: 'warning',
-          code: 'SCHED-PHASE-STATUS-DESYNC',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionRecheckRecovery'),
-          priority: 25
-        });
-      }
-
-      const badgeAlarm = alarms.find(a => a.name === 'ac-badge-tick');
-      const badgeWasRepaired = repairItems.includes('badge-alarm');
-      add(!!badgeAlarm, t('diagnoseBadgeAlarm') + (badgeAlarm
-        ? t(badgeWasRepaired ? 'diagnoseAlarmRebuilt' : 'diagnoseAlarmScheduled')
-          + new Date(badgeAlarm.scheduledTime).toLocaleTimeString() + ')'
-        : t('diagnoseAlarmMissing')), badgeAlarm ? (badgeWasRepaired ? {
-          level: 'repaired',
-          code: 'SCHED-BADGE-REPAIRED',
-          domain: t('diagnoseDomainScheduler'),
-          priority: 30
-        } : {}) : {
-          level: 'warning',
-          code: 'SCHED-BADGE-MISSING',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 40
-        });
-
-      const watchdogAlarm = alarms.find(a => a.name === 'ac-watchdog');
-      const watchdogWasRepaired = repairItems.includes('watchdog-alarm');
-      add(!!watchdogAlarm, t('diagnoseWatchdog') + (watchdogAlarm
-        ? t(watchdogWasRepaired ? 'diagnoseAlarmRebuilt' : 'diagnoseAlarmScheduled')
-          + new Date(watchdogAlarm.scheduledTime).toLocaleTimeString() + ')'
-        : t('diagnoseAlarmMissing')), watchdogAlarm ? (watchdogWasRepaired ? {
-          level: 'repaired',
-          code: 'SCHED-WATCHDOG-REPAIRED',
-          domain: t('diagnoseDomainScheduler'),
-          priority: 30
-        } : {}) : {
-          level: 'warning',
-          code: 'SCHED-WATCHDOG-MISSING',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 40
-        });
+      const watchdogAlarm = ensured?.alarms?.watchdog
+        || alarms.find(a => a.name === 'ac-watchdog');
+      add(!!watchdogAlarm, t('diagnoseWatchdog') + (watchdogAlarm ? t('diagnoseBadgeRebuilt') + new Date(watchdogAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
     }
 
-    // 智能天气仅展示后台 alarm/cache 状态，不在 Popup 重复修复。
-    const smartWeatherDiagnostics = appendSmartWeatherDiagnostics(
-      { add, translate: t },
-      diagnosticState,
-      alarms
-    );
-    if (smartWeatherDiagnostics) await smartWeatherDiagnostics;
+    // 2.0c 智能模式天气预取链路：ac-smart-weather one-shot 闹钟 + ac_smart_weather 缓存新鲜度。
+    // v0.8.0 智能模式新增，此前诊断漏检——闹钟丢失后天气冻结、等效温度/建议分钟数不再更新却无红灯。
+    // 后台 ensureDiagnostics 已在上方补建；此处仅展示状态与缓存新鲜度，不重复补建。
+    const smartOnDiag = !!s.smartMode?.enabled;
+    if (!smartOnDiag) {
+      add(true, t('diagnoseSmartModeOff'));
+    } else {
+      add(true, t('diagnoseSmartModeOn'));
+      const smartWeatherAlarm = ensured?.alarms?.smartWeather || alarms.find(a => a.name === 'ac-smart-weather');
+      add(!!smartWeatherAlarm, t('diagnoseSmartWeatherAlarm') + (smartWeatherAlarm
+        ? t('diagnoseBadgeRebuilt') + new Date(smartWeatherAlarm.scheduledTime).toLocaleTimeString() + ')'
+        : ' ' + t('diagnoseSmartWeatherAlarmMissing')));
+
+      const weatherRes = await chrome.storage.local.get('ac_smart_weather');
+      const weatherCache = weatherRes.ac_smart_weather;
+      const fetchedAt = Number(weatherCache?.fetchedAt) || 0;
+      const ageMs = getTimestampAgeMs(fetchedAt);
+      if (ageMs !== null) {
+        const ageMin = Math.round(ageMs / 60000);
+        if (ageMs <= 60 * 60000) {
+          add(true, t('diagnoseSmartWeatherFresh', ageMin));
+        } else {
+          add(false, t('diagnoseSmartWeatherStale', ageMin));
+        }
+      } else {
+        add(false, t('diagnoseSmartWeatherNoCache'));
+      }
+    }
 
     // 2.1 全局运行时段(同日 white-list)与 ac-active-boundary 闹钟(指北固定 5 闹钟之一)。
     // activeHours.enabled=false 表示全天运行,无边界闹钟是预期,显示透明绿。
     if (s.activeHours?.enabled === true) {
       add(true, t('diagnoseActiveHoursOn', s.activeHours.start || '?', s.activeHours.end || '?'));
-      if (automationEnabled) {
-        const boundaryAlarm = alarms.find(a => a.name === 'ac-active-boundary') || await chrome.alarms.get('ac-active-boundary');
-        add(!!boundaryAlarm, boundaryAlarm
-          ? t('diagnoseActiveBoundary') + t('diagnoseAlarmScheduled') + new Date(boundaryAlarm.scheduledTime).toLocaleTimeString() + ')'
-          : t('diagnoseActiveBoundaryMissing'), {
-          code: 'SCHED-ACTIVE-BOUNDARY-MISSING',
-          domain: t('diagnoseDomainScheduler'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 15
-        });
-      }
+      const boundaryAlarm = alarms.find(a => a.name === 'ac-active-boundary') || await chrome.alarms.get('ac-active-boundary');
+      add(!!boundaryAlarm, t('diagnoseActiveBoundary') + (boundaryAlarm ? t('diagnoseBadgeRebuilt') + new Date(boundaryAlarm.scheduledTime).toLocaleTimeString() + ')' : ' ' + t('diagnoseActiveBoundaryMissing')));
     } else {
-      add(true, t('diagnoseActiveHoursOff'), {
-        level: 'info',
-        code: 'CFG-ACTIVE-HOURS-OFF',
-        domain: t('diagnoseDomainConfig')
-      });
+      add(true, t('diagnoseActiveHoursOff'));
     }
 
     // 2.2 heartbeat: storage __heartbeat 每 20s 写一次(background.js runHeartbeat)。
@@ -2367,144 +1180,49 @@ btnDiagnose.addEventListener('click', async () => {
       if (hbAgeMs !== null && hbAgeMs < 60 * 1000) {
         add(true, t('diagnoseHeartbeat', hbAge));
       } else {
-        add(false, t('diagnoseHeartbeatStale', hbAge), {
-          level: 'warning',
-          code: 'SW-HEARTBEAT-STALE',
-          domain: t('diagnoseDomainBackground'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 60
-        });
+        add(false, t('diagnoseHeartbeatStale', hbAge));
       }
     }
 
     if (pwmAlarm && s.alarmCreatedAt && s.alarmDelayMinutes) {
       const dueAt = s.alarmCreatedAt + s.alarmDelayMinutes * 60000;
       const overdue = dueAt <= Date.now();
-      add(!overdue, t(overdue ? 'diagnoseAlarmExpired' : 'diagnoseAlarmNotExpired') + new Date(dueAt).toLocaleTimeString() + ')', {
-        code: 'SCHED-DEADLINE-EXPIRED',
-        domain: t('diagnoseDomainScheduler'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 10
-      });
+      add(!overdue, t('diagnoseAlarmNotExpired') + new Date(dueAt).toLocaleTimeString() + ')');
     }
 
     // 3. 检查 AC 页面
     const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
     const exactHomeTabs = tabs.filter(tab => tab.url === 'https://w5.ab.ust.hk/njggt/app/home');
     const exactHomeTab = exactHomeTabs.find(tab => !tab.discarded) || null;
-    add(exactHomeTabs.length > 0, t('diagnoseTabOpen') + exactHomeTabs.length + t('diagnoseTabCount'),
-      exactHomeTabs.length > 0 ? {} : {
-        level: automationEnabled ? 'warning' : 'info',
-        code: 'PAGE-HOME-MISSING',
-        domain: t('diagnoseDomainPage'),
-        action: t('diagnoseActionOpenACPage'),
-        priority: 40
-      });
-    if (exactHomeTabs.length > 0 && !exactHomeTab) {
-      add(false, t('diagnoseTabDiscarded'), {
-        level: automationEnabled ? 'warning' : 'info',
-        code: 'PAGE-HOME-DISCARDED',
-        domain: t('diagnoseDomainPage'),
-        action: t('diagnoseActionOpenACPage'),
-        priority: 40
-      });
-    }
+    add(exactHomeTabs.length > 0, t('diagnoseTabOpen') + exactHomeTabs.length + t('diagnoseTabCount'));
     if (exactHomeTab) {
       add(true, t('diagnoseTabNotDiscarded'));
       try {
         const status = bgSchedule.actualStatus;
         const statusAccepted = !!status && status.success !== false && status.invalidTarget !== true;
-        add(statusAccepted, statusAccepted
-          ? t('diagnoseContentOK')
-          : t('diagnoseContentNoResponse') + String(status?.error || '?').slice(0, 60), {
-          code: 'PAGE-CONTENT-UNREACHABLE',
-          domain: t('diagnoseDomainPage'),
-          action: t('diagnoseActionReloadACPage'),
-          priority: 10
-        });
-        if (statusAccepted) {
-          add(typeof status.isOn === 'boolean', t('diagnoseAcReadable') + (typeof status.isOn === 'boolean'
-            ? (status.isOn ? 'ON' : 'OFF')
-            : '?'), {
-            code: 'PAGE-AC-UNREADABLE',
-            domain: t('diagnoseDomainPage'),
-            action: t('diagnoseActionReloadACPage'),
-            priority: 15
-          });
-        }
+        add(statusAccepted, t('diagnoseContentOK'));
+        add(statusAccepted && typeof status.isOn === 'boolean', t('diagnoseAcReadable') + (status?.isOn ? 'ON' : 'OFF'));
         if (statusAccepted && status?.disabled) {
-          add(false, t('diagnoseAcDisabled'), {
-            level: automationEnabled ? 'error' : 'warning',
-            code: 'PAGE-AC-DISABLED',
-            domain: t('diagnoseDomainPage'),
-            action: t('diagnoseActionOpenACPage'),
-            priority: 10
-          });
+          add(false, t('diagnoseAcDisabled'));
         }
       } catch (e) {
-        add(false, t('diagnoseContentNoResponse') + (e.message||'').slice(0,60), {
-          code: 'PAGE-CONTENT-UNREACHABLE',
-          domain: t('diagnoseDomainPage'),
-          action: t('diagnoseActionReloadACPage'),
-          priority: 10
-        });
+        add(false, t('diagnoseContentNoResponse') + (e.message||'').slice(0,60));
       }
     }
 
     // 4. 后台状态
     try {
-      const bgAccepted = !!bg && bg.success !== false;
-      if (!bgProbeFailed) {
-        add(bgAccepted, t(bgAccepted ? 'diagnoseSWOK' : 'diagnoseSWNoResponse'), {
-          code: 'SW-SNAPSHOT-FAILED',
-          domain: t('diagnoseDomainBackground'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 5
-        });
-      }
-      if (bgAccepted) {
-        add(bg.clockMode !== undefined, t('diagnoseClockSync') + (bg.clockMode === undefined
-          ? '?'
-          : (bg.clockMode ? t('diagnoseClock') : t('diagnoseInterval'))), {
-          code: 'SW-CLOCK-SNAPSHOT-MISSING',
-          domain: t('diagnoseDomainBackground'),
-          action: t('diagnoseActionReloadExtension'),
-          priority: 15
-        });
-      }
+      add(!!bg, t('diagnoseSWOK'));
+      add(bg.clockMode !== undefined, t('diagnoseClockSync') + (bg.clockMode ? t('diagnoseClock') : t('diagnoseInterval')));
       // PWM 失败提示:runPwmStep 验证失败时会写 pageTimerError。
       // 主动展示在诊断面板,方便定位"到时间没关/没开"的根因。
       if (s.pageTimerError) {
-        const boundaryStillSettling = pwmStepInFlight || pwmBoundaryDuePending;
-        add(false, t(boundaryStillSettling
-          ? 'diagnosePwmPreviousErrorWhileSettling'
-          : 'diagnosePwmError') + String(s.pageTimerError).slice(0, 120), {
-          ...(boundaryStillSettling ? { level: 'warning' } : {}),
-          code: boundaryStillSettling
-            ? 'SAFETY-TIMER-PREVIOUS-FAILURE'
-            : 'SAFETY-TIMER-FAILED',
-          domain: t('diagnoseDomainSafety'),
-          action: t('diagnoseActionCheckTimer'),
-          priority: boundaryStillSettling ? 20 : 0
-        });
-      } else if (preRepairSchedule?.pageTimerError) {
-        add(true, t('diagnosePwmPreviousErrorRecovered')
-          + String(preRepairSchedule.pageTimerError).slice(0, 120), {
-          level: 'repaired',
-          code: 'SAFETY-TIMER-RECOVERED',
-          domain: t('diagnoseDomainSafety'),
-          priority: 20
-        });
+        add(false, t('diagnosePwmError') + String(s.pageTimerError).slice(0, 120));
       } else {
         add(true, t('diagnosePwmErrorEmpty'));
       }
     } catch (e) {
-      add(false, t('diagnoseSWNoResponse'), {
-        code: 'SW-SNAPSHOT-FAILED',
-        domain: t('diagnoseDomainBackground'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 5
-      });
+      add(false, t('diagnoseSWNoResponse'));
     }
 
     // 4.5. v0.5.10 page timer 跨设备主同步通道诊断
@@ -2516,91 +1234,74 @@ btnDiagnose.addEventListener('click', async () => {
           const localNext = effectiveNextTriggerAt || s.nextTriggerAt || 0;
           add(true, t('diagnosePageTimerExpr', pt.value, fmt(localNext), s.pwmState));
         } else if (pt?.success === false || pt?.invalidTarget === true) {
-          add(false, t('diagnosePageTimerFail') + String(pt.error || '').slice(0,60), {
-            code: 'SAFETY-TIMER-READ-FAILED',
-            domain: t('diagnoseDomainSafety'),
-            action: t('diagnoseActionCheckTimer'),
-            priority: 10
-          });
+          add(false, t('diagnosePageTimerFail') + String(pt.error || '').slice(0,60));
         } else {
-          const pageTimerRequired = isDiagnosticPageTimerRequired(
-            s,
-            bgSchedule.actualStatus?.isOn,
-            automationPausedByActiveHours
-          );
-          add(!pageTimerRequired, t(pageTimerRequired ? 'diagnosePageTimerMissing' : 'diagnosePageTimerEmpty'),
-            pageTimerRequired ? {
-              code: 'SAFETY-TIMER-MISSING',
-              domain: t('diagnoseDomainSafety'),
-              action: t('diagnoseActionCheckTimer'),
-              priority: 0
-            } : {
-              level: 'info',
-              code: 'SAFETY-TIMER-EMPTY',
-              domain: t('diagnoseDomainSafety')
-            });
+          add(true, t('diagnosePageTimerEmpty'));
         }
       } catch (e) {
-        add(false, t('diagnosePageTimerFail') + (e.message||'').slice(0,60), {
-          code: 'SAFETY-TIMER-READ-FAILED',
-          domain: t('diagnoseDomainSafety'),
-          action: t('diagnoseActionCheckTimer'),
-          priority: 10
-        });
+        add(false, t('diagnosePageTimerFail') + (e.message||'').slice(0,60));
       }
     } else if (s.enabled) {
-      add(true, t('diagnosePageTimerPending'), {
-        level: 'info',
-        code: 'SAFETY-TIMER-NOT-CHECKED',
-        domain: t('diagnoseDomainSafety')
-      });
+      add(true, t('diagnosePageTimerPending'));
     }
 
-    // 4.6 页面定时器重试有两条互斥路径：正常 PWM 失败保持当前相位并由 live ac-pwm
-    // 在 1 分钟后重跑；停用／运行时段退出等非 PWM 安全关机才使用独立
-    // ac-page-timer-retry。两者不能因 pageTimerRetryMinutes=0 被混报为“无重试”。
+    // 4.6 ac-page-timer-retry 闹钟(指北固定 5 闹钟之一,此前诊断漏检)。
+    // PWM 验证 runPwmStep 失败或新鲜页 page timer 读不回时,持久化 pageTimerRetryMinutes 与
+    // ac-page-timer-retry 闹钟,1 分钟内自动重试 OFF 关机。诊断应显示这两者是否激活。
     const retryMin = Number(s.pageTimerRetryMinutes) || 0;
-    const pwmRetryAt = Number(pwmAlarm?.scheduledTime) || 0;
-    const pwmRetryActive = isPwmPageTimerRetryActive(s.pageTimerError, pwmRetryAt);
     if (retryMin > 0) {
       const retryAlarm = alarms.find(a => a.name === 'ac-page-timer-retry') || await chrome.alarms.get('ac-page-timer-retry');
       const retryAt = retryAlarm?.scheduledTime || 0;
       const retryStr = retryAt ? new Date(retryAt).toLocaleTimeString() : '?';
-      add(!!retryAlarm, retryAlarm
-        ? t('diagnosePageTimerRetry', retryStr, retryMin)
-        : t('diagnosePageTimerRetryAlarmMissing', retryMin), retryAlarm ? {
-        level: 'warning',
-        code: 'SAFETY-TIMER-RETRYING',
-        domain: t('diagnoseDomainSafety'),
-        action: t('diagnoseActionCheckTimer'),
-        priority: 20
-      } : {
-        code: 'SAFETY-RETRY-ALARM-MISSING',
-        domain: t('diagnoseDomainSafety'),
-        action: t('diagnoseActionCheckTimer'),
-        priority: 5
-      });
-    } else if (pwmRetryActive) {
-      add(true, t('diagnosePageTimerPwmRetry', new Date(pwmRetryAt).toLocaleTimeString()), {
-        level: 'info',
-        code: 'SAFETY-PWM-RETRYING',
-        domain: t('diagnoseDomainSafety')
-      });
+      add(!!retryAlarm, t('diagnosePageTimerRetry', retryStr, retryMin));
     } else {
-      add(true, t('diagnosePageTimerRetryNone'), {
-        level: 'info',
-        code: 'SAFETY-NO-RETRY',
-        domain: t('diagnoseDomainSafety')
-      });
+      add(true, t('diagnosePageTimerRetryNone'));
     }
 
-    // 5. SW 状态可观测性：只同步呈现诊断开始时捕获的首现场。
-    appendServiceWorkerRuntimeDiagnostics(
-      { add, translate: t },
-      captured,
-      diagnosticState,
-      fmt
-    );
+    // 5. SW 状态可观测性:启动时间 / init 完成时间 / 内存 schedule 与 storage 是否一致
+    // 注意:getSwStatus 失败、未响应、或 SW 跑旧代码时 sw 可能为 undefined/success:false,
+    // 必须在所有分支都显示信息,避免静默盲区。
+    // 评判原则:getSwStatus 只是辅助诊断,不是核心功能。如果 popup 已自愈 storage 接管,
+    // 即使 SW 没响应,功能上也是 OK 的,显示绿灯而非红灯。
+    let sw = null;
+    try {
+      sw = await sendDiagnosticRuntimeMessage({ type: 'getSwStatus' });
+    } catch (e) {
+      // sendResponse 异常,记录但不直接红灯
+      console.warn('getSwStatus sendMessage 异常:', e?.message);
+    }
+    if (sw && sw.success === true) {
+      // SW 响应成功:显示三方一致校验
+      const swAgeSec = Math.round((sw.swAgeMs || 0) / 1000);
+      const initAgeSec = sw.initAgeMs >= 0 ? Math.round(sw.initAgeMs / 1000) : -1;
+      add(sw.initCompleted, t('diagnoseSWInitDone', swAgeSec, initAgeSec));
+      // L2 offscreen 长连接保活页(阶段58):每分钟 badge-tick 顺带 ensureOffscreen 重建。
+      // 三态兼容:v0.6.7+ SW 返回 offscreenAlive 真值(true/false);旧 SW 不返回该字段(undefined),
+      // 视为 SW 跑旧代码,不打红灯避免误导用户以为 offscreen 失效。
+      add(sw.offscreenAlive !== false, sw.offscreenAlive === true
+        ? t('diagnoseOffscreenPresent')
+        : (sw.offscreenAlive === false ? t('diagnoseOffscreenMissing') : t('diagnoseOffscreenUnknown')));
+      const memNext = sw.memorySchedule?.nextTriggerAt || 0;
+      const storedNext = storedSchedule.nextTriggerAt || 0;
+      const memLive = sw.liveAlarmScheduledTime || 0;
+      if (automationPausedByActiveHours) {
+        // 暂停态预期没有 PWM 时钟，不把三方全空误报为失步。
+      } else if (areDiagnosticTriggersAligned(memLive, memNext, storedNext)) {
+        add(true, t('diagnoseTriMatch', fmt(memLive)));
+      } else {
+        add(false, t('diagnoseTriMismatch', fmt(memLive), fmt(memNext), fmt(storedNext)));
+      }
+    } else if (ensured?.success === true) {
+      // ensureDiagnostics 已由后台成功处理；getSwStatus 只是附加可观测性接口。
+      add(true, t('diagnoseBgRepairSw'));
+    } else if (sw && sw.success === false) {
+      add(false, t('diagnoseGetSwFailed') + (sw.error||'?').slice(0,80));
+    } else if (sw) {
+      add(false, t('diagnoseGetSwAbnormal') + JSON.stringify(sw).slice(0,80));
+    } else {
+      // SW 完全无响应且 popup 未自愈 — 这是真问题
+      add(false, t('diagnoseGetSwNone'));
+    }
 
     // 6. 构建时间戳:让用户/诊断能直接判断扩展实际加载的是哪次 build
     //    (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
@@ -2618,13 +1319,7 @@ btnDiagnose.addEventListener('click', async () => {
     if (testMsg && !testMsg.startsWith('pwmSettings')) {
       add(true, t('diagnoseI18nOK', i18nLang, testMsg.slice(0,20)));
     } else {
-      add(false, t('diagnoseI18nNoTrans', i18nLang, testMsg), {
-        level: 'warning',
-        code: 'I18N-TRANSLATION-MISSING',
-        domain: t('diagnoseDomainGeneral'),
-        action: t('diagnoseActionReloadExtension'),
-        priority: 90
-      });
+      add(false, t('diagnoseI18nNoTrans', i18nLang, testMsg));
     }
 
     // 8. 最近后台异常：只读本机有界环形日志，并入现有复制诊断报告。
@@ -2633,36 +1328,16 @@ btnDiagnose.addEventListener('click', async () => {
       const diagnosticStorage = await chrome.storage.local.get('ac_diagnostic_log');
       appendRecentDiagnosticLogLines(lines, diagnosticStorage?.ac_diagnostic_log);
     } catch (e) {
-      add(false, t('diagnoseRecentErrorsReadFailed') + (e.message || '').slice(0, 80), {
-        level: 'warning',
-        code: 'DIAG-HISTORY-READ-FAILED',
-        domain: t('diagnoseDomainGeneral'),
-        action: t('diagnoseActionCopyReport'),
-        priority: 95
-      });
+      add(false, t('diagnoseRecentErrorsReadFailed') + (e.message || '').slice(0, 80));
     }
   } catch (e) {
-    add(false, t('diagnoseException') + (e.message||'').slice(0,80), {
-      code: 'DIAG-UNEXPECTED',
-      domain: t('diagnoseDomainGeneral'),
-      action: t('diagnoseActionCopyReport'),
-      priority: 0
-    });
+    lines.push('❌ ' + t('diagnoseException') + (e.message||'').slice(0,80));
   } finally {
-    const reportLines = [...report.getSummaryLines(), '', ...lines];
-    renderDiagnoseResult(reportLines);
-    lastDiagLines = reportLines.slice();
+    renderDiagnoseResult(lines);
+    lastDiagLines = lines.slice();
     if (btnCopyDiag) btnCopyDiag.hidden = false;
     btnDiagnose.disabled = false;
-    const completionLevel = report.getCompletionLevel();
-    showStatus(
-      t(completionLevel === 'error'
-        ? 'diagnoseCompleteIssues'
-        : (completionLevel === 'warning' ? 'diagnoseCompleteWarnings' : 'diagnoseComplete')),
-      completionLevel === 'warning' ? '' : completionLevel
-    );
+    showStatus(t('diagnoseComplete'), 'success');
   }
 });
 
-// 独立兜底脚本只在该标记缺失时接管诊断按钮。必须放在完整处理器注册之后。
-globalThis.__AC_POPUP_DIAGNOSTICS_READY__ = true;

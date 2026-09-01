@@ -244,35 +244,46 @@ function planComfortStart(localSchedule, pageTimerInput, opts = {}) {
   const now = Number.isFinite(opts.now) ? opts.now : Date.now();
   const requestedMinutes = Math.max(1, Math.ceil(Number(opts.minutes) || 5));
   const minuteMs = 60_000;
+  const normalizeFutureTarget = value => {
+    const targetAt = Number(value);
+    return Number.isSafeInteger(targetAt) && targetAt > now
+      ? Math.ceil(targetAt / minuteMs) * minuteMs
+      : 0;
+  };
   const computedMinimumTargetAt = Math.ceil(
     (now + requestedMinutes * minuteMs) / minuteMs
   ) * minuteMs;
-  const restoredMinimumTargetAt = Number(opts.minimumTargetAt);
-  const minimumTargetAt = Number.isSafeInteger(restoredMinimumTargetAt)
-      && restoredMinimumTargetAt > now
-    ? Math.ceil(restoredMinimumTargetAt / minuteMs) * minuteMs
-    : computedMinimumTargetAt;
+  const minimumTargetAt = normalizeFutureTarget(opts.minimumTargetAt)
+    || computedMinimumTargetAt;
+  const preferredTargetAt = normalizeFutureTarget(opts.preferredTargetAt);
+  const temporaryTargetAt = normalizeFutureTarget(opts.temporaryTargetAt);
+  const preservedTargetAt = normalizeFutureTarget(opts.preservedTargetAt);
 
   const storedTargetAt = Number(localSchedule?.pageTimerTargetAt);
   const freshStoredTargetAt = isPageTimerProofFresh(localSchedule, { now })
       && Number.isSafeInteger(storedTargetAt)
       && storedTargetAt > now
+      && storedTargetAt !== temporaryTargetAt
     ? storedTargetAt
     : 0;
   const parsedPageTimer = pageTimerInput?.found === true
     ? parsePageTimerValue(pageTimerInput.value, now)
     : null;
   const liveTargetAt = parsedPageTimer?.valid === true
+      && parsedPageTimer.targetMs !== temporaryTargetAt
     ? parsedPageTimer.targetMs
     : 0;
   const targetAt = Math.max(
     minimumTargetAt,
+    preferredTargetAt,
+    preservedTargetAt,
     freshStoredTargetAt,
     liveTargetAt
   );
 
   return {
     minimumTargetAt,
+    preferredTargetAt,
     targetAt,
     timerMinutes: Math.max(1, Math.ceil((targetAt - now) / minuteMs)),
     reuseFreshProof: freshStoredTargetAt === targetAt

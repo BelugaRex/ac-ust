@@ -22,7 +22,7 @@
 | 模式 | 循环／智能互斥且始终单选 | E2E 双向点击；Logic 并发/回写 | — |
 | 循环定时 | 1+ 整数保存、0 非法原文保留、21/9 控制值 | E2E 用户输入；Logic 全分支 | 真实整周期：Manual |
 | 智能控制 | 灵敏度预览/持久化、缓存建议与 21/9 恢复 | E2E Popup＋Worker；Logic 算法矩阵 | 当前体感：Manual |
-| 天气获取 | 四个生产 URL、`no-store`、同站解析、缓存、23/7 计划 | E2E 确定性四源链 | 当前端点：Live |
+| 天气获取 | 温度／湿度／风速三个生产 URL、`no-store`、同站解析、缓存、24/6 计划 | E2E 确定性三源链 | 当前端点：Live |
 | 天气失败 | 单源 HTTP 失败不生成伪计划，保留上次成功缓存/计划 | E2E 503；Logic stale/invalid | 长时网络中断：Manual smoke |
 | 天气调度 | `:20/:50` one-shot、目标 `:30/:00`、先续排后预取 | Logic 可控时钟/编排；E2E 观察 alarm | 真实钟点唤醒：Manual smoke |
 | 页面发现 | 只操作完整等于 AC home 的未丢弃标签 | E2E 精确 home；Logic URL 反例 | 登录重定向：Manual |

@@ -12,7 +12,7 @@
 // 6. 断言摘要能定位首要问题并给出下一步，同时两个旧红灯都已消除；
 //    修复可由后台诊断或 popup 兜底完成
 // 7. 真实写入页面关机定时器，并由独立新鲜页确认持久化；验证失败关闭与 OFF 零点击
-// 8. 完整重启后验证智能缓存消费，再以四个生产 URL 获取确定性 HKO 响应
+// 8. 完整重启后验证智能缓存消费，再以三个生产 URL 获取确定性 HKO 响应
 // 9. 验证 fetch→解析→缓存→边界计划→Popup，以及失败时保留上次成功数据
 // 10. 从真实 Popup 操作总开关、运行时段、两种模式、分钟数与灵敏度；
 //     false→true 还要经过一次 ON 成功确认与至少五分钟页面关机保险
@@ -1230,7 +1230,6 @@ async function run() {
       temperature: 32.3,
       dewPoint: 10,
       windSpeedMs: 0,
-      rainMm: 0,
       relativeHumidity: 45
     };
     const smartWorkerState = await restartedWorker.evaluate(async ({ boundaryAt, weather }) => {
@@ -1455,8 +1454,8 @@ async function run() {
         && smartPopupState.snapshot?.offMinutes === 9,
       '真实 Popup 与 Service Worker 对智能模式及 21/9 派生时长一致');
 
-    // === HKO 四源数据：生产 URL → fetch → 解析 → 缓存 → 边界计划 → Popup ===
-    console.log('\n--- 步骤 5: 验证 HKO 四源数据获取全链路 ---\n');
+    // === HKO 三源数据：生产 URL → fetch → 解析 → 缓存 → 边界计划 → Popup ===
+    console.log('\n--- 步骤 5: 验证 HKO 三源数据获取全链路 ---\n');
     const weatherBoundary = new Date();
     weatherBoundary.setSeconds(0, 0);
     if (weatherBoundary.getMinutes() < 30) {
@@ -1472,13 +1471,7 @@ async function run() {
         + '202608241510,HK Observatory,73\n202608241510,Tseung Kwan O,67\n',
       wind: 'Date time,Automatic Weather Station,Direction,Speed,Gust\n'
         + '202608241510,Sai Kung,South,10,21\n'
-        + '202608241510,Tseung Kwan O,Southwest,16,26\n',
-      rainfall: {
-        hourlyRainfall: [
-          { automaticWeatherStation: 'Sai Kung', value: '40', unit: 'mm' },
-          { automaticWeatherStation: 'Tseung Kwan O', value: '6', unit: 'mm' }
-        ]
-      }
+        + '202608241510,Tseung Kwan O,Southwest,16,26\n'
     };
     const weatherFetchState = await restartedWorker.evaluate(async ({ boundaryAt, fixtures }) => {
       const originalFetch = globalThis.fetch;
@@ -1487,8 +1480,7 @@ async function run() {
       const bodies = new Map([
         [expectedUrls.temperature, { type: 'text', body: fixtures.temperature }],
         [expectedUrls.humidity, { type: 'text', body: fixtures.humidity }],
-        [expectedUrls.wind, { type: 'text', body: fixtures.wind }],
-        [expectedUrls.rainfall, { type: 'json', body: fixtures.rainfall }]
+        [expectedUrls.wind, { type: 'text', body: fixtures.wind }]
       ]);
       globalThis.fetch = async (input, init = {}) => {
         const url = String(input);
@@ -1525,30 +1517,31 @@ async function run() {
     }, { boundaryAt: weatherBoundaryAt, fixtures: hkoFixtures });
     console.log('  HKO 成功链:', JSON.stringify(weatherFetchState));
 
-    assert(Object.values(weatherFetchState.expectedUrls || {}).length === 4
-        && weatherFetchState.requests?.length === 4
-        && new Set(weatherFetchState.requests.map(request => request.url)).size === 4
+    assert(Object.values(weatherFetchState.expectedUrls || {}).length === 3
+        && weatherFetchState.requests?.length === 3
+        && new Set(weatherFetchState.requests.map(request => request.url)).size === 3
         && Object.values(weatherFetchState.expectedUrls).every(url => (
           weatherFetchState.requests.some(request => request.url === url)
         ))
         && weatherFetchState.requests.every(request => request.cache === 'no-store'),
-      '真实 Worker 向四个生产 HKO URL 各请求一次，并全部禁用 HTTP 缓存');
+      '真实 Worker 只向温度、湿度、风速三个生产 HKO URL 各请求一次，并全部禁用 HTTP 缓存');
     assert(weatherFetchState.weather?.temperature === 32.6
         && weatherFetchState.weather?.relativeHumidity === 67
         && Math.abs(weatherFetchState.weather?.windSpeedMs - 16 / 3.6) < 1e-9
-        && weatherFetchState.weather?.rainMm === 6
+        && !Object.hasOwn(weatherFetchState.weather || {}, 'rainMm')
         && Number.isFinite(weatherFetchState.weather?.dewPoint),
-      '四源响应按 Tseung Kwan O 同站合并，推导露点并把风速换算为 m/s');
+      '三源响应按 Tseung Kwan O 同站合并，推导露点并把风速换算为 m/s');
     assert(weatherFetchState.prepared?.boundaryAt === weatherBoundaryAt
         && weatherFetchState.plan?.boundaryAt === weatherBoundaryAt
-        && weatherFetchState.plan?.onMinutes === 23
-        && weatherFetchState.plan?.offMinutes === 7
-        && weatherFetchState.plan?.weather?.temperature === 32.6,
-      '获取结果缓存后为目标半点预计算并持久化 23/7 边界计划');
+        && weatherFetchState.plan?.onMinutes === 24
+        && weatherFetchState.plan?.offMinutes === 6
+        && weatherFetchState.plan?.weather?.temperature === 32.6
+        && !Object.hasOwn(weatherFetchState.plan?.weather || {}, 'rainMm'),
+      '获取结果缓存后为目标半点预计算并持久化无雨量字段的 24/6 边界计划');
 
     await restartedPopup.reload({ timeout: 10000, waitUntil: 'load' });
     const fetchedWeatherPopupReady = await restartedPopup.waitForFunction(() => (
-      document.getElementById('smartSuggested')?.textContent?.trim() === '23/30'
+      document.getElementById('smartSuggested')?.textContent?.trim() === '24/30'
       && !document.getElementById('smartUpdated')?.textContent?.includes('--')
     ), null, { timeout: 10000 }).then(() => true).catch(() => false);
     const fetchedWeatherPopup = await restartedPopup.evaluate(() => ({
@@ -1557,10 +1550,10 @@ async function run() {
       updated: document.getElementById('smartUpdated')?.textContent?.trim() || ''
     }));
     assert(fetchedWeatherPopupReady
-        && fetchedWeatherPopup.suggested === '23/30'
+        && fetchedWeatherPopup.suggested === '24/30'
         && /°C/.test(fetchedWeatherPopup.teq)
         && fetchedWeatherPopup.updated !== '--',
-      '真实 Popup 消费刚获取的缓存并显示同一 23/30、Teq 与更新时间');
+      '真实 Popup 消费刚获取的三源缓存并显示同一 24/30、Teq 与更新时间');
 
     const weatherFailureState = await restartedWorker.evaluate(async ({ boundaryAt, fixtures }) => {
       const before = await chrome.storage.local.get([
@@ -1580,9 +1573,6 @@ async function run() {
         }
         if (url === SMART_WEATHER_URLS.wind) {
           return { ok: true, status: 200, text: async () => fixtures.wind };
-        }
-        if (url === SMART_WEATHER_URLS.rainfall) {
-          return { ok: true, status: 200, json: async () => fixtures.rainfall };
         }
         return { ok: false, status: 404, text: async () => '' };
       };
@@ -1609,7 +1599,7 @@ async function run() {
     }, { boundaryAt: weatherBoundaryAt, fixtures: hkoFixtures });
     console.log('  HKO 失败回退:', JSON.stringify(weatherFailureState));
     assert(weatherFailureState.prepared === null
-        && weatherFailureState.requests?.length === 4
+      && weatherFailureState.requests?.length === 3
         && weatherFailureState.requests.every(request => request.cache === 'no-store')
         && weatherFailureState.weatherPreserved
         && weatherFailureState.planPreserved,

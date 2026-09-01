@@ -7,7 +7,7 @@
 | 字段 | 值 |
 | --- | --- |
 | 名称 | AC-UST |
-| 版本 | 0.8.2 |
+| 版本 | 0.8.3 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率（Productivity） |
 | 语言 | 中文（简体）、English |
@@ -23,15 +23,15 @@
 
 PWM AC scheduling, weather-based smart control, active hours, and cross-device phase alignment for HKUST Smart Power Meter.
 
-## 0.8.2 更新说明
+## 0.8.3 更新说明
 
 ### 中文
 
-智能自动开启现在只在整点或半点的首分钟执行，错过后等待下一半点，单次最多开启 25 分钟。天气输入统一使用将军澳站的气温、相对湿度、风速与站点雨量；降雨从无雨到黄色暴雨门槛按连续指数曲线增强影响，最终开启时间最多减少一半。
+修复自动开启偶尔不执行的问题：自动开启现在先通过页面关机定时器以固定截止时间预布防成功后才派发开启，单次输入失效不再让整条开启链终止；关机写入、重启与主世界递归开启的异步竞态也得到修复。天气输入只使用将军澳站的气温、相对湿度与风速；雨量不再请求、缓存或参与控制决策。
 
 ### English
 
-Smart automatic startup now runs only during the first minute of each hour or half-hour, waits for the next half-hour when missed, and limits each ON window to 25 minutes. Weather inputs now use Tseung Kwan O station temperature, humidity, wind, and rainfall. Rain influence increases continuously along an exponential curve up to the Amber Rainstorm threshold, while final ON time is never reduced by more than half.
+Fixes intermittent failure to start automatically: automatic startup now pre-arms the page power-off timer with a fixed deadline before dispatching ON, so a single input failure no longer aborts the chain; asynchronous races around shutdown, restart, and recursive ON are also fixed. Weather inputs now use only Tseung Kwan O station temperature, humidity, and wind; rainfall is no longer requested, cached, or used for control decisions.
 
 ## 详细说明（中文 / zh-CN）
 
@@ -148,12 +148,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.2.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.3.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP、图标和本目录资料通过验证。
-2. 上传 `releases/ac-ust-v0.8.2.zip`。
+2. 上传 `releases/ac-ust-v0.8.3.zip`。
 3. 填写商品详情、隐私声明、权限理由与审核测试说明。
 4. 选择私享（Private）、受信任测试人员和香港地区。
 5. 提交审核时选择推迟发布；审核通过后在允许期限内由作者手动发布。

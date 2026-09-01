@@ -9,6 +9,7 @@ const {
   smartWeatherTargetBoundaryAt,
   nextHalfHourBoundary,
   halfHourBoundaryAtOrBefore,
+  planComfortSmartCycle,
   smartModePageTimerTargetAt,
   nextSafePageTimerTargetAt,
   planSmartModeOnWindow,
@@ -34,7 +35,7 @@ export function runPwmPhaseCases(assertPass) {
 
   assertPass(
     Object.keys(pwmPhase).sort().join(',')
-      === 'alignSmartModeNextTrigger,classifySmartOnClock,halfHourBoundaryAtOrBefore,nextHalfHourBoundary,nextSafePageTimerTargetAt,planNextSmartWeatherPrefetch,planPwmRecovery,planPwmStep,planSmartModeOnWindow,planSmartOnAfterConfirmedOff,planSmartOnRetryExceptionRecovery,reconcilePwmTrigger,smartModePageTimerTargetAt,smartWeatherTargetBoundaryAt'
+      === 'alignSmartModeNextTrigger,classifySmartOnClock,halfHourBoundaryAtOrBefore,nextHalfHourBoundary,nextSafePageTimerTargetAt,planComfortSmartCycle,planNextSmartWeatherPrefetch,planPwmRecovery,planPwmStep,planSmartModeOnWindow,planSmartOnAfterConfirmedOff,planSmartOnRetryExceptionRecovery,reconcilePwmTrigger,smartModePageTimerTargetAt,smartWeatherTargetBoundaryAt'
       && typeof nextSafePageTimerTargetAt === 'function'
       && typeof halfHourBoundaryAtOrBefore === 'function',
     'PWM phase module 导出规划函数、天气预取槽与半点对齐函数'
@@ -67,6 +68,38 @@ export function runPwmPhaseCases(assertPass) {
     'nextHalfHourBoundary: 13:45 → 14:00');
   assertPass(nextHalfHourBoundary(hourTime(13, 30)) === hourTime(14, 0),
     'nextHalfHourBoundary: 半点也进到下一个半点');
+
+  const exactFiveMinuteComfortGap = planComfortSmartCycle(
+    hourTime(13, 20),
+    hourTime(13, 25)
+  );
+  const shortComfortGap = planComfortSmartCycle(
+    hourTime(13, 20),
+    hourTime(13, 25, 0, 1)
+  );
+  const exactBoundaryComfortFloor = planComfortSmartCycle(
+    hourTime(13, 25),
+    hourTime(13, 30)
+  );
+  const afterBoundaryComfortFloor = planComfortSmartCycle(
+    hourTime(13, 31),
+    hourTime(13, 36)
+  );
+  const midnightComfortFloor = planComfortSmartCycle(
+    hourTime(23, 55),
+    hourTime(24, 0)
+  );
+  assertPass(exactFiveMinuteComfortGap.boundaryAt === hourTime(13, 0)
+      && exactFiveMinuteComfortGap.rollsIntoNextBoundary === false
+      && shortComfortGap.boundaryAt === hourTime(13, 30)
+      && shortComfortGap.rollsIntoNextBoundary === true
+      && exactBoundaryComfortFloor.boundaryAt === hourTime(13, 30)
+      && exactBoundaryComfortFloor.rollsIntoNextBoundary === true
+      && afterBoundaryComfortFloor.boundaryAt === hourTime(13, 30)
+      && afterBoundaryComfortFloor.rollsIntoNextBoundary === false
+      && midnightComfortFloor.boundaryAt === hourTime(24, 0)
+      && midnightComfortFloor.rollsIntoNextBoundary === true,
+    'planComfortSmartCycle: 严格不足五分钟或 floor 到达边界才滚入新周期；恰好五分钟保留 OFF，跨小时/跨日稳定');
 
   const safeRetryException = planSmartOnRetryExceptionRecovery(
     { onMinutes: 21 },
@@ -132,6 +165,68 @@ export function runPwmPhaseCases(assertPass) {
       && smartAfterHourWindow.kind === 'defer'
       && smartAfterHourWindow.nextTriggerAt === hourTime(14, 30),
     'planSmartModeOnWindow: 智能自动 ON 仅在 :00/:30 分钟执行，并锚定半点绝对关机截止时间');
+
+  const exactFiveMinuteSmartOn = planSmartModeOnWindow(
+    { onMinutes: 5 },
+    {
+      now: hourTime(13, 30),
+      maxOnMinutes: 25,
+      acIsOn: false,
+      triggeredBoundaryAt: hourTime(13, 30)
+    }
+  );
+  const shortFiveMinuteSmartOn = planSmartModeOnWindow(
+    { onMinutes: 5 },
+    {
+      now: hourTime(13, 30, 0, 1),
+      maxOnMinutes: 25,
+      acIsOn: false,
+      triggeredBoundaryAt: hourTime(13, 30)
+    }
+  );
+  const exactFiveMinuteRemainder = planSmartModeOnWindow(
+    { onMinutes: 6 },
+    {
+      now: hourTime(13, 31),
+      maxOnMinutes: 25,
+      acIsOn: false,
+      triggeredBoundaryAt: hourTime(13, 30)
+    }
+  );
+  const shortFiveMinuteRemainder = planSmartModeOnWindow(
+    { onMinutes: 6 },
+    {
+      now: hourTime(13, 31, 0, 1),
+      maxOnMinutes: 25,
+      acIsOn: false,
+      triggeredBoundaryAt: hourTime(13, 30)
+    }
+  );
+  assertPass(exactFiveMinuteSmartOn.kind === 'allow'
+      && exactFiveMinuteSmartOn.pageTimerTargetAt === hourTime(13, 35)
+      && shortFiveMinuteSmartOn.kind === 'defer'
+      && shortFiveMinuteSmartOn.nextTriggerAt === hourTime(14, 0)
+      && exactFiveMinuteRemainder.kind === 'allow'
+      && exactFiveMinuteRemainder.pageTimerTargetAt === hourTime(13, 36)
+      && shortFiveMinuteRemainder.kind === 'defer'
+      && shortFiveMinuteRemainder.nextTriggerAt === hourTime(14, 0),
+    'planSmartModeOnWindow: OFF→ON→OFF 实际余量不足五分钟时零点击跳过 ON，恰好五分钟仍保留');
+
+  const exactFiveMinuteRetry = planSmartOnRetryExceptionRecovery(
+    { onMinutes: 6 },
+    hourTime(13, 30),
+    { now: hourTime(13, 30, 30), retryAt: hourTime(13, 31) }
+  );
+  const shortFiveMinuteRetry = planSmartOnRetryExceptionRecovery(
+    { onMinutes: 6 },
+    hourTime(13, 30),
+    { now: hourTime(13, 30, 30), retryAt: hourTime(13, 31, 0, 1) }
+  );
+  assertPass(exactFiveMinuteRetry.kind === 'retry-smart-on-exception'
+      && exactFiveMinuteRetry.pageTimerTargetAt === hourTime(13, 36)
+      && shortFiveMinuteRetry.kind === 'defer'
+      && shortFiveMinuteRetry.nextTriggerAt === hourTime(14, 0),
+    'planSmartOnRetryExceptionRecovery: typed retry 执行后不足五分钟则折叠短 ON，等于五分钟仍续试');
 
   const delayedBoundaryNow = hourTime(13, 31, 5);
   const delayedBoundaryTarget = hourTime(13, 55);
@@ -804,16 +899,35 @@ export function runPwmPhaseCases(assertPass) {
     {},
     { now }
   ));
-  const onToggleHold = keep(planPwmStep(stepOnSchedule, {}, { now }));
+  const onTimerFirstMatrix = [undefined, false, true].map(acIsOn => keep(planPwmStep(
+    stepOnSchedule,
+    { acIsOn },
+    { now }
+  )));
+  const onToggleHold = keep(planPwmStep(
+    stepOnSchedule,
+    { acIsOn: false, pageTimerSucceeded: true },
+    { now }
+  ));
+  const onUnknownToggleHold = keep(planPwmStep(
+    stepOnSchedule,
+    { pageTimerSucceeded: true },
+    { now }
+  ));
   const onAlreadyOn = keep(planPwmStep(stepOnSchedule, { acIsOn: true }, { now }));
+  const onAlreadyOnAfterTimer = keep(planPwmStep(
+    stepOnSchedule,
+    { acIsOn: true, pageTimerSucceeded: true },
+    { now }
+  ));
   const onToggleFailure = keep(planPwmStep(
     stepOnSchedule,
-    { acIsOn: false, toggleSucceeded: false },
+    { acIsOn: false, pageTimerSucceeded: true, toggleSucceeded: false },
     { now }
   ));
   const onTimerFailure = keep(planPwmStep(
     stepOnSchedule,
-    { toggleSucceeded: true, pageTimerSucceeded: false },
+    { acIsOn: false, toggleSucceeded: true, pageTimerSucceeded: false },
     { now }
   ));
   const onCommit = keep(planPwmStep(
@@ -851,7 +965,7 @@ export function runPwmPhaseCases(assertPass) {
   ));
   assertPass(
     loopModeAtArbitraryMinute.kind === 'hold'
-      && loopModeAtArbitraryMinute.prerequisite === 'toggle-on'
+      && loopModeAtArbitraryMinute.prerequisite === 'set-page-timer'
       && loopOnCommitAtArbitraryMinute.kind === 'commit'
       && loopOnCommitAtArbitraryMinute.nextAction === 'off'
       && loopOnCommitAtArbitraryMinute.nextTriggerAt === hourTime(13, 29)
@@ -859,20 +973,28 @@ export function runPwmPhaseCases(assertPass) {
       && loopOffCommitAtArbitraryMinute.nextAction === 'on'
       && loopOffCommitAtArbitraryMinute.nextTriggerAt === hourTime(13, 37)
       && stepDisabled.kind === 'noop'
+      && onTimerFirstMatrix.every(plan => plan.kind === 'hold'
+        && plan.prerequisite === 'set-page-timer'
+        && plan.timerMinutes === 12)
       && onToggleHold.kind === 'hold'
       && onToggleHold.prerequisite === 'toggle-on'
-      && onToggleHold.proofAction === 'clear'
+      && onUnknownToggleHold.kind === 'hold'
+      && onUnknownToggleHold.prerequisite === 'toggle-on'
       && onAlreadyOn.kind === 'hold'
       && onAlreadyOn.prerequisite === 'set-page-timer'
       && onAlreadyOn.timerMinutes === 12
+      && onAlreadyOnAfterTimer.kind === 'commit'
+      && onAlreadyOnAfterTimer.nextAction === 'off'
+      && onAlreadyOnAfterTimer.delayMinutes === 12
       && onToggleFailure.kind === 'retry'
       && onToggleFailure.retryMinutes === 1
       && onTimerFailure.kind === 'retry'
+      && onTimerFailure.reason === 'page-timer-failed'
       && onTimerFailure.phasePatch.pwmState === 'on'
       && onCommit.kind === 'commit'
       && onCommit.nextAction === 'off'
       && onCommit.delayMinutes === 12,
-    'step ON/OFF: 循环模式可在 13:17→13:29→13:37 完整运行，不受半点限制'
+    'step ON/OFF: ON 始终先确认 timer，再按 AC 状态请求单次 ON，循环仍可在任意分钟运行'
   );
   assertPass(
     onCommitWithPageTarget.nextTriggerAt === onPageTimerTargetAt

@@ -9,59 +9,6 @@
 // 后旧页面可能保留 JS global，却已失去旧 extension runtime 的消息接收端。
 (() => {
 
-const {
-  AC_SWITCH_SELECTOR,
-  findUniqueACControl,
-  isACSwitchDisabled
-} = self.__AC_EXTENSION_PAGE_CONTRACT__;
-
-const CONTENT_BUILD_TIME = 'dev';
-const CONTENT_BUILD_TIME_EPOCH_MS = 0;
-const CONTENT_LISTENER_ID = `${CONTENT_BUILD_TIME_EPOCH_MS || 'dev'}-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-const MAIN_BRIDGE_CHANNEL = `__AC_EXTENSION_${CONTENT_BUILD_TIME_EPOCH_MS || 'dev'}`;
-const MAIN_BRIDGE_EVENTS = {
-  cancel: `${MAIN_BRIDGE_CHANNEL}_CANCEL_AUTOMATIC_ON__`,
-  toggle: `${MAIN_BRIDGE_CHANNEL}_TOGGLE_AC__`,
-  toggleResult: `${MAIN_BRIDGE_CHANNEL}_TOGGLE_AC_RESULT__`,
-  status: `${MAIN_BRIDGE_CHANNEL}_GET_STATUS__`,
-  statusResult: `${MAIN_BRIDGE_CHANNEL}_GET_STATUS_RESULT__`,
-  runtime: `${MAIN_BRIDGE_CHANNEL}_GET_RUNTIME__`,
-  runtimeResult: `${MAIN_BRIDGE_CHANNEL}_GET_RUNTIME_RESULT__`
-};
-let cachedMainRuntimeIdentity = null;
-
-function attachContentRuntimeIdentity(result, mainResult = result) {
-  const mainIdentity = mainResult?.runtimeIdentity?.main
-    || cachedMainRuntimeIdentity;
-  if (mainIdentity) cachedMainRuntimeIdentity = { ...mainIdentity };
-  return {
-    ...(result || {}),
-    runtimeIdentity: {
-      content: {
-        buildTime: CONTENT_BUILD_TIME,
-        buildTimeEpochMs: CONTENT_BUILD_TIME_EPOCH_MS,
-        listenerId: CONTENT_LISTENER_ID,
-        channel: MAIN_BRIDGE_CHANNEL
-      },
-      main: mainIdentity ? { ...mainIdentity } : null
-    }
-  };
-}
-
-async function requestMainWorldRuntimeIdentity(timeoutMs = 750) {
-  const result = await requestMainWorldResult({
-    requestIdPrefix: 'ac-runtime',
-    requestEvent: MAIN_BRIDGE_EVENTS.runtime,
-    resultEvent: MAIN_BRIDGE_EVENTS.runtimeResult,
-    timeoutMs,
-    timeoutResult: { success: false, error: '主世界构建身份读取超时' }
-  });
-  if (result?.runtimeIdentity?.main) {
-    cachedMainRuntimeIdentity = { ...result.runtimeIdentity.main };
-  }
-  return result;
-}
-
 // i18n — content script 运行在隔离世界，不能 importScripts，用内联 fetch loader
 const _i18nCache = {};
 let _i18nReady = false;
@@ -100,6 +47,18 @@ function isExactACHomeContext() {
   return window.top === window && window.location.href === AC_HOME_URL;
 }
 
+function getAutomaticOnCancellationRevision() {
+  const revision = Number(self.__AC_AUTOMATIC_ON_CANCELLATION_REVISION__);
+  return Number.isSafeInteger(revision) && revision >= 0 ? revision : 0;
+}
+
+function cancelAutomaticOnInContentWorld() {
+  const revision = getAutomaticOnCancellationRevision() + 1;
+  self.__AC_AUTOMATIC_ON_CANCELLATION_REVISION__ = revision;
+  window.dispatchEvent(new CustomEvent('__AC_EXTENSION_CANCEL_AUTOMATIC_ON__'));
+  return revision;
+}
+
 // ----- 监听来自 background 的消息 -----
 // 触发 i18n 加载（不阻塞，翻译加载失败不影响核心功能）
 _i18nLoad();
@@ -113,13 +72,8 @@ if (typeof previousContentMessageListener === 'function') {
 const contentMessageListener = (msg, sender, sendResponse) => {
   const action = msg?.action;
   if (action === 'ping') {
-    requestMainWorldRuntimeIdentity().then(mainResult => {
-      sendResponse(attachContentRuntimeIdentity({
-        success: true,
-        mainRuntimeReachable: mainResult?.success === true
-      }, mainResult));
-    });
-    return true;
+    sendResponse({ success: true });
+    return false;
   }
 
   const isACOperation = action === 'on'
@@ -129,53 +83,36 @@ const contentMessageListener = (msg, sender, sendResponse) => {
     || action === 'setTimer'
     || action === 'getPageTimer';
   if (isACOperation && !isExactACHomeContext()) {
-    sendResponse(attachContentRuntimeIdentity({
-      success: false,
-      invalidTarget: true,
-      error: '拒绝在非精确 AC home 页面执行空调操作'
-    }));
+    sendResponse({ success: false, invalidTarget: true, error: '拒绝在非精确 AC home 页面执行空调操作' });
     return false;
   }
   if (action === 'cancelAutomaticOn') {
-    // 新 build 用版本化频道；同时通知一次 legacy 频道，收口升级瞬间可能仍在
-    // 等待的旧 ON 请求。两条频道都只改取消 revision，不会点击页面。
-    for (const eventType of new Set([
-      MAIN_BRIDGE_EVENTS.cancel,
-      '__AC_EXTENSION_CANCEL_AUTOMATIC_ON__'
-    ])) {
-      window.dispatchEvent(new CustomEvent(eventType));
-    }
-    sendResponse(attachContentRuntimeIdentity({ success: true, cancelled: true }));
+    const cancellationRevision = cancelAutomaticOnInContentWorld();
+    sendResponse({ success: true, cancelled: true, cancellationRevision });
     return false;
   }
   if (action === 'off') {
-    sendResponse(attachContentRuntimeIdentity({
+    sendResponse({
       success: false,
       error: 'OFF 操作已禁用；自动关机只允许使用 Power-off after'
-    }));
+    });
     return false;
   }
   if (action === 'on') {
-    toggleACSwitch(action, msg.notAfterAt).then(result => {
-      sendResponse(attachContentRuntimeIdentity(result));
-    });
+    toggleACSwitch(action, msg.notAfterAt).then(result => sendResponse(result));
     return true; // 异步响应
   }
   if (action === 'status') {
-    getAuthoritativeACStatus().then(result => {
-      sendResponse(attachContentRuntimeIdentity(result));
-    });
+    getAuthoritativeACStatus().then(result => sendResponse(result));
     return true;
   }
   if (action === 'setTimer') {
-    setPagePowerOffTimer(msg.minutes, msg.targetAt).then(result => {
-      sendResponse(attachContentRuntimeIdentity(result));
-    });
+    setPagePowerOffTimer(msg.minutes, msg.targetAt).then(result => sendResponse(result));
     return true;
   }
   if (action === 'getPageTimer') {
     // v0.5.10：读 picker 当前值——跨设备主同步通道（UST 服务器同步给所有会话）
-    sendResponse(attachContentRuntimeIdentity(getPagePowerOffTimer()));
+    sendResponse(getPagePowerOffTimer());
     return true;
   }
   return false;
@@ -215,11 +152,7 @@ if (!self.__AC_CONTENT_ERROR_REPORTED__) {
 
 // ----- 获取当前 AC 状态 -----
 function getACStatus() {
-  const switchControl = findACSwitch();
-  if (!switchControl) return { isOn: null, error: '未唯一找到 AC 开关元素' };
-  const antSwitch = switchControl.matches?.('button.ant-switch[role="switch"]')
-    ? switchControl
-    : null;
+  const antSwitch = findAntACSwitch();
   if (antSwitch) {
     const disabled = isAntACSwitchDisabled(antSwitch);
     const checked = antSwitch.getAttribute('aria-checked');
@@ -232,30 +165,47 @@ function getACStatus() {
     if (text.includes('OFF')) return { isOn: false, disabled, source: 'ant-switch-text' };
   }
 
-  return getLegacyACStatus(switchControl);
+  return getLegacyACStatus();
 }
 
 // 基于 DOM 的 disabled 状态判定，而非余额数值：free mode 下余额为 0 也不禁用。
 function isAntACSwitchDisabled(sw) {
-  return isACSwitchDisabled(sw);
+  if (!sw) return false;
+  return sw.disabled === true
+    || sw.hasAttribute?.('disabled')
+    || sw.getAttribute?.('aria-disabled') === 'true'
+    || String(sw.className || '').includes('ant-switch-disabled');
 }
 
-// 提取（Fowler Extract Function）：读取已经 AC 语义唯一定位的旧版开关。
-function getLegacyACStatus(legacySwitch) {
-  if (legacySwitch) return { isOn: !!legacySwitch.checked, source: 'legacy-semantic-switch' };
-  return { isOn: null, error: '未找到 AC 开关元素' };
-}
-
-async function waitForReadableACStatus(timeoutMs = 750, pollIntervalMs = 50) {
-  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
-  const interval = Math.max(1, Number(pollIntervalMs) || 1);
-  let status = getACStatus();
-
-  while (typeof status?.isOn !== 'boolean' && Date.now() < deadline) {
-    await sleep(interval);
-    status = getACStatus();
+// 提取（Fowler Extract Function）：旧版页面 Semantic UI toggle 的状态扫描与兜底匹配。
+function getLegacyACStatus() {
+  // 旧版页面: 通过 DOM 判断 Semantic UI toggle 状态
+  const checkboxes = document.querySelectorAll('.ui.toggle.checkbox input[type="checkbox"]');
+  for (const cb of checkboxes) {
+    // 确认是 AC 开关（附近有 "Air Conditioning" 文本）
+    const parent = cb.closest('.row') || cb.closest('[class*="column"]');
+    if (parent) {
+      const text = parent.textContent || '';
+      if (text.includes('Air Conditioning') || text.includes('ON') || text.includes('OFF')) {
+        return { isOn: cb.checked };
+      }
+    }
+    // 也检查最近的包含 ON/OFF 文本的元素
+    const nearby = cb.parentElement?.parentElement?.parentElement;
+    if (nearby) {
+      const text = nearby.textContent || '';
+      if (text.includes('Air Conditioning')) {
+        return { isOn: cb.checked };
+      }
+    }
   }
-  return status;
+  
+  // 方法2: 查找所有 toggle checkbox
+  if (checkboxes.length > 0) {
+    return { isOn: checkboxes[0].checked, note: '最佳匹配' };
+  }
+  
+  return { isOn: null, error: '未找到 AC 开关元素' };
 }
 
 async function getAuthoritativeACStatus() {
@@ -278,18 +228,9 @@ async function getAuthoritativeACStatus() {
       : isolatedStatus);
   }
 
-  // React 切换受控组件时可能短暂同时保留旧／新开关；只读等待唯一状态恢复，
-  // 不刷新页面、不触发点击，持续歧义仍返回 unknown。
-  const recoveredStatus = await waitForReadableACStatus();
-  if (typeof recoveredStatus?.isOn === 'boolean') {
-    return withBalance(mainWorldStatus?.error
-      ? { ...recoveredStatus, fallbackError: mainWorldStatus.error, via: 'isolated-retry' }
-      : { ...recoveredStatus, via: 'isolated-retry' });
-  }
-
   return withBalance(mainWorldStatus?.error
-    ? { ...recoveredStatus, fallbackError: mainWorldStatus.error }
-    : recoveredStatus);
+    ? { ...isolatedStatus, fallbackError: mainWorldStatus.error }
+    : isolatedStatus);
 }
 
 // 页面余额环会同时显示当前剩余分钟数（如 "242 min"）和周期总额。
@@ -354,33 +295,31 @@ function getACBalanceSnapshot() {
     return { success: false, error: '自动开启窗口截止时间无效' };
   }
 
-  // 在首次 await 页面 DOM 前冻结主世界的取消 revision。dispatchEvent 同步
-  // 往返，因此后台稍后送达 cancelAutomaticOn 时，这个已接纳的 ON 仍携带旧
-  // revision，不能在 waitForSwitch 结束后重新采样成一份“新”请求。
-  const mainRuntimeAtAdmission = await requestMainWorldRuntimeIdentity();
-  const cancellationRevision = Number(
-    mainRuntimeAtAdmission?.runtimeIdentity?.main?.automaticOnCancellationRevision
-  );
-  if (!Number.isSafeInteger(cancellationRevision) || cancellationRevision < 0) {
-    return {
-      success: false,
-      error: mainRuntimeAtAdmission?.error || '主世界取消版本读取失败，拒绝自动开启'
-    };
-  }
+  const cancellationRevision = getAutomaticOnCancellationRevision();
 
   // 隔离世界只确认页面已渲染，然后把目标状态交给主世界 ensureACState()。
-  // 状态预检、单次 click、页面成功提示与状态复查全部由主世界统一负责。
+  // 状态预检、单次 click、10 秒等待与递归复查全部由主世界统一负责。
   const switchEl = await waitForSwitch(10000);
+  if (cancellationRevision !== getAutomaticOnCancellationRevision()) {
+    return { success: false, cancelled: true, error: '请求已被后台取消' };
+  }
   if (!switchEl) {
     return { success: false, error: t('contentTimeout') };
   }
 
-  const mainWorldResult = await requestMainWorldToggle(
-    targetAction,
-    90000,
-    notAfterAt,
-    cancellationRevision
-  );
+  requestMainWorldToggle.cancellationRevision = cancellationRevision;
+  let mainWorldResult;
+  try {
+    mainWorldResult = await requestMainWorldToggle(targetAction, 90000, notAfterAt);
+  } finally {
+    if (requestMainWorldToggle.cancellationRevision === cancellationRevision) {
+      requestMainWorldToggle.cancellationRevision = null;
+    }
+  }
+
+  if (cancellationRevision !== getAutomaticOnCancellationRevision()) {
+    return { success: false, cancelled: true, error: '请求已被后台取消' };
+  }
 
   if (mainWorldResult?.success) {
     console.log('[AC扩展] 主世界切换成功:', mainWorldResult);
@@ -395,8 +334,6 @@ function getACBalanceSnapshot() {
     verified: false,
     via: 'isolated-delegated-to-main',
     mainWorldResult,
-    executionConfirmationMissing:
-      mainWorldResult?.executionConfirmationMissing === true,
     error: mainWorldResult?.error || t('contentRetryExhausted', targetAction)
   };
 }
@@ -440,20 +377,18 @@ function requestMainWorldResult({
   });
 }
 
-async function requestMainWorldToggle(
-  targetAction,
-  timeoutMs,
-  notAfterAt = 0,
-  cancellationRevision = null
-) {
+async function requestMainWorldToggle(targetAction, timeoutMs, notAfterAt = 0) {
+  const cancellationRevision = Number(requestMainWorldToggle.cancellationRevision);
   return requestMainWorldResult({
     requestIdPrefix: 'ac',
-    requestEvent: MAIN_BRIDGE_EVENTS.toggle,
-    resultEvent: MAIN_BRIDGE_EVENTS.toggleResult,
+    requestEvent: '__AC_EXTENSION_TOGGLE_AC__',
+    resultEvent: '__AC_EXTENSION_TOGGLE_AC_RESULT__',
     payload: {
       action: targetAction,
-      cancellationRevision,
-      ...(notAfterAt !== 0 ? { notAfterAt } : {})
+      ...(notAfterAt !== 0 ? { notAfterAt } : {}),
+      ...(Number.isSafeInteger(cancellationRevision) && cancellationRevision >= 0
+        ? { cancellationRevision }
+        : {})
     },
     timeoutMs,
     timeoutResult: null
@@ -463,8 +398,8 @@ async function requestMainWorldToggle(
 async function requestMainWorldStatus(timeoutMs) {
   return requestMainWorldResult({
     requestIdPrefix: 'ac-status',
-    requestEvent: MAIN_BRIDGE_EVENTS.status,
-    resultEvent: MAIN_BRIDGE_EVENTS.statusResult,
+    requestEvent: '__AC_EXTENSION_GET_STATUS__',
+    resultEvent: '__AC_EXTENSION_GET_STATUS_RESULT__',
     timeoutMs,
     timeoutResult: { isOn: null, error: '主世界状态读取超时' }
   });
@@ -496,6 +431,74 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
+const POWER_OFF_TIMER_MAX_TYPING_ATTEMPTS = 3;
+
+function normalizePowerOffTimerDiagnosticText(value, maxLength) {
+  return String(value ?? '')
+    .replace(/\b[a-z][a-z0-9+.-]*:\/\/\S+/gi, '[redacted]')
+    .replace(/\btabId\b(?:\s*[:=]\s*\S+)?/gi, 'tab')
+    .slice(0, maxLength);
+}
+
+function boundedPowerOffTimerCount(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric)
+    ? Math.min(99, Math.max(0, Math.trunc(numeric)))
+    : 0;
+}
+
+function boundedPowerOffTimerElapsed(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric)
+    ? Math.min(120000, Math.max(0, Math.trunc(numeric)))
+    : 0;
+}
+
+function createPowerOffTimerFailure(error, details = {}) {
+  return {
+    success: false,
+    error: normalizePowerOffTimerDiagnosticText(error, 240) || '页面定时器设置失败',
+    failureStage: normalizePowerOffTimerDiagnosticText(details.failureStage, 48) || 'unknown',
+    attempt: Math.min(
+      POWER_OFF_TIMER_MAX_TYPING_ATTEMPTS,
+      boundedPowerOffTimerCount(details.attempt)
+    ),
+    expectedValue: normalizePowerOffTimerDiagnosticText(details.expectedValue, 16),
+    observedValue: normalizePowerOffTimerDiagnosticText(details.observedValue, 16),
+    observedTitle: normalizePowerOffTimerDiagnosticText(details.observedTitle, 16),
+    inputReplacementCount: boundedPowerOffTimerCount(details.inputReplacementCount),
+    controlCount: boundedPowerOffTimerCount(details.controlCount),
+    visibleDropdownCount: boundedPowerOffTimerCount(details.visibleDropdownCount),
+    elapsedMs: boundedPowerOffTimerElapsed(details.elapsedMs)
+  };
+}
+
+function getPowerOffTimerObservation(state = findPowerOffTimerControlState()) {
+  const input = state.control?.input || null;
+  return {
+    observedValue: (input?.value || '').trim(),
+    observedTitle: (input?.getAttribute?.('title') || '').trim(),
+    controlCount: state.controlCount,
+    visibleDropdownCount: findVisiblePickerDropdowns().length
+  };
+}
+
+function createPowerOffTimerTypingFailure(failureStage, details = {}) {
+  const state = details.state || findPowerOffTimerControlState();
+  return {
+    success: false,
+    retryable: details.retryable !== false,
+    failureStage,
+    inputReplacementCount: details.inputReplacementCount || 0,
+    ...getPowerOffTimerObservation(state),
+    ...(details.observedValue === undefined ? {} : { observedValue: details.observedValue }),
+    ...(details.observedTitle === undefined ? {} : { observedTitle: details.observedTitle }),
+    ...(details.visibleDropdownCount === undefined
+      ? {}
+      : { visibleDropdownCount: details.visibleDropdownCount })
+  };
+}
+
 async function waitForStablePowerOffTimerControl(
   timeoutMs = 750,
   pollIntervalMs = 50
@@ -503,23 +506,60 @@ async function waitForStablePowerOffTimerControl(
   const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
   const interval = Math.max(1, Number(pollIntervalMs) || 1);
   let previousControl = null;
+  let lastState = findPowerOffTimerControlState();
 
   while (Date.now() <= deadline) {
-    const control = findPowerOffTimerControl();
-    if (control
-        && previousControl?.input === control.input
-        && previousControl?.picker === control.picker) {
-      return control;
+    const state = findPowerOffTimerControlState();
+    if (state.controlCount > 1) {
+      return createPowerOffTimerTypingFailure('locate-control', {
+        state,
+        retryable: false
+      });
     }
-    previousControl = control;
+    if (state.control
+        && previousControl?.input === state.control.input
+        && previousControl?.picker === state.control.picker) {
+      return { success: true, ...state };
+    }
+    previousControl = state.control;
+    lastState = state;
     if (Date.now() >= deadline) break;
     await sleep(interval);
   }
-  return null;
+  return createPowerOffTimerTypingFailure('stabilize-control', { state: lastState });
 }
 
-// AntD 确认后 React 可能短暂同时保留旧树与新树。只在同一个唯一语义控件
-// 连续两次承载目标值时返回；持续歧义、空值或节点继续替换都会超时失败关闭。
+function resolveLivePowerOffTimerControl(
+  previousInput,
+  expectedPrefix,
+  diagnostics,
+  failureStage
+) {
+  const state = findPowerOffTimerControlState();
+  if (!state.control) {
+    return createPowerOffTimerTypingFailure(failureStage, {
+      state,
+      inputReplacementCount: diagnostics.inputReplacementCount,
+      retryable: state.controlCount <= 1
+    });
+  }
+
+  if (previousInput && state.control.input !== previousInput) {
+    diagnostics.inputReplacementCount += 1;
+  }
+  const observedValue = String(state.control.input.value || '');
+  if (expectedPrefix !== null && observedValue !== expectedPrefix) {
+    return createPowerOffTimerTypingFailure(failureStage, {
+      state,
+      observedValue,
+      inputReplacementCount: diagnostics.inputReplacementCount
+    });
+  }
+  return { success: true, ...state };
+}
+
+// AntD 确认后 React 可能短暂同时保留旧树与新树。最终值必须由同一个
+// 唯一语义 live input 连续承载 500ms，且本次新打开的 dropdown 已关闭。
 function isPowerOffTimerConfirmationAccepted({
   input,
   rawValue,
@@ -548,7 +588,9 @@ async function waitForConfirmedPowerOffTimerInput(
     pollIntervalMs = 50,
     stableWindowMs = 500,
     visibleBefore = new Set(),
-    openedDropdown = null
+    openedDropdown = null,
+    inputReplacementCount = 0,
+    lastInput = null
   } = {}
 ) {
   const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
@@ -556,13 +598,26 @@ async function waitForConfirmedPowerOffTimerInput(
   const requiredStableMs = Math.max(0, Number(stableWindowMs) || 0);
   let stableInput = null;
   let stableSince = 0;
+  let previousInput = lastInput;
+  let replacements = inputReplacementCount;
+  let lastState = findPowerOffTimerControlState();
+  let lastValue = '';
+  let lastTitle = '';
+  let lastVisibleDropdownCount = findVisiblePickerDropdowns().length;
 
   while (Date.now() <= deadline) {
-    const input = findPowerOffTimerInput();
+    const state = findPowerOffTimerControlState();
+    const input = state.control?.input || null;
+    if (previousInput && input && previousInput !== input) replacements += 1;
+    previousInput = input;
     const rawValue = (input?.value || '').trim();
-    const rawTitle = (input?.getAttribute('title') || '').trim();
+    const rawTitle = (input?.getAttribute?.('title') || '').trim();
     const visibleDropdowns = findVisiblePickerDropdowns();
-    if (isPowerOffTimerConfirmationAccepted({
+    lastState = state;
+    lastValue = rawValue;
+    lastTitle = rawTitle;
+    lastVisibleDropdownCount = visibleDropdowns.length;
+    if (state.controlCount === 1 && isPowerOffTimerConfirmationAccepted({
       input,
       rawValue,
       rawTitle,
@@ -576,7 +631,14 @@ async function waitForConfirmedPowerOffTimerInput(
         stableInput = input;
         stableSince = Date.now();
       } else if (Date.now() - stableSince >= requiredStableMs) {
-        return input;
+        return {
+          success: true,
+          input,
+          inputReplacementCount: replacements,
+          visibleBefore,
+          openedDropdown,
+          ...getPowerOffTimerObservation(state)
+        };
       }
     } else {
       stableInput = null;
@@ -586,7 +648,14 @@ async function waitForConfirmedPowerOffTimerInput(
     if (Date.now() >= deadline) break;
     await sleep(interval);
   }
-  return null;
+  return createPowerOffTimerTypingFailure('confirm-stable', {
+    state: lastState,
+    observedValue: lastValue,
+    observedTitle: lastTitle,
+    visibleDropdownCount: lastVisibleDropdownCount,
+    inputReplacementCount: replacements,
+    retryable: lastState.controlCount <= 1
+  });
 }
 
 function setNativeInputValue(input, value) {
@@ -600,93 +669,342 @@ function setNativeInputValue(input, value) {
 }
 
 async function typeTimeIntoPickerInput(input, value) {
-  const initialControl = findPowerOffTimerControl();
-  if (!initialControl || initialControl.input !== input) return false;
+  const initialState = findPowerOffTimerControlState();
+  if (!initialState.control || initialState.control.input !== input) {
+    return createPowerOffTimerTypingFailure('locate-control', {
+      state: initialState,
+      retryable: false
+    });
+  }
   // 受控 AntD picker 单次模拟输入可能被 React 中途回退；有限重试提高可靠性。
-  const MAX_TYPING_ATTEMPTS = 3;
+  let totalReplacementCount = 0;
+  let lastFailure = null;
+  const visibleDropdownsBefore = new Set(findVisiblePickerDropdowns());
 
-  for (let attempt = 1; attempt <= MAX_TYPING_ATTEMPTS; attempt++) {
-    const control = await waitForStablePowerOffTimerControl();
-    if (!control) {
-      console.warn(`[AC扩展] 页面定时器输入第 ${attempt} 次等待唯一控件超时`);
+  for (let attempt = 1; attempt <= POWER_OFF_TIMER_MAX_TYPING_ATTEMPTS; attempt++) {
+    const stableControl = await waitForStablePowerOffTimerControl();
+    if (!stableControl.success) {
+      lastFailure = {
+        ...stableControl,
+        attempt,
+        inputReplacementCount: totalReplacementCount
+      };
+      if (stableControl.retryable === false) break;
       continue;
     }
-    const attemptInput = control.input;
-    const hadReadonly = attemptInput.hasAttribute('readonly');
     try {
-      if (await typeOnceIntoPickerInput(control.picker, attemptInput, value)) {
-        return true;
+      const result = await typeOnceIntoPickerInput(
+        stableControl.control.picker,
+        stableControl.control.input,
+        value,
+        visibleDropdownsBefore
+      );
+      totalReplacementCount += result.inputReplacementCount || 0;
+      if (result.success) {
+        return {
+          ...result,
+          attempt,
+          inputReplacementCount: totalReplacementCount
+        };
       }
+      lastFailure = {
+        ...result,
+        attempt,
+        inputReplacementCount: totalReplacementCount
+      };
       console.warn(`[AC扩展] 页面定时器输入第 ${attempt} 次未接受 ${value}`);
+      if (result.retryable === false) break;
     } catch (e) {
+      lastFailure = {
+        ...createPowerOffTimerTypingFailure('typing-exception', {
+          inputReplacementCount: totalReplacementCount
+        }),
+        attempt
+      };
       console.warn(`[AC扩展] 页面定时器输入第 ${attempt} 次异常:`, e?.message || e);
-    } finally {
-      if (hadReadonly) attemptInput.setAttribute('readonly', '');
     }
   }
 
-  return false;
+  return lastFailure || createPowerOffTimerTypingFailure('typing-exhausted', {
+    inputReplacementCount: totalReplacementCount
+  });
 }
 
-// 单次模拟手动输入。确认后重新按 Power-off after 语义定位稳定控件：
-// 受控 picker 可能延迟提交或用新节点替换本次输入节点，不能用 300ms 后的
-// 旧 input 快照提前判失败。
-async function typeOnceIntoPickerInput(picker, input, value) {
-  const control = findPowerOffTimerControl();
-  if (!control || control.input !== input || control.picker !== picker) return false;
-  const visibleDropdownsBefore = new Set(findVisiblePickerDropdowns());
-  input.removeAttribute('readonly');
-  picker.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true, view: window }));
-  picker.click();
-  input.focus();
-  input.click();
-  await sleep(100);
+// 单次模拟手动输入。每个 input 事件后重新从 Power-off after 语义定位
+// 当前 live input；保留已接受前缀的节点替换可继续，回滚或歧义交给外层重试。
+async function typeOnceIntoPickerInput(picker, input, value, visibleDropdownsBefore) {
+  const initialState = findPowerOffTimerControlState();
+  if (!initialState.control
+      || initialState.control.input !== input
+      || initialState.control.picker !== picker) {
+    return createPowerOffTimerTypingFailure('locate-control', {
+      state: initialState,
+      retryable: false
+    });
+  }
 
-  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'a', code: 'KeyA', ctrlKey: true, bubbles: true }));
-  setNativeInputValue(input, '');
-  input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
-  await sleep(50);
+  const operationVisibleDropdownsBefore = visibleDropdownsBefore instanceof Set
+    ? visibleDropdownsBefore
+    : new Set(findVisiblePickerDropdowns());
+  const diagnostics = { inputReplacementCount: 0 };
+  const readonlyStates = new Map();
+  const makeWritable = (liveInput) => {
+    if (!readonlyStates.has(liveInput)) {
+      readonlyStates.set(liveInput, liveInput.hasAttribute('readonly'));
+    }
+    liveInput.removeAttribute('readonly');
+  };
+  let currentControl = initialState.control;
 
-  for (const char of value) {
-    input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true }));
-    setNativeInputValue(input, input.value + char);
-    input.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: char }));
-    input.dispatchEvent(new KeyboardEvent('keyup', { key: char, bubbles: true }));
+  try {
+    makeWritable(currentControl.input);
+    currentControl.picker.dispatchEvent(new MouseEvent('mousedown', {
+      bubbles: true,
+      cancelable: true,
+      view: window
+    }));
+    currentControl.picker.click();
+    currentControl.input.focus();
+    currentControl.input.click();
+    await sleep(100);
+
+    let live = resolveLivePowerOffTimerControl(
+      currentControl.input,
+      null,
+      diagnostics,
+      'open-picker'
+    );
+    if (!live.success) return live;
+    currentControl = live.control;
+    makeWritable(currentControl.input);
+    currentControl.input.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'a',
+      code: 'KeyA',
+      ctrlKey: true,
+      bubbles: true
+    }));
+    live = resolveLivePowerOffTimerControl(
+      currentControl.input,
+      null,
+      diagnostics,
+      'clear-input'
+    );
+    if (!live.success) return live;
+    currentControl = live.control;
+    makeWritable(currentControl.input);
+    setNativeInputValue(currentControl.input, '');
+    currentControl.input.dispatchEvent(new InputEvent('input', {
+      bubbles: true,
+      inputType: 'deleteContentBackward',
+      data: null
+    }));
+    await sleep(50);
+    live = resolveLivePowerOffTimerControl(
+      currentControl.input,
+      '',
+      diagnostics,
+      'clear-input'
+    );
+    if (!live.success) return live;
+    currentControl = live.control;
+
+    let acceptedPrefix = '';
+    for (const char of value) {
+      live = resolveLivePowerOffTimerControl(
+        currentControl.input,
+        acceptedPrefix,
+        diagnostics,
+        'type-character'
+      );
+      if (!live.success) return live;
+      currentControl = live.control;
+      makeWritable(currentControl.input);
+      currentControl.input.dispatchEvent(new KeyboardEvent('keydown', {
+        key: char,
+        bubbles: true
+      }));
+      live = resolveLivePowerOffTimerControl(
+        currentControl.input,
+        acceptedPrefix,
+        diagnostics,
+        'type-character'
+      );
+      if (!live.success) return live;
+      currentControl = live.control;
+      makeWritable(currentControl.input);
+      const nextPrefix = acceptedPrefix + char;
+      setNativeInputValue(currentControl.input, nextPrefix);
+      currentControl.input.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        inputType: 'insertText',
+        data: char
+      }));
+      await sleep(30);
+      live = resolveLivePowerOffTimerControl(
+        currentControl.input,
+        nextPrefix,
+        diagnostics,
+        'type-character'
+      );
+      if (!live.success) return live;
+      currentControl = live.control;
+      currentControl.input.dispatchEvent(new KeyboardEvent('keyup', {
+        key: char,
+        bubbles: true
+      }));
+      acceptedPrefix = nextPrefix;
+    }
+
+    live = resolveLivePowerOffTimerControl(
+      currentControl.input,
+      value,
+      diagnostics,
+      'change'
+    );
+    if (!live.success) return live;
+    currentControl = live.control;
+    currentControl.input.dispatchEvent(new Event('change', { bubbles: true }));
     await sleep(30);
-  }
-
-  input.dispatchEvent(new Event('change', { bubbles: true }));
-  input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-  input.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true }));
-  await sleep(300);
-
-  const okResult = clickUniquePowerOffPickerOk(control, visibleDropdownsBefore);
-  if (!okResult.accepted) return false;
-  if (okResult.clicked) {
+    live = resolveLivePowerOffTimerControl(
+      currentControl.input,
+      value,
+      diagnostics,
+      'change'
+    );
+    if (!live.success) return live;
+    currentControl = live.control;
+    currentControl.input.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      which: 13,
+      bubbles: true
+    }));
+    await sleep(30);
+    live = resolveLivePowerOffTimerControl(
+      currentControl.input,
+      value,
+      diagnostics,
+      'enter'
+    );
+    if (!live.success) return live;
+    currentControl = live.control;
+    currentControl.input.dispatchEvent(new KeyboardEvent('keyup', {
+      key: 'Enter',
+      code: 'Enter',
+      keyCode: 13,
+      which: 13,
+      bubbles: true
+    }));
     await sleep(300);
-  }
+    live = resolveLivePowerOffTimerControl(
+      currentControl.input,
+      value,
+      diagnostics,
+      'enter'
+    );
+    if (!live.success) return live;
+    currentControl = live.control;
 
-  return !!(await waitForConfirmedPowerOffTimerInput(
-    value,
-    {
+    const okResult = clickUniquePowerOffPickerOk(
+      currentControl,
+      operationVisibleDropdownsBefore
+    );
+    if (!okResult.accepted) {
+      return createPowerOffTimerTypingFailure('select-ok', {
+        state: findPowerOffTimerControlState(),
+        inputReplacementCount: diagnostics.inputReplacementCount,
+        visibleDropdownCount: okResult.visibleDropdownCount,
+        retryable: false
+      });
+    }
+    if (okResult.clicked) await sleep(300);
+
+    return waitForConfirmedPowerOffTimerInput(value, {
       timeoutMs: 3000,
       pollIntervalMs: 50,
       stableWindowMs: 500,
-      visibleBefore: visibleDropdownsBefore,
-      openedDropdown: okResult.dropdown
+      visibleBefore: operationVisibleDropdownsBefore,
+      openedDropdown: okResult.openedDropdown,
+      inputReplacementCount: diagnostics.inputReplacementCount,
+      lastInput: currentControl.input
+    });
+  } finally {
+    for (const [changedInput, hadReadonly] of readonlyStates) {
+      if (hadReadonly) changedInput.setAttribute('readonly', '');
     }
-  ));
+  }
 }
 
 // ----- 查找 AC 开关 DOM 元素 -----
 function findACSwitch() {
-  return findUniqueACControl(document, AC_SWITCH_SELECTOR);
+  const antSwitch = findAntACSwitch();
+  if (antSwitch) return antSwitch;
+
+  // 查找包含 "Air Conditioning" 文本的区域，然后找其中的 toggle checkbox
+  const allElements = document.querySelectorAll('*');
+  for (const el of allElements) {
+    if (el.children.length === 0 && el.textContent?.trim() === 'Air Conditioning Status') {
+      // 向上找包含 toggle checkbox 的父容器
+      let container = el.parentElement;
+      for (let i = 0; i < 10 && container; i++) {
+        const toggle = container.querySelector('.ui.toggle.checkbox');
+        if (toggle) return toggle;
+        container = container.parentElement;
+      }
+    }
+  }
+  
+  // 备用: 直接找页面上唯一的 toggle checkbox
+  const toggles = document.querySelectorAll('.ui.toggle.checkbox');
+  if (toggles.length === 1) return toggles[0];
+  
+  // 如果有多个，找包含 ON/OFF 文本的那个
+  for (const toggle of toggles) {
+    const text = toggle.textContent || '';
+    if ((text.includes('ON') || text.includes('OFF')) && toggle.querySelector('input[type="checkbox"]')) {
+      return toggle;
+    }
+  }
+  
+  return toggles.length > 0 ? toggles[0] : null;
+}
+
+function findAntACSwitch() {
+  const statusLabels = Array.from(document.querySelectorAll('small'));
+  for (const small of statusLabels) {
+    const text = (small.textContent || '').trim();
+    if (text === 'Air Conditioning Status' || text === 'AirConditioning Status') {
+      let container = small.closest('[class*="row"]') || small.closest('div[style*="flex"]') || small.parentElement?.parentElement;
+      for (let i = 0; i < 8 && container; i++) {
+        const antSwitch = container.querySelector('button.ant-switch[role="switch"]');
+        if (antSwitch) return antSwitch;
+        container = container.parentElement;
+      }
+    }
+  }
+
+  const antSwitches = document.querySelectorAll('button.ant-switch[role="switch"]');
+  if (antSwitches.length === 1) return antSwitches[0];
+  if (antSwitches.length > 1) {
+    for (const sw of antSwitches) {
+      const parentText = (sw.closest('[class*="row"]') || sw.parentElement?.parentElement || sw.parentElement || sw)?.textContent || '';
+      if (parentText.includes('Air Conditioning') || parentText.includes('AC')) {
+        return sw;
+      }
+    }
+    return antSwitches[0];
+  }
+
+  return null;
 }
 
 // ----- 设置页面自带的定时关闭（作为保险）-----
 async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
   console.log(`[AC扩展] 尝试设置页面定时器: ${totalMinutes} 分钟`);
 
+  const startedAt = Date.now();
+  let expectedValue = '';
   try {
     const {
       requestedMinutes,
@@ -697,28 +1015,78 @@ async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
       minutes: mins,
       value
     } = computePageTimerTarget(totalMinutes, Date.now(), requestedTargetAt);
+    expectedValue = value;
 
-    const pickerInput = findPowerOffTimerInput();
-    if (!pickerInput) {
-      return { success: false, error: t('contentNoInput') };
+    const initialState = findPowerOffTimerControlState();
+    if (!initialState.control) {
+      return createPowerOffTimerFailure(
+        initialState.controlCount > 1
+          ? 'Power-off after 控件无法唯一关联'
+          : t('contentNoInput'),
+        {
+          failureStage: 'locate-control',
+          expectedValue,
+          ...getPowerOffTimerObservation(initialState),
+          elapsedMs: Date.now() - startedAt
+        }
+      );
     }
 
     console.log(`[AC扩展] 模拟手动输入页面关机时间: ${value} (${requestedMinutes} 分钟后${crossesMidnight ? '，跨午夜' : ''})`);
 
-    const typed = await typeTimeIntoPickerInput(pickerInput, value);
-    if (!typed) {
-      return { success: false, error: t('contentInputRejected', String(value)) };
+    const typed = await typeTimeIntoPickerInput(initialState.control.input, value);
+    if (!typed.success) {
+      return createPowerOffTimerFailure(
+        t('contentInputRejected', String(value)),
+        {
+          ...typed,
+          expectedValue,
+          elapsedMs: Date.now() - startedAt
+        }
+      );
     }
 
-    // 受控组件可在确认后用等价新节点承载最终值；等待 DOM 恢复唯一，而非
-    // 在 React 双树过渡期间猜选第一个候选或把正常节点替换误判为失败。
-    const confirmedInput = await waitForConfirmedPowerOffTimerInput(value);
-    if (!confirmedInput) {
-      return findPowerOffTimerInput()
-        ? { success: false, error: t('contentInputRejected', String(value)) }
-        : { success: false, error: 'Power-off after 控件在写入期间发生歧义' };
+    const finalState = findPowerOffTimerControlState();
+    if (!finalState.control || finalState.control.input !== typed.input) {
+      return createPowerOffTimerFailure(
+        'Power-off after 控件在最终确认后不再唯一',
+        {
+          failureStage: 'final-control',
+          attempt: typed.attempt,
+          expectedValue,
+          inputReplacementCount: typed.inputReplacementCount,
+          ...getPowerOffTimerObservation(finalState),
+          elapsedMs: Date.now() - startedAt
+        }
+      );
     }
-    const confirmedValue = (confirmedInput.value || confirmedInput.getAttribute('title') || '').trim();
+    const confirmedInput = finalState.control.input;
+    const confirmedRawValue = (confirmedInput.value || '').trim();
+    const confirmedTitle = (confirmedInput.getAttribute('title') || '').trim();
+    const finalVisibleDropdowns = findVisiblePickerDropdowns();
+    if (!isPowerOffTimerConfirmationAccepted({
+      input: confirmedInput,
+      rawValue: confirmedRawValue,
+      rawTitle: confirmedTitle,
+      expectedValue,
+      ariaExpanded: confirmedInput.getAttribute('aria-expanded'),
+      visibleDropdowns: finalVisibleDropdowns,
+      visibleBefore: typed.visibleBefore instanceof Set ? typed.visibleBefore : new Set(),
+      openedDropdown: typed.openedDropdown || null
+    })) {
+      return createPowerOffTimerFailure('页面定时器最终确认失效', {
+        failureStage: 'final-confirmation',
+        attempt: typed.attempt,
+        expectedValue,
+        observedValue: confirmedRawValue,
+        observedTitle: confirmedTitle,
+        inputReplacementCount: typed.inputReplacementCount,
+        controlCount: finalState.controlCount,
+        visibleDropdownCount: finalVisibleDropdowns.length,
+        elapsedMs: Date.now() - startedAt
+      });
+    }
+    const confirmedValue = confirmedRawValue || confirmedTitle;
     return {
       success: true,
       hours,
@@ -728,10 +1096,15 @@ async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
       targetAt,
       crossesMidnight,
       value: confirmedValue,
-      title: (confirmedInput.getAttribute('title') || '').trim()
+      title: confirmedTitle
     };
   } catch (e) {
-    return { success: false, error: String(e) };
+    return createPowerOffTimerFailure(expectedValue ? '页面定时器设置异常' : String(e), {
+      failureStage: expectedValue ? 'exception' : 'compute-target',
+      expectedValue,
+      ...getPowerOffTimerObservation(),
+      elapsedMs: Date.now() - startedAt
+    });
   }
 }
 
@@ -772,10 +1145,28 @@ function computePageTimerTarget(totalMinutes, nowMs = Date.now(), requestedTarge
 
 // 找到 "Power-off after" 旁的定时器输入框
 function findPowerOffTimerInput() {
-  return findPowerOffTimerControl()?.input || null;
+  return findPowerOffTimerControlState().control?.input || null;
 }
 
-function findPowerOffTimerControl() {
+function isPowerOffAfterLabel(text) {
+  return /^power[\s-]*off\s+after\s*:?$/i.test(String(text || '').trim());
+}
+
+function hasExplicitPowerOffTimerAssociation(label, picker, input) {
+  const labelId = String(label.id || label.getAttribute?.('id') || '');
+  const inputId = String(input.id || input.getAttribute?.('id') || '');
+  const labelFor = String(label.getAttribute?.('for') || '');
+  if (inputId && labelFor === inputId) return true;
+  if (!labelId) return false;
+  return [picker, input].some(element => (
+    ['aria-labelledby', 'aria-describedby'].some(attribute => (
+      String(element.getAttribute?.(attribute) || '').split(/\s+/).includes(labelId)
+    ))
+  ));
+}
+
+function findPowerOffTimerControlState() {
+  const MAX_IMPLICIT_ASSOCIATION_DEPTH = 4;
   const labels = Array.from(document.querySelectorAll('small, label, div, span'))
     .filter(label => label.children.length === 0 && isPowerOffAfterLabel(label.textContent));
   const controls = new Map();
@@ -783,27 +1174,35 @@ function findPowerOffTimerControl() {
   for (const label of labels) {
     let container = label.parentElement;
     for (let depth = 0; depth < 8 && container; depth++) {
-      const candidates = Array.from(container.querySelectorAll('.ant-picker'))
+      const pickers = Array.from(container.querySelectorAll('.ant-picker'));
+      if (pickers.length === 0) {
+        container = container.parentElement;
+        continue;
+      }
+      const candidates = pickers
         .map((picker) => {
           const inputs = Array.from(picker.querySelectorAll('input'))
-            .filter(input => String(input.type || '').toLowerCase() !== 'hidden');
-          return inputs.length === 1 ? { label, container, picker, input: inputs[0] } : null;
+            .filter(input => String(input.type || '').toLowerCase() !== 'hidden')
+            .filter(input => input.isConnected !== false);
+          const input = inputs.length === 1 ? inputs[0] : null;
+          const associated = input && (
+            depth <= MAX_IMPLICIT_ASSOCIATION_DEPTH
+            || hasExplicitPowerOffTimerAssociation(label, picker, input)
+          );
+          return associated
+            ? { label, container, picker, input: inputs[0] }
+            : null;
         })
         .filter(Boolean);
-      if (candidates.length === 1) {
-        controls.set(candidates[0].input, candidates[0]);
-        break;
-      }
-      if (candidates.length > 1) break;
-      container = container.parentElement;
+      for (const candidate of candidates) controls.set(candidate.input, candidate);
+      break;
     }
   }
 
-  return controls.size === 1 ? controls.values().next().value : null;
-}
-
-function isPowerOffAfterLabel(text) {
-  return /^power[\s-]*off\s+after\s*:?$/i.test(String(text || '').trim());
+  return {
+    control: controls.size === 1 ? controls.values().next().value : null,
+    controlCount: controls.size
+  };
 }
 
 function findVisiblePickerDropdowns() {
@@ -818,6 +1217,12 @@ function findVisiblePickerDropdowns() {
 }
 
 function resolvePowerOffPickerDropdown(control, visibleBefore) {
+  const visible = findVisiblePickerDropdowns();
+  const newlyVisible = visible.filter(dropdown => !visibleBefore.has(dropdown));
+  if (newlyVisible.length > 1) {
+    return { dropdown: null, openedDropdown: null, ambiguous: true, visible };
+  }
+
   const relationIds = new Set();
   for (const element of [control.input, control.picker]) {
     for (const attribute of ['aria-controls', 'aria-owns']) {
@@ -825,41 +1230,81 @@ function resolvePowerOffPickerDropdown(control, visibleBefore) {
         .forEach(id => relationIds.add(id));
     }
   }
-  const visible = findVisiblePickerDropdowns();
   const linked = Array.from(relationIds)
     .map(id => document.getElementById?.(id))
     .filter(element => element?.matches?.('.ant-picker-dropdown'))
     .filter(element => visible.includes(element));
-  if (linked.length > 1) return { dropdown: null, ambiguous: true };
-  if (linked.length === 1) return { dropdown: linked[0], ambiguous: false };
-
-  const newlyVisible = visible.filter(dropdown => !visibleBefore.has(dropdown));
-  if (newlyVisible.length > 1) return { dropdown: null, ambiguous: true };
-  if (newlyVisible.length === 1) return { dropdown: newlyVisible[0], ambiguous: false };
-
-  const pickerOwnsFocus = document.activeElement === control.input
-    || control.input.getAttribute?.('aria-expanded') === 'true';
-  if (pickerOwnsFocus && visibleBefore.size === 0 && visible.length === 1) {
-    return { dropdown: visible[0], ambiguous: false };
+  if (linked.length > 1
+      || (linked.length === 1
+        && newlyVisible.length === 1
+        && linked[0] !== newlyVisible[0])) {
+    return { dropdown: null, openedDropdown: null, ambiguous: true, visible };
   }
-  return { dropdown: null, ambiguous: visible.length > 0 };
+
+  let dropdown = linked[0] || newlyVisible[0] || null;
+  if (!dropdown && visible.length > 0) {
+    return { dropdown: null, openedDropdown: null, ambiguous: true, visible };
+  }
+  return {
+    dropdown,
+    openedDropdown: dropdown && !visibleBefore.has(dropdown) ? dropdown : null,
+    ambiguous: false,
+    visible
+  };
 }
 
 function clickUniquePowerOffPickerOk(control, visibleBefore) {
-  const { dropdown, ambiguous } = resolvePowerOffPickerDropdown(control, visibleBefore);
-  if (ambiguous) {
+  const resolved = resolvePowerOffPickerDropdown(control, visibleBefore);
+  if (resolved.ambiguous) {
     console.warn('[AC扩展] Power-off after 下拉层无法唯一关联，拒绝猜测 OK');
-    return { accepted: false, clicked: false, dropdown: null };
+    return {
+      accepted: false,
+      clicked: false,
+      openedDropdown: null,
+      visibleDropdownCount: resolved.visible.length
+    };
   }
-  if (!dropdown) return { accepted: true, clicked: false, dropdown: null };
+  if (!resolved.dropdown) {
+    return {
+      accepted: true,
+      clicked: false,
+      openedDropdown: null,
+      visibleDropdownCount: resolved.visible.length
+    };
+  }
 
-  const buttons = Array.from(dropdown.querySelectorAll('.ant-picker-ok button:not([disabled])'));
+  const visibleEnabledButtons = resolved.visible.flatMap(dropdown => Array.from(
+    dropdown.querySelectorAll('.ant-picker-ok button:not([disabled])')
+  ).filter(button => button.disabled !== true));
+  if (visibleEnabledButtons.length > 1) {
+    console.warn('[AC扩展] 可见下拉层有多个 enabled OK，拒绝猜测');
+    return {
+      accepted: false,
+      clicked: false,
+      openedDropdown: resolved.openedDropdown,
+      visibleDropdownCount: resolved.visible.length
+    };
+  }
+
+  const buttons = Array.from(
+    resolved.dropdown.querySelectorAll('.ant-picker-ok button:not([disabled])')
+  ).filter(button => button.disabled !== true);
   if (buttons.length > 1) {
-    console.warn('[AC扩展] Power-off after 下拉层有多个 OK，拒绝猜测');
-    return { accepted: false, clicked: false, dropdown };
+    console.warn('[AC扩展] Power-off after 下拉层有多个 enabled OK，拒绝猜测');
+    return {
+      accepted: false,
+      clicked: false,
+      openedDropdown: resolved.openedDropdown,
+      visibleDropdownCount: resolved.visible.length
+    };
   }
   if (buttons.length === 1) buttons[0].click();
-  return { accepted: true, clicked: buttons.length === 1, dropdown };
+  return {
+    accepted: true,
+    clicked: buttons.length === 1,
+    openedDropdown: resolved.openedDropdown,
+    visibleDropdownCount: resolved.visible.length
+  };
 }
 
 // ----- v0.5.10: 读取页面已设置的 "Power-off after" 定时器值（跨设备主同步通道） -----
