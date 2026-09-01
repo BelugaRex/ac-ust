@@ -707,17 +707,17 @@ async function runTests() {
     'popup.html 的 CSS 不使用 vw/vh 视口单位（防窗口塌陷回归）');
   assertPass(!/\d+\.\d+px\b/.test(popupCssNoComments),
     'popup.css 的显式像素尺寸均使用整数，避免主动引入子像素几何');
-  assertPass(/--popup-width:\s*250px/.test(popupCssNoComments)
+  assertPass(/--popup-width:\s*280px/.test(popupCssNoComments)
       && /body\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
       && /\.app-shell\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
       && /\.static-preview body\s*\{[^}]*?width:\s*var\(--popup-width\)[^}]*?min-width:\s*var\(--popup-width\)/.test(popupCssNoComments)
       && /\.static-preview \.app-shell\s*\{[^}]*?transform-origin:\s*top left/.test(popupCssNoComments),
-    'popup、shell 与静态预览共用 250px 宽度令牌；窄预览仍从左上角整体缩放');
-  assertPass(/--font:\s*"Inter Variable",\s*"Inter",\s*-apple-system/.test(popupCssNoComments)
+    'popup、shell 与静态预览共用 280px 宽度令牌；窄预览仍从左上角整体缩放');
+  assertPass(/--font:\s*-apple-system,\s*BlinkMacSystemFont,\s*"SF Pro Text",\s*"Helvetica Neue"/.test(popupCssNoComments)
       && popupCssNoComments.includes('"PingFang SC"')
       && popupCssNoComments.includes('"Microsoft YaHei UI"')
       && popupCssNoComments.includes('"Noto Sans CJK SC"'),
-    'popup 优先使用 Inter，并保留 macOS、Windows 与 Linux 中文字体回退');
+    'popup 使用系统平台字体，并保留 macOS、Windows 与 Linux 中文字体回退');
   assertPass(/\.content\s*\{[^}]*?width:\s*auto[^}]*?min-width:\s*0[^}]*?padding:\s*8px 12px/.test(popupCssNoComments),
     '内容区使用水平12px、垂直8px的紧凑 gutter，不再由标签或版本元数据决定面板宽度');
   assertPass(/\.status-card,\s*\.settings-card\s*\{[^}]*?background:\s*var\(--surface\)[^}]*?border:\s*1px solid var\(--border\)/.test(popupCssNoComments)
@@ -735,12 +735,13 @@ async function runTests() {
       && (popupHtml.match(/class="field"/g) || []).length === 4
       && /\.field-grid\s*\{[^}]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)[^}]*?gap:\s*10px/.test(popupCssNoComments),
     '运行时段与循环时长各使用一组等宽双列字段');
-  assertPass(/\.field input\[type="time"\]\s*,\s*\.field input\[type="number"\]\s*\{[^}]*?width:\s*100%[^}]*?height:\s*32px[^}]*?font-size:\s*13px/.test(popupCssNoComments),
+  assertPass(/\.field input\[type="text"\]\s*,\s*\.field input\[type="number"\]\s*\{[^}]*?width:\s*100%[^}]*?height:\s*32px[^}]*?font-size:\s*13px/.test(popupCssNoComments),
     '四个字段统一填满列宽，使用 32px 控件高度和 13px 数字');
   assertPass(/\.toggle-switch\s*\{[^}]*?width:\s*36px[^}]*?height:\s*20px/.test(popupCssNoComments)
       && /\.toggle-switch::after\s*\{[^}]*?inset:\s*-11px\s+-4px/.test(popupCssNoComments)
-      && (popupHtml.match(/class="toggle-switch"/g) || []).length === 3,
-    '三个拨杆（主开关/运行时段/智能控制）统一为 36×20px，并通过绝对命中区达到桌面指针目标要求');
+      && (popupHtml.match(/class="toggle-switch"/g) || []).length === 2
+      && (popupHtml.match(/class="mode-choice"/g) || []).length === 2,
+    '主开关与运行时段两个拨杆统一为 36×20px，自动模式用两个分段按钮（mode-choice）选择');
   assertPass((popupHtml.match(/class="number-field"/g) || []).length === 2
       && (popupHtml.match(/class="field-unit" data-i18n="unitMinutes"/g) || []).length === 2
       && /\.field-unit\s*\{[^}]*?position:\s*absolute[^}]*?pointer-events:\s*none/.test(popupCssNoComments),
@@ -757,7 +758,7 @@ async function runTests() {
     path.join(ROOT, 'background.js'),
     'utf8'
   );
-  assertPass(popupJs.includes('const timerOn = currentScheduleEnabled && !smartOn;')
+  assertPass(popupJs.includes('const timerSelected = !smartSelected;')
       && popupJs.includes("showStatus(t(data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK'), 'success');")
       && popupJs.includes("add(true, t('diagnoseSmartModeOn'))")
       && zhCN.statusSmartOnOK?.message === '智能控制已开启'
@@ -4647,18 +4648,13 @@ return { reapplySmartSensitivityNow };`
   }
   assertPass(activeHoursHeaderIndex >= 0
       && activeHoursBodyIndex > activeHoursHeaderIndex
-      && timerHeaderIndex > activeHoursBodyIndex
-      && smartHeaderIndex > timerHeaderIndex
-      && directSettingChildIds16.join(',') === [
-        'activeHoursSectionHeader',
-        'activeHoursBody',
-        'timerSectionHeader',
-        'timerBody',
-        'smartSectionHeader',
-        'smartBody',
-        'scheduleHintPin'
-      ].join(','),
-    '16D: 运行时段是循环定时与智能控制之前的独立同级区块');
+      && popupHtml.indexOf('class="automation-heading"') >= 0
+      && popupHtml.indexOf('class="automation-heading"') < activeHoursHeaderIndex
+      && popupHtml.indexOf('class="active-hours-section"') >= 0
+      && popupHtml.indexOf('class="active-hours-section"') < activeHoursHeaderIndex
+      && popupHtml.indexOf('id="timerBody"') > activeHoursBodyIndex
+      && popupHtml.indexOf('id="smartBody"') > popupHtml.indexOf('id="timerBody"'),
+    '16D: 运行时段位于自动化总开关之后、循环定时与智能控制之前');
   assertPass(syncActiveHoursUiSource.includes('activeHoursBody.hidden = !currentActiveHours.enabled;')
       && !syncModeUiSource.includes('activeHoursBody')
       && !syncModeUiSource.includes('activeHoursToggle'),

@@ -53,6 +53,7 @@ const t = (key, ...subs) => I18n.t(key, ...subs);
 
 const onMinutesInput = document.getElementById('onMinutes');
 const offMinutesInput = document.getElementById('offMinutes');
+const automationToggle = document.getElementById('automationToggle');
 const activeHoursToggle = document.getElementById('activeHoursToggle');
 const activeHoursStart = document.getElementById('activeHoursStart');
 const activeHoursEnd = document.getElementById('activeHoursEnd');
@@ -102,8 +103,7 @@ let currentScheduleEnabled = false;
 let currentActiveHours = { enabled: false, start: '08:00', end: '23:00' };
 let currentSmartMode = { enabled: false, sensitivity: 5 };
 let lastAnnouncedState = '';
-let _toggleProgrammatic = false; // 防止程序同步 timerToggle 时触发 onChange 循环
-let _smartProgrammatic = false;  // 防止程序同步 smartModeToggle 时触发 onChange 循环
+let modeSwitchInFlight = false; // 模式切换期间防止重复点击/切换
 
 function updateSmartSensitivityBubble() {
   const value = Number(smartSensitivity.value);
@@ -152,27 +152,23 @@ function syncActiveHoursUI() {
 }
 
 function syncModeUI() {
-  const smartOn = currentSmartMode.enabled;
-  const timerOn = currentScheduleEnabled && !smartOn;
+  const smartSelected = currentSmartMode.enabled;
+  const timerSelected = !smartSelected;
+  automationToggle.checked = currentScheduleEnabled;
 
-  _toggleProgrammatic = true;
-  timerToggle.checked = timerOn;
-  timerToggleState.textContent = timerOn ? t('timerEnabled') : t('timerDisabled');
-  _toggleProgrammatic = false;
+  timerToggle.setAttribute('aria-pressed', String(timerSelected));
+  timerToggleState.textContent = timerSelected ? t('modeSelected') : t('modeNotSelected');
 
-  _smartProgrammatic = true;
-  smartModeToggle.checked = smartOn;
-  smartModeToggleState.textContent = smartOn ? t('timerEnabled') : t('timerDisabled');
-  _smartProgrammatic = false;
+  smartModeToggle.setAttribute('aria-pressed', String(smartSelected));
+  smartModeToggleState.textContent = smartSelected ? t('modeSelected') : t('modeNotSelected');
 
   // 灵敏度滑块始终可调，便于在开启智能控制前预设偏好
   smartSensitivity.value = String(currentSmartMode.sensitivity);
   requestAnimationFrame(updateSmartSensitivityBubble);
 
-  // 折叠：各自开关关闭时隐藏对应 body。智能控制开 → 循环定时关（其 body 折叠）；
-  // 循环定时开 → 智能控制关（其 body 折叠）；两者都关 → 两个 body 都折叠。
-  timerBody.hidden = !timerOn;
-  smartBody.hidden = !smartOn;
+  // 分段控件始终保留一个模式；总开关关闭时仍可预设参数。
+  timerBody.hidden = !timerSelected;
+  smartBody.hidden = !smartSelected;
 }
 
 function commitActiveHours() {
@@ -201,6 +197,23 @@ function commitActiveHours() {
 activeHoursToggle.addEventListener('change', commitActiveHours);
 activeHoursStart.addEventListener('change', commitActiveHours);
 activeHoursEnd.addEventListener('change', commitActiveHours);
+
+automationToggle.addEventListener('change', async () => {
+  if (modeSwitchInFlight) return;
+  const previousEnabled = currentScheduleEnabled;
+  const enabled = automationToggle.checked;
+  currentScheduleEnabled = enabled;
+  syncModeUI();
+  const pendingMessage = t(enabled ? 'timerEnabling' : 'timerDisabling');
+  setModeSwitchBusy(true, pendingMessage);
+  try {
+    const result = await updateSchedule(enabled, true);
+    if (!result?.success) currentScheduleEnabled = previousEnabled;
+  } finally {
+    syncModeUI();
+    setModeSwitchBusy(false);
+  }
+});
 
 // ----- 智能模式：开关 + 灵敏度滑块 + 实时读数 -----
 function renderSmartReadout(suggested, weather) {
@@ -274,14 +287,26 @@ async function updateSmartReadout() {
   }
 }
 
-smartModeToggle.addEventListener('change', async () => {
-  if (_smartProgrammatic) return;
-  const enabled = smartModeToggle.checked;
-  currentSmartMode.enabled = enabled;
-  currentScheduleEnabled = enabled;  // 智能控制开 = 自动控制开；关 = 自动控制全关（与循环定时互斥）
+smartModeToggle.addEventListener('click', async () => {
+  if (modeSwitchInFlight) return;
+  if (currentSmartMode.enabled) return;
+  currentSmartMode.enabled = true;
   syncModeUI();
-  await updateSchedule(enabled, true);
-  await updateSmartReadout();
+  const pendingMessage = t('modeChanging');
+  smartModeToggleState.textContent = pendingMessage;
+  setModeSwitchBusy(true, pendingMessage);
+  try {
+    const result = await updateSchedule(currentScheduleEnabled, true);
+    if (result?.success) {
+      showStatus(t('statusModeSaved'), 'success');
+      await updateSmartReadout();
+    } else {
+      currentSmartMode.enabled = false;
+    }
+  } finally {
+    syncModeUI();
+    setModeSwitchBusy(false);
+  }
 });
 
 smartSensitivity.addEventListener('input', () => {
@@ -663,22 +688,37 @@ async function updateSchedule(enabled, restart = false) {
 }
 
 // ----- 定时拨动开关（双向同步 toggle） -----
-timerToggle.addEventListener('change', async () => {
-  if (_toggleProgrammatic) return; // 程序同步，不触发 updateSchedule
-  const enabled = timerToggle.checked;
-  currentScheduleEnabled = enabled;
-  if (enabled) {
-    currentSmartMode.enabled = false;  // 平级互斥：开循环定时 → 关智能控制
+function setModeSwitchBusy(busy, message = '') {
+  modeSwitchInFlight = busy;
+  for (const toggle of [automationToggle, timerToggle, smartModeToggle]) {
+    toggle.disabled = busy;
+    if (busy) toggle.setAttribute('aria-busy', 'true');
+    else toggle.removeAttribute('aria-busy');
   }
+  if (busy) {
+    statusDiv.setAttribute('aria-busy', 'true');
+    showStatus(message, '');
+  } else {
+    statusDiv.removeAttribute('aria-busy');
+  }
+}
+
+// ----- 自动模式分段选择（循环定时与智能控制互斥） -----
+timerToggle.addEventListener('click', async () => {
+  if (modeSwitchInFlight) return;
+  if (!currentSmartMode.enabled) return;
+  currentSmartMode.enabled = false;
   syncModeUI();
-  timerToggle.disabled = true; // 防止双击
-  timerToggleState.textContent = enabled ? t('timerEnabling') : t('timerDisabling');
-  timerToggle.setAttribute('aria-busy', 'true');
+  const pendingMessage = t('modeChanging');
+  timerToggleState.textContent = pendingMessage;
+  setModeSwitchBusy(true, pendingMessage);
   try {
-    await updateSchedule(enabled, true);
+    const result = await updateSchedule(currentScheduleEnabled, true);
+    if (result?.success) showStatus(t('statusModeSaved'), 'success');
+    else currentSmartMode.enabled = true;
   } finally {
-    timerToggle.disabled = false;
-    timerToggle.removeAttribute('aria-busy');
+    syncModeUI();
+    setModeSwitchBusy(false);
   }
 });
 
