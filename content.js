@@ -1093,10 +1093,11 @@ async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
 
     const initialState = findPowerOffTimerControlState();
     if (!initialState.control) {
+      const labelHints = collectPowerOffTimerLabelHints();
       return createPowerOffTimerFailure(
         initialState.controlCount > 1
           ? 'Power-off after 控件无法唯一关联'
-          : t('contentNoInput'),
+          : `${t('contentNoInput')}${labelHints ? `；附近标签: ${labelHints}` : ''}`,
         {
           failureStage: 'locate-control',
           expectedValue,
@@ -1223,7 +1224,21 @@ function findPowerOffTimerInput() {
 }
 
 function isPowerOffAfterLabel(text) {
-  return /^power[\s-]*off\s+after\s*:?$/i.test(String(text || '').trim());
+  return /^power[\s-]*off\s+after\b/i.test(String(text || '').trim());
+}
+
+// 诊断辅助：定位失败时，回传页面实际存在、且与关机定时器语义相关的短标签文本，
+// 用于识别 UST 页面改版后的真实标签文案（有界 + 只保留 off/after/power/time 等关键词）。
+function collectPowerOffTimerLabelHints(maxCount = 6) {
+  return Array.from(document.querySelectorAll(
+    'small, label, p, h1, h2, h3, h4, h5, h6, div, span'
+  ))
+    .filter(el => el.children.length === 0)
+    .map(el => String(el.textContent || '').trim())
+    .filter(text => text.length > 0 && text.length <= 60
+      && /off|after|power|time|select|shut|turn|schedule/i.test(text))
+    .slice(0, maxCount)
+    .join(' | ');
 }
 
 function hasExplicitPowerOffTimerAssociation(label, picker, input) {
@@ -1237,6 +1252,18 @@ function hasExplicitPowerOffTimerAssociation(label, picker, input) {
       String(element.getAttribute?.(attribute) || '').split(/\s+/).includes(labelId)
     ))
   ));
+}
+
+// 兜底定位：UST 页面改版后 "Power-off after" 标签文案可能变化，
+// 但输入框 placeholder="Select time" 长期稳定，据此唯一关联输入框。
+function findPowerOffTimerInputByPlaceholder() {
+  const inputs = Array.from(document.querySelectorAll('.ant-picker input'))
+    .filter(input => String(input.type || '').toLowerCase() !== 'hidden')
+    .filter(input => input.isConnected !== false)
+    .filter(input => /^select\s+time$/i.test(
+      String(input.getAttribute?.('placeholder') || '').trim()
+    ));
+  return inputs.length === 1 ? inputs[0] : null;
 }
 
 function findPowerOffTimerControlState() {
@@ -1270,6 +1297,22 @@ function findPowerOffTimerControlState() {
         .filter(Boolean);
       for (const candidate of candidates) controls.set(candidate.input, candidate);
       break;
+    }
+  }
+
+  // 兜底：标签语义匹配失败时，回退到 placeholder="Select time" 的输入框。
+  if (controls.size === 0) {
+    const fallbackInput = findPowerOffTimerInputByPlaceholder();
+    if (fallbackInput) {
+      const picker = typeof fallbackInput.closest === 'function'
+        ? fallbackInput.closest('.ant-picker')
+        : null;
+      controls.set(fallbackInput, {
+        label: null,
+        container: picker?.parentElement || null,
+        picker,
+        input: fallbackInput
+      });
     }
   }
 
