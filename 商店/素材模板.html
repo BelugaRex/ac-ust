@@ -181,8 +181,8 @@
         }
       : {
           title: '循环定时，稳定对齐',
-          text: '自定义开关时长与每日运行时段，多设备共享相位；页面关机时间、扩展闹钟和倒计时采用同一绝对截止时间。',
-          chips: ['PWM 循环', '运行时段', '跨设备相位对齐', 'OFF 零点击']
+          text: '自定义开关时长；限时运行默认关闭即全天运行，也可设定每日时段。多设备共享相位，页面与扩展采用同一绝对截止时间。',
+          chips: ['PWM 循环', '限时运行', '跨设备相位对齐', 'OFF 零点击']
         };
 
     function markReady() {
@@ -193,7 +193,7 @@
       asset.className = 'screen';
       asset.innerHTML = `
         <section class="copy">
-          <div class="eyebrow">AC-UST 0.8.3</div>
+          <div class="eyebrow">AC-UST 0.8.4</div>
           <h1>${screenshotCopy.title}</h1>
           <p>${screenshotCopy.text}</p>
           <div class="chips">${screenshotCopy.chips.map(text => `<span class="chip">${text}</span>`).join('')}</div>
@@ -224,7 +224,7 @@
           <div>
             <h1>AC-UST</h1>
             <p>${marquee
-              ? 'PWM 循环 · 智能天气控制 · 运行时段 · 跨设备相位对齐'
+              ? 'PWM 循环 · 智能天气控制 · 限时运行 · 跨设备相位对齐'
               : 'HKUST Smart Power Meter<br>PWM + 智能天气控制'}</p>
           </div>
         </section>`;

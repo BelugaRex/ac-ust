@@ -363,6 +363,45 @@ function attachCachedActualStatus(schedule) {
   return schedule;
 }
 
+function isSmartSchedule(schedule) {
+  return schedule?.smartMode?.enabled === true;
+}
+
+function getPopupAutomationAlarmName(schedule) {
+  return isSmartSchedule(schedule) ? 'ac-smart' : 'ac-pwm';
+}
+
+function getPopupModeState(schedule) {
+  return isSmartSchedule(schedule) ? schedule?.smartState : schedule?.pwmState;
+}
+
+function getPopupModeNextTriggerAt(schedule) {
+  const value = isSmartSchedule(schedule)
+    ? schedule?.smartNextTriggerAt
+    : schedule?.nextTriggerAt;
+  return Number(value) || 0;
+}
+
+function getPopupModeNextBoundaryAt(schedule) {
+  const boundaryAt = Number(schedule?._nextBoundary) || 0;
+  return boundaryAt > 0 ? boundaryAt : getPopupModeNextTriggerAt(schedule);
+}
+
+function getPopupModeNextAction(schedule) {
+  if (schedule?._nextAction === 'on' || schedule?._nextAction === 'off') {
+    return schedule._nextAction;
+  }
+
+  const modeState = isSmartSchedule(schedule)
+    ? schedule.smartState
+    : (schedule?._effectivePwmState
+      || (typeof schedule?.actualStatus?.isOn === 'boolean'
+        ? (schedule.actualStatus.isOn ? 'off' : 'on')
+        : schedule.pwmState));
+  if (modeState === 'on' || modeState === 'off') return modeState;
+  return 'on';
+}
+
 function isAutomationPausedByActiveHours(schedule, now = new Date()) {
   if (!schedule?.enabled || schedule.activeHours?.enabled !== true) return false;
   const start = String(schedule.activeHours.start || '').match(/^(\d{2}):(\d{2})$/);
@@ -378,7 +417,7 @@ function isAutomationPausedByActiveHours(schedule, now = new Date()) {
 async function refreshStatus() {
   if (IS_STATIC_PREVIEW) {
     updateCountdownDisplay(staticPreviewSchedule, {
-      scheduledTime: staticPreviewSchedule.nextTriggerAt
+      scheduledTime: getPopupModeNextTriggerAt(staticPreviewSchedule)
     });
     void updateSmartReadout();
     return;
@@ -388,9 +427,8 @@ async function refreshStatus() {
     const useLite = pollCount++ % 10 !== 0;
     const msgType = useLite ? 'getScheduleLite' : 'getSchedule';
 
-    const [response, alarm, controlAudit] = await Promise.all([
+    const [response, controlAudit] = await Promise.all([
       chrome.runtime.sendMessage({ type: msgType }),
-      chrome.alarms.get('ac-pwm'),
       typeof readCurrentBuildControlAudit === 'function'
         ? readCurrentBuildControlAudit()
         : null
@@ -408,12 +446,12 @@ async function refreshStatus() {
     // Charge Mode 才清除。这样 SW 重启或单次消息异常不会让 Est 闪退。
     attachCachedActualStatus(schedule);
 
+    const alarm = await chrome.alarms.get(getPopupAutomationAlarmName(schedule));
     updateCountdownDisplay(schedule, alarm, controlAudit);
   } catch (e) {
     const stored = await chrome.storage.local.get("ac_schedule");
     if (stored.ac_schedule) {
-      const [alarm, controlAudit] = await Promise.all([
-        chrome.alarms.get("ac-pwm"),
+      const [controlAudit] = await Promise.all([
         typeof readCurrentBuildControlAudit === 'function'
           ? readCurrentBuildControlAudit()
           : null
@@ -422,6 +460,7 @@ async function refreshStatus() {
       const pausedByActiveHours = isAutomationPausedByActiveHours(fallbackSchedule);
       fallbackSchedule._insideActiveHours = !pausedByActiveHours;
       fallbackSchedule._automationPausedByActiveHours = pausedByActiveHours;
+      const alarm = await chrome.alarms.get(getPopupAutomationAlarmName(fallbackSchedule));
       updateCountdownDisplay(fallbackSchedule, alarm, controlAudit);
     }
   }
@@ -545,19 +584,15 @@ function updateCountdownDisplay(schedule, alarm, controlAudit = null) {
     idleDisplay.textContent = t('activeHoursOutside');
   }
 
-  // 优先级：full 路径 _effectivePwmState（页面真实状态反推）> lite 路径合并的
-  // cached actualStatus 反推 > 兜底 pwmState。fallback 加 cached 反推是为了
+  // 优先级：后台返回的当前模式 _nextAction > 当前模式 phase state > 页面真实状态反推。
+  // fallback 加 cached 反推是为了
   // ON 路径 setPageTimer 失败的故障态：background.js 故意保持 pwmState='on' 让
   // 1 分钟后整轮幂等 ON + 重试 setPageTimer（见 background.js runPwmStep 顶部
   // "PWM ON 失败重试" 注释），此时 pwmState='on' 既不代表"AC 当前 OFF"也不代表
   // "用户应看到分钟后自动开启"。状态行已通过 refreshStatus() 合并的 cached
   // actualStatus 显示"冷气运行中"，hero caption 必须同源取 cached actualStatus
   // 反推，否则会出现"运行中、分钟后自动开启"这种自相矛盾文案。
-  const nextAction = schedule._effectivePwmState
-    || schedule._nextAction
-    || (typeof schedule.actualStatus?.isOn === 'boolean'
-      ? (schedule.actualStatus.isOn ? 'off' : 'on')
-      : schedule.pwmState);
+  const nextAction = getPopupModeNextAction(schedule);
   const inferredACOn = nextAction !== 'on';
   const currentACOn = typeof schedule.actualStatus?.isOn === 'boolean'
     ? schedule.actualStatus.isOn
@@ -603,11 +638,13 @@ function renderCountdown(schedule, alarm, nextAction, controlAudit = null) {
 
   // 计算倒计时（v0.5.x 起只保留间隔模式）
   let remainingMs = 0;
-  if (schedule._nextBoundary) {
-    remainingMs = schedule._nextBoundary - Date.now();
+  const modeNextBoundaryAt = getPopupModeNextBoundaryAt(schedule);
+  if (modeNextBoundaryAt > 0) {
+    remainingMs = modeNextBoundaryAt - Date.now();
   } else if (alarm?.scheduledTime) {
     remainingMs = alarm.scheduledTime - Date.now();
-  } else if (schedule.alarmCreatedAt && schedule.alarmDelayMinutes) {
+  } else if (!isSmartSchedule(schedule)
+      && schedule.alarmCreatedAt && schedule.alarmDelayMinutes) {
     remainingMs = schedule.alarmCreatedAt + schedule.alarmDelayMinutes * 60000 - Date.now();
   }
 
@@ -645,17 +682,26 @@ async function updateSchedule(enabled, restart = false) {
   offMinutesInput.value = data.offMinutes;
 
   if (IS_STATIC_PREVIEW) {
+    const previewNextTriggerAt = enabled
+      ? Date.now() + data.onMinutes * 60 * 1000
+      : 0;
+    const previewSmartEnabled = data.smartMode.enabled;
+    const previewClockPlannedAt = previewNextTriggerAt > 0 ? Date.now() : 0;
     Object.assign(staticPreviewSchedule, data, {
       actualStatus: { isOn: enabled },
-      pwmState: enabled ? 'off' : 'on',
-      nextTriggerAt: enabled ? Date.now() + data.onMinutes * 60 * 1000 : 0
+      pwmState: previewSmartEnabled ? 'on' : (enabled ? 'off' : 'on'),
+      nextTriggerAt: previewSmartEnabled ? 0 : previewNextTriggerAt,
+      pwmClockPlannedAt: previewSmartEnabled ? 0 : previewClockPlannedAt,
+      smartState: previewSmartEnabled ? (enabled ? 'off' : 'on') : 'on',
+      smartNextTriggerAt: previewSmartEnabled ? previewNextTriggerAt : 0,
+      smartClockPlannedAt: previewSmartEnabled ? previewClockPlannedAt : 0
     });
     currentScheduleEnabled = enabled;
     updateCountdownDisplay(staticPreviewSchedule, {
-      scheduledTime: staticPreviewSchedule.nextTriggerAt
+      scheduledTime: getPopupModeNextTriggerAt(staticPreviewSchedule)
     });
     showStatus(enabled ? t('statusOnOK') : t('statusClosedOK'), 'success');
-    return;
+    return { success: true, schedule: { ...staticPreviewSchedule } };
   }
 
   // 提取（Fowler Extract Function）：后台 updateSchedule 响应的本地应用——状态文案与倒计时刷新。
@@ -676,15 +722,16 @@ async function updateSchedule(enabled, restart = false) {
       showStatus(t(data.smartMode.enabled ? 'statusSmartOnOK' : 'statusOnOK'), 'success');
     }
 
-    const alarm = await chrome.alarms.get('ac-pwm');
+    const alarm = await chrome.alarms.get(getPopupAutomationAlarmName(response.schedule));
     updateCountdownDisplay(attachCachedActualStatus(response.schedule), alarm);
+    return response;
   }
 
   const response = await chrome.runtime.sendMessage({
     type: 'updateSchedule',
     data: data
   });
-  await applyScheduleUpdateResponse(response);
+  return applyScheduleUpdateResponse(response);
 }
 
 // ----- 定时拨动开关（双向同步 toggle） -----
@@ -748,7 +795,7 @@ startup().then(setupStaticPreviewFit);
 setInterval(refreshStatus, 1000);
 
 // 从 manifest 读取版本号（硬编码兜底：硬编码须与 manifest.json 版本同步，build.sh 会在 dist/ 中再次核对并注入）
-const APP_VERSION = '0.8.3';
+const APP_VERSION = '0.8.4';
 // BUILD_TIME 由 build.sh 注入,用于诊断扩展实际加载的是哪次 build
 // (同名版本号 0.4.28 可能对应多次代码改动,构建时间戳可区分)
 const BUILD_TIME = 'dev';
@@ -805,6 +852,82 @@ function areDiagnosticTriggersAligned(...triggerTimes) {
     return false;
   }
   return Math.max(...times) - Math.min(...times) < DIAGNOSTIC_TRIGGER_TOLERANCE_MS;
+}
+
+function classifyDiagnosticRetryChannels(schedule, automationAlarm, pageTimerRetryAlarm) {
+  const smartMode = schedule?.smartMode?.enabled === true;
+  const automationAlarmName = smartMode ? 'ac-smart' : 'ac-pwm';
+  const markerKind = String(
+    (smartMode ? schedule?.smartRetryKind : schedule?.pwmRetryKind) || ''
+  );
+  const markerScheduledAt = Number(
+    (smartMode ? schedule?.smartRetryScheduledAt : schedule?.pwmRetryScheduledAt) || 0
+  ) || 0;
+  const nextTriggerAt = Number(
+    (smartMode ? schedule?.smartNextTriggerAt : schedule?.nextTriggerAt) || 0
+  ) || 0;
+  const liveAutomationAt = Number(automationAlarm?.scheduledTime) || 0;
+  const liveAlarmName = String(automationAlarm?.name || '');
+  const hasExpectedLiveAlarm = liveAutomationAt > 0
+    && (!liveAlarmName || liveAlarmName === automationAlarmName)
+    && (!smartMode || liveAlarmName === '' || liveAlarmName === 'ac-smart');
+  const retryKindMatchesMode = smartMode
+    ? markerKind === 'smart-on-safety-timer'
+    : markerKind !== '';
+  const modeState = smartMode ? schedule?.smartState : schedule?.pwmState;
+  let smartOnSafety;
+  if (!retryKindMatchesMode) {
+    smartOnSafety = { ok: true, status: 'inactive' };
+  } else if (!hasExpectedLiveAlarm) {
+    smartOnSafety = {
+      ok: false,
+      status: 'missing-alarm',
+      markerScheduledAt,
+      nextTriggerAt,
+      liveAlarmAt: 0
+    };
+  } else {
+    const active = schedule?.enabled === true
+      && modeState === 'on'
+      && areDiagnosticTriggersAligned(markerScheduledAt, nextTriggerAt, liveAutomationAt);
+    smartOnSafety = {
+      ok: active,
+      status: active ? 'active' : 'mismatch',
+      markerScheduledAt,
+      nextTriggerAt,
+      liveAlarmAt: liveAutomationAt
+    };
+  }
+
+  const targetMinutes = Number(schedule?.pageTimerRetryMinutes) || 0;
+  const storedRetryAt = Number(schedule?.pageTimerRetryAt) || 0;
+  const livePageTimerRetryAt = Number(pageTimerRetryAlarm?.scheduledTime) || 0;
+  const hasStoredOffRetry = targetMinutes > 0 || storedRetryAt > 0;
+  let offPageTimer;
+  if (!hasStoredOffRetry && !livePageTimerRetryAt) {
+    offPageTimer = { ok: true, status: 'inactive', targetMinutes: 0 };
+  } else if (hasStoredOffRetry && !livePageTimerRetryAt) {
+    offPageTimer = {
+      ok: false,
+      status: 'missing-alarm',
+      targetMinutes,
+      storedRetryAt,
+      liveAlarmAt: 0
+    };
+  } else {
+    const active = targetMinutes > 0
+      && storedRetryAt > 0
+      && areDiagnosticTriggersAligned(storedRetryAt, livePageTimerRetryAt);
+    offPageTimer = {
+      ok: active,
+      status: active ? 'active' : 'mismatch',
+      targetMinutes,
+      storedRetryAt,
+      liveAlarmAt: livePageTimerRetryAt
+    };
+  }
+
+  return { smartOnSafety, offPageTimer };
 }
 
 async function sendDiagnosticRuntimeMessage(message) {
@@ -1122,9 +1245,15 @@ btnDiagnose.addEventListener('click', async () => {
       ? bg.schedule
       : (bg || {});
     const s = { ...storedSchedule, ...(ensured?.schedule || {}), ...bgSchedule };
+    const smartMode = isSmartSchedule(s);
+    const automationAlarmName = getPopupAutomationAlarmName(s);
+    const modeState = getPopupModeState(s);
     const automationPausedByActiveHours = s._automationPausedByActiveHours === true
       || isAutomationPausedByActiveHours(s);
-    const effectiveNextTriggerAt = s.nextTriggerAt || 0;
+    const effectiveNextTriggerAt = getPopupModeNextBoundaryAt(s);
+    const storedModeNextTriggerAt = smartMode
+      ? Number(storedSchedule.smartNextTriggerAt) || 0
+      : Number(storedSchedule.nextTriggerAt) || 0;
     const diagnosticRepairs = Array.isArray(ensured?.repairs)
       ? ensured.repairs
       : [];
@@ -1132,11 +1261,20 @@ btnDiagnose.addEventListener('click', async () => {
       repair === 'pwm-trigger'
       || repair === 'pwm-alarm'
       || repair === 'smart-on-clock'
+      || repair === 'smart-clock'
+      || repair === 'smart-alarm'
     ));
+    const automationModeLabel = smartMode ? 'Smart' : 'PWM';
+    const formatAutomationAlarmDiagnostic = key => t(key)
+      .replace(/ac-pwm/g, automationAlarmName)
+      .replace(/\bPWM\b/gi, automationModeLabel);
+    const formatAutomationRetryDiagnostic = message => smartMode
+      ? message
+      : String(message).replace(/Smart/gi, 'PWM').replace(/智能/gu, 'PWM');
 
     add(!!storedSchedule, t('diagnoseStorageRW'));
     add(s.enabled === true, t('diagnoseEnabledPrefix') + s.enabled + ' (' + (s.enabled ? t('diagnoseOn') : t('diagnoseOff')) + ')');
-    add(!!s.mode, t('diagnoseMode') + (s.mode || '?'));
+    add(!!s.mode, t('diagnoseMode') + (smartMode ? 'smart' : (s.mode || '?')));
     add(s.clockMode !== undefined, t('diagnoseClockMode') + (s.clockMode ? t('diagnoseClock') : t('diagnoseInterval')));
     if (s.clockMode === false && s.enabled
       && !automationPausedByActiveHours && !effectiveNextTriggerAt) {
@@ -1144,21 +1282,28 @@ btnDiagnose.addEventListener('click', async () => {
     } else if (effectiveNextTriggerAt) {
       const repairedLabel = backgroundClockRepaired
         ? t('diagnoseBgWriteback')
-        : (storedSchedule.nextTriggerAt === effectiveNextTriggerAt ? '' : t('diagnoseBgWriteback'));
+        : (storedModeNextTriggerAt === effectiveNextTriggerAt ? '' : t('diagnoseBgWriteback'));
       add(true, t('diagnoseTriggerTime') + new Date(effectiveNextTriggerAt).toLocaleTimeString() + repairedLabel);
     }
 
     // 2. 检查闹钟 — 运行闹钟只允许后台自愈，确保创建前后都复核运行时段门禁。
     let alarms = await chrome.alarms.getAll();
-    const pwmAlarm = ensured?.alarms?.pwm || alarms.find(a => a.name === 'ac-pwm');
+    const selectedEnsuredAlarm = smartMode
+      ? ensured?.alarms?.smart
+      : ensured?.alarms?.pwm;
+    const selectedEnsuredAlarmName = String(selectedEnsuredAlarm?.name || '');
+    const automationAlarm = selectedEnsuredAlarm
+      && (!selectedEnsuredAlarmName || selectedEnsuredAlarmName === automationAlarmName)
+      ? selectedEnsuredAlarm
+      : alarms.find(a => a.name === automationAlarmName);
     if (automationPausedByActiveHours) {
       add(true, t('diagnoseAutomationPaused'));
     } else {
-      add(!!pwmAlarm, t('diagnosePwmExists') + (pwmAlarm ? t('diagnosePwmTrigger') + new Date(pwmAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
-      if (pwmAlarm && s.clockMode === false && !effectiveNextTriggerAt) {
-        add(false, t('diagnosePwmSync'));
-      } else if (pwmAlarm && effectiveNextTriggerAt) {
-        add(areDiagnosticTriggersAligned(pwmAlarm.scheduledTime, effectiveNextTriggerAt), t('diagnosePwmSync') + (backgroundClockRepaired ? t('diagnoseBgWriteback') : ''));
+      add(!!automationAlarm, formatAutomationAlarmDiagnostic('diagnosePwmExists') + (automationAlarm ? t('diagnosePwmTrigger') + new Date(automationAlarm.scheduledTime).toLocaleTimeString() + ')' : ''));
+      if (automationAlarm && s.clockMode === false && !effectiveNextTriggerAt) {
+        add(false, formatAutomationAlarmDiagnostic('diagnosePwmSync'));
+      } else if (automationAlarm && effectiveNextTriggerAt) {
+        add(areDiagnosticTriggersAligned(automationAlarm.scheduledTime, effectiveNextTriggerAt), formatAutomationAlarmDiagnostic('diagnosePwmSync') + (backgroundClockRepaired ? t('diagnoseBgWriteback') : ''));
       }
 
       const badgeAlarm = ensured?.alarms?.badge
@@ -1224,7 +1369,7 @@ btnDiagnose.addEventListener('click', async () => {
       }
     }
 
-    if (pwmAlarm && s.alarmCreatedAt && s.alarmDelayMinutes) {
+    if (!smartMode && automationAlarm && s.alarmCreatedAt && s.alarmDelayMinutes) {
       const dueAt = s.alarmCreatedAt + s.alarmDelayMinutes * 60000;
       const overdue = dueAt <= Date.now();
       add(!overdue, t('diagnoseAlarmNotExpired') + new Date(dueAt).toLocaleTimeString() + ')');
@@ -1271,8 +1416,8 @@ btnDiagnose.addEventListener('click', async () => {
       try {
         const pt = await sendDiagnosticRuntimeMessage({ type: 'getPageTimer' });
         if (pt && pt.success !== false && pt.invalidTarget !== true && pt.found && pt.value) {
-          const localNext = effectiveNextTriggerAt || s.nextTriggerAt || 0;
-          add(true, t('diagnosePageTimerExpr', pt.value, fmt(localNext), s.pwmState));
+            const localNext = effectiveNextTriggerAt;
+            add(true, t('diagnosePageTimerExpr', pt.value, fmt(localNext), modeState));
         } else if (pt?.success === false || pt?.invalidTarget === true) {
           add(false, t('diagnosePageTimerFail') + String(pt.error || '').slice(0,60));
         } else {
@@ -1285,17 +1430,59 @@ btnDiagnose.addEventListener('click', async () => {
       add(true, t('diagnosePageTimerPending'));
     }
 
-    // 4.6 ac-page-timer-retry 闹钟(指北固定 5 闹钟之一,此前诊断漏检)。
-    // PWM 验证 runPwmStep 失败或新鲜页 page timer 读不回时,持久化 pageTimerRetryMinutes 与
-    // ac-page-timer-retry 闹钟,1 分钟内自动重试 OFF 关机。诊断应显示这两者是否激活。
-    const retryMin = Number(s.pageTimerRetryMinutes) || 0;
-    if (retryMin > 0) {
-      const retryAlarm = alarms.find(a => a.name === 'ac-page-timer-retry') || await chrome.alarms.get('ac-page-timer-retry');
-      const retryAt = retryAlarm?.scheduledTime || 0;
-      const retryStr = retryAt ? new Date(retryAt).toLocaleTimeString() : '?';
-      add(!!retryAlarm, t('diagnosePageTimerRetry', retryStr, retryMin));
+    // 4.6 当前模式的自动重试与独立 OFF 页面关机重试分别诊断。
+    // Smart 使用 ac-smart/smartRetry*；PWM 使用 ac-pwm/pwmRetry*。
+    const pageTimerRetryAlarm = alarms.find(a => a.name === 'ac-page-timer-retry')
+      || await chrome.alarms.get('ac-page-timer-retry');
+    const retryChannels = classifyDiagnosticRetryChannels(
+      s,
+      automationAlarm,
+      pageTimerRetryAlarm
+    );
+    const smartOnSafetyRetry = retryChannels.smartOnSafety;
+    if (smartOnSafetyRetry.status === 'active') {
+      add(true, formatAutomationRetryDiagnostic(t(
+        'diagnoseSmartOnSafetyRetryActive',
+        fmt(smartOnSafetyRetry.liveAlarmAt)
+      )));
+    } else if (smartOnSafetyRetry.status === 'missing-alarm') {
+      add(false, formatAutomationRetryDiagnostic(t(
+        'diagnoseSmartOnSafetyRetryMissingAlarm',
+        fmt(smartOnSafetyRetry.markerScheduledAt)
+      )));
+    } else if (smartOnSafetyRetry.status === 'mismatch') {
+      add(false, formatAutomationRetryDiagnostic(t(
+        'diagnoseSmartOnSafetyRetryMismatch',
+        fmt(smartOnSafetyRetry.markerScheduledAt),
+        fmt(smartOnSafetyRetry.nextTriggerAt),
+        fmt(smartOnSafetyRetry.liveAlarmAt)
+      )));
     } else {
-      add(true, t('diagnosePageTimerRetryNone'));
+      add(true, formatAutomationRetryDiagnostic(t('diagnoseSmartOnSafetyRetryInactive')));
+    }
+
+    const offPageTimerRetry = retryChannels.offPageTimer;
+    if (offPageTimerRetry.status === 'active') {
+      add(true, t(
+        'diagnoseOffPageTimerRetryActive',
+        fmt(offPageTimerRetry.liveAlarmAt),
+        offPageTimerRetry.targetMinutes
+      ));
+    } else if (offPageTimerRetry.status === 'missing-alarm') {
+      add(false, t(
+        'diagnoseOffPageTimerRetryMissingAlarm',
+        fmt(offPageTimerRetry.storedRetryAt),
+        offPageTimerRetry.targetMinutes
+      ));
+    } else if (offPageTimerRetry.status === 'mismatch') {
+      add(false, t(
+        'diagnoseOffPageTimerRetryMismatch',
+        fmt(offPageTimerRetry.storedRetryAt),
+        fmt(offPageTimerRetry.liveAlarmAt),
+        offPageTimerRetry.targetMinutes
+      ));
+    } else {
+      add(true, t('diagnoseOffPageTimerRetryInactive'));
     }
 
     // 5. SW 状态可观测性:启动时间 / init 完成时间 / 内存 schedule 与 storage 是否一致
@@ -1321,9 +1508,20 @@ btnDiagnose.addEventListener('click', async () => {
       add(sw.offscreenAlive !== false, sw.offscreenAlive === true
         ? t('diagnoseOffscreenPresent')
         : (sw.offscreenAlive === false ? t('diagnoseOffscreenMissing') : t('diagnoseOffscreenUnknown')));
-      const memNext = sw.memorySchedule?.nextTriggerAt || 0;
-      const storedNext = storedSchedule.nextTriggerAt || 0;
-      const memLive = sw.liveAlarmScheduledTime || 0;
+      const memoryModeIsSmart = isSmartSchedule(sw.memorySchedule);
+      const memNext = smartMode
+        ? (memoryModeIsSmart ? Number(sw.memorySchedule?.smartNextTriggerAt) || 0 : 0)
+        : (memoryModeIsSmart ? 0 : Number(sw.memorySchedule?.nextTriggerAt) || 0);
+      const storedNext = smartMode
+        ? Number(storedSchedule.smartNextTriggerAt) || 0
+        : Number(storedSchedule.nextTriggerAt) || 0;
+      const swLiveAlarmName = String(sw.liveAlarmName || '');
+      const swLiveAlarmMatches = smartMode
+        ? swLiveAlarmName === automationAlarmName
+        : !swLiveAlarmName || swLiveAlarmName === automationAlarmName;
+      const memLive = swLiveAlarmMatches
+        ? Number(sw.liveAlarmScheduledTime) || 0
+        : 0;
       if (automationPausedByActiveHours) {
         // 暂停态预期没有 PWM 时钟，不把三方全空误报为失步。
       } else if (areDiagnosticTriggersAligned(memLive, memNext, storedNext)) {

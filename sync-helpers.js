@@ -1,5 +1,5 @@
 // ============================================================
-// sync-helpers.js — 跨设备 PWM 同步的纯函数（无 chrome.* 副作用）
+// sync-helpers.js — 跨设备 Smart/PWM phase envelope 纯函数（无 chrome.* 副作用）
 // ============================================================
 //
 // 设计目的：
@@ -7,8 +7,8 @@
 //   `chrome.storage.local` 是各设备本地的、不会被浏览器自动同步，
 //   结果是同一账号的多台设备跑各自的 PWM 循环——同一台 AC 被反复开关。
 //
-//   把"瘦化版"schedule（config + PWM 相位）推到 `chrome.storage.sync`，
-//   让多台设备对齐到相同的 wall-clock 边界，依赖 background.js 中
+//   把"瘦化版"schedule（config + 当前模式 phase envelope）推到
+//   `chrome.storage.sync`，让多台设备对齐到相同的 wall-clock 边界，依赖 background.js 中
 //   toggleAC() 的 A1 幂等预检让先触发的那台完成 toggle、后到的看到
 //   目标状态已达成直接跳过。
 //
@@ -26,13 +26,109 @@
 // alarmCreatedAt / alarmDelayMinutes / pwmRetry*）属于本机运行态，不应同步——
 // 特别是 __heartbeat 每 20s 写一次，会瞬间打爆 sync 写入配额
 // （8 写/分钟、100 写/小时、1200 写/天）。
-const SYNC_FIELDS = ['enabled', 'onMinutes', 'offMinutes', 'activeHours', 'smartMode', 'pwmState', 'nextTriggerAt', 'smartClockPlannedAt'];
+const SYNC_PHASE_SCHEMA_VERSION = 1;
+const SYNC_FIELDS = [
+  'enabled',
+  'onMinutes',
+  'offMinutes',
+  'activeHours',
+  'smartMode',
+  'phase',
+  'pwmState',
+  'nextTriggerAt',
+  'smartClockPlannedAt',
+  'smartState',
+  'smartNextTriggerAt',
+  'pwmClockPlannedAt',
+  'syncedAt'
+];
+
+function normalizeSyncMode(value) {
+  return value === 'smart' || value === 'pwm' ? value : null;
+}
+
+function getSyncMode(schedule, opts = {}) {
+  return normalizeSyncMode(opts.mode)
+    || (schedule?.smartMode?.enabled === true ? 'smart' : 'pwm');
+}
+
+function normalizePhaseState(value) {
+  return value === 'on' ? 'on' : 'off';
+}
+
+function normalizePositiveTimestamp(value) {
+  const timestamp = Number(value);
+  return Number.isFinite(timestamp) && timestamp > 0 ? timestamp : 0;
+}
+
+function normalizeFutureTimestamp(value, now) {
+  const timestamp = normalizePositiveTimestamp(value);
+  return timestamp > now ? timestamp : 0;
+}
+
+function getLocalPhaseNamespace(schedule, mode) {
+  if (mode === 'smart') {
+    return {
+      state: normalizePhaseState(schedule?.smartState),
+      nextTriggerAt: normalizePositiveTimestamp(schedule?.smartNextTriggerAt),
+      clockPlannedAt: normalizePositiveTimestamp(schedule?.smartClockPlannedAt)
+    };
+  }
+
+  return {
+    state: normalizePhaseState(schedule?.pwmState),
+    nextTriggerAt: normalizePositiveTimestamp(schedule?.nextTriggerAt),
+    clockPlannedAt: normalizePositiveTimestamp(schedule?.pwmClockPlannedAt)
+      || normalizePositiveTimestamp(schedule?.alarmCreatedAt)
+  };
+}
+
+function createPhaseAdoption(mode, state, nextTriggerAt, clockPlannedAt, metadataOnly = false) {
+  return {
+    mode,
+    state,
+    clockPlannedAt,
+    // 这些字段是现有 background.js 调用方的兼容返回字段；它们不代表
+    // Smart/PWM 内部状态的来源。
+    pwmState: state,
+    nextTriggerAt,
+    smartClockPlannedAt: clockPlannedAt,
+    ...(mode === 'smart'
+      ? {
+        smartState: state,
+        smartNextTriggerAt: nextTriggerAt
+      }
+      : { pwmClockPlannedAt: clockPlannedAt }),
+    ...(metadataOnly ? { metadataOnly: true } : {})
+  };
+}
 
 // 把内存 schedule 组装成 push 到 chrome.storage.sync 的瘦化对象。
 // nextTriggerAt 若已是过去时戳则推 0——让接收方识别为"相位未定"，
 // 而不是用陈旧值误导对端把闹钟调度到过去时刻。
 function composeSyncPayload(schedule, now = Date.now()) {
-  return {
+  const syncNow = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  const mode = getSyncMode(schedule);
+  const smartEnabled = mode === 'smart';
+  const state = normalizePhaseState(
+    smartEnabled ? schedule?.smartState : schedule?.pwmState
+  );
+  const nextTriggerAt = normalizeFutureTimestamp(
+    smartEnabled ? schedule?.smartNextTriggerAt : schedule?.nextTriggerAt,
+    syncNow
+  );
+  const clockPlannedAt = smartEnabled
+    ? normalizePositiveTimestamp(schedule?.smartClockPlannedAt)
+    : normalizePositiveTimestamp(schedule?.pwmClockPlannedAt)
+      || normalizePositiveTimestamp(schedule?.alarmCreatedAt);
+  const phase = {
+    schemaVersion: SYNC_PHASE_SCHEMA_VERSION,
+    mode,
+    state,
+    nextTriggerAt,
+    clockPlannedAt
+  };
+  const payload = {
     enabled: !!schedule.enabled,
     onMinutes: schedule.onMinutes,
     offMinutes: schedule.offMinutes,
@@ -42,26 +138,27 @@ function composeSyncPayload(schedule, now = Date.now()) {
     smartMode: schedule.smartMode
       ? { enabled: !!schedule.smartMode.enabled, sensitivity: schedule.smartMode.sensitivity }
       : { enabled: false, sensitivity: 5 },
-    pwmState: schedule.pwmState === 'on' ? 'on' : 'off',
-    // 远端若拿到过去时戳：本端刚 toggle 完到-下一周期绝对时间，
-    // 但 sync 传输有延迟，1 分钟内仍可采纳用于边界对齐；超过 1 分钟
-    // 视为陈旧，标记 0 让对端忽略相位字段。
-    nextTriggerAt: (schedule.nextTriggerAt && schedule.nextTriggerAt > now)
-      ? schedule.nextTriggerAt
-      : 0,
-    // syncedAt 是这次配置写入时间，不是 phase 的生成时间。智能 ON 的接收方
-    // 必须沿用原始本机计划来源，避免一次无关配置 push 把旧坏钟重新锚定为正常。
-    smartClockPlannedAt: Number(schedule.smartClockPlannedAt) > 0
-      ? Number(schedule.smartClockPlannedAt)
-      : (Number(schedule.alarmCreatedAt) > 0
-        ? Number(schedule.alarmCreatedAt)
-        : 0),
-    syncedAt: now
+    phase,
+    // 旧协议字段只投影当前真实模式；Smart 不从这些字段读取内部真值。
+    pwmState: state,
+    nextTriggerAt,
+    smartClockPlannedAt: clockPlannedAt,
+    syncedAt: syncNow
   };
+
+  if (smartEnabled) {
+    payload.smartState = state;
+    payload.smartNextTriggerAt = nextTriggerAt;
+  } else {
+    payload.pwmClockPlannedAt = clockPlannedAt;
+  }
+
+  return payload;
 }
 
-// 判断是否应当采纳远端的 PWM 相位。
-// 返回 null（无需变更）或 { pwmState, nextTriggerAt }（采纳此相位）。
+// 判断是否应当采纳远端当前模式的相位。
+// 返回 null（无需变更）或带 mode/state 的相位结果；pwmState/nextTriggerAt/
+// smartClockPlannedAt 保留给现有调用方作为兼容返回字段。
 //
 // 决策口径（全部基于自身的本地 schedule，反复推演过两种边界场景）：
 //   1. 自回环抑制：remote.syncedAt <= lastSyncedAt → 自己刚写入的回流，跳过。
@@ -70,76 +167,125 @@ function composeSyncPayload(schedule, now = Date.now()) {
 //   4. 否则（本地无未来触发时间，或偏差 > 10s）→ 采纳 remote 相位。
 //
 // opts.lastSyncedAt 是 background.js 模块变量的本地参照，调用方维护；
-// 测试时可直接传入，便于验证自回环场景。
+// opts.mode 可明确指定本地 namespace。没有 phase 的旧 payload 只允许 PWM
+// 读取顶层 generic 字段；Smart 必须由调用方显式传 legacyMigration=true 才读取。
 function computePhaseAdoption(localSchedule, remote, opts = {}) {
   const {
     now = Date.now(),
     toleranceMs = 10_000,   // 相位偏差 ≤ 10s 视为已对齐，不再 re-reschedule
     staleMs = 60_000,        // 远端触发时间在过去 > 60s 视为陈旧
-    lastSyncedAt = 0
+    lastSyncedAt = 0,
+    legacyMigration = false
   } = opts;
 
   if (!remote || typeof remote !== 'object') return null;
-  if (!remote.syncedAt) return null;
+  const remoteSyncedAt = normalizePositiveTimestamp(remote.syncedAt);
+  if (!remoteSyncedAt) return null;
 
   // 自回环：远端 syncedAt 不比本地新 → 跳过相位采纳
-  if (remote.syncedAt <= lastSyncedAt) return null;
+  if (remoteSyncedAt <= normalizePositiveTimestamp(lastSyncedAt)) return null;
 
-  const remoteTrigger = Number(remote.nextTriggerAt) || 0;
+  const mode = getSyncMode(localSchedule, opts);
+  const hasPhase = Object.prototype.hasOwnProperty.call(remote, 'phase');
+  let remoteState;
+  let remoteTrigger;
+  let remotePlannedAt;
+
+  if (hasPhase) {
+    const phase = remote.phase;
+    if (!phase || typeof phase !== 'object' || Array.isArray(phase)) return null;
+    if (phase.schemaVersion !== SYNC_PHASE_SCHEMA_VERSION
+        || normalizeSyncMode(phase.mode) !== mode) {
+      return null;
+    }
+    if (phase.state !== 'on' && phase.state !== 'off') return null;
+    remoteState = phase.state;
+    remoteTrigger = normalizePositiveTimestamp(phase.nextTriggerAt);
+    remotePlannedAt = normalizePositiveTimestamp(phase.clockPlannedAt);
+  } else {
+    // 旧 payload 没有 mode，generic 字段对 Smart/PWM 有歧义；默认只兼容
+    // PWM。Smart 迁移必须由调用方明确打开，避免 PWM 状态反向覆盖 Smart。
+    if (mode === 'smart' && legacyMigration !== true) return null;
+    if (remote.pwmState !== 'on' && remote.pwmState !== 'off') return null;
+    remoteState = remote.pwmState;
+    remoteTrigger = normalizePositiveTimestamp(remote.nextTriggerAt);
+    remotePlannedAt = normalizePositiveTimestamp(remote.smartClockPlannedAt);
+  }
+
   if (!remoteTrigger) return null;  // 远端无相位信息
 
   // 陈旧：远端时戳在过去过远 → 即便 sync 传到也对端已错过，跳相位以免把闹钟调度到过去
-  if (remoteTrigger < now - staleMs) return null;
+  const referenceNow = Number.isFinite(Number(now)) ? Number(now) : Date.now();
+  const staleWindow = Number.isFinite(Number(staleMs))
+    ? Math.max(0, Number(staleMs))
+    : 60_000;
+  if (remoteTrigger < referenceNow - staleWindow) return null;
 
-  const localTrigger = Number(localSchedule?.nextTriggerAt) || 0;
-  const remotePwmState = remote.pwmState === 'on' ? 'on' : 'off';
-  const remotePlannedAt = Number(remote.smartClockPlannedAt) || 0;
-  const localPlannedAt = Number(localSchedule?.smartClockPlannedAt)
-    || Number(localSchedule?.alarmCreatedAt)
-    || 0;
+  const localPhase = getLocalPhaseNamespace(localSchedule, mode);
+  const localTrigger = localPhase.nextTriggerAt;
+  const localPlannedAt = localPhase.clockPlannedAt;
+  const tolerance = Number.isFinite(Number(toleranceMs))
+    ? Math.max(0, Number(toleranceMs))
+    : 10_000;
   // OFF 是安全动作：两端都计划 OFF 时，远端较晚的截止绝不能
   // 延后本机已有的较早 OFF。这也让 timer-only 修复投影在新版对端
   // 只会收紧、不会放宽关机保险。
-  if (localTrigger > now
-      && localSchedule?.pwmState === 'off'
-      && remotePwmState === 'off'
+  if (localTrigger > referenceNow
+      && localPhase.state === 'off'
+      && remoteState === 'off'
       && localTrigger <= remoteTrigger) {
     return null;
   }
   // 容忍窗口内：偏差 ≤ 10s 且本地未来触发 → 视为已对齐
-  if (localTrigger > now
-      && localSchedule?.pwmState === remotePwmState
-      && Math.abs(localTrigger - remoteTrigger) <= toleranceMs) {
+  if (localTrigger > referenceNow
+      && localPhase.state === remoteState
+      && Math.abs(localTrigger - remoteTrigger) <= tolerance) {
     if (remotePlannedAt > 0 && remotePlannedAt !== localPlannedAt) {
-      return {
-        pwmState: remotePwmState,
-        nextTriggerAt: remoteTrigger,
-        smartClockPlannedAt: remotePlannedAt,
-        metadataOnly: true
-      };
+      return createPhaseAdoption(
+        mode,
+        remoteState,
+        remoteTrigger,
+        remotePlannedAt,
+        true
+      );
     }
     return null;
   }
 
-  return {
-    pwmState: remotePwmState,
-    nextTriggerAt: remoteTrigger,
-    ...(remotePlannedAt > 0 ? { smartClockPlannedAt: remotePlannedAt } : {})
-  };
+  return createPhaseAdoption(mode, remoteState, remoteTrigger, remotePlannedAt);
 }
 
 // 计算哪些 config 字段需要采纳（last-writer-wins，无相位守卫）。
 // 返回 { changed: bool, fields: {...} }——background.js 拿到后会合并并写 local storage。
-function computeConfigDiff(localSchedule, remote) {
+// Smart 的 on/off 是天气派生运行态；明确 Smart 时不从远端 config 覆盖。
+function computeConfigDiff(localSchedule, remote, opts = {}) {
   if (!remote || typeof remote !== 'object') return { changed: false, fields: {} };
   const out = {};
   let changed = false;
+  const explicitMode = normalizeSyncMode(opts.mode);
+  const remotePhaseMode = remote.phase && typeof remote.phase === 'object'
+    ? normalizeSyncMode(remote.phase.mode)
+    : null;
+  const remoteSmartMode = typeof remote.smartMode?.enabled === 'boolean'
+    ? (remote.smartMode.enabled ? 'smart' : 'pwm')
+    : null;
+  const mode = explicitMode
+    || remotePhaseMode
+    || remoteSmartMode
+    || getSyncMode(localSchedule);
+  const protectSmartDurations = opts.protectSmartDurations === true || mode === 'smart';
 
-  if (typeof remote.onMinutes === 'number' && remote.onMinutes !== localSchedule?.onMinutes) {
+  if (!protectSmartDurations
+      && typeof remote.onMinutes === 'number'
+      && Number.isFinite(remote.onMinutes)
+      && remote.onMinutes !== localSchedule?.onMinutes) {
     out.onMinutes = remote.onMinutes;
     changed = true;
   }
-  if (typeof remote.offMinutes === 'number' && remote.offMinutes !== localSchedule?.offMinutes) {
+  if (!protectSmartDurations
+      && typeof remote.offMinutes === 'number'
+      && Number.isFinite(remote.offMinutes)
+      && remote.offMinutes !== localSchedule?.offMinutes) {
     out.offMinutes = remote.offMinutes;
     changed = true;
   }
@@ -378,6 +524,7 @@ function computeExpectedTriggerFromPageTimer(localSchedule, pageOffAt, now) {
 // 也可 `import { composeSyncPayload } from './sync-helpers.js'` 直接具名导入（Node 18+）。
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
+    SYNC_PHASE_SCHEMA_VERSION,
     SYNC_FIELDS,
     composeSyncPayload,
     computePhaseAdoption,

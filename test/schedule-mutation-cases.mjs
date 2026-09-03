@@ -3,7 +3,9 @@ import scheduleMutations from '../schedule-mutations.js';
 const {
   setScheduleNextTrigger,
   setSchedulePwmClockIntent,
+  setScheduleSmartClockIntent,
   replaceSchedulePwmRetryState,
+  replaceScheduleSmartRetryState,
   replaceSchedulePageTimerRetryState,
   replaceSchedulePageTimerState,
   recordSchedulePageTimerFailureState,
@@ -17,7 +19,9 @@ export function runScheduleMutationCases(assertPass) {
       === [
         'setScheduleNextTrigger',
         'setSchedulePwmClockIntent',
+        'setScheduleSmartClockIntent',
         'replaceSchedulePwmRetryState',
+        'replaceScheduleSmartRetryState',
         'replaceSchedulePageTimerRetryState',
         'replaceSchedulePageTimerState',
         'recordSchedulePageTimerFailureState',
@@ -36,8 +40,18 @@ export function runScheduleMutationCases(assertPass) {
   const targetAt = 1_787_983_440_000.25;
   const schedule = {
     nextTriggerAt: 0,
-    smartClockPlannedAt: 0,
-    alarmCreatedAt: 0
+    smartNextTriggerAt: 111,
+    smartClockPlannedAt: 222,
+    pwmClockPlannedAt: 333,
+    alarmCreatedAt: 444,
+    alarmDelayMinutes: 5,
+    pwmRetryKind: 'pwm-old',
+    pwmRetryBoundaryAt: 555,
+    pwmRetryScheduledAt: 666,
+    smartRetryKind: 'smart-old',
+    smartRetryBoundaryAt: 777,
+    smartRetryScheduledAt: 888,
+    pwmState: 'pwm-state'
   };
   let nowReads = 0;
   const options = {
@@ -48,99 +62,162 @@ export function runScheduleMutationCases(assertPass) {
   setScheduleNextTrigger(schedule, targetAt, options);
   assertPass(
     schedule.nextTriggerAt === targetAt
-      && schedule.smartClockPlannedAt === originAt
-      && nowReads === 1,
-    '新时钟保留小数毫秒，并只读取一次 immutable origin'
+      && schedule.smartNextTriggerAt === 111
+      && schedule.smartClockPlannedAt === 222
+      && schedule.pwmClockPlannedAt === 333
+      && schedule.alarmCreatedAt === 444
+      && schedule.alarmDelayMinutes === 5
+      && schedule.pwmRetryKind === 'pwm-old'
+      && schedule.pwmRetryBoundaryAt === 555
+      && schedule.pwmRetryScheduledAt === 666
+      && schedule.smartRetryKind === 'smart-old'
+      && schedule.smartRetryBoundaryAt === 777
+      && schedule.smartRetryScheduledAt === 888
+      && schedule.pwmState === 'pwm-state'
+      && nowReads === 0,
+    'generic setter 只更新 nextTriggerAt，不读取 origin 或污染任一 namespace'
   );
 
-  setScheduleNextTrigger(schedule, targetAt + 1500, options);
+  setScheduleNextTrigger(schedule, 0, {
+    ...options,
+    plannedAt: originAt
+  });
   assertPass(
-    schedule.nextTriggerAt === targetAt + 1500
-      && schedule.smartClockPlannedAt === originAt
-      && nowReads === 1,
-    '容差边界内的 live verify 保留原 origin，且不读取当前时间'
+    schedule.nextTriggerAt === 0
+      && schedule.smartNextTriggerAt === 111
+      && schedule.smartClockPlannedAt === 222
+      && schedule.pwmClockPlannedAt === 333
+      && schedule.alarmCreatedAt === 444
+      && schedule.alarmDelayMinutes === 5
+      && schedule.pwmRetryKind === 'pwm-old'
+      && schedule.pwmRetryBoundaryAt === 555
+      && schedule.pwmRetryScheduledAt === 666
+      && schedule.smartRetryKind === 'smart-old'
+      && schedule.smartRetryBoundaryAt === 777
+      && schedule.smartRetryScheduledAt === 888
+      && schedule.pwmState === 'pwm-state'
+      && nowReads === 0,
+    'generic setter 清除时仍只更新 nextTriggerAt，并忽略 plannedAt/readNow'
   );
 
   const remoteOriginAt = originAt - 600_000;
-  setScheduleNextTrigger(schedule, targetAt + 500, {
-    ...options,
-    plannedAt: remoteOriginAt
-  });
-  assertPass(
-    schedule.smartClockPlannedAt === remoteOriginAt && nowReads === 1,
-    '显式远端 origin 无条件覆盖同钟 origin，且不读取当前时间'
-  );
-
-  const legacySchedule = {
+  const pwmIntentSchedule = {
     nextTriggerAt: targetAt,
-    smartClockPlannedAt: 0,
-    alarmCreatedAt: originAt - 1000
-  };
-  setScheduleNextTrigger(legacySchedule, targetAt + 500, options);
-  assertPass(
-    legacySchedule.smartClockPlannedAt === originAt - 1000 && nowReads === 1,
-    '同钟缺少 origin 时继承 legacy alarmCreatedAt，不制造新来源'
-  );
-
-  setScheduleNextTrigger(schedule, targetAt + 2000.001, options);
-  assertPass(
-    schedule.smartClockPlannedAt === originAt && nowReads === 2,
-    '超过容差即认领新时钟，并惰性读取一次新 origin'
-  );
-
-  setScheduleNextTrigger(schedule, 0, options);
-  assertPass(
-    schedule.nextTriggerAt === 0
-      && schedule.smartClockPlannedAt === 0
-      && nowReads === 2,
-    '清除时钟同步清除 origin，且不读取当前时间'
-  );
-
-  const intentSchedule = {
-    nextTriggerAt: targetAt,
-    smartClockPlannedAt: 0,
+    smartNextTriggerAt: targetAt - 1000,
+    smartClockPlannedAt: originAt - 2000,
+    pwmClockPlannedAt: originAt - 1000,
     alarmCreatedAt: originAt,
     alarmDelayMinutes: 4,
     untouched: 'kept'
   };
-  setSchedulePwmClockIntent(intentSchedule, targetAt + 500, options);
+  setSchedulePwmClockIntent(pwmIntentSchedule, targetAt + 500, options);
   assertPass(
-    intentSchedule.nextTriggerAt === targetAt + 500
-      && intentSchedule.smartClockPlannedAt === originAt
-      && intentSchedule.alarmCreatedAt === 0
-      && intentSchedule.alarmDelayMinutes === 0
-      && intentSchedule.untouched === 'kept'
-      && nowReads === 2,
-    'same-clock intent 先继承 legacy origin，再清 verified alarm metadata'
+    pwmIntentSchedule.nextTriggerAt === targetAt + 500
+      && pwmIntentSchedule.pwmClockPlannedAt === originAt - 1000
+      && pwmIntentSchedule.smartNextTriggerAt === targetAt - 1000
+      && pwmIntentSchedule.smartClockPlannedAt === originAt - 2000
+      && pwmIntentSchedule.alarmCreatedAt === 0
+      && pwmIntentSchedule.alarmDelayMinutes === 0
+      && pwmIntentSchedule.untouched === 'kept'
+      && nowReads === 0,
+    'same-clock PWM intent 保留旧 pwm origin，且清理 legacy alarm metadata'
   );
 
-  setSchedulePwmClockIntent(intentSchedule, targetAt + 3000, {
+  setSchedulePwmClockIntent(pwmIntentSchedule, targetAt + 3000, options);
+  assertPass(
+    pwmIntentSchedule.nextTriggerAt === targetAt + 3000
+      && pwmIntentSchedule.pwmClockPlannedAt === originAt
+      && pwmIntentSchedule.smartNextTriggerAt === targetAt - 1000
+      && pwmIntentSchedule.smartClockPlannedAt === originAt - 2000
+      && pwmIntentSchedule.alarmCreatedAt === 0
+      && pwmIntentSchedule.alarmDelayMinutes === 0
+      && nowReads === 1,
+    '新时钟 PWM intent 惰性创建新的 pwm origin，不读取 Smart namespace'
+  );
+
+  setSchedulePwmClockIntent(pwmIntentSchedule, targetAt + 3500, {
     ...options,
     plannedAt: remoteOriginAt
   });
   assertPass(
-    intentSchedule.nextTriggerAt === targetAt + 3000
-      && intentSchedule.smartClockPlannedAt === remoteOriginAt
-      && intentSchedule.alarmCreatedAt === 0
-      && intentSchedule.alarmDelayMinutes === 0
-      && nowReads === 2,
-    '显式 origin 的新 intent 保留来源并声明尚无 verified alarm'
+    pwmIntentSchedule.nextTriggerAt === targetAt + 3500
+      && pwmIntentSchedule.pwmClockPlannedAt === remoteOriginAt
+      && pwmIntentSchedule.smartNextTriggerAt === targetAt - 1000
+      && pwmIntentSchedule.smartClockPlannedAt === originAt - 2000
+      && pwmIntentSchedule.alarmCreatedAt === 0
+      && pwmIntentSchedule.alarmDelayMinutes === 0
+      && nowReads === 1,
+    '显式 PWM origin 覆盖为新来源，并继续清理 legacy alarm metadata'
   );
 
-  setSchedulePwmClockIntent(intentSchedule, 0, options);
+  setSchedulePwmClockIntent(pwmIntentSchedule, 0, options);
   assertPass(
-    intentSchedule.nextTriggerAt === 0
-      && intentSchedule.smartClockPlannedAt === 0
-      && intentSchedule.alarmCreatedAt === 0
-      && intentSchedule.alarmDelayMinutes === 0
+    pwmIntentSchedule.nextTriggerAt === 0
+      && pwmIntentSchedule.pwmClockPlannedAt === 0
+      && pwmIntentSchedule.smartNextTriggerAt === targetAt - 1000
+      && pwmIntentSchedule.smartClockPlannedAt === originAt - 2000
+      && pwmIntentSchedule.alarmCreatedAt === 0
+      && pwmIntentSchedule.alarmDelayMinutes === 0
+      && nowReads === 1,
+    '清除 PWM clock intent 只清 PWM 时钟与 legacy metadata，不改变 Smart origin'
+  );
+
+  const smartIntentSchedule = {
+    nextTriggerAt: targetAt,
+    pwmClockPlannedAt: remoteOriginAt,
+    smartNextTriggerAt: targetAt,
+    smartClockPlannedAt: originAt - 2000,
+    alarmCreatedAt: originAt - 3000,
+    alarmDelayMinutes: 7,
+    untouched: 'kept'
+  };
+  setScheduleSmartClockIntent(smartIntentSchedule, targetAt + 3000, options);
+  assertPass(
+    smartIntentSchedule.smartNextTriggerAt === targetAt + 3000
+      && smartIntentSchedule.smartClockPlannedAt === originAt
+      && smartIntentSchedule.nextTriggerAt === targetAt
+      && smartIntentSchedule.pwmClockPlannedAt === remoteOriginAt
+      && smartIntentSchedule.alarmCreatedAt === originAt - 3000
+      && smartIntentSchedule.alarmDelayMinutes === 7
+      && smartIntentSchedule.untouched === 'kept'
       && nowReads === 2,
-    '撤销 clock intent 同步清四个时钟字段且不读取当前时间'
+    'Smart clock intent 只更新 Smart trigger/origin，不污染 PWM 或 alarm metadata'
+  );
+
+  setScheduleSmartClockIntent(smartIntentSchedule, targetAt + 3500, {
+    ...options,
+    plannedAt: remoteOriginAt
+  });
+  assertPass(
+    smartIntentSchedule.smartNextTriggerAt === targetAt + 3500
+      && smartIntentSchedule.smartClockPlannedAt === remoteOriginAt
+      && smartIntentSchedule.nextTriggerAt === targetAt
+      && smartIntentSchedule.pwmClockPlannedAt === remoteOriginAt
+      && smartIntentSchedule.alarmCreatedAt === originAt - 3000
+      && smartIntentSchedule.alarmDelayMinutes === 7
+      && nowReads === 2,
+    '显式 Smart origin 只覆盖 Smart namespace，并保留 PWM 与 alarm metadata'
+  );
+
+  setScheduleSmartClockIntent(smartIntentSchedule, 0, options);
+  assertPass(
+    smartIntentSchedule.smartNextTriggerAt === 0
+      && smartIntentSchedule.smartClockPlannedAt === 0
+      && smartIntentSchedule.nextTriggerAt === targetAt
+      && smartIntentSchedule.pwmClockPlannedAt === remoteOriginAt
+      && smartIntentSchedule.alarmCreatedAt === originAt - 3000
+      && smartIntentSchedule.alarmDelayMinutes === 7
+      && nowReads === 2,
+    '清除 Smart clock intent 只清 Smart 时钟，不改变 PWM 与 alarm metadata'
   );
 
   const retrySchedule = {
     pwmRetryKind: 'old-kind',
     pwmRetryBoundaryAt: 111,
     pwmRetryScheduledAt: 222,
+    smartRetryKind: 'smart-old-kind',
+    smartRetryBoundaryAt: 333,
+    smartRetryScheduledAt: 444,
     untouched: 'kept'
   };
   const fractionalRetryAt = targetAt + 0.5;
@@ -153,8 +230,11 @@ export function runScheduleMutationCases(assertPass) {
     retrySchedule.pwmRetryKind === 'unknown-kind'
       && retrySchedule.pwmRetryBoundaryAt === originAt
       && retrySchedule.pwmRetryScheduledAt === fractionalRetryAt
+      && retrySchedule.smartRetryKind === 'smart-old-kind'
+      && retrySchedule.smartRetryBoundaryAt === 333
+      && retrySchedule.smartRetryScheduledAt === 444
       && retrySchedule.untouched === 'kept',
-    'retry primitive 原样原子替换三字段，不吞掉 unknown kind 或小数毫秒'
+    'PWM retry primitive 原样原子替换三字段，不交叉写入 Smart retry'
   );
 
   replaceSchedulePwmRetryState(retrySchedule);
@@ -162,8 +242,48 @@ export function runScheduleMutationCases(assertPass) {
     retrySchedule.pwmRetryKind === ''
       && retrySchedule.pwmRetryBoundaryAt === 0
       && retrySchedule.pwmRetryScheduledAt === 0
+      && retrySchedule.smartRetryKind === 'smart-old-kind'
+      && retrySchedule.smartRetryBoundaryAt === 333
+      && retrySchedule.smartRetryScheduledAt === 444
       && retrySchedule.untouched === 'kept',
-    '空 retry replacement 只清 retry 三字段'
+    '空 PWM retry replacement 只清 PWM retry 三字段'
+  );
+
+  const smartRetrySchedule = {
+    pwmRetryKind: 'pwm-kind',
+    pwmRetryBoundaryAt: 555,
+    pwmRetryScheduledAt: 666,
+    smartRetryKind: 'old-smart-kind',
+    smartRetryBoundaryAt: 777,
+    smartRetryScheduledAt: 888,
+    untouched: 'kept'
+  };
+  replaceScheduleSmartRetryState(smartRetrySchedule, {
+    kind: 'unknown-smart-kind',
+    boundaryAt: originAt,
+    scheduledAt: fractionalRetryAt
+  });
+  assertPass(
+    smartRetrySchedule.smartRetryKind === 'unknown-smart-kind'
+      && smartRetrySchedule.smartRetryBoundaryAt === originAt
+      && smartRetrySchedule.smartRetryScheduledAt === fractionalRetryAt
+      && smartRetrySchedule.pwmRetryKind === 'pwm-kind'
+      && smartRetrySchedule.pwmRetryBoundaryAt === 555
+      && smartRetrySchedule.pwmRetryScheduledAt === 666
+      && smartRetrySchedule.untouched === 'kept',
+    'Smart retry primitive 原样原子替换三字段，不交叉写入 PWM retry'
+  );
+
+  replaceScheduleSmartRetryState(smartRetrySchedule);
+  assertPass(
+    smartRetrySchedule.smartRetryKind === ''
+      && smartRetrySchedule.smartRetryBoundaryAt === 0
+      && smartRetrySchedule.smartRetryScheduledAt === 0
+      && smartRetrySchedule.pwmRetryKind === 'pwm-kind'
+      && smartRetrySchedule.pwmRetryBoundaryAt === 555
+      && smartRetrySchedule.pwmRetryScheduledAt === 666
+      && smartRetrySchedule.untouched === 'kept',
+    '空 Smart retry replacement 只清 Smart retry 三字段'
   );
 
   const pageRetrySchedule = {

@@ -1182,7 +1182,7 @@
     }
   }
 </style>
-<link rel="stylesheet" href="popup.css?v=0.8.3">
+<link rel="stylesheet" href="popup.css?v=0.8.4">
 </head>
 <body>
 
@@ -1244,11 +1244,10 @@
             <label for="automationToggle" data-i18n="automationSettingsLabel"></label>
           </h2>
           <label class="toggle-switch">
-            <input type="checkbox" id="automationToggle" aria-labelledby="automationSettingsLabel" aria-describedby="automationScopeHint">
+            <input type="checkbox" id="automationToggle" aria-labelledby="automationSettingsLabel">
             <span class="toggle-slider"></span>
           </label>
         </div>
-        <p id="automationScopeHint" data-i18n="automationScopeHint"></p>
       </div>
       <section class="active-hours-section" aria-labelledby="activeHoursRow" aria-describedby="automationScopeHint">
       <div class="settings-header" id="activeHoursSectionHeader">
@@ -1257,11 +1256,12 @@
         </h3>
         <div class="toggle-area">
           <label class="toggle-switch">
-            <input type="checkbox" id="activeHoursToggle" aria-labelledby="activeHoursRow">
+            <input type="checkbox" id="activeHoursToggle" aria-labelledby="activeHoursRow" aria-describedby="automationScopeHint">
             <span class="toggle-slider"></span>
           </label>
         </div>
       </div>
+      <p class="active-hours-hint" id="automationScopeHint" data-i18n="automationScopeHint"></p>
       <div class="setting-group" id="activeHoursBody" role="group" aria-labelledby="activeHoursRow">
         <span class="visually-hidden" id="time24Hint" data-i18n="time24Hint"></span>
         <div class="field-grid" id="activeHoursSection">
@@ -1356,6 +1356,6 @@
 <script src="i18n.js"></script>
 <script src="billing-helpers.js"></script>
 <script src="smart-mode.js"></script>
-<script src="popup.js?v=0.8.3"></script>
+<script src="popup.js?v=0.8.4"></script>
 </body>
 </html>

@@ -24,8 +24,10 @@ RUNTIME_FILES=(
   ac-page-contract.js
   sync-helpers.js
   schedule-mutations.js
+  smart-retry.js
   pwm-retry.js
   pwm-phase.js
+  smart-phase.js
   smart-recovery.js
   interval-recovery.js
   recovery-coordinator.js

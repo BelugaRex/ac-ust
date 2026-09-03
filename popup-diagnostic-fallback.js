@@ -17,9 +17,9 @@
     diagnoseFallbackNoCapturedError: 'No Popup error event was captured before fallback activation',
     diagnoseFallbackDocument: 'Popup document: readyState=$1, visibility=$2, viewport=$3×$4, content=$5×$6',
     diagnoseFallbackSchedule: 'Safe schedule snapshot: $1',
-    diagnoseFallbackAlarms: 'ac-* alarms: $1',
+    diagnoseFallbackAlarmsMode: 'ac-* alarms (current=$1): $2',
     diagnoseFallbackHeartbeat: 'storage heartbeat age: $1',
-    diagnoseFallbackSw: 'Service Worker snapshot: initCompleted=$1, live ac-pwm=$2',
+    diagnoseFallbackSwMode: 'Service Worker snapshot: initCompleted=$1, live $2=$3',
     diagnoseFallbackSectionFailed: '$1 snapshot failed: $2',
     diagnoseFallbackPartial: 'Partial fallback report: no repair was attempted; copy it as-is for support',
     copyDiagDone: 'Diagnostic report copied',
@@ -55,6 +55,33 @@
       : '∅';
   }
 
+  function isFallbackSmartSchedule(schedule) {
+    return schedule?.smartMode?.enabled === true;
+  }
+
+  function getFallbackAutomationAlarmName(schedule) {
+    return isFallbackSmartSchedule(schedule) ? 'ac-smart' : 'ac-pwm';
+  }
+
+  function getFallbackModeFields(schedule) {
+    const smartEnabled = isFallbackSmartSchedule(schedule);
+    return smartEnabled
+      ? {
+        stateKey: 'smartState',
+        triggerKey: 'smartNextTriggerAt',
+        clockKey: 'smartClockPlannedAt',
+        retryKindKey: 'smartRetryKind',
+        retryScheduledAtKey: 'smartRetryScheduledAt'
+      }
+      : {
+        stateKey: 'pwmState',
+        triggerKey: 'nextTriggerAt',
+        clockKey: 'pwmClockPlannedAt',
+        retryKindKey: 'pwmRetryKind',
+        retryScheduledAtKey: 'pwmRetryScheduledAt'
+      };
+  }
+
   function formatFallbackSchedule(schedule) {
     const value = schedule && typeof schedule === 'object' ? schedule : {};
     const activeHours = value.activeHours && typeof value.activeHours === 'object'
@@ -63,14 +90,25 @@
     const smartMode = value.smartMode && typeof value.smartMode === 'object'
       ? value.smartMode
       : {};
+    const smartEnabled = smartMode.enabled === true;
+    const modeFields = getFallbackModeFields(value);
+    const { stateKey, triggerKey, clockKey, retryKindKey, retryScheduledAtKey } = modeFields;
+    const clockPlannedAt = smartEnabled
+      ? value.smartClockPlannedAt
+      : value.pwmClockPlannedAt || value.alarmCreatedAt;
     return [
       `enabled=${value.enabled === true}`,
-      `mode=${sanitizeFallbackToken(value.mode)}`,
+      `mode=${smartEnabled ? 'smart' : sanitizeFallbackToken(value.mode)}`,
+      `activeMode=${smartEnabled ? 'smart' : 'pwm'}`,
+      `alarmMode=${getFallbackAutomationAlarmName(value)}`,
       `clockMode=${value.clockMode === true}`,
-      `pwmState=${sanitizeFallbackToken(value.pwmState)}`,
-      `nextTriggerAt=${formatFallbackTimestamp(value.nextTriggerAt)}`,
+      `${stateKey}=${sanitizeFallbackToken(value[stateKey])}`,
+      `${triggerKey}=${formatFallbackTimestamp(value[triggerKey])}`,
+      `${clockKey}=${formatFallbackTimestamp(clockPlannedAt)}`,
+      `${retryKindKey}=${sanitizeFallbackToken(value[retryKindKey], 'none')}`,
+      `${retryScheduledAtKey}=${formatFallbackTimestamp(value[retryScheduledAtKey])}`,
       `activeHours=${activeHours.enabled === true}:${sanitizeFallbackToken(activeHours.start)}-${sanitizeFallbackToken(activeHours.end)}`,
-      `smartMode=${smartMode.enabled === true}:sensitivity=${Number.isFinite(Number(smartMode.sensitivity)) ? Number(smartMode.sensitivity) : '?'}`,
+      `smartMode=${smartEnabled}:sensitivity=${Number.isFinite(Number(smartMode.sensitivity)) ? Number(smartMode.sensitivity) : '?'}`,
       `pageTimerError=${Boolean(value.pageTimerError)}`,
       `pageTimerRetryAt=${formatFallbackTimestamp(value.pageTimerRetryAt)}`
     ].join(', ');
@@ -329,10 +367,12 @@
       chrome.alarms.getAll(),
       sendFallbackRuntimeMessage({ type: 'getSwStatus' })
     ]);
+    let fallbackSchedule = {};
 
     if (storageResult.status === 'fulfilled') {
       const stored = storageResult.value || {};
-      lines.push(`✅ ${fallbackTranslate('diagnoseFallbackSchedule', formatFallbackSchedule(stored.ac_schedule))}`);
+      fallbackSchedule = stored.ac_schedule || {};
+      lines.push(`✅ ${fallbackTranslate('diagnoseFallbackSchedule', formatFallbackSchedule(fallbackSchedule))}`);
       const heartbeat = Number(stored.__heartbeat);
       const heartbeatAge = Number.isFinite(heartbeat) && heartbeat > 0 && heartbeat <= Date.now()
         ? `${Math.round((Date.now() - heartbeat) / 1000)}s`
@@ -347,12 +387,17 @@
     }
 
     if (alarmsResult.status === 'fulfilled') {
+      const currentAlarmName = getFallbackAutomationAlarmName(
+        Object.keys(fallbackSchedule).length
+          ? fallbackSchedule
+          : swResult.status === 'fulfilled' ? swResult.value?.memorySchedule : null
+      );
       const alarmText = (alarmsResult.value || [])
         .filter(alarm => typeof alarm?.name === 'string' && alarm.name.startsWith('ac-'))
         .sort((left, right) => left.name.localeCompare(right.name))
         .map(alarm => `${sanitizeFallbackToken(alarm.name)}@${formatFallbackTimestamp(alarm.scheduledTime)}`)
         .join(' | ') || 'none';
-      lines.push(`✅ ${fallbackTranslate('diagnoseFallbackAlarms', alarmText)}`);
+      lines.push(`✅ ${fallbackTranslate('diagnoseFallbackAlarmsMode', currentAlarmName, alarmText)}`);
     } else {
       lines.push(`⚠️ [POPUP-ALARMS-READ-FAILED] ${fallbackTranslate(
         'diagnoseFallbackSectionFailed',
@@ -362,10 +407,21 @@
     }
 
     if (swResult.status === 'fulfilled' && swResult.value?.success === true) {
+      const currentSchedule = Object.keys(fallbackSchedule).length
+        ? fallbackSchedule
+        : swResult.value.memorySchedule;
+      const currentAlarmName = getFallbackAutomationAlarmName(currentSchedule);
+      const liveAlarmName = String(swResult.value.liveAlarmName || '');
+      const liveAlarmMatches = isFallbackSmartSchedule(currentSchedule)
+        ? liveAlarmName === currentAlarmName
+        : !liveAlarmName || liveAlarmName === currentAlarmName;
       lines.push(`✅ ${fallbackTranslate(
-        'diagnoseFallbackSw',
+        'diagnoseFallbackSwMode',
         swResult.value.initCompleted === true,
-        formatFallbackTimestamp(swResult.value.liveAlarmScheduledTime)
+        currentAlarmName,
+        liveAlarmMatches
+          ? formatFallbackTimestamp(swResult.value.liveAlarmScheduledTime)
+          : '∅'
       )}`);
     } else {
       const reason = swResult.status === 'rejected'

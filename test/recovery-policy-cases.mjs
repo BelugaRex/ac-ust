@@ -15,7 +15,7 @@ export function runRecoveryPolicyCases(assertPass) {
   const now = at(17, 37, 7);
   const smartSchedule = {
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 23,
     offMinutes: 7,
     smartMode: { enabled: true }
@@ -87,7 +87,7 @@ export function runRecoveryPolicyCases(assertPass) {
         plannedActionAt: at(18, 0),
         maxOnMinutes: 25
       }).reason === 'smart-mode-disabled'
-      && planSmartRecovery({ ...smartSchedule, pwmState: 'off' }, {
+      && planSmartRecovery({ ...smartSchedule, smartState: 'off' }, {
         now,
         plannedActionAt: at(18, 0),
         maxOnMinutes: 25
@@ -152,7 +152,8 @@ export function runRecoveryPolicyCases(assertPass) {
     '恢复协调器优先选择仍安全的智能当前周期恢复');
 
   const coordinatedInterval = planPwmLifecycleRecovery({
-    ...smartSchedule,
+    enabled: true,
+    pwmState: 'on',
     smartMode: { enabled: false }
   }, {
     now,
@@ -163,14 +164,14 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   assertPass(coordinatedInterval.kind === 'preserve-live-alarm'
       && coordinatedInterval.strategy === 'interval'
-      && coordinatedInterval.smartDecisionReason === 'smart-mode-disabled',
-    '恢复协调器在智能策略旁路后交由普通循环策略处理');
+      && !Object.prototype.hasOwnProperty.call(coordinatedInterval, 'smartDecisionReason'),
+    '恢复协调器按当前模式选择普通循环策略，不携带 Smart fallback 语义');
 
   const untrustedSmartStoredClock = planPwmLifecycleRecovery({
     ...smartSchedule,
     onMinutes: 0,
     offMinutes: 30,
-    pwmState: 'on'
+    smartState: 'on'
   }, {
     now: at(22, 25),
     plannedActionAt: at(22, 50),
@@ -181,10 +182,10 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   const ownedSmartRetryClock = planPwmLifecycleRecovery({
     ...smartSchedule,
-    pwmState: 'on',
-    pwmRetryKind: 'smart-on',
-    pwmRetryBoundaryAt: at(22, 0),
-    pwmRetryScheduledAt: at(22, 18)
+    smartState: 'on',
+    smartRetryKind: 'smart-on',
+    smartRetryBoundaryAt: at(22, 0),
+    smartRetryScheduledAt: at(22, 18)
   }, {
     now: at(22, 17),
     plannedActionAt: at(22, 18),
@@ -195,10 +196,10 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   const shortSmartRetryClock = planPwmLifecycleRecovery({
     ...smartSchedule,
-    pwmState: 'on',
-    pwmRetryKind: 'smart-on',
-    pwmRetryBoundaryAt: at(22, 0),
-    pwmRetryScheduledAt: at(22, 22)
+    smartState: 'on',
+    smartRetryKind: 'smart-on',
+    smartRetryBoundaryAt: at(22, 0),
+    smartRetryScheduledAt: at(22, 22)
   }, {
     now: at(22, 21),
     plannedActionAt: at(22, 22),
@@ -209,7 +210,7 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   const driftedSmartBoundary = planPwmLifecycleRecovery({
     ...smartSchedule,
-    pwmState: 'on'
+    smartState: 'on'
   }, {
     now: at(22, 30) + 200.25,
     plannedActionAt: at(22, 30) + 500.5,
@@ -221,7 +222,7 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   const preparedWeatherProjectedOff = planPwmLifecycleRecovery({
     ...smartSchedule,
-    pwmState: 'off',
+    smartState: 'off',
     onMinutes: 0,
     offMinutes: 30
   }, {
@@ -235,7 +236,7 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   const actualOffPhaseClock = planPwmLifecycleRecovery({
     ...smartSchedule,
-    pwmState: 'off',
+    smartState: 'off',
     onMinutes: 0,
     offMinutes: 30
   }, {
@@ -249,7 +250,7 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   const exactButSkippedSmartClock = planPwmLifecycleRecovery({
     ...smartSchedule,
-    pwmState: 'on'
+    smartState: 'on'
   }, {
     now: at(18, 58, 57),
     plannedActionAt: at(19, 30),
@@ -260,7 +261,7 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   const nearestSmartBoundaryClock = planPwmLifecycleRecovery({
     ...smartSchedule,
-    pwmState: 'on'
+    smartState: 'on'
   }, {
     now: at(18, 58, 57),
     plannedActionAt: at(19, 0),
@@ -271,7 +272,7 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   const skippedClockStillInvalidAt1903 = planPwmLifecycleRecovery({
     ...smartSchedule,
-    pwmState: 'on'
+    smartState: 'on'
   }, {
     now: at(19, 3),
     smartClockPlannedAt: at(18, 56),
@@ -283,12 +284,12 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   const explicitSafetySkipPreserved = planPwmLifecycleRecovery({
     ...smartSchedule,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 3,
     offMinutes: 27,
-    pwmRetryKind: 'smart-on-safety-skip',
-    pwmRetryBoundaryAt: at(19, 0),
-    pwmRetryScheduledAt: at(19, 30)
+    smartRetryKind: 'smart-on-safety-skip',
+    smartRetryBoundaryAt: at(19, 0),
+    smartRetryScheduledAt: at(19, 30)
   }, {
     now: at(19, 1),
     smartClockPlannedAt: at(18, 59),
@@ -300,7 +301,7 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   const badClockDue = planPwmLifecycleRecovery({
     ...smartSchedule,
-    pwmState: 'on'
+    smartState: 'on'
   }, {
     now: at(19, 30),
     smartClockPlannedAt: at(18, 56),
@@ -311,7 +312,7 @@ export function runRecoveryPolicyCases(assertPass) {
   });
   const badClockExpired = planPwmLifecycleRecovery({
     ...smartSchedule,
-    pwmState: 'on'
+    smartState: 'on'
   }, {
     now: at(19, 30, 2),
     smartClockPlannedAt: at(18, 56),

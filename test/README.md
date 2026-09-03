@@ -18,7 +18,7 @@ AC-UST 是无依赖的纯 JS Chrome/Edge 扩展,测试分两层,各自职责清�
 
 ### `verify-fix.mjs`(代码层,日常 CI 用)
 
-**用途**:用 mock chrome API 模拟用户场景,验证 popup.js 诊断面板的自愈逻辑。
+**用途**:用 mock chrome API 模拟用户场景,验证 popup.js「召唤医生」面板的自动修复尝试逻辑。
 
 **前置条件**:
 - Node.js 20（在仓库根目录运行 `nvm install && nvm use`）
@@ -31,11 +31,11 @@ node test/verify-fix.mjs
 ```
 
 **验证内容**:
-- 用例 1–4：popup 诊断的 `nextTriggerAt` 自愈与 Service Worker 降级行为
+- 用例 1–4：popup「召唤医生」的 `nextTriggerAt` 自动修复尝试与 Service Worker 降级行为
 - 用例 5–8：i18n 包体、冷气余额解析与 PWM 可用时间估算、跨设备相位同步、页面定时器解析与采纳、popup 布局防回归（CSS 禁 vw/vh，popup 固定为 250px 并保留固定 gutter，静态网页预览在窄窗口整体等比缩放）
 - popup 的界面字号限制在 8–16px：主界面为 16px，固定标签页提醒为 12px，版本元信息为 10px；元素间距统一收敛为可见边界之间的 8px 或 16px；1px 边框组件使用 7px/15px CSS padding 补偿，输入框外边距为 0，运行时段时钟指示器为 16px 且自身内边距为 0，运行时段和间隔时长输入框为 32px 标准高度，同一行文字与输入框垂直居中
 - 状态文字与倒计时、状态卡片与设置卡片、设置卡片与页脚边界均使用 8px 间距；页脚 8px 外间距叠加 8px 顶部内边距，使卡片边界到页脚内容保持 16px
-- 拨杆与诊断按钮的扩大命中区采用绝对定位伪元素，不参与布局；设置头、拨杆区域和运行时段标签不使用透明 `min-height` 撑开可见线框距离
+- 拨杆与「召唤医生」按钮的扩大命中区采用绝对定位伪元素，不参与布局；设置头、拨杆区域和运行时段标签不使用透明 `min-height` 撑开可见线框距离
 - “循环定时”标题及同栏拨杆到设置卡上方外框线、下方分隔线的可见距离均为 16px
 - 运行时段行的输入框到上方标题分隔线、下方运行时段分隔线均为 16px；文字、拨杆和输入框保持同一中心线，因此各自上下距离对称
 - “开启时长（分钟）”一行到上方运行时段分隔线、“关闭时长（分钟）”一行到下方提示分隔线均为 16px；每行标签和 32px 输入框的水平中轴线一致
@@ -45,8 +45,9 @@ node test/verify-fix.mjs
 - 开启/关闭时长每行的文字对齐运行时段文字（跳过拨杆占位），三个输入框统一为 5rem 并复用共享 Grid 列，时长输入框与结束时间框左对齐
 - 用例 9–10：单一 ON 点击链路、每次点击后等待 10 秒、所有读写只选择完整 URL 精确等于 AC home 的标签、其他 UST 页面不作为初始操作目标、首次开机未确认时由统一函数刷新或回到 home 并有限递归一次、OFF 零点击以及 ON→OFF 前的定时器证明
 - 用例 11：`Power-off after` 写入时才把浮点持续时长向上对齐到整分钟绝对截止时间；写入后按 `10/15/20` 秒间隔在新鲜页面确认同一 `HH:MM`，页面证明、PWM alarm 与 popup 倒计时共用该截止时间，失败重试、过期闹钟恢复、时钟修复与手动开机都不得绕过确认
+- 用例 14：医生检查报告始终分开显示智能自动 ON 的页面安全定时器重试和独立 OFF 页面定时器重试；两条通道分别覆盖 active、inactive、missing alarm 与 mismatch，typed marker 错位必须判红，`pageTimerRetryMinutes` 仅表示 OFF 通道的目标关机分钟数
 - 用例 15：Service Worker 后台异常按串行写链保存到本机环形日志，并发追加不丢失且只保留最新 50 条；URL/邮箱脱敏、消息截断、写入失败隔离，popup 仅按新到旧并入当前构建以来最新 5 条，并拒绝构建前、未来与非法时间戳记录
-- 用例 16：运行时段作为循环定时与智能控制共用的独立门禁，覆盖 `[start,end)` 真值表、模式选择保留、循环立即恢复、智能半点延后、自动 ON/运行闹钟最终竞态复检、退出时页面定时器安全停机、停用状态下独立编辑无关机副作用，以及启动、同步、看门狗、诊断和 popup 暂停态旁路；popup 不得直接创建运行闹钟，自愈只委派后台
+- 用例 16：运行时段作为循环定时与智能控制共用的独立门禁，覆盖 `[start,end)` 真值表、模式选择保留、循环立即恢复、智能半点延后、自动 ON/运行闹钟最终竞态复检、退出时页面定时器安全停机、停用状态下独立编辑无关机副作用，以及启动、同步、看门狗、医生修复尝试和 popup 暂停态旁路；popup 不得直接创建运行闹钟，自动修复只委派后台
 - 余额链路：`billing-helpers.js` 先于 `content.js` 注入；内容脚本只从 `Air Conditioning Balance` 区块的 `.ant-progress-text` 读取当前分钟数，拒绝把周期总额当成余额，并随现有状态响应返回；预计标签与日期时间分两行，今明两日显示“今天／明天”和“Today／Tomorrow”，之后显示月日；预计墙钟可用时间不超过 24 小时时同时使用警示符号、颜色和无障碍文案提醒
 
 `test/fixtures/power-off-after-states.json` 是从真实页面 DOM 样本提取的脱敏 fixture：已设定时 `.ant-picker input` 的 `value/title` 都是 `HH:MM` 且 AC 为 ON；页面关机后两者清空且 AC 为 OFF。它锁定 content script 的读取依据，不含账号、房间或余额信息。
@@ -72,7 +73,7 @@ python3 test/verify-icon.py
 
 ### `e2e-verify.cjs`(浏览器层,**手动触发**)
 
-**用途**:用 Playwright 启动系统 Chrome/Edge + 加载 dist/ 扩展,模拟用户点击诊断按钮,读取真实诊断输出。这是 evaluator 友好的"实际扩展中验证"路径,但**需要桌面图形环境**,CI 中无法跑。
+**用途**:用 Playwright 启动系统 Chrome/Edge + 加载 dist/ 扩展,模拟用户点击「召唤医生」按钮,读取真实报告。这是 evaluator 友好的"实际扩展中验证"路径,但**需要桌面图形环境**,CI 中无法跑。
 
 **前置条件**:
 - `npm install playwright`(临时安装,不入 package.json)
@@ -95,11 +96,21 @@ node test/e2e-verify.cjs
 - 测试 profile 在 `.test-profile/`(自动清理)
 - 测试结束自动关闭 Edge
 
+### `e2e-background-repair.cjs`（构建后 Worker 聚焦回归）
+
+**用途**：真实加载 `dist/`，从扩展页面发送 `ensureDiagnostics`，稳定触发智能 ON
+不可信时钟的 `repairScheduleClock()` 重绑定路径；同时校验运行中的 Service Worker
+与 `dist/background.js` 字节哈希一致，并确认 response、Worker console/error 与
+`ac_diagnostic_log` 均不再出现 `Assignment to constant variable.`。
+
+前置条件与 WSL2 `LD_LIBRARY_PATH` 要求同 `e2e-verify.cjs`。该脚本不需要真实账号，
+使用精确 AC home URL 的本地 fixture 确认 OFF 状态，完成后自动关闭浏览器并删除临时 profile。
+
 ## 用户手动验证清单
 
 每次代码改动后,用户在 Edge 中:
 
 1. `edge://extensions/` → 找到 AC-UST → 点"重新加载"按钮
 2. 打开 popup → 看标题行中的版本号与构建时间,确认当前加载的是最新构建
-3. 点诊断按钮 → 检查所有 ✅/❌
+3. 点「召唤医生」按钮 → 检查所有 ✅/❌
 4. 如果有红灯,先看头栏构建时间是否最新;最新则报 bug,不是最新则重新 reload 扩展

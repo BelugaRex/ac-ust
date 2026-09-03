@@ -146,21 +146,16 @@ async function run() {
       || await waitForExtensionServiceWorker(context);
 
     // ac_schedule 首次出现只是 onInstalled 写默认值的中间点；必须继续等
-    // init、install seed 及其 echo/publish 凭据全部收口。若本机 false seed
-    // 被误判为 remote F，这里明确失败，不能先清 marker 把生产回归藏掉。
+    // init 与 sync seed 收口。若本机 false seed 被误判为 remote F，这里明确
+    // 失败，不能先改夹具把生产回归藏掉。
     const initDeadline = Date.now() + 15000;
     const bootstrapIsQuiescent = state => (
       state?.initCompleted === true
-      && state.installBootstrapComplete === true
       && state.scheduleReady === true
       && state.syncSeeded === true
       && state.publishPending === false
       && state.deferredRecordPresent === false
       && state.authorityAlarmNames?.length === 0
-      && state.localEchoCount === 0
-      && state.syncInboundArrivalGeneration === 0
-      && state.remoteDisableArrivalGeneration === 0
-      && state.phaseAdoptionInFlight === false
     );
     let bootstrapState = null;
     let stableBootstrapObservations = 0;
@@ -169,17 +164,11 @@ async function run() {
         authorityAlarmPrefixes
       }) => {
         try {
-          // runtime.sendMessage 从扩展 Service Worker 发出时不会回送给同一个
-          // Worker 的 onMessage listener。这里本来就在读取 Worker 内部的
-          // generation/echo 状态，因此直接读取 init receipt，避免把浏览器
-          // 的 self-message 语义误报成初始化失败；真实页面消息链在后续
-          // Popup 旅程中单独覆盖。
           const initCompleted = typeof initCompletedAt === 'number'
             && initCompletedAt > 0;
           const [local, sync, alarms] = await Promise.all([
             chrome.storage.local.get([
               'ac_schedule',
-              'ac_install_bootstrap_complete',
               'ac_schedule_sync_publish_pending',
               'ac_deferred_sync_disable'
             ]),
@@ -193,8 +182,6 @@ async function run() {
             )));
           return {
             initCompleted,
-            installBootstrapComplete:
-              local.ac_install_bootstrap_complete === true,
             scheduleReady: !!local.ac_schedule,
             syncSeeded: sync.ac_schedule_sync?.enabled === false,
             publishPending:
@@ -203,23 +190,7 @@ async function run() {
               local,
               'ac_deferred_sync_disable'
             ),
-            authorityAlarmNames,
-            localEchoCount:
-              typeof activeLocalSyncEchoIdentities === 'object'
-                ? activeLocalSyncEchoIdentities.size
-                : -1,
-            syncInboundArrivalGeneration:
-              typeof syncInboundArrivalGeneration === 'number'
-                ? syncInboundArrivalGeneration
-                : -1,
-            remoteDisableArrivalGeneration:
-              typeof remoteDisableArrivalGeneration === 'number'
-                ? remoteDisableArrivalGeneration
-                : -1,
-            phaseAdoptionInFlight:
-              typeof isSyncPhaseAdoptionAdmissionBlocked === 'function'
-                ? isSyncPhaseAdoptionAdmissionBlocked()
-                : true
+            authorityAlarmNames
           };
         } catch (error) {
           return { error: error?.message || String(error) };
@@ -273,9 +244,6 @@ async function run() {
       // durable watermark 已清理后同步重置本 Worker 的缓存；否则后续夹具
       // 仍会继承 install seed 的 Lamport 水位，不再是独立测试场景。
       lastSyncedAt = 0;
-      syncWatermarkLoaded = false;
-      completedSyncPayloadReceipt = null;
-      activeLocalSyncEchoIdentities.clear();
       // 写入 storage:nextTriggerAt=0(红灯根因)
       await chrome.storage.local.set({
         ac_schedule: {
@@ -1689,9 +1657,6 @@ async function run() {
         'ac_schedule_sync_payload_receipt'
       ]);
       lastSyncedAt = 0;
-      syncWatermarkLoaded = false;
-      completedSyncPayloadReceipt = null;
-      activeLocalSyncEchoIdentities.clear();
       await Promise.all([
         'ac-pwm',
         'ac-badge-tick',

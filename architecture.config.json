@@ -3,7 +3,7 @@
   "entrypoints": {
     "serviceWorker": {
       "file": "background.js",
-      "imports": ["i18n.js", "sync-helpers.js", "schedule-mutations.js", "pwm-retry.js", "pwm-phase.js", "smart-recovery.js", "interval-recovery.js", "recovery-coordinator.js", "smart-mode.js"]
+      "imports": ["i18n.js", "sync-helpers.js", "schedule-mutations.js", "smart-retry.js", "pwm-retry.js", "pwm-phase.js", "smart-phase.js", "smart-recovery.js", "interval-recovery.js", "recovery-coordinator.js", "smart-mode.js"]
     },
     "contentScripts": [
       {
@@ -113,13 +113,7 @@
         "symbols": [
           "planPwmStep",
           "planPwmRecovery",
-          "reconcilePwmTrigger",
-          "planNextSmartWeatherPrefetch",
-          "smartWeatherTargetBoundaryAt",
-          "nextHalfHourBoundary",
-          "smartModePageTimerTargetAt",
-          "planSmartModeOnWindow",
-          "alignSmartModeNextTrigger"
+          "reconcilePwmTrigger"
         ]
       },
       "consumers": [
@@ -128,12 +122,136 @@
           "symbols": [
             "planPwmStep",
             "planPwmRecovery",
-            "reconcilePwmTrigger",
+            "reconcilePwmTrigger"
+          ]
+        }
+      ]
+    },
+      {
+        "name": "Smart phase decisions",
+        "provider": {
+          "file": "smart-phase.js",
+          "symbols": [
+            "planSmartStep",
+            "planComfortSmartCycle",
+            "smartPageTimerTargetAt",
+            "smartModePageTimerTargetAt",
+            "normalizeSmartHalfHourAlarmBoundary",
+            "nextSafeSmartPageTimerTargetAt",
+            "isSmartHalfHourBoundary",
+            "nextSmartHalfHourBoundary",
+            "normalizeHalfHourAlarmBoundary",
+            "nextHalfHourBoundary",
             "planNextSmartWeatherPrefetch",
             "smartWeatherTargetBoundaryAt",
-            "smartModePageTimerTargetAt",
             "planSmartModeOnWindow",
+            "planSmartOnRetryExceptionRecovery",
+            "planSmartOnAfterConfirmedOff",
+            "classifySmartOnClock",
             "alignSmartModeNextTrigger"
+          ]
+        },
+        "consumers": [
+          {
+            "file": "background.js",
+            "symbols": [
+              "planSmartStep",
+              "planComfortSmartCycle",
+              "smartPageTimerTargetAt",
+              "smartModePageTimerTargetAt",
+              "normalizeSmartHalfHourAlarmBoundary",
+              "nextSafeSmartPageTimerTargetAt",
+              "isSmartHalfHourBoundary",
+              "nextSmartHalfHourBoundary",
+              "normalizeHalfHourAlarmBoundary",
+              "nextHalfHourBoundary",
+              "planNextSmartWeatherPrefetch",
+              "smartWeatherTargetBoundaryAt",
+              "planSmartModeOnWindow",
+              "planSmartOnRetryExceptionRecovery",
+              "planSmartOnAfterConfirmedOff",
+              "classifySmartOnClock",
+              "alignSmartModeNextTrigger"
+            ]
+          },
+          {
+            "file": "smart-recovery.js",
+            "symbols": ["planSmartModeOnWindow", "classifySmartOnClock"]
+          }
+        ]
+    },
+    {
+      "name": "Smart retry decisions",
+      "provider": {
+        "file": "smart-retry.js",
+        "symbols": [
+          "SMART_RETRY_KINDS",
+          "getSmartRetryDescriptor",
+          "normalizeSmartRetryKind"
+        ]
+      },
+      "consumers": [
+        {
+          "file": "smart-phase.js",
+          "symbols": ["getSmartRetryDescriptor"]
+        },
+        {
+          "file": "background.js",
+          "symbols": ["SMART_RETRY_KINDS", "getSmartRetryDescriptor"]
+        }
+      ]
+    },
+    {
+      "name": "PWM retry decisions",
+      "provider": {
+        "file": "pwm-retry.js",
+        "symbols": [
+          "PWM_RETRY_KINDS",
+          "getPwmRetryDescriptor",
+          "normalizePwmRetryKind"
+        ]
+      },
+      "consumers": [
+        {
+          "file": "background.js",
+          "symbols": ["PWM_RETRY_KINDS", "getPwmRetryDescriptor"]
+        }
+      ]
+    },
+    {
+      "name": "PWM schedule namespace mutations",
+      "provider": {
+        "file": "schedule-mutations.js",
+        "symbols": [
+          "setSchedulePwmClockIntent",
+          "replaceSchedulePwmRetryState"
+        ]
+      },
+      "consumers": [
+        {
+          "file": "background.js",
+          "symbols": [
+            "setSchedulePwmClockIntent",
+            "replaceSchedulePwmRetryState"
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Smart schedule namespace mutations",
+      "provider": {
+        "file": "schedule-mutations.js",
+        "symbols": [
+          "setScheduleSmartClockIntent",
+          "replaceScheduleSmartRetryState"
+        ]
+      },
+      "consumers": [
+        {
+          "file": "background.js",
+          "symbols": [
+            "setScheduleSmartClockIntent",
+            "replaceScheduleSmartRetryState"
           ]
         }
       ]
@@ -189,8 +307,10 @@
       "ac-page-contract.js",
       "sync-helpers.js",
       "schedule-mutations.js",
+      "smart-retry.js",
       "pwm-retry.js",
       "pwm-phase.js",
+      "smart-phase.js",
       "smart-recovery.js",
       "interval-recovery.js",
       "recovery-coordinator.js",
@@ -225,6 +345,34 @@
       ]
     },
     {
+      "name": "schedule mutations remain browser independent",
+      "files": ["schedule-mutations.js"],
+      "forbidPatterns": [
+        "\\bchrome\\s*\\.",
+        "\\bdocument\\s*\\.",
+        "\\bwindow\\s*\\.",
+        "\\blocalStorage\\b",
+        "\\bfetch\\s*\\(",
+        "\\bimportScripts\\s*\\("
+      ]
+    },
+    {
+      "name": "Smart schedule mutations do not write PWM namespace",
+      "files": ["schedule-mutations.js"],
+      "forbidPatterns": [
+        "function\\s+setScheduleSmartClockIntent\\b(?:(?!\\n\\s*function\\s)[\\s\\S])*\\b(?:pwmClockPlannedAt|alarmCreatedAt|pwmRetry(?:Kind|BoundaryAt|ScheduledAt)|pwmState)\\b",
+        "function\\s+replaceScheduleSmartRetryState\\b(?:(?!\\n\\s*function\\s)[\\s\\S])*\\bpwmRetry(?:Kind|BoundaryAt|ScheduledAt)\\b"
+      ]
+    },
+    {
+      "name": "PWM schedule mutations do not write Smart namespace",
+      "files": ["schedule-mutations.js"],
+      "forbidPatterns": [
+        "function\\s+setSchedulePwmClockIntent\\b(?:(?!\\n\\s*function\\s)[\\s\\S])*\\b(?:smartClockPlannedAt|smartNextTriggerAt|smartRetry(?:Kind|BoundaryAt|ScheduledAt)|smartState)\\b",
+        "function\\s+replaceSchedulePwmRetryState\\b(?:(?!\\n\\s*function\\s)[\\s\\S])*\\bsmartRetry(?:Kind|BoundaryAt|ScheduledAt)\\b"
+      ]
+    },
+    {
       "name": "PWM phase decisions remain browser independent",
       "files": ["pwm-phase.js"],
       "forbidPatterns": [
@@ -233,6 +381,65 @@
         "\\bwindow\\s*\\.",
         "\\blocalStorage\\b",
         "\\bimportScripts\\s*\\("
+      ]
+    },
+    {
+      "name": "Smart phase and recovery never depend on PWM molecules",
+      "files": ["smart-phase.js", "smart-recovery.js"],
+      "forbidPatterns": [
+        "pwm-phase\\.js",
+        "\\bplanPwm(?:Step|Recovery)\\b",
+        "\\brunPwmStep\\b"
+      ]
+    },
+    {
+      "name": "Smart molecules never depend on PWM retry",
+      "files": ["smart-phase.js", "smart-recovery.js"],
+      "forbidPatterns": [
+        "pwm-retry\\.js",
+        "\\bPWM_RETRY(?:_KINDS|_DESCRIPTORS)?\\b",
+        "\\b(?:get|normalize)PwmRetry(?:Descriptor|Kind)\\b",
+        "\\bpwmRetry(?:Kind|BoundaryAt|ScheduledAt)?\\b"
+      ]
+    },
+    {
+      "name": "PWM phase and interval recovery never depend on Smart molecules",
+      "files": ["pwm-phase.js", "interval-recovery.js"],
+      "forbidPatterns": [
+        "smart-phase\\.js",
+        "\\bplanSmart(?:Step|ModeOnWindow|OnAfterConfirmedOff|OnRetryExceptionRecovery)\\b",
+        "\\bclassifySmartOnClock\\b",
+        "\\brunSmartStep\\b"
+      ]
+    },
+    {
+      "name": "PWM molecules never depend on Smart retry",
+      "files": ["pwm-phase.js", "interval-recovery.js"],
+      "forbidPatterns": [
+        "smart-retry\\.js",
+        "\\bSMART_RETRY(?:_KINDS|_DESCRIPTORS)?\\b",
+        "\\b(?:get|normalize)SmartRetry(?:Descriptor|Kind)\\b",
+        "\\bsmartRetry(?:Kind|BoundaryAt|ScheduledAt)?\\b"
+      ]
+    },
+    {
+      "name": "PWM retry has no Smart retry semantics",
+      "files": ["pwm-retry.js"],
+      "forbidPatterns": [
+        "\\bSMART_RETRY(?:_KINDS|_DESCRIPTORS)?\\b",
+        "\\b(?:get|normalize)SmartRetry(?:Descriptor|Kind)\\b",
+        "\\bsmartRetry(?:Kind|BoundaryAt|ScheduledAt)?\\b",
+        "\\bsmart-(?:on|safety)[\\w-]*\\b"
+      ]
+    },
+    {
+      "name": "Smart retry has no PWM retry semantics",
+      "files": ["smart-retry.js"],
+      "forbidPatterns": [
+        "\\bPWM_RETRY(?:_KINDS|_DESCRIPTORS)?\\b",
+        "\\b(?:get|normalize)PwmRetry(?:Descriptor|Kind)\\b",
+        "\\bpwmRetry(?:Kind|BoundaryAt|ScheduledAt)?\\b",
+        "\\bpwm-(?:page-timer|toggle)[\\w-]*\\b"
       ]
     },
     {

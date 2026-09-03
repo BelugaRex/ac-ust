@@ -1,10 +1,13 @@
 import pwmPhase from '../pwm-phase.js';
+import smartPhase from '../smart-phase.js';
 
 const MINUTE_MS = 60_000;
 const {
   planPwmStep,
   planPwmRecovery,
-  reconcilePwmTrigger,
+  reconcilePwmTrigger
+} = pwmPhase;
+const {
   planNextSmartWeatherPrefetch,
   smartWeatherTargetBoundaryAt,
   nextHalfHourBoundary,
@@ -17,7 +20,7 @@ const {
   planSmartOnAfterConfirmedOff,
   classifySmartOnClock,
   alignSmartModeNextTrigger
-} = pwmPhase;
+} = smartPhase;
 
 export function runPwmPhaseCases(assertPass) {
   const now = 1_700_000_000_000;
@@ -35,14 +38,22 @@ export function runPwmPhaseCases(assertPass) {
 
   assertPass(
     Object.keys(pwmPhase).sort().join(',')
-      === 'alignSmartModeNextTrigger,classifySmartOnClock,halfHourBoundaryAtOrBefore,nextHalfHourBoundary,nextSafePageTimerTargetAt,planComfortSmartCycle,planNextSmartWeatherPrefetch,planPwmRecovery,planPwmStep,planSmartModeOnWindow,planSmartOnAfterConfirmedOff,planSmartOnRetryExceptionRecovery,reconcilePwmTrigger,smartModePageTimerTargetAt,smartWeatherTargetBoundaryAt'
+      === 'planPwmRecovery,planPwmStep,reconcilePwmTrigger'
+      && typeof smartPhase.planSmartStep === 'function'
+      && typeof smartPhase.planSmartModeOnWindow === 'function'
       && typeof nextSafePageTimerTargetAt === 'function'
       && typeof halfHourBoundaryAtOrBefore === 'function',
-    'PWM phase module 导出规划函数、天气预取槽与半点对齐函数'
+    'PWM phase 只导出 PWM 规划函数，Smart phase 独立导出智能策略'
   );
 
   // 智能天气在 :20/:50 预取并绑定下一 :30/:00 控制边界；调度始终严格晚于 now。
   const hourTime = (h, m, s = 0, ms = 0) => new Date(2026, 7, 17, h, m, s, ms).getTime();
+  const smartSchedule = onMinutes => ({
+    enabled: true,
+    smartMode: { enabled: true },
+    smartState: 'on',
+    onMinutes
+  });
   const prefetchCases = [
     [hourTime(14, 19, 59, 999), hourTime(14, 20), hourTime(14, 30)],
     [hourTime(14, 20), hourTime(14, 50), hourTime(15, 0)],
@@ -102,12 +113,12 @@ export function runPwmPhaseCases(assertPass) {
     'planComfortSmartCycle: 严格不足五分钟或 floor 到达边界才滚入新周期；恰好五分钟保留 OFF，跨小时/跨日稳定');
 
   const safeRetryException = planSmartOnRetryExceptionRecovery(
-    { onMinutes: 21 },
+    smartSchedule(21),
     hourTime(13, 30),
     { now: hourTime(13, 31), retryAt: hourTime(13, 32) }
   );
   const unsafeRetryException = planSmartOnRetryExceptionRecovery(
-    { onMinutes: 21 },
+    smartSchedule(21),
     hourTime(13, 30),
     { now: hourTime(13, 49, 30), retryAt: hourTime(13, 50, 30) }
   );
@@ -119,36 +130,36 @@ export function runPwmPhaseCases(assertPass) {
     'planSmartOnRetryExceptionRecovery: 异常只续一分钟且保留原截止；余量不足明确延至下一半点');
 
   const smartBeforeWindow = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     { now: hourTime(13, 29, 59, 999), maxOnMinutes: 25 }
   );
   const smartAtWindow = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     { now: hourTime(13, 30), maxOnMinutes: 25 }
   );
   const smartLateInWindow = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     { now: hourTime(13, 30, 59, 999), maxOnMinutes: 25 }
   );
   const smartAfterWindow = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     { now: hourTime(13, 31), maxOnMinutes: 25 }
   );
   const smartAtHourWindow = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     { now: hourTime(14, 0), maxOnMinutes: 25 }
   );
   const smartLateHourWindow = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     { now: hourTime(14, 0, 59, 999), maxOnMinutes: 25 }
   );
   const smartAfterHourWindow = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     { now: hourTime(14, 1), maxOnMinutes: 25 }
   );
   assertPass(smartBeforeWindow.kind === 'defer'
       && smartBeforeWindow.nextTriggerAt === hourTime(13, 30)
-      && smartBeforeWindow.phasePatch.pwmState === 'on'
+      && smartBeforeWindow.phasePatch.smartState === 'on'
       && smartAtWindow.kind === 'allow'
       && smartAtWindow.boundaryAt === hourTime(13, 30)
       && smartAtWindow.windowEndsAt === hourTime(13, 31)
@@ -167,7 +178,7 @@ export function runPwmPhaseCases(assertPass) {
     'planSmartModeOnWindow: 智能自动 ON 仅在 :00/:30 分钟执行，并锚定半点绝对关机截止时间');
 
   const exactFiveMinuteSmartOn = planSmartModeOnWindow(
-    { onMinutes: 5 },
+    smartSchedule(5),
     {
       now: hourTime(13, 30),
       maxOnMinutes: 25,
@@ -176,7 +187,7 @@ export function runPwmPhaseCases(assertPass) {
     }
   );
   const shortFiveMinuteSmartOn = planSmartModeOnWindow(
-    { onMinutes: 5 },
+    smartSchedule(5),
     {
       now: hourTime(13, 30, 0, 1),
       maxOnMinutes: 25,
@@ -185,7 +196,7 @@ export function runPwmPhaseCases(assertPass) {
     }
   );
   const exactFiveMinuteRemainder = planSmartModeOnWindow(
-    { onMinutes: 6 },
+    smartSchedule(6),
     {
       now: hourTime(13, 31),
       maxOnMinutes: 25,
@@ -194,7 +205,7 @@ export function runPwmPhaseCases(assertPass) {
     }
   );
   const shortFiveMinuteRemainder = planSmartModeOnWindow(
-    { onMinutes: 6 },
+    smartSchedule(6),
     {
       now: hourTime(13, 31, 0, 1),
       maxOnMinutes: 25,
@@ -213,12 +224,12 @@ export function runPwmPhaseCases(assertPass) {
     'planSmartModeOnWindow: OFF→ON→OFF 实际余量不足五分钟时零点击跳过 ON，恰好五分钟仍保留');
 
   const exactFiveMinuteRetry = planSmartOnRetryExceptionRecovery(
-    { onMinutes: 6 },
+    smartSchedule(6),
     hourTime(13, 30),
     { now: hourTime(13, 30, 30), retryAt: hourTime(13, 31) }
   );
   const shortFiveMinuteRetry = planSmartOnRetryExceptionRecovery(
-    { onMinutes: 6 },
+    smartSchedule(6),
     hourTime(13, 30),
     { now: hourTime(13, 30, 30), retryAt: hourTime(13, 31, 0, 1) }
   );
@@ -231,7 +242,7 @@ export function runPwmPhaseCases(assertPass) {
   const delayedBoundaryNow = hourTime(13, 31, 5);
   const delayedBoundaryTarget = hourTime(13, 55);
   const driftedBoundary1ms = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     {
       now: delayedBoundaryNow,
       maxOnMinutes: 25,
@@ -240,7 +251,7 @@ export function runPwmPhaseCases(assertPass) {
     }
   );
   const driftedBoundary1499ms = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     {
       now: delayedBoundaryNow,
       maxOnMinutes: 25,
@@ -249,7 +260,7 @@ export function runPwmPhaseCases(assertPass) {
     }
   );
   const driftedBoundary1500ms = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     {
       now: delayedBoundaryNow,
       maxOnMinutes: 25,
@@ -258,7 +269,7 @@ export function runPwmPhaseCases(assertPass) {
     }
   );
   const driftedFractionalBoundary = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     {
       now: delayedBoundaryNow,
       maxOnMinutes: 25,
@@ -267,7 +278,7 @@ export function runPwmPhaseCases(assertPass) {
     }
   );
   const untrustedBoundary1501ms = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     {
       now: delayedBoundaryNow,
       maxOnMinutes: 25,
@@ -289,18 +300,18 @@ export function runPwmPhaseCases(assertPass) {
       && untrustedBoundary1501ms.kind === 'defer',
     'planSmartModeOnWindow: 浏览器半点闹钟不超过 1500ms 漂移仍归一到原边界，超过上限才拒绝');
   assertPass(planSmartModeOnWindow(
-    { onMinutes: 26 },
+    smartSchedule(26),
     { now: hourTime(13, 30), maxOnMinutes: 25 }
   ).kind === 'refuse'
       && planSmartModeOnWindow(
-        { onMinutes: 26 },
+        smartSchedule(26),
         { now: hourTime(13, 30), maxOnMinutes: 30 }
       ).kind === 'refuse',
   'planSmartModeOnWindow: 25 分钟为不可由调用参数放宽的智能 ON 硬上限');
   assertPass(smartModePageTimerTargetAt(25, hourTime(13, 30, 59, 999)) === hourTime(13, 55),
     'smartModePageTimerTargetAt: 延迟唤醒仍以半点 + 25 分钟关机');
   const smartAlreadyOnRetry = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     {
       now: hourTime(13, 45),
       maxOnMinutes: 25,
@@ -309,7 +320,7 @@ export function runPwmPhaseCases(assertPass) {
     }
   );
   const smartAlreadyOnOverrun = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     {
       now: hourTime(13, 55),
       maxOnMinutes: 25,
@@ -318,7 +329,7 @@ export function runPwmPhaseCases(assertPass) {
     }
   );
   const smartAlreadyOnAcrossBoundary = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     {
       now: hourTime(14, 0),
       maxOnMinutes: 25,
@@ -327,11 +338,11 @@ export function runPwmPhaseCases(assertPass) {
     }
   );
   const smartAlreadyOnMissingBoundary = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     { now: hourTime(14, 0), maxOnMinutes: 25, acIsOn: true }
   );
   const smartAlreadyOnInvalidBoundary = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     {
       now: hourTime(14, 0),
       maxOnMinutes: 25,
@@ -340,7 +351,7 @@ export function runPwmPhaseCases(assertPass) {
     }
   );
   const smartAlreadyOnFutureBoundary = planSmartModeOnWindow(
-    { onMinutes: 25 },
+    smartSchedule(25),
     {
       now: hourTime(13, 45),
       maxOnMinutes: 25,
@@ -385,7 +396,7 @@ export function runPwmPhaseCases(assertPass) {
     nextAction: 'on',
     nextTriggerAt: hourTime(14, 20),
     delayMinutes: 37,
-    phasePatch: { pwmState: 'on', nextTriggerAt: hourTime(14, 20) }
+    phasePatch: { smartState: 'on', nextTriggerAt: hourTime(14, 20) }
   };
   alignSmartModeNextTrigger(smartOffCommit, hourTime(13, 10));
   assertPass(smartOffCommit.nextTriggerAt === hourTime(13, 30)
@@ -397,7 +408,7 @@ export function runPwmPhaseCases(assertPass) {
     nextAction: 'on',
     nextTriggerAt: hourTime(13, 26),
     delayMinutes: 1,
-    phasePatch: { pwmState: 'on', nextTriggerAt: hourTime(13, 26) }
+    phasePatch: { smartState: 'on', nextTriggerAt: hourTime(13, 26) }
   };
   alignSmartModeNextTrigger(
     smartFiveMinuteGap,
@@ -409,7 +420,7 @@ export function runPwmPhaseCases(assertPass) {
     nextAction: 'on',
     nextTriggerAt: hourTime(13, 26),
     delayMinutes: 1,
-    phasePatch: { pwmState: 'on', nextTriggerAt: hourTime(13, 26) }
+    phasePatch: { smartState: 'on', nextTriggerAt: hourTime(13, 26) }
   };
   alignSmartModeNextTrigger(
     smartShortGap,
@@ -426,7 +437,7 @@ export function runPwmPhaseCases(assertPass) {
   const recoveredOffClock = typeof planSmartOnAfterConfirmedOff === 'function'
     ? planSmartOnAfterConfirmedOff({
         enabled: true,
-        pwmState: 'on',
+        smartState: 'on',
         onMinutes: 23,
         offMinutes: 7,
         smartMode: { enabled: true }
@@ -448,7 +459,7 @@ export function runPwmPhaseCases(assertPass) {
   const lateSmartClock = typeof classifySmartOnClock === 'function'
     ? classifySmartOnClock({
         enabled: true,
-        pwmState: 'on',
+        smartState: 'on',
         onMinutes: 23,
         smartMode: { enabled: true }
       }, hourTime(19, 30), { now: classifyNow })
@@ -456,7 +467,7 @@ export function runPwmPhaseCases(assertPass) {
   const nearestSmartClock = typeof classifySmartOnClock === 'function'
     ? classifySmartOnClock({
         enabled: true,
-        pwmState: 'on',
+        smartState: 'on',
         onMinutes: 23,
         smartMode: { enabled: true }
       }, hourTime(19, 0), { now: classifyNow })
@@ -464,17 +475,17 @@ export function runPwmPhaseCases(assertPass) {
   const typedSafeClock = typeof classifySmartOnClock === 'function'
     ? classifySmartOnClock({
         enabled: true,
-        pwmState: 'on',
+        smartState: 'on',
         onMinutes: 23,
         smartMode: { enabled: true },
-        pwmRetryKind: 'smart-on-safe-delay',
-        pwmRetryBoundaryAt: hourTime(19, 0),
-        pwmRetryScheduledAt: recoveredSafeRetryAt
+        smartRetryKind: 'smart-on-safe-delay',
+        smartRetryBoundaryAt: hourTime(19, 0),
+        smartRetryScheduledAt: recoveredSafeRetryAt
       }, recoveredSafeRetryAt, { now: classifyNow })
     : null;
   const stillLateAfterBoundary = classifySmartOnClock({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 23,
     smartMode: { enabled: true }
   }, hourTime(19, 30), {
@@ -483,7 +494,7 @@ export function runPwmPhaseCases(assertPass) {
   });
   const exhaustedOffClock = planSmartOnAfterConfirmedOff({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 3,
     offMinutes: 27,
     smartMode: { enabled: true }
@@ -494,19 +505,19 @@ export function runPwmPhaseCases(assertPass) {
   });
   const typedSafetySkipClock = classifySmartOnClock({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 3,
     smartMode: { enabled: true },
-    pwmRetryKind: 'smart-on-safety-skip',
-    pwmRetryBoundaryAt: hourTime(19, 0),
-    pwmRetryScheduledAt: hourTime(19, 30)
+    smartRetryKind: 'smart-on-safety-skip',
+    smartRetryBoundaryAt: hourTime(19, 0),
+    smartRetryScheduledAt: hourTime(19, 30)
   }, hourTime(19, 30), {
     now: hourTime(19, 3),
     plannedAt: hourTime(18, 59)
   });
   const zeroDurationNearBoundary = planSmartOnAfterConfirmedOff({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 0,
     offMinutes: 30,
     smartMode: { enabled: true }
@@ -517,7 +528,7 @@ export function runPwmPhaseCases(assertPass) {
   });
   const encodedZeroDurationNearBoundary = planSmartOnAfterConfirmedOff({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 30,
     offMinutes: 30,
     smartMode: { enabled: true }
@@ -528,7 +539,7 @@ export function runPwmPhaseCases(assertPass) {
   });
   const postBoundaryNormalClock = classifySmartOnClock({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 23,
     smartMode: { enabled: true }
   }, hourTime(19, 0), {
@@ -537,7 +548,7 @@ export function runPwmPhaseCases(assertPass) {
   });
   const boundaryOffCommitNextClock = classifySmartOnClock({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 23,
     smartMode: { enabled: true }
   }, hourTime(20, 0), {
@@ -547,7 +558,7 @@ export function runPwmPhaseCases(assertPass) {
   });
   const ordinarySafeBoundary = planSmartOnAfterConfirmedOff({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 23,
     offMinutes: 7,
     smartMode: { enabled: true }
@@ -558,7 +569,7 @@ export function runPwmPhaseCases(assertPass) {
   });
   const zeroDurationSafeBoundary = planSmartOnAfterConfirmedOff({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 0,
     offMinutes: 30,
     smartMode: { enabled: true }
@@ -569,7 +580,7 @@ export function runPwmPhaseCases(assertPass) {
   });
   const invalidDurationBoundary = planSmartOnAfterConfirmedOff({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 26,
     offMinutes: 4,
     smartMode: { enabled: true }
@@ -580,7 +591,7 @@ export function runPwmPhaseCases(assertPass) {
   });
   const oneMinuteWindowExhausted = planSmartOnAfterConfirmedOff({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 1,
     offMinutes: 29,
     smartMode: { enabled: true }
@@ -592,24 +603,24 @@ export function runPwmPhaseCases(assertPass) {
   });
   const mismatchedMarkerClock = classifySmartOnClock({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 23,
     smartMode: { enabled: true },
-    pwmRetryKind: 'smart-on-safe-delay',
-    pwmRetryBoundaryAt: hourTime(19, 0),
-    pwmRetryScheduledAt: hourTime(19, 5)
+    smartRetryKind: 'smart-on-safe-delay',
+    smartRetryBoundaryAt: hourTime(19, 0),
+    smartRetryScheduledAt: hourTime(19, 5)
   }, hourTime(19, 30), {
     now: hourTime(19, 21),
     plannedAt: hourTime(18, 56)
   });
   const safetyTimerClock = classifySmartOnClock({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 23,
     smartMode: { enabled: true },
-    pwmRetryKind: 'smart-on-safety-timer',
-    pwmRetryBoundaryAt: 0,
-    pwmRetryScheduledAt: hourTime(18, 53)
+    smartRetryKind: 'smart-on-safety-timer',
+    smartRetryBoundaryAt: 0,
+    smartRetryScheduledAt: hourTime(18, 53)
   }, hourTime(18, 53), {
     now: hourTime(18, 54),
     plannedAt: hourTime(18, 52),
@@ -618,7 +629,7 @@ export function runPwmPhaseCases(assertPass) {
   });
   const originlessNearestClock = classifySmartOnClock({
     enabled: true,
-    pwmState: 'on',
+    smartState: 'on',
     onMinutes: 23,
     smartMode: { enabled: true }
   }, hourTime(19, 0), {
@@ -671,7 +682,7 @@ export function runPwmPhaseCases(assertPass) {
     nextAction: 'off',
     nextTriggerAt: hourTime(14, 23),
     delayMinutes: 23,
-    phasePatch: { pwmState: 'off', nextTriggerAt: hourTime(14, 23) }
+    phasePatch: { smartState: 'off', nextTriggerAt: hourTime(14, 23) }
   };
   alignSmartModeNextTrigger(smartOnCommit, hourTime(14, 0));
   assertPass(smartOnCommit.nextTriggerAt === hourTime(14, 23),
@@ -865,7 +876,7 @@ export function runPwmPhaseCases(assertPass) {
       && recoveryTimerHold.timerMinutes === 5
       && recoveryTimerFailure.kind === 'retry'
       && recoveryTimerFailure.retryMinutes === 1
-      && recoveryTimerFailure.phasePatch.pwmState === 'off'
+      && recoveryTimerFailure.phasePatch.pwmState === 'on'
       && recoveryTimerSuccess.kind === 'commit'
       && recoveryTimerSuccess.nextAction === 'off'
       && recoveryTimerSuccess.nextTriggerAt === recoveryTimerTargetAt,
@@ -885,6 +896,7 @@ export function runPwmPhaseCases(assertPass) {
     {
       toggleSucceeded: true,
       pageTimerSucceeded: true,
+      pageTimerVerified: true,
       pageTimerTargetAt: loopOnTargetAt
     },
     { now: hourTime(13, 17) }
@@ -915,9 +927,14 @@ export function runPwmPhaseCases(assertPass) {
     { now }
   ));
   const onAlreadyOn = keep(planPwmStep(stepOnSchedule, { acIsOn: true }, { now }));
-  const onAlreadyOnAfterTimer = keep(planPwmStep(
+  const onVerifyHold = keep(planPwmStep(
     stepOnSchedule,
     { acIsOn: true, pageTimerSucceeded: true },
+    { now }
+  ));
+  const onVerifyFailure = keep(planPwmStep(
+    stepOnSchedule,
+    { acIsOn: true, pageTimerSucceeded: true, pageTimerVerified: false },
     { now }
   ));
   const onToggleFailure = keep(planPwmStep(
@@ -932,7 +949,7 @@ export function runPwmPhaseCases(assertPass) {
   ));
   const onCommit = keep(planPwmStep(
     stepOnSchedule,
-    { toggleSucceeded: true, pageTimerSucceeded: true },
+    { toggleSucceeded: true, pageTimerSucceeded: true, pageTimerVerified: true },
     { now }
   ));
   const onPageTimerTargetAt = now + 13 * MINUTE_MS;
@@ -941,6 +958,7 @@ export function runPwmPhaseCases(assertPass) {
     {
       toggleSucceeded: true,
       pageTimerSucceeded: true,
+      pageTimerVerified: true,
       pageTimerTargetAt: onPageTimerTargetAt
     },
     { now }
@@ -950,6 +968,7 @@ export function runPwmPhaseCases(assertPass) {
     {
       toggleSucceeded: true,
       pageTimerSucceeded: true,
+      pageTimerVerified: true,
       pageTimerTargetAt: now
     },
     { now }
@@ -959,6 +978,7 @@ export function runPwmPhaseCases(assertPass) {
     {
       toggleSucceeded: true,
       pageTimerSucceeded: true,
+      pageTimerVerified: true,
       pageTimerTargetAt: Number.NaN
     },
     { now }
@@ -983,9 +1003,11 @@ export function runPwmPhaseCases(assertPass) {
       && onAlreadyOn.kind === 'hold'
       && onAlreadyOn.prerequisite === 'set-page-timer'
       && onAlreadyOn.timerMinutes === 12
-      && onAlreadyOnAfterTimer.kind === 'commit'
-      && onAlreadyOnAfterTimer.nextAction === 'off'
-      && onAlreadyOnAfterTimer.delayMinutes === 12
+      && onVerifyHold.kind === 'hold'
+      && onVerifyHold.prerequisite === 'verify-page-timer'
+      && onVerifyFailure.kind === 'retry'
+      && onVerifyFailure.reason === 'page-timer-verify-failed'
+      && onVerifyFailure.phasePatch.pwmState === 'on'
       && onToggleFailure.kind === 'retry'
       && onToggleFailure.retryMinutes === 1
       && onTimerFailure.kind === 'retry'
@@ -994,7 +1016,7 @@ export function runPwmPhaseCases(assertPass) {
       && onCommit.kind === 'commit'
       && onCommit.nextAction === 'off'
       && onCommit.delayMinutes === 12,
-    'step ON/OFF: ON 始终先确认 timer，再按 AC 状态请求单次 ON，循环仍可在任意分钟运行'
+    'step ON/OFF: ON 先写 timer、再按 AC 状态请求单次 ON，开机后新鲜页验证关机定时器才提交'
   );
   assertPass(
     onCommitWithPageTarget.nextTriggerAt === onPageTimerTargetAt

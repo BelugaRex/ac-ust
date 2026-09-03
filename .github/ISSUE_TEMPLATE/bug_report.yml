@@ -69,8 +69,8 @@ body:
   - type: textarea
     id: diagnostics
     attributes:
-      label: 诊断结果
-      description: 请运行弹窗底部的“运行诊断”，粘贴与问题有关的结果。请勿提交账号或其他敏感信息。
+      label: 医生检查结果
+      description: 请点击弹窗底部的“召唤医生”，粘贴与问题有关的结果。自动修复不保证一定成功；请勿提交账号或其他敏感信息。
       render: text
 
   - type: textarea

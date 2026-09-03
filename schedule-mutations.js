@@ -9,10 +9,15 @@
   'use strict';
 
   function setScheduleNextTrigger(scheduleState, nextTriggerAt, options = {}) {
+    const normalizedAt = Number(nextTriggerAt) > 0 ? Number(nextTriggerAt) : 0;
+    scheduleState.nextTriggerAt = normalizedAt;
+  }
+
+  function setSchedulePwmClockIntent(scheduleState, nextTriggerAt, options = {}) {
     const previousAt = Number(scheduleState.nextTriggerAt) || 0;
     const normalizedAt = Number(nextTriggerAt) > 0 ? Number(nextTriggerAt) : 0;
     const requestedPlannedAt = Number(options?.plannedAt);
-    const existingPlannedAt = Number(scheduleState.smartClockPlannedAt) || 0;
+    const existingPlannedAt = Number(scheduleState.pwmClockPlannedAt) || 0;
     const legacyPlannedAt = Number(scheduleState.alarmCreatedAt) || 0;
     const toleranceMs = Number(options?.toleranceMs) || 0;
     const sameClock = previousAt > 0
@@ -21,6 +26,33 @@
 
     scheduleState.nextTriggerAt = normalizedAt;
     if (normalizedAt <= 0) {
+      scheduleState.pwmClockPlannedAt = 0;
+    } else if (Number.isFinite(requestedPlannedAt) && requestedPlannedAt > 0) {
+      scheduleState.pwmClockPlannedAt = requestedPlannedAt;
+    } else if (!sameClock || existingPlannedAt <= 0) {
+      const readNow = typeof options?.readNow === 'function'
+        ? options.readNow
+        : Date.now;
+      scheduleState.pwmClockPlannedAt = sameClock && legacyPlannedAt > 0
+        ? legacyPlannedAt
+        : readNow();
+    }
+    scheduleState.alarmCreatedAt = 0;
+    scheduleState.alarmDelayMinutes = 0;
+  }
+
+  function setScheduleSmartClockIntent(scheduleState, nextTriggerAt, options = {}) {
+    const previousAt = Number(scheduleState.smartNextTriggerAt) || 0;
+    const normalizedAt = Number(nextTriggerAt) > 0 ? Number(nextTriggerAt) : 0;
+    const requestedPlannedAt = Number(options?.plannedAt);
+    const existingPlannedAt = Number(scheduleState.smartClockPlannedAt) || 0;
+    const toleranceMs = Number(options?.toleranceMs) || 0;
+    const sameClock = previousAt > 0
+      && normalizedAt > 0
+      && Math.abs(previousAt - normalizedAt) <= toleranceMs;
+
+    scheduleState.smartNextTriggerAt = normalizedAt;
+    if (normalizedAt <= 0) {
       scheduleState.smartClockPlannedAt = 0;
     } else if (Number.isFinite(requestedPlannedAt) && requestedPlannedAt > 0) {
       scheduleState.smartClockPlannedAt = requestedPlannedAt;
@@ -28,16 +60,8 @@
       const readNow = typeof options?.readNow === 'function'
         ? options.readNow
         : Date.now;
-      scheduleState.smartClockPlannedAt = sameClock && legacyPlannedAt > 0
-        ? legacyPlannedAt
-        : readNow();
+      scheduleState.smartClockPlannedAt = readNow();
     }
-  }
-
-  function setSchedulePwmClockIntent(scheduleState, nextTriggerAt, options = {}) {
-    setScheduleNextTrigger(scheduleState, nextTriggerAt, options);
-    scheduleState.alarmCreatedAt = 0;
-    scheduleState.alarmDelayMinutes = 0;
   }
 
   function replaceSchedulePwmRetryState(
@@ -47,6 +71,15 @@
     scheduleState.pwmRetryKind = kind;
     scheduleState.pwmRetryBoundaryAt = boundaryAt;
     scheduleState.pwmRetryScheduledAt = scheduledAt;
+  }
+
+  function replaceScheduleSmartRetryState(
+    scheduleState,
+    { kind = '', boundaryAt = 0, scheduledAt = 0 } = {}
+  ) {
+    scheduleState.smartRetryKind = kind;
+    scheduleState.smartRetryBoundaryAt = boundaryAt;
+    scheduleState.smartRetryScheduledAt = scheduledAt;
   }
 
   function replaceSchedulePageTimerRetryState(
@@ -99,7 +132,9 @@
   return Object.freeze({
     setScheduleNextTrigger,
     setSchedulePwmClockIntent,
+    setScheduleSmartClockIntent,
     replaceSchedulePwmRetryState,
+    replaceScheduleSmartRetryState,
     replaceSchedulePageTimerRetryState,
     replaceSchedulePageTimerState,
     recordSchedulePageTimerFailureState,

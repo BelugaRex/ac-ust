@@ -382,8 +382,8 @@ input {
   line-height: 20px;
 }
 
-.automation-heading p {
-  margin-top: 2px;
+.active-hours-hint {
+  padding: 0 14px 4px;
   color: var(--text-secondary);
   font-size: 11px;
   line-height: 15px;
@@ -999,7 +999,7 @@ html:lang(zh) :is(
 
 html:lang(zh) :is(
   .balance-estimate,
-  .automation-heading p,
+  .active-hours-hint,
   .field-label,
   .settings-hint,
   .status,

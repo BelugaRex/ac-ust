@@ -432,6 +432,9 @@ function sleep(ms) {
 }
 
 const POWER_OFF_TIMER_MAX_TYPING_ATTEMPTS = 3;
+const POWER_OFF_TIMER_WHOLE_VALUE_FALLBACK_STAGES = new Set([
+  'type-character'
+]);
 
 function normalizePowerOffTimerDiagnosticText(value, maxLength) {
   return String(value ?? '')
@@ -560,6 +563,9 @@ function resolveLivePowerOffTimerControl(
 
 // AntD 确认后 React 可能短暂同时保留旧树与新树。最终值必须由同一个
 // 唯一语义 live input 连续承载 500ms，且本次新打开的 dropdown 已关闭。
+// 提交成功的硬信号是 value 与 title 同时等于期望 HH:MM：原生 value setter
+// 只写 value、不写 title；若 title 仍为空说明 AntD 的 onOk 未触发、服务器未持久化，
+// 此时本地 DOM 看似已写入，但新鲜页读回仍为空，必须在本地确认阶段就判为未提交。
 function isPowerOffTimerConfirmationAccepted({
   input,
   rawValue,
@@ -570,14 +576,12 @@ function isPowerOffTimerConfirmationAccepted({
   visibleBefore,
   openedDropdown
 }) {
-  const confirmedValue = rawValue || rawTitle;
-  const valuesConsistent = !rawValue || !rawTitle || rawValue === rawTitle;
   const dropdownClosed = ariaExpanded !== 'true'
     && (!openedDropdown || !visibleDropdowns.includes(openedDropdown))
     && visibleDropdowns.every(dropdown => visibleBefore.has(dropdown));
   return !!input
-    && valuesConsistent
-    && confirmedValue === expectedValue
+    && rawValue === expectedValue
+    && rawTitle === expectedValue
     && dropdownClosed;
 }
 
@@ -597,6 +601,10 @@ async function waitForConfirmedPowerOffTimerInput(
   const interval = Math.max(1, Number(pollIntervalMs) || 1);
   const requiredStableMs = Math.max(0, Number(stableWindowMs) || 0);
   let stableInput = null;
+  let stableValue = '';
+  let stableTitle = '';
+  let stableAriaExpanded = '';
+  let stableVisibleDropdowns = [];
   let stableSince = 0;
   let previousInput = lastInput;
   let replacements = inputReplacementCount;
@@ -627,8 +635,22 @@ async function waitForConfirmedPowerOffTimerInput(
       visibleBefore,
       openedDropdown
     })) {
-      if (input !== stableInput) {
+      const ariaExpanded = input?.getAttribute?.('aria-expanded') || '';
+      const sameVisibleDropdowns = visibleDropdowns.length
+        === stableVisibleDropdowns.length
+        && visibleDropdowns.every(
+          (dropdown, index) => dropdown === stableVisibleDropdowns[index]
+        );
+      if (input !== stableInput
+          || rawValue !== stableValue
+          || rawTitle !== stableTitle
+          || ariaExpanded !== stableAriaExpanded
+          || !sameVisibleDropdowns) {
         stableInput = input;
+        stableValue = rawValue;
+        stableTitle = rawTitle;
+        stableAriaExpanded = ariaExpanded;
+        stableVisibleDropdowns = [...visibleDropdowns];
         stableSince = Date.now();
       } else if (Date.now() - stableSince >= requiredStableMs) {
         return {
@@ -642,6 +664,10 @@ async function waitForConfirmedPowerOffTimerInput(
       }
     } else {
       stableInput = null;
+      stableValue = '';
+      stableTitle = '';
+      stableAriaExpanded = '';
+      stableVisibleDropdowns = [];
       stableSince = 0;
     }
 
@@ -693,11 +719,14 @@ async function typeTimeIntoPickerInput(input, value) {
       continue;
     }
     try {
+      const useWholeValueFallback = attempt === 2
+        && POWER_OFF_TIMER_WHOLE_VALUE_FALLBACK_STAGES.has(lastFailure?.failureStage);
       const result = await typeOnceIntoPickerInput(
         stableControl.control.picker,
         stableControl.control.input,
         value,
-        visibleDropdownsBefore
+        visibleDropdownsBefore,
+        { wholeValue: useWholeValueFallback }
       );
       totalReplacementCount += result.inputReplacementCount || 0;
       if (result.success) {
@@ -732,7 +761,13 @@ async function typeTimeIntoPickerInput(input, value) {
 
 // 单次模拟手动输入。每个 input 事件后重新从 Power-off after 语义定位
 // 当前 live input；保留已接受前缀的节点替换可继续，回滚或歧义交给外层重试。
-async function typeOnceIntoPickerInput(picker, input, value, visibleDropdownsBefore) {
+async function typeOnceIntoPickerInput(
+  picker,
+  input,
+  value,
+  visibleDropdownsBefore,
+  { wholeValue = false } = {}
+) {
   const initialState = findPowerOffTimerControlState();
   if (!initialState.control
       || initialState.control.input !== input
@@ -758,15 +793,23 @@ async function typeOnceIntoPickerInput(picker, input, value, visibleDropdownsBef
 
   try {
     makeWritable(currentControl.input);
-    currentControl.picker.dispatchEvent(new MouseEvent('mousedown', {
-      bubbles: true,
-      cancelable: true,
-      view: window
-    }));
-    currentControl.picker.click();
-    currentControl.input.focus();
-    currentControl.input.click();
-    await sleep(100);
+    if (currentControl.input.getAttribute('aria-expanded') !== 'true') {
+      // AntD 的下拉层由 mousedown 打开；原生 click() 只触发 click 不触发 mousedown，
+      // 对 readonly 输入框打不开下拉层。先派发 mousedown/mouseup 再 focus/click。
+      currentControl.input.dispatchEvent(new MouseEvent('mousedown', {
+        bubbles: true,
+        cancelable: true
+      }));
+      currentControl.input.dispatchEvent(new MouseEvent('mouseup', {
+        bubbles: true,
+        cancelable: true
+      }));
+      currentControl.input.focus();
+      currentControl.input.click();
+      await sleep(100);
+    } else {
+      currentControl.input.focus();
+    }
 
     let live = resolveLivePowerOffTimerControl(
       currentControl.input,
@@ -808,51 +851,78 @@ async function typeOnceIntoPickerInput(picker, input, value, visibleDropdownsBef
     if (!live.success) return live;
     currentControl = live.control;
 
-    let acceptedPrefix = '';
-    for (const char of value) {
+    if (wholeValue) {
       live = resolveLivePowerOffTimerControl(
         currentControl.input,
-        acceptedPrefix,
+        '',
         diagnostics,
         'type-character'
       );
       if (!live.success) return live;
       currentControl = live.control;
       makeWritable(currentControl.input);
-      currentControl.input.dispatchEvent(new KeyboardEvent('keydown', {
-        key: char,
-        bubbles: true
-      }));
-      live = resolveLivePowerOffTimerControl(
-        currentControl.input,
-        acceptedPrefix,
-        diagnostics,
-        'type-character'
-      );
-      if (!live.success) return live;
-      currentControl = live.control;
-      makeWritable(currentControl.input);
-      const nextPrefix = acceptedPrefix + char;
-      setNativeInputValue(currentControl.input, nextPrefix);
+      setNativeInputValue(currentControl.input, value);
       currentControl.input.dispatchEvent(new InputEvent('input', {
         bubbles: true,
         inputType: 'insertText',
-        data: char
+        data: value
       }));
-      await sleep(30);
+      await sleep(50);
       live = resolveLivePowerOffTimerControl(
         currentControl.input,
-        nextPrefix,
+        value,
         diagnostics,
         'type-character'
       );
       if (!live.success) return live;
       currentControl = live.control;
-      currentControl.input.dispatchEvent(new KeyboardEvent('keyup', {
-        key: char,
-        bubbles: true
-      }));
-      acceptedPrefix = nextPrefix;
+    } else {
+      let acceptedPrefix = '';
+      for (const char of value) {
+        live = resolveLivePowerOffTimerControl(
+          currentControl.input,
+          acceptedPrefix,
+          diagnostics,
+          'type-character'
+        );
+        if (!live.success) return live;
+        currentControl = live.control;
+        makeWritable(currentControl.input);
+        currentControl.input.dispatchEvent(new KeyboardEvent('keydown', {
+          key: char,
+          bubbles: true
+        }));
+        live = resolveLivePowerOffTimerControl(
+          currentControl.input,
+          acceptedPrefix,
+          diagnostics,
+          'type-character'
+        );
+        if (!live.success) return live;
+        currentControl = live.control;
+        makeWritable(currentControl.input);
+        const nextPrefix = acceptedPrefix + char;
+        setNativeInputValue(currentControl.input, nextPrefix);
+        currentControl.input.dispatchEvent(new InputEvent('input', {
+          bubbles: true,
+          inputType: 'insertText',
+          data: char
+        }));
+        await sleep(30);
+        live = resolveLivePowerOffTimerControl(
+          currentControl.input,
+          nextPrefix,
+          diagnostics,
+          'type-character'
+        );
+        if (!live.success) return live;
+        currentControl = live.control;
+        currentControl.input.dispatchEvent(new KeyboardEvent('keyup', {
+          key: char,
+          bubbles: true
+        }));
+        acceptedPrefix = nextPrefix;
+      }
     }
 
     live = resolveLivePowerOffTimerControl(
@@ -905,6 +975,10 @@ async function typeOnceIntoPickerInput(picker, input, value, visibleDropdownsBef
     );
     if (!live.success) return live;
     currentControl = live.control;
+
+    // 只读输入框打字不改 rc-picker 内部值，先点选时刻单元格再点 OK，
+    // 确保 OK 提交的是目标时刻而非空值（结构未知时返回 false，不影响原链路）。
+    clickPowerOffTimeCells(currentControl, operationVisibleDropdownsBefore, value);
 
     const okResult = clickUniquePowerOffPickerOk(
       currentControl,
@@ -1251,6 +1325,34 @@ function resolvePowerOffPickerDropdown(control, visibleBefore) {
     ambiguous: false,
     visible
   };
+}
+
+// 只读 picker 下打字不会更新 rc-picker 内部值，OK 提交的仍是空值；
+// 正确做法是像真实用户一样在下拉层点选时刻单元格（小时 + 分钟），再点 OK。
+// 结构未知时安全返回 false，不抛错、不猜测。
+function clickPowerOffTimeCells(control, visibleBefore, value) {
+  const resolved = resolvePowerOffPickerDropdown(control, visibleBefore);
+  if (resolved.ambiguous || !resolved.dropdown) return false;
+  const parts = String(value || '').split(':');
+  const hours = String(parts[0] || '').trim();
+  const minutes = String(parts[1] || '').trim();
+  if (!/^\d{1,2}$/.test(hours) || !/^\d{1,2}$/.test(minutes)) return false;
+  const columns = Array.from(
+    resolved.dropdown.querySelectorAll('.ant-picker-time-panel-column')
+  );
+  if (columns.length < 2) return false;
+  const findCell = (column, text) => Array.from(column.querySelectorAll('li')).find(
+    cell => {
+      const cellText = String(cell.textContent || '').trim();
+      return cellText === text || cellText === String(Number(text));
+    }
+  );
+  const hourCell = findCell(columns[0], hours);
+  const minuteCell = findCell(columns[1], minutes);
+  if (!hourCell || !minuteCell) return false;
+  hourCell.click();
+  minuteCell.click();
+  return true;
 }
 
 function clickUniquePowerOffPickerOk(control, visibleBefore) {
