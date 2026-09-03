@@ -943,38 +943,9 @@ async function typeOnceIntoPickerInput(
     );
     if (!live.success) return live;
     currentControl = live.control;
-    currentControl.input.dispatchEvent(new KeyboardEvent('keydown', {
-      key: 'Enter',
-      code: 'Enter',
-      keyCode: 13,
-      which: 13,
-      bubbles: true
-    }));
-    await sleep(30);
-    live = resolveLivePowerOffTimerControl(
-      currentControl.input,
-      value,
-      diagnostics,
-      'enter'
-    );
-    if (!live.success) return live;
-    currentControl = live.control;
-    currentControl.input.dispatchEvent(new KeyboardEvent('keyup', {
-      key: 'Enter',
-      code: 'Enter',
-      keyCode: 13,
-      which: 13,
-      bubbles: true
-    }));
-    await sleep(300);
-    live = resolveLivePowerOffTimerControl(
-      currentControl.input,
-      value,
-      diagnostics,
-      'enter'
-    );
-    if (!live.success) return live;
-    currentControl = live.control;
+    // 不再派发 Enter：rc-picker 的 Enter 在「本地输入」阶段就会触发 onOk 提交，
+    // 此时 AC 尚未开机，提交会被服务端拒绝并触发整页刷新，导致后续点选单元格/OK
+    // 被中断（表现为「输入框未接受时间」）。改为直接点选时刻单元格再点 OK 完成提交。
 
     // 只读输入框打字不改 rc-picker 内部值，先点选时刻单元格再点 OK，
     // 确保 OK 提交的是目标时刻而非空值（结构未知时返回 false，不影响原链路）。

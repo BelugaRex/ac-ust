@@ -4201,8 +4201,6 @@ return { reapplySmartSensitivityNow };`
   const replacementLiveInput11J = replacementHarness11J.getCurrentInput();
   const replacementChangeEvents11J = replacementHarness11J.state.eventLog
     .filter(event => event.type === 'change');
-  const replacementEnterEvents11J = replacementHarness11J.state.eventLog
-    .filter(event => event.key === 'Enter');
   assertPass(replacementResult11J.success === true
       && replacementHarness11J.state.attemptCount === 1
       && replacementHarness11J.state.replacementCount === 2
@@ -4213,10 +4211,8 @@ return { reapplySmartSensitivityNow };`
       && replacementLiveInput11J.getAttribute('title') === replacementHarness11J.expectedValue
       && replacementHarness11J.getVisibleDropdownCount() === 0
       && replacementHarness11J.getStableConfirmationMs() >= 500
-      && replacementChangeEvents11J.at(-1)?.nodeId === replacementLiveInput11J.id
-      && replacementEnterEvents11J.length === 2
-      && replacementEnterEvents11J.every(event => event.nodeId === replacementLiveInput11J.id),
-    '11J-2: 第二/第三字符替换节点并保留前缀时，change/Enter/OK 在当前 live 控件完成且稳定 500ms');
+      && replacementChangeEvents11J.at(-1)?.nodeId === replacementLiveInput11J.id,
+    '11J-2: 第二/第三字符替换节点并保留前缀时，change/OK 在当前 live 控件完成且稳定 500ms（不再派发 Enter）');
 
   const wholeValueFallbackHarness11J = createPowerOffAfterHarness({
     replacementMode: 'rollback'
