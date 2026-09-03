@@ -2902,6 +2902,7 @@ async function runSmartStep(alarmContext = {}) {
         )) return;
       }
 
+      let typedRetryClock = null;
       if (schedule.smartState === 'on' && alarmScheduledAt > 0) {
         const clock = classifySmartOnClock(schedule, alarmScheduledAt, {
           now,
@@ -2917,12 +2918,34 @@ async function runSmartStep(alarmContext = {}) {
           });
           return;
         }
+        if (clock?.valid && clock.kind === 'typed-retry'
+            && normalizeHalfHourAlarmBoundary(alarmScheduledAt) === 0
+            && isSmartHalfHourBoundary(Number(clock.boundaryAt))) {
+          typedRetryClock = clock;
+        }
       }
 
       let plan = planSmartStep(schedule, {
         now,
         alarmScheduledAt
       });
+      if (typedRetryClock) {
+        // 智能 ON 预布防失败后的非半点重试：ac-smart 一分钟后再次触发，
+        // 但 alarmScheduledAt 不再是半点边界。分类器已识别 typed-retry marker，
+        // 这里以原半点边界与绝对关机截止直接重跑「写关机时间 → 确认开机」，
+        // 而不是把本周期剩余 ON 时间白白延到下一半点。
+        const retryTargetAt = Number(typedRetryClock.pageTimerTargetAt);
+        plan = {
+          kind: 'start',
+          reason: 'smart-on-typed-retry',
+          nextAction: 'off',
+          boundaryAt: Number(typedRetryClock.boundaryAt),
+          windowEndsAt: retryTargetAt,
+          onMinutes: Number(schedule.onMinutes),
+          targetAt: retryTargetAt,
+          nextTriggerAt: retryTargetAt
+        };
+      }
       if (!plan || plan.kind === 'noop') return;
       if (plan.nextAction === 'on') {
         alignSmartModeNextTrigger(plan, now, { notBeforeAt: now + 1 });
@@ -2943,7 +2966,7 @@ async function runSmartStep(alarmContext = {}) {
           maxOnMinutes: SMART_MODE.ON_MAX,
           acIsOn: false,
           boundaryAt: plan.boundaryAt,
-          triggeredBoundaryAt: alarmScheduledAt
+          triggeredBoundaryAt: plan.boundaryAt
         });
         if (onWindowPlan.kind !== 'allow') {
           await commitSmartOnRetry(
@@ -2984,7 +3007,7 @@ async function runSmartStep(alarmContext = {}) {
 
         if (!armResult?.success) {
           if (armResult.failureStage === 'write') {
-            schedule.pageTimerError = `智能自动开启前页面关机定时器未确认：${armResult.error || '未知错误'}`;
+            schedule.pageTimerError = `智能自动开启前页面关机定时器未确认：${armResult.error || '未知错误'}${armResult.pageTimerFailureStage ? `（${armResult.pageTimerFailureStage}）` : ''}`;
             await commitSmartOnRetry(
               plan.boundaryAt,
               Date.now(),
@@ -4123,6 +4146,9 @@ async function armPowerOffTimerEnsuringOn(
       success: false,
       failureStage: 'write',
       error: writeResult?.error || '页面关机定时器写入失败',
+      pageTimerFailureStage: writeResult?.failureStage || '',
+      pageTimerObservedValue: writeResult?.observedValue || '',
+      pageTimerObservedTitle: writeResult?.observedTitle || '',
       targetAt: Number(writeResult?.targetAt) || 0,
       automaticDeadlineExpired: writeResult?.automaticDeadlineExpired === true
     };
