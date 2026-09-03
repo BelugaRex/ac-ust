@@ -4370,6 +4370,61 @@ return { reapplySmartSensitivityNow };`
       && timeCellHarness11J.state.timeCellClicks[1] === '34',
     '11J-6A: 只读 picker 提交前在下拉层点选 12 时与 34 分单元格，确保 OK 提交正确时刻');
 
+  // 11J-6B: UST 页面改版后 Power-off after 定位健壮性——前缀匹配 + placeholder 兜底。
+  const powerOffLabelMatcherSource = extractSourceSection(
+    contentSource,
+    'function isPowerOffAfterLabel(',
+    'function findPowerOffTimerControlState(',
+    'power-off label matcher'
+  );
+  const loadLabelMatcher = new Function(
+    'document',
+    `${powerOffLabelMatcherSource};
+    return { isPowerOffAfterLabel, collectPowerOffTimerLabelHints, findPowerOffTimerInputByPlaceholder };`
+  );
+  const labelMatcher = loadLabelMatcher(null);
+  const placeholderInput11J = {
+    type: 'text',
+    isConnected: true,
+    getAttribute(name) { return name === 'placeholder' ? 'Select time' : null; }
+  };
+  const placeholderMatcher = loadLabelMatcher({
+    querySelectorAll(selector) {
+      return selector === '.ant-picker input' ? [placeholderInput11J] : [];
+    }
+  });
+  const ambiguousPlaceholderMatcher = loadLabelMatcher({
+    querySelectorAll(selector) {
+      return selector === '.ant-picker input'
+        ? [placeholderInput11J, { ...placeholderInput11J }]
+        : [];
+    }
+  });
+  const hintDocument11J = {
+    querySelectorAll(selector) {
+      if (selector !== 'small, label, p, h1, h2, h3, h4, h5, h6, div, span') return [];
+      return [
+        { children: [], textContent: 'Power-off after (min)' },
+        { children: [], textContent: 'Air Conditioning Status' },
+        { children: [], textContent: 'left of 22100 min balance' },
+        { children: [{}, {}], textContent: 'Select time to power-off AC automatically' }
+      ];
+    }
+  };
+  const hintMatcher = loadLabelMatcher(hintDocument11J);
+  assertPass(
+    labelMatcher.isPowerOffAfterLabel('Power-off after')
+      && labelMatcher.isPowerOffAfterLabel('Power off after')
+      && labelMatcher.isPowerOffAfterLabel('Power-off after (min)')
+      && labelMatcher.isPowerOffAfterLabel('Power-off After')
+      && !labelMatcher.isPowerOffAfterLabel('Air Conditioning Status')
+      && !labelMatcher.isPowerOffAfterLabel('Auto shutdown')
+      && placeholderMatcher.findPowerOffTimerInputByPlaceholder() === placeholderInput11J
+      && ambiguousPlaceholderMatcher.findPowerOffTimerInputByPlaceholder() === null
+      && hintMatcher.collectPowerOffTimerLabelHints() === 'Power-off after (min)',
+    '11J-6B: isPowerOffAfterLabel 放宽为前缀匹配；placeholder="Select time" 唯一时才兜底定位；失败回显真实标签文案'
+  );
+
   const clearPageTimerProofStart = backgroundSource.indexOf('function clearPageTimerProofState()');
   const clearPageTimerProofEnd = backgroundSource.indexOf('\nasync function syncStoredTriggerFromAlarm', clearPageTimerProofStart);
   const clearPageTimerProofSource = clearPageTimerProofStart >= 0
