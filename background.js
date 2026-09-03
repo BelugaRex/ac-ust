@@ -2969,73 +2969,44 @@ async function runSmartStep(alarmContext = {}) {
           1,
           Math.ceil((targetAt - now) / 60000)
         );
-        const timerResult = await setPageTimer(timerMinutes, {
-          retryOnFailure: false,
+        const armResult = await armPowerOffTimerEnsuringOn(timerMinutes, {
           targetAt,
           automaticOnDeadlineAt: windowEndsAt,
           automationRevision,
           automationMode: 'smart',
-          deferVerification: true
+          requireAutomationAllowed: true
         });
         if (await abortStaleAutomation(
           automationRevision,
-          'runSmartStep-page-timer-active-hours-paused',
+          'runSmartStep-arm-active-hours-paused',
           'smart'
         )) return;
-        if (!timerResult?.success) {
-          schedule.pageTimerError = `智能自动开启前页面关机定时器未确认：${timerResult?.error || '未知错误'}${timerResult?.failureStage ? `（${timerResult.failureStage}）` : ''}`;
-          await commitSmartOnRetry(
-            plan.boundaryAt,
-            Date.now(),
-            'smart-on-page-timer-retry'
-          );
-          return;
-        }
 
-        const before = await getCurrentACStatus();
-        if (await abortStaleAutomation(
-          automationRevision,
-          'runSmartStep-status-active-hours-paused',
-          'smart'
-        )) return;
-        if (before?.isOn !== true) {
-          await toggleAC('on', {
-            notAfterAt: windowEndsAt,
-            requireAutomationAllowed: true,
-            automationRevision,
-            automationMode: 'smart'
-          });
-        }
-        const after = await getCurrentACStatus();
-        if (after?.isOn !== true) {
-          schedule.pageTimerError = '智能自动开启未确认；本轮不重复点击，等待下一半点';
-          await commitSmartOnRetry(
-            plan.boundaryAt,
-            Date.now(),
-            'smart-on-confirmation-retry'
-          );
-          return;
-        }
-
-        // Power-off after 只在开机态下才被持久化：先写入、开机后，再用独立新鲜页读回确认。
-        const verification = await verifyPageTimerPersistence(timerResult.value, {
-          automationRevision,
-          automationMode: 'smart',
-          shutdownRevision: null,
-          notAfterAt: windowEndsAt
-        });
-        if (await abortStaleAutomation(
-          automationRevision,
-          'runSmartStep-verify-active-hours-paused',
-          'smart'
-        )) return;
-        if (!verification?.success) {
+        if (!armResult?.success) {
+          if (armResult.failureStage === 'write') {
+            schedule.pageTimerError = `智能自动开启前页面关机定时器未确认：${armResult.error || '未知错误'}`;
+            await commitSmartOnRetry(
+              plan.boundaryAt,
+              Date.now(),
+              'smart-on-page-timer-retry'
+            );
+            return;
+          }
+          if (armResult.failureStage === 'ensure-on') {
+            schedule.pageTimerError = '智能自动开启未确认；本轮不重复点击，等待下一半点';
+            await commitSmartOnRetry(
+              plan.boundaryAt,
+              Date.now(),
+              'smart-on-confirmation-retry'
+            );
+            return;
+          }
           await setPageTimer(1, {
             retryOnFailure: false,
             automationRevision,
             automationMode: 'smart'
           });
-          schedule.pageTimerError = `智能开启后关机定时器未确认：${verification?.error || '未知错误'}；已补设 1 分钟关机`;
+          schedule.pageTimerError = `智能开启后关机定时器未确认：${armResult.error || '未知错误'}；已补设 1 分钟关机`;
           await commitSmartOnRetry(
             plan.boundaryAt,
             Date.now(),
@@ -3043,8 +3014,9 @@ async function runSmartStep(alarmContext = {}) {
           );
           return;
         }
-        schedule.pageTimerMinutes = timerResult.actualDelayMinutes || timerMinutes;
-        schedule.pageTimerTargetAt = timerResult.targetAt;
+
+        schedule.pageTimerMinutes = armResult.actualDelayMinutes || timerMinutes;
+        schedule.pageTimerTargetAt = armResult.targetAt;
         schedule.pageTimerError = '';
         schedule.pageTimerRetryAt = 0;
         schedule.pageTimerRetryMinutes = 0;
@@ -3155,78 +3127,97 @@ async function runPwmStep() {
   const automationRevision = claimPwmStepOwnership();
   let controlAuditOnOutcomeRecorded = false;
 
-  // 提取（Fowler Extract Function）：PWM 开机 hold 分支——页面 timer 已确认后单次点击 + 只读复核。
-  // 观察结果写回 observations，最终返回重新规划后的 plan；外围绝不重复点击。
-  async function resolveToggleOnHold(plan, observations) {
-    await recordControlAuditDispatch();
-    try {
-      const automaticOnDeadlineAt = getAutomaticOnDeadline();
-      const toggleResult = await toggleAC('on', {
-        requireAutomationAllowed: true,
-        automationRevision,
-        ...(automaticOnDeadlineAt > 0
-          ? { notAfterAt: automaticOnDeadlineAt }
-          : {})
-      });
-      observations.toggleSucceeded = !!toggleResult?.success;
-      observations.toggleError = toggleResult?.error || '';
-      if (!observations.toggleSucceeded) {
-        schedule.pageTimerError = `自动开启未确认：${toggleResult?.error || '未知错误'}`;
-      }
-    } catch (e) {
-      observations.toggleSucceeded = false;
-      observations.toggleError = e?.message || String(e);
-      schedule.pageTimerError = `自动开启异常：${observations.toggleError}`;
-    }
-
-    const actual = await getCurrentACStatus();
-    observations.acIsOn = actual?.isOn;
-    if (actual?.isOn === false) {
-      observations.toggleSucceeded = false;
-    }
-    if (actual?.isOn === true) {
-      await recordControlAuditOnOutcome(true, 'status-confirmed');
-      await recordControlAuditTerminal('confirmed', 'status-confirmed');
-      controlAuditOnOutcomeRecorded = true;
-      schedule.pageTimerError = '';
-      console.log('[AC扩展] PWM 开机只读复核通过：AC=ON');
-    } else if (!observations.toggleSucceeded) {
-      await recordControlAuditOnOutcome(false, 'status-unconfirmed');
-      controlAuditOnOutcomeRecorded = true;
-      console.warn(`[AC扩展] PWM 本轮未开机：实际=${actual?.isOn}；外围不重复点击，1分钟后重试`);
-    } else {
-      await recordControlAuditOnOutcome(false, 'status-unknown');
-      controlAuditOnOutcomeRecorded = true;
-    }
-    return planPwmStep(schedule, observations);
-  }
-
-  // 提取（Fowler Extract Function）：PWM ON 页面 timer 前置布防——固定目标写入并重新规划。
-  async function resolvePageTimerPrearmHold(plan, observations) {
+  // 提取（Fowler Extract Function）：PWM ON 相位原子布防——一次调用 armPowerOffTimerEnsuringOn
+  // 完成「写关机时间 → 确认开机 → 开新页验证」，观察结果写回 observations；
+  // 开机审计经 ensureOn 钩子在 toggle 前后插入，外围绝不重复点击。
+  async function resolvePageTimerArmHold(plan, observations) {
     applyPwmPlanState(plan);
     await recordControlAuditTimerPrearm(
       'started',
       0,
       'prearm-started'
     );
-    const pageTimerResult = await setPageTimer(plan.timerMinutes, {
-      retryOnFailure: false,
+
+    const armResult = await armPowerOffTimerEnsuringOn(plan.timerMinutes, {
+      automaticOnDeadlineAt: getAutomaticOnDeadline(),
       automationRevision,
-      deferVerification: true
+      automationMode: 'pwm',
+      requireAutomationAllowed: true,
+      ensureOn: async (notAfterAt) => {
+        await recordControlAuditDispatch();
+        try {
+          const toggleResult = await toggleAC('on', {
+            requireAutomationAllowed: true,
+            automationRevision,
+            ...(notAfterAt > 0 ? { notAfterAt } : {})
+          });
+          observations.toggleSucceeded = !!toggleResult?.success;
+          observations.toggleError = toggleResult?.error || '';
+        } catch (e) {
+          observations.toggleSucceeded = false;
+          observations.toggleError = e?.message || String(e);
+        }
+      }
     });
-    await recordControlAuditTimerPrearm(
-      pageTimerResult?.success ? 'ok' : 'failed',
-      Number(pageTimerResult?.targetAt) || 0,
-      pageTimerResult?.success ? 'prearm-confirmed' : 'prearm-unconfirmed'
-    );
+
     if (await abortStaleAutomation(
       automationRevision,
-      'runPwmStep-page-timer-active-hours-paused'
+      'runPwmStep-arm-active-hours-paused'
     )) return null;
-    observations.pageTimerSucceeded = !!pageTimerResult?.success;
-    observations.pageTimerTargetAt = Number(pageTimerResult?.targetAt);
-    observations.pageTimerValue = String(pageTimerResult?.value || '').trim();
-    observations.pageTimerError = pageTimerResult?.error || schedule.pageTimerError || '';
+
+    const writeSucceeded = armResult?.failureStage !== 'write';
+    await recordControlAuditTimerPrearm(
+      writeSucceeded ? 'ok' : 'failed',
+      Number(armResult?.targetAt) || 0,
+      writeSucceeded ? 'prearm-confirmed' : 'prearm-unconfirmed'
+    );
+
+    observations.pageTimerSucceeded = writeSucceeded;
+    observations.pageTimerTargetAt = Number(armResult?.targetAt) || 0;
+    observations.pageTimerValue = String(armResult?.value || '').trim();
+    observations.acIsOn = armResult?.acIsOn === true;
+    observations.pageTimerVerified = armResult?.success === true;
+
+    if (armResult?.toggledOn) {
+      observations.toggleSucceeded = armResult?.acIsOn === true;
+      if (armResult?.acIsOn === true) {
+        await recordControlAuditOnOutcome(true, 'status-confirmed');
+        await recordControlAuditTerminal('confirmed', 'status-confirmed');
+        controlAuditOnOutcomeRecorded = true;
+        schedule.pageTimerError = '';
+        console.log('[AC扩展] PWM 开机只读复核通过：AC=ON');
+      } else {
+        await recordControlAuditOnOutcome(false, 'status-unconfirmed');
+        controlAuditOnOutcomeRecorded = true;
+        console.warn('[AC扩展] PWM 本轮未开机：外围不重复点击，1分钟后重试');
+      }
+    }
+
+    if (armResult?.failureStage === 'verify') {
+      const safety = await setPageTimer(1, {
+        retryOnFailure: false,
+        automationRevision
+      });
+      observations.pageTimerError = `开机后关机定时器未确认：${armResult.error || '未知错误'}${safety?.success ? '；已补设 1 分钟关机' : ''}`;
+      await recordControlAuditTimerPrearm(
+        'failed',
+        Number(armResult?.targetAt) || 0,
+        'prearm-unpersisted'
+      );
+    } else if (armResult?.failureStage === 'ensure-on') {
+      observations.toggleError = armResult.error || '自动开启未确认';
+    } else if (armResult?.success) {
+      observations.pageTimerError = '';
+      schedule.pageTimerError = '';
+      await recordControlAuditTimerPrearm(
+        'ok',
+        Number(armResult?.targetAt) || 0,
+        'prearm-persisted'
+      );
+    } else {
+      observations.pageTimerError = armResult.error || '';
+    }
+
     return planPwmStep(schedule, observations);
   }
 
@@ -3243,48 +3234,6 @@ async function runPwmStep() {
       ? '原页面关机定时器缺失，已补设 1 分钟定时器；本轮不推进且不点击开关'
       : `页面关机定时器未正确设置：${timerResult?.error || '未知错误'}`;
     console.warn('[AC扩展] PWM 关机边界：页面定时器证明缺失，已尝试补设 1 分钟定时器；不点击开关');
-    return planPwmStep(schedule, observations);
-  }
-
-  // 提取（Fowler Extract Function）：PWM ON 开机后的页面定时器落盘验证——AC 已 ON 时
-  // 才用独立新鲜页读回确认 Power-off after 真正持久化，失败则补设 1 分钟关机兜底。
-  async function resolvePageTimerVerifyHold(plan, observations) {
-    applyPwmPlanState(plan);
-    const expectedValue = observations.pageTimerValue || '';
-    if (!expectedValue) {
-      observations.pageTimerVerified = false;
-      observations.pageTimerError = '页面定时器缺少可验证的目标时间';
-      return planPwmStep(schedule, observations);
-    }
-    const verification = await verifyPageTimerPersistence(expectedValue, {
-      automationRevision,
-      automationMode: 'pwm',
-      notAfterAt: 0
-    });
-    if (await abortStaleAutomation(
-      automationRevision,
-      'runPwmStep-verify-active-hours-paused'
-    )) return null;
-    observations.pageTimerVerified = !!verification?.success;
-    if (verification?.success) {
-      await recordControlAuditTimerPrearm(
-        'ok',
-        Number(observations.pageTimerTargetAt) || 0,
-        'prearm-persisted'
-      );
-      observations.pageTimerError = '';
-    } else {
-      const safety = await setPageTimer(1, {
-        retryOnFailure: false,
-        automationRevision
-      });
-      observations.pageTimerError = `开机后关机定时器未确认：${verification?.error || '未知错误'}${safety?.success ? '；已补设 1 分钟关机' : ''}`;
-      await recordControlAuditTimerPrearm(
-        'failed',
-        Number(observations.pageTimerTargetAt) || 0,
-        'prearm-unpersisted'
-      );
-    }
     return planPwmStep(schedule, observations);
   }
 
@@ -3380,21 +3329,8 @@ async function runPwmStep() {
       console.log(`[AC扩展] PWM 关机边界：页面定时器已正确设置 (${schedule.pageTimerMinutes} 分钟)，不点击开关`);
     }
 
-    if (plan.kind === 'hold' && plan.prerequisite === 'set-page-timer') {
-      plan = await resolvePageTimerPrearmHold(plan, observations);
-      if (!plan) return;
-    }
-
-    if (plan.kind === 'hold' && plan.prerequisite === 'toggle-on') {
-      plan = await resolveToggleOnHold(plan, observations);
-      if (await abortStaleAutomation(
-        automationRevision,
-        'runPwmStep-toggle-active-hours-paused'
-      )) return;
-    }
-
-    if (plan.kind === 'hold' && plan.prerequisite === 'verify-page-timer') {
-      plan = await resolvePageTimerVerifyHold(plan, observations);
+    if (plan.kind === 'hold' && plan.prerequisite === 'arm-page-timer') {
+      plan = await resolvePageTimerArmHold(plan, observations);
       if (!plan) return;
     }
 
@@ -4149,6 +4085,121 @@ async function requestTimerBasedShutdown(reason = '', minutes = 1) {
     error: result?.error || '页面关机定时器设置失败',
     result,
     reason
+  };
+}
+
+// 原子（Fowler Extract/Move Function）：设置关机时间并保证开机后落盘验证。
+// 组合三个既有原子——setPageTimer（写入，defer 验证）、toggleAC（开机）、
+// verifyPageTimerPersistence（独立新鲜页读回）——供智能模式与 PWM 共用同一
+// 「写 → 确认开机 → 开新页验证」时序。Power-off after 只在开机态被服务器保留，
+// 所以必须先本地写入、开机确认后再读回；读回前绝不刷新写入来源页。
+// ensureOn 可选钩子让调用方在开机前后插入自己的审计/副作用，缺省直接 toggleAC。
+async function armPowerOffTimerEnsuringOn(
+  minutes,
+  {
+    targetAt = 0,
+    automaticOnDeadlineAt = 0,
+    automationRevision = null,
+    automationMode = 'pwm',
+    shutdownRevision = null,
+    requireAutomationAllowed = true,
+    ensureOn = null
+  } = {}
+) {
+  const writeResult = await setPageTimer(minutes, {
+    retryOnFailure: false,
+    targetAt,
+    automaticOnDeadlineAt,
+    automationRevision,
+    automationMode,
+    shutdownRevision,
+    deferVerification: true
+  });
+  if (writeResult?.automationStale || writeResult?.shutdownStale) {
+    return { ...writeResult, success: false, failureStage: 'write' };
+  }
+  if (!writeResult?.success) {
+    return {
+      success: false,
+      failureStage: 'write',
+      error: writeResult?.error || '页面关机定时器写入失败',
+      targetAt: Number(writeResult?.targetAt) || 0,
+      automaticDeadlineExpired: writeResult?.automaticDeadlineExpired === true
+    };
+  }
+  const value = String(writeResult.value || '').trim();
+  const fixedTargetAt = Number(writeResult.targetAt);
+
+  const before = await getCurrentACStatus();
+  let acIsOn = before?.isOn === true;
+  let toggledOn = false;
+  if (!acIsOn) {
+    if (typeof ensureOn === 'function') {
+      await ensureOn(automaticOnDeadlineAt);
+    } else {
+      await toggleAC('on', {
+        notAfterAt: automaticOnDeadlineAt,
+        requireAutomationAllowed,
+        automationRevision,
+        automationMode
+      });
+    }
+    toggledOn = true;
+    const after = await getCurrentACStatus();
+    acIsOn = after?.isOn === true;
+    if (!acIsOn) {
+      return {
+        success: false,
+        failureStage: 'ensure-on',
+        error: '自动开启未确认',
+        value,
+        targetAt: fixedTargetAt,
+        acIsOn: false,
+        toggledOn
+      };
+    }
+  }
+
+  const verification = await verifyPageTimerPersistence(value, {
+    automationRevision,
+    automationMode,
+    shutdownRevision,
+    notAfterAt: automaticOnDeadlineAt
+  });
+  if (verification.automationStale || verification.shutdownStale) {
+    return {
+      success: false,
+      failureStage: 'verify',
+      automationStale: verification.automationStale === true,
+      shutdownStale: verification.shutdownStale === true,
+      error: '自动控制已暂停',
+      value,
+      targetAt: fixedTargetAt,
+      acIsOn,
+      toggledOn
+    };
+  }
+  if (!verification.success) {
+    return {
+      success: false,
+      failureStage: 'verify',
+      error: verification.error || '关机定时器新鲜页面验证未确认',
+      value,
+      targetAt: fixedTargetAt,
+      acIsOn,
+      toggledOn,
+      automaticDeadlineExpired: verification.automaticDeadlineExpired === true
+    };
+  }
+
+  return {
+    success: true,
+    value,
+    targetAt: fixedTargetAt,
+    actualDelayMinutes: writeResult.actualDelayMinutes || minutes,
+    verification,
+    acIsOn,
+    toggledOn
   };
 }
 

@@ -916,18 +916,18 @@ export function runPwmPhaseCases(assertPass) {
     { acIsOn },
     { now }
   )));
-  const onToggleHold = keep(planPwmStep(
+  const onToggleRetry = keep(planPwmStep(
     stepOnSchedule,
     { acIsOn: false, pageTimerSucceeded: true },
     { now }
   ));
-  const onUnknownToggleHold = keep(planPwmStep(
+  const onUnknownToggleRetry = keep(planPwmStep(
     stepOnSchedule,
     { pageTimerSucceeded: true },
     { now }
   ));
   const onAlreadyOn = keep(planPwmStep(stepOnSchedule, { acIsOn: true }, { now }));
-  const onVerifyHold = keep(planPwmStep(
+  const onVerifyRetry = keep(planPwmStep(
     stepOnSchedule,
     { acIsOn: true, pageTimerSucceeded: true },
     { now }
@@ -985,7 +985,7 @@ export function runPwmPhaseCases(assertPass) {
   ));
   assertPass(
     loopModeAtArbitraryMinute.kind === 'hold'
-      && loopModeAtArbitraryMinute.prerequisite === 'set-page-timer'
+      && loopModeAtArbitraryMinute.prerequisite === 'arm-page-timer'
       && loopOnCommitAtArbitraryMinute.kind === 'commit'
       && loopOnCommitAtArbitraryMinute.nextAction === 'off'
       && loopOnCommitAtArbitraryMinute.nextTriggerAt === hourTime(13, 29)
@@ -994,21 +994,22 @@ export function runPwmPhaseCases(assertPass) {
       && loopOffCommitAtArbitraryMinute.nextTriggerAt === hourTime(13, 37)
       && stepDisabled.kind === 'noop'
       && onTimerFirstMatrix.every(plan => plan.kind === 'hold'
-        && plan.prerequisite === 'set-page-timer'
+        && plan.prerequisite === 'arm-page-timer'
         && plan.timerMinutes === 12)
-      && onToggleHold.kind === 'hold'
-      && onToggleHold.prerequisite === 'toggle-on'
-      && onUnknownToggleHold.kind === 'hold'
-      && onUnknownToggleHold.prerequisite === 'toggle-on'
+      && onToggleRetry.kind === 'retry'
+      && onToggleRetry.reason === 'toggle-on-failed'
+      && onUnknownToggleRetry.kind === 'retry'
+      && onUnknownToggleRetry.reason === 'toggle-on-failed'
       && onAlreadyOn.kind === 'hold'
-      && onAlreadyOn.prerequisite === 'set-page-timer'
+      && onAlreadyOn.prerequisite === 'arm-page-timer'
       && onAlreadyOn.timerMinutes === 12
-      && onVerifyHold.kind === 'hold'
-      && onVerifyHold.prerequisite === 'verify-page-timer'
+      && onVerifyRetry.kind === 'retry'
+      && onVerifyRetry.reason === 'page-timer-verify-failed'
       && onVerifyFailure.kind === 'retry'
       && onVerifyFailure.reason === 'page-timer-verify-failed'
       && onVerifyFailure.phasePatch.pwmState === 'on'
       && onToggleFailure.kind === 'retry'
+      && onToggleFailure.reason === 'toggle-on-failed'
       && onToggleFailure.retryMinutes === 1
       && onTimerFailure.kind === 'retry'
       && onTimerFailure.reason === 'page-timer-failed'

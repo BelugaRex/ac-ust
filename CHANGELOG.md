@@ -3,6 +3,7 @@
 ## 0.8.4
 
 - 修正 `Power-off after` 的服务器保留时序：该定时器只有在空调已开启（ON）时才会被保留，先输入再立即刷新无效。自动 ON 的预布防改为「本地写入（defer 验证）→ 派发一次开机 → 确认 AC 已 ON → 独立新鲜页读回确认」，避免在 AC 尚未开启时读回为空而被误判失败、导致自动开启永远无法推进；开机后验证失败会补设 1 分钟关机兜底并排 1 分钟重试。
+- 将「设置关机时间」收敛为可复用原子 `armPowerOffTimerEnsuringOn`（写 → 确认开机 → 开新页验证），智能模式与 PWM 共用同一时序；PWM 的 ON 相位由三段状态机（set-page-timer / toggle-on / verify-page-timer）收敛为单步原子布防 `arm-page-timer`，开机审计经 `ensureOn` 钩子保留。
 
 ## 0.8.3
 

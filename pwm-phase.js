@@ -87,7 +87,7 @@ function planPwmTargetStep(schedule, targetAction, observations, now, durations)
   return pwmPhaseRetryPlan('off-proof-retry', 'off', now);
 }
 
-// 提取（Fowler Extract Function）：ON 相位目标步决策——页面定时器链 → 开机确认链 → 提交 OFF。
+// 提取（Fowler Extract Function）：ON 相位目标步决策——原子化布防（写→开机→验证）→ 提交 OFF。
 function planPwmOnTargetStep(schedule, observations, now, durations) {
   if (typeof observations?.pageTimerSucceeded !== 'boolean') {
     return {
@@ -95,7 +95,7 @@ function planPwmOnTargetStep(schedule, observations, now, durations) {
       reason: 'page-timer-required',
       nextAction: 'on',
       proofAction: 'clear',
-      prerequisite: 'set-page-timer',
+      prerequisite: 'arm-page-timer',
       timerMinutes: durations.onMinutes,
       phasePatch: { pwmState: 'on', nextTriggerAt: 0 }
     };
@@ -108,31 +108,11 @@ function planPwmOnTargetStep(schedule, observations, now, durations) {
   const onConfirmed = observations?.acIsOn === true
     || observations?.toggleSucceeded === true;
   if (!onConfirmed) {
-    if (observations?.toggleSucceeded === false) {
-      return pwmPhaseRetryPlan('toggle-on-failed', 'on', now, 'clear');
-    }
-    return {
-      kind: 'hold',
-      reason: 'toggle-on-required',
-      nextAction: 'on',
-      prerequisite: 'toggle-on',
-      phasePatch: { pwmState: 'on', nextTriggerAt: 0 }
-    };
+    return pwmPhaseRetryPlan('toggle-on-failed', 'on', now, 'clear');
   }
 
-  // Power-off after 只在开机态下才被服务器保留：先写入（defer 验证）、开机后，
-  // 再用独立新鲜页读回确认，否则会凭空造出无关机证明的 OFF 相位。
   if (observations?.pageTimerVerified !== true) {
-    if (observations?.pageTimerVerified === false) {
-      return pwmPhaseRetryPlan('page-timer-verify-failed', 'on', now, 'clear');
-    }
-    return {
-      kind: 'hold',
-      reason: 'page-timer-verify-required',
-      nextAction: 'on',
-      prerequisite: 'verify-page-timer',
-      phasePatch: { pwmState: 'on', nextTriggerAt: 0 }
-    };
+    return pwmPhaseRetryPlan('page-timer-verify-failed', 'on', now, 'clear');
   }
 
   const nextTriggerAt = pwmPhasePageTimerTarget(

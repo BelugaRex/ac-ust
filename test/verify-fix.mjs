@@ -1786,15 +1786,14 @@ async function runTests() {
     '9H: 每个 PWM 开机步骤只调用一次 toggleAC(on)，无外围点击重试循环');
   const smartPlannerIndex = smartBody.indexOf('let plan = planSmartStep(schedule, {');
   const smartWindowPlanIndex = smartBody.indexOf('const onWindowPlan = planSmartModeOnWindow(schedule, {');
-  const smartTimerIndex = smartBody.indexOf('const timerResult = await setPageTimer(timerMinutes, {');
-  const smartToggleIndex = smartBody.indexOf("toggleAC('on', {");
-  const smartAfterStatusIndex = smartBody.indexOf('const after = await getCurrentACStatus()', smartToggleIndex);
+  const smartArmIndex = smartBody.indexOf('const armResult = await armPowerOffTimerEnsuringOn(timerMinutes, {');
+  const smartVerifyFallbackIndex = smartBody.indexOf('await setPageTimer(1, {', smartArmIndex);
   assertPass(smartPlannerIndex >= 0
       && smartWindowPlanIndex > smartPlannerIndex
-      && smartTimerIndex > smartWindowPlanIndex
-      && smartToggleIndex > smartTimerIndex
-      && smartAfterStatusIndex > smartToggleIndex
-      && countOccurrences(smartBody, "toggleAC('on', {") === 1
+      && smartArmIndex > smartWindowPlanIndex
+      && smartVerifyFallbackIndex > smartArmIndex
+      && countOccurrences(smartBody, "armPowerOffTimerEnsuringOn(") === 1
+      && countOccurrences(smartBody, "toggleAC('on', {") === 0
       && !smartBody.includes("toggleAC('off')")
       && !smartBody.includes('for (let retry')
       && smartBody.includes('planSmartOnRetryExceptionRecovery(')
@@ -1807,7 +1806,7 @@ async function runTests() {
       && smartBody.includes('replaceSmartRetryState()')
       && smartBody.includes('targetAt,')
       && smartBody.includes('automaticOnDeadlineAt: windowEndsAt')
-      && smartBody.includes('notAfterAt: windowEndsAt'),
+      && smartBody.includes('requireAutomationAllowed: true'),
     '9H-1: Smart 使用正式 planner/recovery API，先新鲜页面定时器、最多一次 ON、复核后提交 ac-smart 绝对 targetAt');
   assertPass(!smartBody.includes('runPwmStep')
       && !smartBody.includes('planPwmStep')
@@ -2763,11 +2762,11 @@ async function runTests() {
     },
     { now: plannerNow10 }
   );
-  const setPageTimerCallIdx = pwmBody.indexOf('const pageTimerResult = await setPageTimer(plan.timerMinutes');
+  const setPageTimerCallIdx = pwmBody.indexOf('const armResult = await armPowerOffTimerEnsuringOn(plan.timerMinutes, {');
   assertPass(timerRequiredPlan10.kind === 'hold'
-      && timerRequiredPlan10.prerequisite === 'set-page-timer'
+      && timerRequiredPlan10.prerequisite === 'arm-page-timer'
       && timerRequiredPlan10.timerMinutes === plannerOnSchedule10.onMinutes
-      && pwmBody.includes("plan.prerequisite === 'set-page-timer'")
+      && pwmBody.includes("plan.prerequisite === 'arm-page-timer'")
       && setPageTimerCallIdx > 0,
     '10A: ON planner 要求 adapter 先按配置分钟确认页面定时器');
 
@@ -2779,8 +2778,8 @@ async function runTests() {
       && timerTargetCommittedPlan10.phasePatch.nextTriggerAt === plannerPageTarget10,
     '10B: 页面定时器失败保持 ON；成功后推进为 OFF 并采纳页面绝对目标');
 
-  const pageTimerObservationIdx = pwmBody.indexOf('observations.pageTimerSucceeded = !!pageTimerResult?.success', setPageTimerCallIdx);
-  const pageTimerTargetObservationIdx = pwmBody.indexOf('observations.pageTimerTargetAt = Number(pageTimerResult?.targetAt)', pageTimerObservationIdx);
+  const pageTimerObservationIdx = pwmBody.indexOf('observations.pageTimerSucceeded = writeSucceeded;', setPageTimerCallIdx);
+  const pageTimerTargetObservationIdx = pwmBody.indexOf('observations.pageTimerTargetAt = Number(armResult?.targetAt) || 0;', pageTimerObservationIdx);
   const pageTimerReplanIdx = pwmBody.indexOf('plan = planPwmStep(schedule, observations);', pageTimerObservationIdx);
   const finalPlanApplyIdx = pwmBody.lastIndexOf('applyPwmPlanState(plan);');
   assertPass(setPageTimerCallIdx > 0
@@ -2808,7 +2807,7 @@ async function runTests() {
     '10E: setPageTimer 失败分支在 sync 前提前 return，避免把未推进的 pwmState 推给对端让对端帮自己推进相位');
 
   // 10F: 失败时 pageTimerError 写入明确的失败原因，便于诊断面板排障
-  assertPass(pwmBody.includes('observations.pageTimerError = pageTimerResult?.error')
+  assertPass(pwmBody.includes("observations.pageTimerError = armResult.error || ''")
       && pwmBody.includes("pageTimerError = `自动开启前页面关机定时器未确认")
       && !pwmBody.includes('开机已成功，但页面关机定时器未确认'),
     '10F: timer prearm 失败文案明确发生在自动开启前，不误报 AC 已成功开启');
@@ -5882,7 +5881,7 @@ return { reapplySmartSensitivityNow };`
   );
   const automaticOnBody16 = extractSourceSection(
     backgroundSource,
-    'async function resolveToggleOnHold(plan, observations) {',
+    'async function resolvePageTimerArmHold(plan, observations) {',
     '\n  // 提取（Fowler Extract Function）：PWM 关机补时 hold 分支',
     'automatic ON gate'
   );
@@ -6734,69 +6733,42 @@ return { reapplySmartSensitivityNow };`
   // ===== 用例 17: ON timer prearm 与有限恢复 =====
   console.log('\n\n=== 用例 17: ON timer prearm 与有限恢复 ===\n');
 
-  const toggleOnHelperStart17 = pwmBody.indexOf(
-    'async function resolveToggleOnHold(plan, observations) {'
+  const armHelperStart17 = pwmBody.indexOf(
+    'async function resolvePageTimerArmHold(plan, observations) {'
   );
-  const toggleOnHelperEnd17 = pwmBody.indexOf(
-    '\n\n  // 提取（Fowler Extract Function）：PWM ON 页面 timer 前置布防',
-    toggleOnHelperStart17
-  );
-  const toggleOnHelperSource17 = toggleOnHelperStart17 >= 0
-      && toggleOnHelperEnd17 > toggleOnHelperStart17
-    ? pwmBody.slice(toggleOnHelperStart17, toggleOnHelperEnd17)
-    : '';
-  const timerPrearmHelperStart17 = pwmBody.indexOf(
-    'async function resolvePageTimerPrearmHold(plan, observations) {'
-  );
-  const timerPrearmHelperEnd17 = pwmBody.indexOf(
+  const armHelperEnd17 = pwmBody.indexOf(
     '\n\n  // 提取（Fowler Extract Function）：PWM 关机补时 hold 分支',
-    timerPrearmHelperStart17
+    armHelperStart17
   );
-  const timerPrearmHelperSource17 = timerPrearmHelperStart17 >= 0
-      && timerPrearmHelperEnd17 > timerPrearmHelperStart17
-    ? pwmBody.slice(timerPrearmHelperStart17, timerPrearmHelperEnd17)
-    : '';
-  const timerVerifyHelperStart17 = pwmBody.indexOf(
-    'async function resolvePageTimerVerifyHold(plan, observations) {'
-  );
-  const timerVerifyHelperEnd17 = pwmBody.indexOf(
-    '\n\n  // 提取（Fowler Extract Function）：PWM 失败重试分支',
-    timerVerifyHelperStart17
-  );
-  const timerVerifyHelperSource17 = timerVerifyHelperStart17 >= 0
-      && timerVerifyHelperEnd17 > timerVerifyHelperStart17
-    ? pwmBody.slice(timerVerifyHelperStart17, timerVerifyHelperEnd17)
+  const armHelperSource17 = armHelperStart17 >= 0
+      && armHelperEnd17 > armHelperStart17
+    ? pwmBody.slice(armHelperStart17, armHelperEnd17)
     : '';
   const createOnAdapterHarness17 = new Function(
     'schedule',
     'planPwmStep',
     'setPageTimer',
     'toggleAC',
-    'getCurrentACStatus',
     'applyPwmPlanState',
-    'getAutomaticOnDeadline',
     'abortStaleAutomation',
     'recordControlAuditTimerPrearm',
     'recordControlAuditDispatch',
     'recordControlAuditOnOutcome',
     'recordControlAuditTerminal',
-    'verifyPageTimerPersistence',
+    'armPowerOffTimerEnsuringOn',
+    'getAutomaticOnDeadline',
     'console',
     `const automationRevision = 41;
+    let controlAuditOnOutcomeRecorded = false;
     function planSmartAutomaticOn() { return null; }
-    ${toggleOnHelperSource17}
-    ${timerPrearmHelperSource17}
-    ${timerVerifyHelperSource17}
-    return { resolveToggleOnHold, resolvePageTimerPrearmHold, resolvePageTimerVerifyHold };`
+    ${armHelperSource17}
+    return { resolvePageTimerArmHold };`
   );
 
   const runOnAdapterCase17 = async ({
-    timerResult,
-    toggleResult = { success: true },
-    statusResult = { isOn: true },
-    verificationResult = { success: true },
-    initialAcIsOn = false,
-    staleAfterTimer = false
+    armResult,
+    staleAfterArm = false,
+    initialAcIsOn = false
   }) => {
     const adapterSchedule = {
       enabled: true,
@@ -6807,7 +6779,7 @@ return { reapplySmartSensitivityNow };`
       smartMode: { enabled: false }
     };
     const calls = [];
-    let timerCompleted = false;
+    let armCompleted = false;
     const adapter = createOnAdapterHarness17(
       adapterSchedule,
       (receivedSchedule, receivedObservations) => pwmPhase.planPwmStep(
@@ -6816,120 +6788,132 @@ return { reapplySmartSensitivityNow };`
         { now: plannerNow10 }
       ),
       async (minutes, options) => {
-        calls.push({ type: 'timer', minutes, options: { ...options } });
-        timerCompleted = true;
-        return { ...timerResult };
+        calls.push({ type: 'safety-timer', minutes, options: { ...options } });
+        return { success: true };
       },
       async (_action, options) => {
         calls.push({ type: 'toggle', options: { ...options } });
-        return { ...toggleResult };
-      },
-      async () => {
-        calls.push({ type: 'status' });
-        return { ...statusResult };
+        return { success: true };
       },
       plan => {
         if (plan?.phasePatch) Object.assign(adapterSchedule, plan.phasePatch);
       },
-      deadline => deadline,
-      async () => staleAfterTimer && timerCompleted,
+      async () => staleAfterArm && armCompleted,
       async () => null,
       async () => null,
       async () => null,
       async () => null,
-      async (expectedValue) => {
-        calls.push({ type: 'verify', value: expectedValue });
-        return { ...verificationResult };
+      async (minutes, options) => {
+        calls.push({ type: 'arm', minutes, options: { ...options } });
+        armCompleted = true;
+        return { ...armResult };
       },
+      () => 0,
       quietConsole
     );
-    const targetAt = Number(timerResult?.targetAt) || plannerNow10 + 12 * 60_000;
+    const targetAt = Number(armResult?.targetAt) || plannerNow10 + 12 * 60_000;
     const observations = {
       acIsOn: initialAcIsOn,
       smartPageTimerTargetAt: targetAt,
       smartOnWindowEndsAt: 0
     };
     let plan = pwmPhase.planPwmStep(adapterSchedule, observations, { now: plannerNow10 });
-    plan = await adapter.resolvePageTimerPrearmHold(plan, observations);
-    if (plan?.kind === 'hold' && plan.prerequisite === 'toggle-on') {
-      plan = await adapter.resolveToggleOnHold(plan, observations);
-    }
-    if (plan?.kind === 'hold' && plan.prerequisite === 'verify-page-timer') {
-      plan = await adapter.resolvePageTimerVerifyHold(plan, observations);
-    }
+    plan = await adapter.resolvePageTimerArmHold(plan, observations);
     return { calls, plan, observations, targetAt };
   };
 
   const adapterTargetAt17 = plannerNow10 + 12 * 60_000;
   const timerFailureAdapter17 = await runOnAdapterCase17({
-    timerResult: {
+    armResult: {
       success: false,
+      failureStage: 'write',
       error: 'type failed',
-      failureStage: 'type-character',
       targetAt: adapterTargetAt17
     }
   });
   const timerSuccessAdapter17 = await runOnAdapterCase17({
-    timerResult: {
+    armResult: {
       success: true,
       value: '22:25',
       actualDelayMinutes: 12,
-      targetAt: adapterTargetAt17
+      targetAt: adapterTargetAt17,
+      acIsOn: true,
+      toggledOn: true
     }
   });
   const alreadyOnTimerSuccessAdapter17 = await runOnAdapterCase17({
-    timerResult: {
+    armResult: {
       success: true,
       value: '22:25',
       actualDelayMinutes: 12,
-      targetAt: adapterTargetAt17
+      targetAt: adapterTargetAt17,
+      acIsOn: true,
+      toggledOn: false
     },
     initialAcIsOn: true
   });
-  const verificationFailureAdapter17 = await runOnAdapterCase17({
-    timerResult: {
-      success: true,
+  const ensureOnFailureAdapter17 = await runOnAdapterCase17({
+    armResult: {
+      success: false,
+      failureStage: 'ensure-on',
+      error: '自动开启未确认',
       value: '22:25',
-      actualDelayMinutes: 12,
-      targetAt: adapterTargetAt17
-    },
-    verificationResult: { success: false, error: '未持久化' }
+      targetAt: adapterTargetAt17,
+      acIsOn: false,
+      toggledOn: true
+    }
+  });
+  const verificationFailureAdapter17 = await runOnAdapterCase17({
+    armResult: {
+      success: false,
+      failureStage: 'verify',
+      error: '未持久化',
+      value: '22:25',
+      targetAt: adapterTargetAt17,
+      acIsOn: true,
+      toggledOn: true
+    }
   });
   const deadlineExpiredAdapter17 = await runOnAdapterCase17({
-    timerResult: {
+    armResult: {
       success: false,
+      failureStage: 'write',
       automaticDeadlineExpired: true,
       error: '自动开启截止时间已过期',
       targetAt: adapterTargetAt17
     }
   });
   const staleAdapter17 = await runOnAdapterCase17({
-    timerResult: {
+    armResult: {
       success: true,
       value: '22:25',
       actualDelayMinutes: 12,
-      targetAt: adapterTargetAt17
+      targetAt: adapterTargetAt17,
+      acIsOn: true,
+      toggledOn: true
     },
-    staleAfterTimer: true
+    staleAfterArm: true
   });
-  assertPass(timerFailureAdapter17.calls.map(call => call.type).join(',') === 'timer'
+  assertPass(timerFailureAdapter17.calls.map(call => call.type).join(',') === 'arm'
       && timerFailureAdapter17.plan?.kind === 'retry'
       && timerFailureAdapter17.plan?.reason === 'page-timer-failed'
-      && timerSuccessAdapter17.calls.map(call => call.type).join(',') === 'timer,toggle,status,verify'
-      && timerSuccessAdapter17.calls.filter(call => call.type === 'toggle').length === 1
-      && timerSuccessAdapter17.calls.filter(call => call.type === 'verify').length === 1
+      && timerSuccessAdapter17.calls.map(call => call.type).join(',') === 'arm'
       && timerSuccessAdapter17.plan?.kind === 'commit'
       && timerSuccessAdapter17.plan?.nextTriggerAt === adapterTargetAt17
-      && alreadyOnTimerSuccessAdapter17.calls.map(call => call.type).join(',') === 'timer,verify'
+      && alreadyOnTimerSuccessAdapter17.calls.map(call => call.type).join(',') === 'arm'
       && alreadyOnTimerSuccessAdapter17.plan?.kind === 'commit'
       && alreadyOnTimerSuccessAdapter17.plan?.nextTriggerAt === adapterTargetAt17
-      && verificationFailureAdapter17.calls.map(call => call.type).join(',') === 'timer,toggle,status,verify,timer'
+      && ensureOnFailureAdapter17.calls.map(call => call.type).join(',') === 'arm'
+      && ensureOnFailureAdapter17.plan?.kind === 'retry'
+      && ensureOnFailureAdapter17.plan?.reason === 'toggle-on-failed'
+      && verificationFailureAdapter17.calls.map(call => call.type).join(',') === 'arm,safety-timer'
       && verificationFailureAdapter17.plan?.kind === 'retry'
       && verificationFailureAdapter17.plan?.reason === 'page-timer-verify-failed'
-      && deadlineExpiredAdapter17.calls.map(call => call.type).join(',') === 'timer'
-      && staleAdapter17.calls.map(call => call.type).join(',') === 'timer'
+      && deadlineExpiredAdapter17.calls.map(call => call.type).join(',') === 'arm'
+      && deadlineExpiredAdapter17.plan?.reason === 'page-timer-failed'
+      && staleAdapter17.calls.map(call => call.type).join(',') === 'arm'
       && staleAdapter17.plan === null,
-    '17A: background adapter timer 失败/过期/revision 失效均零 ON；成功后 dispatch 一次并只读确认，开机后新鲜页验证关机定时器才提交原 targetAt');
+    '17A: background adapter 原子布防零 ON；写/开机/验证失败分别回退对应重试，成功后提交原 targetAt');
 
   const sharedPredicateAtomsSource17 = extractSourceSection(
     backgroundSource,
@@ -7659,15 +7643,9 @@ return { reapplySmartSensitivityNow };`
   );
   const prearmAuditSource18 = extractSourceSection(
     backgroundSource,
-    'async function resolvePageTimerPrearmHold(plan, observations) {',
+    'async function resolvePageTimerArmHold(plan, observations) {',
     '\n\n  // 提取（Fowler Extract Function）：PWM 关机补时 hold 分支',
     'timer-prearm hook order'
-  );
-  const dispatchAuditSource18 = extractSourceSection(
-    backgroundSource,
-    'async function resolveToggleOnHold(plan, observations) {',
-    '\n\n  // 提取（Fowler Extract Function）：PWM ON 页面 timer 前置布防',
-    'on-dispatch hook order'
   );
   const retryAuditSource18 = extractSourceSection(
     backgroundSource,
@@ -7694,18 +7672,18 @@ return { reapplySmartSensitivityNow };`
     "recordControlAuditTimerPrearm(\n      'started'"
   );
   const prearmWriteIndex18 = prearmAuditSource18.indexOf(
-    'const pageTimerResult = await setPageTimer('
+    'const armResult = await armPowerOffTimerEnsuringOn('
   );
-  const prearmOutcomeIndex18 = prearmAuditSource18.indexOf(
-    "pageTimerResult?.success ? 'ok' : 'failed'"
-  );
-  const dispatchStartedIndex18 = dispatchAuditSource18.indexOf(
+  const dispatchStartedIndex18 = prearmAuditSource18.indexOf(
     'recordControlAuditDispatch();'
   );
-  const dispatchWriteIndex18 = dispatchAuditSource18.indexOf(
+  const dispatchWriteIndex18 = prearmAuditSource18.indexOf(
     "const toggleResult = await toggleAC('on'"
   );
-  const dispatchOutcomeIndex18 = dispatchAuditSource18.indexOf(
+  const prearmOutcomeIndex18 = prearmAuditSource18.indexOf(
+    "writeSucceeded ? 'ok' : 'failed'"
+  );
+  const dispatchOutcomeIndex18 = prearmAuditSource18.indexOf(
     'recordControlAuditOnOutcome(',
     dispatchWriteIndex18
   );
@@ -7722,7 +7700,7 @@ return { reapplySmartSensitivityNow };`
     "recordControlAuditAdmission('ok', 'revision-current')"
   );
   const prearmBranchIndex18 = pwmRuntimeAuditSource18.indexOf(
-    "plan.prerequisite === 'set-page-timer'"
+    "plan.prerequisite === 'arm-page-timer'"
   );
   assertPass(backgroundSource.includes("const BUILD_TIME = 'dev';")
       && backgroundSource.includes('const BUILD_TIME_EPOCH_MS = 0;')
@@ -7741,9 +7719,10 @@ return { reapplySmartSensitivityNow };`
       && watchdogAuditSource18.indexOf("recordControlAuditMissedWake('watchdog')")
         < watchdogAuditSource18.indexOf('async function recoverMissingPwmAlarm()')
       && prearmStartedIndex18 >= 0 && prearmWriteIndex18 > prearmStartedIndex18
-      && prearmOutcomeIndex18 > prearmWriteIndex18
-      && dispatchStartedIndex18 >= 0 && dispatchWriteIndex18 > dispatchStartedIndex18
-      && dispatchOutcomeIndex18 > dispatchWriteIndex18
+      && dispatchStartedIndex18 > prearmWriteIndex18
+      && dispatchWriteIndex18 > dispatchStartedIndex18
+      && prearmOutcomeIndex18 > dispatchWriteIndex18
+      && dispatchOutcomeIndex18 > prearmOutcomeIndex18
       && retryAlarmIndex18 >= 0 && retryHookIndex18 > retryAlarmIndex18
       && backgroundSource.includes("recordControlAuditTerminal('disabled', 'automation-disabled')"),
     '18L: 有限源码钩子锁定 alarm 验证→planned→delivery→admission/prearm/dispatch/outcome→retry/terminal 顺序');
