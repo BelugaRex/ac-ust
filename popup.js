@@ -388,6 +388,9 @@ function getPopupModeNextBoundaryAt(schedule) {
 }
 
 function getPopupModeNextAction(schedule) {
+  if (typeof schedule?.actualStatus?.isOn === 'boolean') {
+    return schedule.actualStatus.isOn ? 'off' : 'on';
+  }
   if (schedule?._nextAction === 'on' || schedule?._nextAction === 'off') {
     return schedule._nextAction;
   }

@@ -3934,7 +3934,8 @@ async function setPageTimer(
       result = await sendSerializedPageTimerMessage(tabId, {
         action: 'setTimer',
         minutes,
-        targetAt: fixedTargetAt
+        targetAt: fixedTargetAt,
+        allowLocalOnly: deferVerification
       }, automationRevision, PAGE_TIMER_WRITE_TIMEOUT_MS, shutdownRevision, automationMode);
     } catch (error) {
       return {

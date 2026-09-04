@@ -107,7 +107,8 @@ const contentMessageListener = (msg, sender, sendResponse) => {
     return true;
   }
   if (action === 'setTimer') {
-    setPagePowerOffTimer(msg.minutes, msg.targetAt).then(result => sendResponse(result));
+    setPagePowerOffTimer(msg.minutes, msg.targetAt, msg.allowLocalOnly === true)
+      .then(result => sendResponse(result));
     return true;
   }
   if (action === 'getPageTimer') {
@@ -574,6 +575,7 @@ function isPowerOffTimerConfirmationAccepted({
   rawValue,
   rawTitle,
   expectedValue,
+  allowLocalOnly = false,
   ariaExpanded,
   visibleDropdowns,
   visibleBefore,
@@ -584,7 +586,7 @@ function isPowerOffTimerConfirmationAccepted({
     && visibleDropdowns.every(dropdown => visibleBefore.has(dropdown));
   return !!input
     && rawValue === expectedValue
-    && rawTitle === expectedValue
+    && (rawTitle === expectedValue || (allowLocalOnly && rawTitle === ''))
     && dropdownClosed;
 }
 
@@ -594,6 +596,7 @@ async function waitForConfirmedPowerOffTimerInput(
     timeoutMs = 3000,
     pollIntervalMs = 50,
     stableWindowMs = 500,
+    allowLocalOnly = false,
     visibleBefore = new Set(),
     openedDropdown = null,
     inputReplacementCount = 0,
@@ -633,6 +636,7 @@ async function waitForConfirmedPowerOffTimerInput(
       rawValue,
       rawTitle,
       expectedValue: value,
+      allowLocalOnly,
       ariaExpanded: input?.getAttribute?.('aria-expanded'),
       visibleDropdowns,
       visibleBefore,
@@ -697,7 +701,7 @@ function setNativeInputValue(input, value) {
   }
 }
 
-async function typeTimeIntoPickerInput(input, value) {
+async function typeTimeIntoPickerInput(input, value, allowLocalOnly = false) {
   const initialState = findPowerOffTimerControlState();
   if (!initialState.control || initialState.control.input !== input) {
     return createPowerOffTimerTypingFailure('locate-control', {
@@ -732,7 +736,7 @@ async function typeTimeIntoPickerInput(input, value) {
         stableControl.control.input,
         value,
         visibleDropdownsBefore,
-        { wholeValue: useWholeValueFallback }
+        { wholeValue: useWholeValueFallback, allowLocalOnly }
       );
       totalReplacementCount += result.inputReplacementCount || 0;
       if (result.success) {
@@ -772,7 +776,7 @@ async function typeOnceIntoPickerInput(
   input,
   value,
   visibleDropdownsBefore,
-  { wholeValue = false } = {}
+  { wholeValue = false, allowLocalOnly = false } = {}
 ) {
   const initialState = findPowerOffTimerControlState();
   if (!initialState.control
@@ -975,6 +979,7 @@ async function typeOnceIntoPickerInput(
       timeoutMs: 3000,
       pollIntervalMs: 50,
       stableWindowMs: 500,
+      allowLocalOnly,
       visibleBefore: operationVisibleDropdownsBefore,
       openedDropdown: okResult.openedDropdown,
       inputReplacementCount: diagnostics.inputReplacementCount,
@@ -1051,7 +1056,11 @@ function findAntACSwitch() {
 }
 
 // ----- 设置页面自带的定时关闭（作为保险）-----
-async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
+async function setPagePowerOffTimer(
+  totalMinutes,
+  requestedTargetAt = 0,
+  allowLocalOnly = false
+) {
   console.log(`[AC扩展] 尝试设置页面定时器: ${totalMinutes} 分钟`);
 
   const startedAt = Date.now();
@@ -1095,7 +1104,11 @@ async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
 
     console.log(`[AC扩展] 模拟手动输入页面关机时间: ${value} (${requestedMinutes} 分钟后${crossesMidnight ? '，跨午夜' : ''})`);
 
-    const typed = await typeTimeIntoPickerInput(initialState.control.input, value);
+    const typed = await typeTimeIntoPickerInput(
+      initialState.control.input,
+      value,
+      allowLocalOnly
+    );
     if (!typed.success) {
       return createPowerOffTimerFailure(
         t('contentInputRejected', String(value)),
@@ -1130,6 +1143,7 @@ async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
       rawValue: confirmedRawValue,
       rawTitle: confirmedTitle,
       expectedValue,
+      allowLocalOnly,
       ariaExpanded: confirmedInput.getAttribute('aria-expanded'),
       visibleDropdowns: finalVisibleDropdowns,
       visibleBefore: typed.visibleBefore instanceof Set ? typed.visibleBefore : new Set(),
@@ -1157,7 +1171,8 @@ async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
       targetAt,
       crossesMidnight,
       value: confirmedValue,
-      title: confirmedTitle
+      title: confirmedTitle,
+      locallyAccepted: allowLocalOnly && confirmedTitle !== expectedValue
     };
   } catch (e) {
     return createPowerOffTimerFailure(expectedValue ? '页面定时器设置异常' : String(e), {

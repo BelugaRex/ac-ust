@@ -859,6 +859,9 @@ async function runTests() {
       && popupJs.includes('countdownNumber.textContent = String(minutes);'),
     'popup.js 倒计时写入 hero 大数字与 countdownCaption，不再使用 countdownInterval');
     assertPass(popupJs.includes('function getPopupModeNextAction(schedule)')
+        && popupJs.indexOf("if (typeof schedule?.actualStatus?.isOn === 'boolean')")
+          < popupJs.indexOf("if (schedule?._nextAction === 'on' || schedule?._nextAction === 'off')")
+        && popupJs.includes("return schedule.actualStatus.isOn ? 'off' : 'on';")
       && popupJs.includes('const nextAction = getPopupModeNextAction(schedule);')
       && popupJs.includes("schedule?._effectivePwmState")
       && popupJs.includes("typeof schedule?.actualStatus?.isOn === 'boolean'")
@@ -1832,7 +1835,7 @@ async function runTests() {
   assertPass(setTimerBody.includes('targetAt = 0')
       && setTimerBody.includes("action: 'setTimer'")
       && setTimerBody.includes('targetAt')
-      && contentSource.includes('setPagePowerOffTimer(msg.minutes, msg.targetAt)'),
+      && contentSource.includes('setPagePowerOffTimer(msg.minutes, msg.targetAt, msg.allowLocalOnly === true)'),
     '9H-2: 智能半点绝对关机截止时间由 background 透传到 content，不退化为相对分钟');
   assertPass(smartBody.includes('planSmartOnAfterConfirmedOff(')
       && smartBody.includes('planComfortSmartCycle(')
@@ -1990,6 +1993,9 @@ async function runTests() {
     assertPass(contentSource.includes('targetAt,')
         && contentSource.includes('actualDelayMinutes,'),
       '9M-4: content setTimer 响应回传 targetAt 与实际延迟给后台');
+    assertPass(contentSource.includes('msg.allowLocalOnly === true')
+        && backgroundSource.includes('allowLocalOnly: deferVerification'),
+      '9M-5: 自动开机预布防允许本地先接受输入，普通页面定时器仍由后台严格新鲜页确认');
   }
   const verificationStartForReload = backgroundSource.indexOf('async function verifyPageTimerPersistence(');
   const verificationEndForReload = backgroundSource.indexOf('\n// 关机定时器设置失败时', verificationStartForReload);
@@ -3894,11 +3900,11 @@ return { reapplySmartSensitivityNow };`
   assertPass(contentSource.includes("pickerInput.getAttribute('title')")
       && contentSource.includes('const effectiveValue = value || title'),
     '11J: 内容脚本以用户实测的 title=HH:MM 作为 value 的刷新后兼容回退');
-  assertPass(contentSource.includes('async function typeTimeIntoPickerInput(input, value)')
+  assertPass(contentSource.includes('async function typeTimeIntoPickerInput(input, value, allowLocalOnly = false)')
       && contentSource.includes('const POWER_OFF_TIMER_MAX_TYPING_ATTEMPTS = 3')
       && contentSource.includes('const POWER_OFF_TIMER_WHOLE_VALUE_FALLBACK_STAGES = new Set([')
       && contentSource.includes('async function typeOnceIntoPickerInput(')
-      && contentSource.includes('{ wholeValue = false } = {}')
+      && contentSource.includes('{ wholeValue = false, allowLocalOnly = false } = {}')
       && contentSource.includes('waitForConfirmedPowerOffTimerInput(value'),
     '11J-1: 页面定时器保留三次尝试、一次整串兜底，并委派稳定 live 控件确认');
 
@@ -3910,7 +3916,7 @@ return { reapplySmartSensitivityNow };`
   );
   const powerOffControlSource = extractSourceSection(
     contentSource,
-    'async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {',
+    'async function setPagePowerOffTimer(',
     '\n// ----- v0.5.10: 读取页面已设置的 "Power-off after"',
     'Power-off after control runtime'
   );
@@ -4222,8 +4228,8 @@ return { reapplySmartSensitivityNow };`
     );
 
     return {
-      async run() {
-        return runtime.setPagePowerOffTimer(34, targetAt);
+      async run(allowLocalOnly = false) {
+        return runtime.setPagePowerOffTimer(34, targetAt, allowLocalOnly);
       },
       getCurrentInput: () => controls[0]?.input || null,
       getVisibleDropdownCount: () => runtime.findVisiblePickerDropdowns().length,
@@ -4354,6 +4360,8 @@ return { reapplySmartSensitivityNow };`
   const titleOnlyResult11J = await titleOnlyHarness11J.run();
   const valueOnlyHarness11J = createPowerOffAfterHarness({ confirmationMode: 'value-only' });
   const valueOnlyResult11J = await valueOnlyHarness11J.run();
+  const localOnlyHarness11J = createPowerOffAfterHarness({ confirmationMode: 'value-only' });
+  const localOnlyResult11J = await localOnlyHarness11J.run(true);
   assertPass(conflictingValueResult11J.success === false
       && conflictingValueResult11J.failureStage === 'confirm-stable'
       && conflictingValueResult11J.attempt === 3
@@ -4366,6 +4374,11 @@ return { reapplySmartSensitivityNow };`
       && valueOnlyResult11J.observedValue === valueOnlyHarness11J.expectedValue
       && valueOnlyResult11J.observedTitle === '',
     '11J-5: 仅 value 或仅 title 均判为未提交（AntD 未触发 onOk）；二者冲突时三次后明确失败');
+  assertPass(localOnlyResult11J.success === true
+      && localOnlyResult11J.locallyAccepted === true
+      && localOnlyHarness11J.getCurrentInput().value === localOnlyHarness11J.expectedValue
+      && localOnlyHarness11J.getCurrentInput().getAttribute('title') === '',
+    '11J-5B: 自动开机预布防可接受本地 value、暂缺 title，交由开机后新鲜页面验证持久化');
 
   const signatureMutationHarness11J = createPowerOffAfterHarness({
     mutateConfirmedTitleAtMs: 550
