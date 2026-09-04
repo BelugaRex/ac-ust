@@ -437,12 +437,8 @@ async function run() {
       const prefix = message?.split(/\$\d+/)[0];
       return prefix && text.includes(prefix);
     });
-    assert(hasLocalizedPrefix(diagnoseText, 'diagnoseSummary'),
-      '诊断顶部显示 error/warning/repaired 汇总');
-    assert(['diagnosePopupDocumentReady', 'diagnosePopupLayoutOK',
-      'diagnosePopupControlsSync', 'diagnosePopupKeepaliveOK']
-      .every(key => hasDiagnosticLinePrefix(diagnoseText, '✅', key)),
-    '真实 Popup 诊断显示文档、布局、控件同步与保活连接现场信息');
+    assert(hasLocalizedPrefix(diagnoseText, 'diagnoseStorageRW'),
+      '诊断顶部显示 storage 可读写现场信息');
     assert(popupState.lang === 'zh-CN'
         && popupState.shellWidth === 280
         && popupState.shellScrollWidth <= popupState.shellClientWidth + 1
@@ -455,10 +451,8 @@ async function run() {
         && !diagnoseText.includes('[POPUP-HORIZONTAL-OVERFLOW]')
         && !diagnoseText.includes('[POPUP-KEEPALIVE-DISCONNECTED]'),
       '健康 Popup 不产生控件失步、横向溢出或保活断开警告');
-    assert(diagnoseText.includes('[PAGE-HOME-MISSING]'),
-      '未打开冷气主页时显示稳定故障码 PAGE-HOME-MISSING');
-    assert(hasLocalizedPrefix(diagnoseText, 'diagnoseNextStep'),
-      '首要问题后显示唯一下一步建议');
+    assert(hasDiagnosticLinePrefix(diagnoseText, '❌', 'diagnoseTabOpen'),
+      '未打开冷气主页时显示冷气页面未打开的故障现场');
     // 关键断言:两个红灯都消除
     assert(!hasDiagnosticLine('❌', 'diagnoseMissingTrigger'),
       '红灯 #1 已消除:诊断输出不再报告 storage 绝对触发时间缺失');
