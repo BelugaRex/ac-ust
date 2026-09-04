@@ -388,6 +388,9 @@ function getPopupModeNextBoundaryAt(schedule) {
 }
 
 function getPopupModeNextAction(schedule) {
+  if (typeof schedule?.actualStatus?.isOn === 'boolean') {
+    return schedule.actualStatus.isOn ? 'off' : 'on';
+  }
   if (schedule?._nextAction === 'on' || schedule?._nextAction === 'off') {
     return schedule._nextAction;
   }
@@ -584,7 +587,7 @@ function updateCountdownDisplay(schedule, alarm, controlAudit = null) {
     idleDisplay.textContent = t('activeHoursOutside');
   }
 
-  // 优先级：后台返回的当前模式 _nextAction > 当前模式 phase state > 页面真实状态反推。
+  // 优先级：页面真实状态 > 后台当前模式 _nextAction > 当前模式 phase state。
   // fallback 加 cached 反推是为了
   // ON 路径 setPageTimer 失败的故障态：background.js 故意保持 pwmState='on' 让
   // 1 分钟后整轮幂等 ON + 重试 setPageTimer（见 background.js runPwmStep 顶部
@@ -1402,8 +1405,7 @@ btnDiagnose.addEventListener('click', async () => {
     try {
       add(!!bg, t('diagnoseSWOK'));
       add(bg.clockMode !== undefined, t('diagnoseClockSync') + (bg.clockMode ? t('diagnoseClock') : t('diagnoseInterval')));
-      // PWM 失败提示:runPwmStep 验证失败时会写 pageTimerError。
-      // 主动展示在诊断面板,方便定位"到时间没关/没开"的根因。
+      // 安全定时器失败提示：Smart/PWM 都可能写入共享 pageTimerError，文案不能误归属为 PWM。
       if (s.pageTimerError) {
         add(false, t('diagnosePwmError') + String(s.pageTimerError).slice(0, 120));
       } else {
@@ -1414,7 +1416,7 @@ btnDiagnose.addEventListener('click', async () => {
     }
 
     // 4.5. v0.5.10 page timer 跨设备主同步通道诊断
-    // page timer 两相位都对齐：pwmState='off'(AC 正开) 直接采纳；pwmState='on'(AC 正关) 掉算下一“开”。
+    // page timer 两相位都对齐；诊断只展示当前模式状态，不把 Smart 误称为 PWM。
     if (exactHomeTab && s.enabled) {
       try {
         const pt = await sendDiagnosticRuntimeMessage({ type: 'getPageTimer' });
@@ -1424,7 +1426,7 @@ btnDiagnose.addEventListener('click', async () => {
         } else if (pt?.success === false || pt?.invalidTarget === true) {
           add(false, t('diagnosePageTimerFail') + String(pt.error || '').slice(0,60));
         } else {
-          add(true, t('diagnosePageTimerEmpty'));
+          add(false, t('diagnosePageTimerEmpty'));
         }
       } catch (e) {
         add(false, t('diagnosePageTimerFail') + (e.message||'').slice(0,60));
@@ -1528,9 +1530,9 @@ btnDiagnose.addEventListener('click', async () => {
       if (automationPausedByActiveHours) {
         // 暂停态预期没有 PWM 时钟，不把三方全空误报为失步。
       } else if (areDiagnosticTriggersAligned(memLive, memNext, storedNext)) {
-        add(true, t('diagnoseTriMatch', fmt(memLive)));
+        add(true, t('diagnoseTriMatch', automationAlarmName, fmt(memLive)));
       } else {
-        add(false, t('diagnoseTriMismatch', fmt(memLive), fmt(memNext), fmt(storedNext)));
+        add(false, t('diagnoseTriMismatch', automationAlarmName, fmt(memLive), fmt(memNext), fmt(storedNext)));
       }
     } else if (ensured?.success === true) {
       // ensureDiagnostics 已由后台成功处理；getSwStatus 只是附加可观测性接口。

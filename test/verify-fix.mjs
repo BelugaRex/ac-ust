@@ -859,12 +859,41 @@ async function runTests() {
       && popupJs.includes('countdownNumber.textContent = String(minutes);'),
     'popup.js 倒计时写入 hero 大数字与 countdownCaption，不再使用 countdownInterval');
     assertPass(popupJs.includes('function getPopupModeNextAction(schedule)')
+        && popupJs.includes("return schedule.actualStatus.isOn ? 'off' : 'on';")
       && popupJs.includes('const nextAction = getPopupModeNextAction(schedule);')
       && popupJs.includes("schedule?._effectivePwmState")
       && popupJs.includes("typeof schedule?.actualStatus?.isOn === 'boolean'")
       && popupJs.includes("schedule.actualStatus.isOn ? 'off' : 'on'")
       && popupJs.includes(': schedule.pwmState));'),
     'popup.js nextAction fallback 链含 cached actualStatus 反推档——锁住 ON setPageTimer 失败 故障态 pwmState=on 时 popup 不再误显示"分钟后自动开启"（与状态行"冷气运行中"冲突的根因修复）');
+  const popupActionStart = popupJs.indexOf('function getPopupModeNextAction(schedule)');
+  const popupActionEnd = popupJs.indexOf('\nfunction isAutomationPausedByActiveHours', popupActionStart);
+  const popupNextAction = new Function(
+    `${popupJs.slice(popupActionStart, popupActionEnd)}; return getPopupModeNextAction;`
+  )();
+  assertPass(popupNextAction({
+    smartMode: { enabled: true },
+    _nextAction: 'on',
+    smartState: 'on',
+    actualStatus: { isOn: true }
+  }) === 'off'
+      && popupNextAction({
+        smartMode: { enabled: true },
+        _nextAction: 'off',
+        smartState: 'off',
+        actualStatus: { isOn: false }
+      }) === 'on',
+    'popup nextAction 以真实 AC 状态优先，避免 ON 时误显示自动开启');
+  assertPass(popupJs.includes("add(false, t('diagnosePageTimerEmpty'))")
+      && zhCN.safetynetNotSet?.message.includes('自动控制仍会继续重试')
+      && !zhCN.safetynetNotSet?.message.includes('PWM 循环')
+      && zhCN.diagnosePwmError?.message.includes('自动控制')
+      && zhCN.diagnosePageTimerExpr?.message.includes('state=')
+      && !zhCN.diagnosePageTimerExpr?.message.includes('pwmState=')
+      && en.safetynetNotSet?.message.includes('automatic control will retry')
+      && en.diagnosePwmError?.message.includes('Automatic control')
+      && en.diagnosePageTimerExpr?.message.includes('state='),
+    'Smart/PWM 共用诊断不再误标 PWM，空 page timer 不再显示绿色成功');
   assertPass(popupJs.includes('function formatBuildTimeShort(buildTime)')
       && popupJs.includes('return `${month}/${day} ${hour}:${minute}`;')
       && popupJs.includes('versionInfo.textContent = `v${displayVersion} · ${formatBuildTimeShort(BUILD_TIME)}`')
@@ -5228,8 +5257,8 @@ return { reapplySmartSensitivityNow };`
     '14G-2: 诊断面板新增智能模式天气闹钟与缓存新鲜度检查');
   assertPass(!popupSource.includes('const fmt2 =')
       && popupSource.includes("const fmt = (t) => t ? new Date(t).toLocaleTimeString() : '∅';")
-      && /diagnoseTriMatch', fmt\(/.test(popupSource)
-      && /diagnoseTriMismatch', fmt\(/.test(popupSource),
+      && /diagnoseTriMatch', automationAlarmName, fmt\(/.test(popupSource)
+      && /diagnoseTriMismatch', automationAlarmName, fmt\(/.test(popupSource),
     '14H: 诊断 fmt 提升到顶层一次,不再重现 fmt2 typo 致 SW success 分支 ReferenceError (“fmt is not defined” v0.6.7 实测浮現)');
   assertPass(popupSource.includes("sw.offscreenAlive === true")
       && popupSource.includes("sw.offscreenAlive === false")

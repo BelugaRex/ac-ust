@@ -792,9 +792,9 @@ async function run() {
     assert(recoveredReceiverState.pageTimer?.found === true
         && recoveredReceiverState.pageTimer?.value === null,
       'page timer 诊断复用同一后台恢复入口并读取空定时器状态');
-    assert(hasDiagnosticLine('✅', 'diagnosePageTimerPending')
-        || hasDiagnosticLine('✅', 'diagnosePageTimerEmpty'),
-      'AC 已开启但页面定时器为空时显示 page timer 空/未设或待 AC 页面校验');
+      assert(hasDiagnosticLine('❌', 'diagnosePageTimerEmpty')
+          || hasDiagnosticLine('✅', 'diagnosePageTimerPending'),
+        'AC 已开启但页面定时器为空时显示未设置警告或待 AC 页面校验，不误报成功');
     assert(directProbeAfterRecovery.ok === true
         && directProbeAfterRecovery.status?.balanceMinutes === 156,
       '恢复后真实 content script 接收端持续响应');
