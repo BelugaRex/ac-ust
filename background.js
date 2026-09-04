@@ -3054,12 +3054,19 @@ async function runSmartStep(alarmContext = {}) {
       }
 
       if (plan.kind === 'finish') {
-        const status = await getCurrentACStatus();
+        let status = await getCurrentACStatus();
         if (await abortStaleAutomation(
           automationRevision,
           'runSmartStep-off-status-active-hours-paused',
           'smart'
         )) return;
+        // 页面关机定时器刚触发时，开关可能还没刷新到 OFF（陈旧读回）。
+        // 读到 ON 时短暂重读一次确认是否真的仍 ON，避免误设 1 分钟安全定时器。
+        if (status?.isOn === true) {
+          await sleep(1500);
+          const recheck = await getCurrentACStatus();
+          if (recheck?.isOn === false) status = recheck;
+        }
         if (status?.isOn !== false) {
           const safetyTimer = await setPageTimer(1, {
             retryOnFailure: false,

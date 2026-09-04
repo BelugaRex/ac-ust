@@ -1829,6 +1829,10 @@ async function runTests() {
       && smartBody.includes('alignSmartModeNextTrigger(')
       && smartBody.includes('minOffMinutes: minimumSmartOffMinutes'),
     '9H-3: Smart OFF 使用正式确认后恢复 API，按最短关机窗口对齐下一半点 ON');
+  assertPass(smartBody.includes('if (status?.isOn === true) {')
+      && smartBody.includes('const recheck = await getCurrentACStatus();')
+      && smartBody.includes('if (recheck?.isOn === false) status = recheck;'),
+    '9H-6: 关机边界读到 ON 时短暂重读确认，避免陈旧读回误设 1 分钟安全定时器');
   assertPass(!backgroundSource.includes('retryExistingTabToggle')
       && !backgroundSource.includes('async function retryToggle'),
     '9I: background 已删除四次即时消息重试路径');
