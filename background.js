@@ -3614,7 +3614,9 @@ const PAGE_TIMER_RECOVERABLE_FAILURE_STAGES = new Set([
   'open-picker',
   'clear-input',
   'change',
-  'enter'
+  'enter',
+  'locate-control',
+  'final-control'
 ]);
 const PAGE_TIMER_FAILURE_STRING_LIMITS = Object.freeze({
   error: 240,

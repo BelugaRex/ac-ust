@@ -1062,7 +1062,16 @@ async function setPagePowerOffTimer(totalMinutes, requestedTargetAt = 0) {
     } = computePageTimerTarget(totalMinutes, Date.now(), requestedTargetAt);
     expectedValue = value;
 
-    const initialState = findPowerOffTimerControlState();
+    // 页面可能正处于重渲染（session 重登录 / AC 状态切换），此时「Power-off after」
+    // 区块会短暂消失（附近只剩 Power Consumption）。先短等待重试定位，再判定失败。
+    let initialState = findPowerOffTimerControlState();
+    if (!initialState.control && initialState.controlCount === 0) {
+      const locateDeadline = Date.now() + 4000;
+      while (!initialState.control && Date.now() < locateDeadline) {
+        await sleep(200);
+        initialState = findPowerOffTimerControlState();
+      }
+    }
     if (!initialState.control) {
       const labelHints = collectPowerOffTimerLabelHints();
       return createPowerOffTimerFailure(
