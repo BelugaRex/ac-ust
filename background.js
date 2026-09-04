@@ -5110,7 +5110,7 @@ async function repairSmartScheduleClock(options = {}) {
 async function ensureScheduleClock() {
   await loadScheduleFromStorage();
   if (!isAutomationAllowed()) return;
-  await backfillNextTriggerAt(false);
+  await backfillNextTriggerAt(true);
   const now = Date.now();
   const existingAlarm = await chrome.alarms.get('ac-pwm');
   const rawAlarmAt = Number(existingAlarm?.scheduledTime) || 0;

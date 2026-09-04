@@ -463,8 +463,8 @@ async function run() {
     assert(hasDiagnosticLine('✅', 'diagnoseTriggerTime')
         || diagnoseText.includes('[SCHED-TRIGGER-REPAIRED]'),
       'storage 绝对触发时间已恢复，并在本次发生修复时明确标记 repaired');
-    assert(hasDiagnosticLine('✅', 'diagnosePwmSync'),
-      '绿灯出现:ac-pwm 与 storage 触发时间已同步');
+    assert(hasDiagnosticLine('✅', 'diagnoseTriMatch'),
+      '绿灯出现:live ac-pwm 与内存、storage 三方一致');
     // storage 实际被写入
     assert(finalStorage.nextTriggerAt === pwmScheduledTime,
       '真实 storage.nextTriggerAt 已修复为 ac-pwm.scheduledTime');
