@@ -7,7 +7,7 @@
 | 字段 | 值 |
 | --- | --- |
 | 名称 | AC-UST |
-| 版本 | 0.8.5 |
+| 版本 | 0.8.6 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率（Productivity） |
 | 语言 | 中文（简体）、English |
@@ -23,15 +23,15 @@
 
 PWM AC scheduling, weather-based smart control, optional operating-hour limits, and cross-device phase alignment for HKUST Smart Power Meter.
 
-## 0.8.5 更新说明
+## 0.8.6 更新说明
 
 ### 中文
 
-修复智能模式自动开启的可靠性：预布防失败后重试改为在原半点周期内重跑，不再直接延到下一半点；开机确认改为轮询等待页面真正变 ON 后再进入新鲜页验证。页面关机定时器写入不再用 `Enter` 键过早触发提交，session 重登录或状态切换导致「Power-off after」区块短暂消失时会短等待重定位并重试；恢复逻辑在 login/CAS 重登录期间不再强行导航回 home，避免打断 CAS 回调造成反复断口。
+修复智能自动开启偶发的「输入框未接受时间（stabilize-control）」：页面重渲染（session 重登录、AC 状态切换或余额刷新）会让「Power-off after」定时器控件短暂消失或重挂载，原 750ms 稳定等待过短导致预布防失败、整轮自动开启被放弃；现对齐到 4 秒等待控件稳定后再写入关机时间。
 
 ### English
 
-Fixes the server retention timing of the Power-off after timer: it is only persisted once the AC is ON, so writing it and immediately refreshing has no effect. Automatic startup now writes the shutdown time locally, dispatches a single ON, confirms the AC is ON, then reads back via an independent fresh page — avoiding a false failure (empty read-back) while the AC is still off, which previously blocked automatic startup. If verification fails after startup, a 1-minute shutdown fallback is set.
+Fixes an occasional smart auto-on failure ("input rejected time / stabilize-control"): page re-renders (session re-login, AC status switch, or balance refresh) could briefly unmount or remount the "Power-off after" picker; the previous 750ms stabilization window was too short, failing the pre-arm step and aborting the whole auto-on cycle. The wait is now aligned to 4 seconds before writing the shutdown time.
 
 ## 详细说明（中文 / zh-CN）
 
@@ -148,12 +148,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.5.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.6.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP、图标和本目录资料通过验证。
-2. 上传 `releases/ac-ust-v0.8.5.zip`。
+2. 上传 `releases/ac-ust-v0.8.6.zip`。
 3. 填写商品详情、隐私声明、权限理由与审核测试说明。
 4. 选择私享（Private）、受信任测试人员和香港地区。
 5. 提交审核时选择推迟发布；审核通过后在允许期限内由作者手动发布。

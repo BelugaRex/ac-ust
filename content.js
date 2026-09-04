@@ -502,8 +502,11 @@ function createPowerOffTimerTypingFailure(failureStage, details = {}) {
   };
 }
 
+// 页面重渲染（session 重登录 / AC 状态切换 / billing 刷新）会让「Power-off after」
+// picker 短暂消失或重挂载，750ms 骑不过去；与 setPagePowerOffTimer 的 4s 定位等待对齐，
+// 避免在页面尚未稳定时以「stabilize-control」过早放弃自动开启。
 async function waitForStablePowerOffTimerControl(
-  timeoutMs = 750,
+  timeoutMs = 4000,
   pollIntervalMs = 50
 ) {
   const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
