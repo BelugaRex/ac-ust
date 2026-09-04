@@ -708,6 +708,9 @@ async function typeTimeIntoPickerInput(input, value) {
   // 受控 AntD picker 单次模拟输入可能被 React 中途回退；有限重试提高可靠性。
   let totalReplacementCount = 0;
   let lastFailure = null;
+  if (closePowerOffPickerDropdowns(input) > 0) {
+    await sleep(100);
+  }
   const visibleDropdownsBefore = new Set(findVisiblePickerDropdowns());
 
   for (let attempt = 1; attempt <= POWER_OFF_TIMER_MAX_TYPING_ATTEMPTS; attempt++) {
@@ -1314,6 +1317,27 @@ function findVisiblePickerDropdowns() {
       && !cls.includes('ant-picker-dropdown-hidden')
       && !/display\s*:\s*none|visibility\s*:\s*hidden/i.test(style);
   });
+}
+
+// 关闭上次尝试遗留的下拉层（rc-picker 通过 Escape 关闭），
+// 避免遗留 dropdown 与本次新打开的下拉层叠加，被误判为「多个可见 OK」而 select-ok 失败。
+function closePowerOffPickerDropdowns(input) {
+  if (!input || typeof input.dispatchEvent !== 'function') return 0;
+  const visible = findVisiblePickerDropdowns();
+  if (visible.length === 0) return 0;
+  try {
+    input.dispatchEvent(new KeyboardEvent('keydown', {
+      key: 'Escape',
+      code: 'Escape',
+      keyCode: 27,
+      which: 27,
+      bubbles: true,
+      cancelable: true
+    }));
+  } catch (_) {
+    return 0;
+  }
+  return visible.length;
 }
 
 function resolvePowerOffPickerDropdown(control, visibleBefore) {

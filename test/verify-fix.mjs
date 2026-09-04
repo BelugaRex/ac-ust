@@ -4390,6 +4390,10 @@ return { reapplySmartSensitivityNow };`
       && timeCellHarness11J.state.timeCellClicks[0] === '12'
       && timeCellHarness11J.state.timeCellClicks[1] === '34',
     '11J-6A: 只读 picker 提交前在下拉层点选 12 时与 34 分单元格，确保 OK 提交正确时刻');
+  assertPass(contentSource.includes('function closePowerOffPickerDropdowns(')
+      && contentSource.includes("key: 'Escape'")
+      && contentSource.includes('if (closePowerOffPickerDropdowns(input) > 0)'),
+    '11J-6C: 写入前清理上次遗留的可见下拉层，避免 select-ok 误判');
 
   // 11J-6B: UST 页面改版后 Power-off after 定位健壮性——前缀匹配 + placeholder 兜底。
   const powerOffLabelMatcherSource = extractSourceSection(
