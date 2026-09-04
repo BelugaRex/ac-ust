@@ -2887,6 +2887,9 @@ async function runTests() {
       && verifyBody.includes('finally')
       && verifyBody.includes('await chrome.tabs.remove(verifierTabId);'),
     '11B-2: 每次验证尝试都会在 finally 中回收临时隐藏页');
+  assertPass(verifyBody.includes("{ action: 'status' }")
+      && verifyBody.includes('acIsOn: freshAcIsOn'),
+    '11B-3: 新鲜页同时读回 ON 状态（status），供开机复核与未开机恢复');
   const verificationCallIdx = setTimerBody.indexOf('verifyPageTimerPersistence(expectedValue');
   const proofWriteIdx = setTimerBody.indexOf('schedule.pageTimerMinutes = result.actualDelayMinutes || requestedMinutes');
   assertPass(verificationCallIdx > 0
@@ -6983,6 +6986,17 @@ return { reapplySmartSensitivityNow };`
       && staleAdapter17.calls.map(call => call.type).join(',') === 'arm'
       && staleAdapter17.plan === null,
     '17A: background adapter 原子布防零 ON；写/开机/验证失败分别回退对应重试，成功后提交原 targetAt');
+
+  const armOnBody17 = extractSourceSection(
+    backgroundSource,
+    'async function armPowerOffTimerEnsuringOn(',
+    '// ----- 闹钟触发时执行 -----'
+  );
+  assertPass(armOnBody17.includes('if (verification.acIsOn === false)')
+      && armOnBody17.includes('supplemented: true')
+      && armOnBody17.includes('deferVerification: false')
+      && armOnBody17.includes('自动开启未确认（新鲜页复核未开机后重试开机仍未确认）'),
+    '17B: 新鲜页复核未开机时先开机再补关机时间，复核失败按 ensure-on/verify 回退');
 
   const sharedPredicateAtomsSource17 = extractSourceSection(
     backgroundSource,

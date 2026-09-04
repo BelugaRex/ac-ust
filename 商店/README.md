@@ -6,7 +6,7 @@
 
 | 文件 | 用途 |
 | --- | --- |
-| `CHROMEWEBSTORE.md` | 基本信息、双语短/长说明、`0.8.6` 更新说明、数据使用、权限理由、审核步骤与发布设置 |
+| `CHROMEWEBSTORE.md` | 基本信息、双语短/长说明、`0.8.7` 更新说明、数据使用、权限理由、审核步骤与发布设置 |
 | `PRIVACY.md` | Chrome Web Store 隐私政策 URL 指向的正式原文 |
 | `素材/icon-128.png` | 128×128 商店图标；内容必须与 `../icons/ac-ust_128.png` 一致 |
 | `素材/screenshot-1.png`、`素材/screenshot-2.png` | 1280×800 商品页截图 |
@@ -17,8 +17,8 @@
 ## 提交前清单
 
 1. 运行完整构建与测试，确认 `manifest.json`、文案版本和 ZIP 文件名一致。
-2. 上传 `../releases/ac-ust-v0.8.6.zip`；ZIP 由 `../build.sh` 生成，不在本目录保存第二份。
-3. 从 `CHROMEWEBSTORE.md` 复制对应语言的短说明、详细说明与 `0.8.6` 更新说明。
+2. 上传 `../releases/ac-ust-v0.8.7.zip`；ZIP 由 `../build.sh` 生成，不在本目录保存第二份。
+3. 从 `CHROMEWEBSTORE.md` 复制对应语言的短说明、详细说明与 `0.8.7` 更新说明。
 4. 上传 `素材/` 内的图标、两张截图和宣传图。
 5. 隐私政策填写 `CHROMEWEBSTORE.md` 所列 GitHub URL，并按表格如实声明 UST 页面内容的本地处理、浏览器同步及香港天文台天气请求；合并到公开 `main` 后先确认该 URL 可匿名访问且返回政策正文，再提交审核。
 6. 在开发者信息中心单独填写审核测试帐号与允许操作范围；**不得把帐号、密码、Cookie 或 token 写入本仓库**。

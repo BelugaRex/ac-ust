@@ -3434,6 +3434,7 @@ async function verifyPageTimerPersistence(
 {
   let lastActualValue = '';
   let lastFailure = '';
+  let lastAcIsOn = null;
 
   const shutdownVerificationIsCurrent = () => shutdownRevision === null
     || (typeof isTimerBasedShutdownCurrent === 'function'
@@ -3488,12 +3489,17 @@ async function verifyPageTimerPersistence(
         return staleVerificationResult();
       }
       const actualValue = String(readback?.value || readback?.title || '').trim();
+      const statusReadback = await sendReadMessageToExactACHome(
+        verifierTabId,
+        { action: 'status' }
+      );
+      const freshAcIsOn = statusReadback?.isOn === true;
       if (readback?.found && actualValue === expectedValue) {
-        return { success: true, value: actualValue };
+        return { success: true, value: actualValue, acIsOn: freshAcIsOn };
       }
 
       lastFailure = `第 ${attempt + 1} 次新鲜页读回不匹配（期望 ${expectedValue}，实际 ${actualValue || '空'}）`;
-      return { success: false, actualValue };
+      return { success: false, actualValue, acIsOn: freshAcIsOn };
     } catch (e) {
       lastFailure = `第 ${attempt + 1} 次新鲜页验证异常：${e?.message || String(e)}`;
       return { success: false };
@@ -3516,10 +3522,18 @@ async function verifyPageTimerPersistence(
       return attemptResult;
     }
     if (attemptResult.success) {
-      return { success: true, value: attemptResult.value, attempts: attempt + 1 };
+      return {
+        success: true,
+        value: attemptResult.value,
+        acIsOn: attemptResult.acIsOn,
+        attempts: attempt + 1
+      };
     }
     if (attemptResult.actualValue !== undefined) {
       lastActualValue = attemptResult.actualValue;
+    }
+    if (attemptResult.acIsOn !== undefined) {
+      lastAcIsOn = attemptResult.acIsOn;
     }
   }
 
@@ -3527,6 +3541,7 @@ async function verifyPageTimerPersistence(
     success: false,
     error: `页面定时器经 ${PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length} 次新鲜页验证后仍未持久化：${lastFailure || '未知错误'}`,
     actualValue: lastActualValue,
+    acIsOn: lastAcIsOn,
     attempts: PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length
   };
 }
@@ -4214,6 +4229,64 @@ async function armPowerOffTimerEnsuringOn(
       toggledOn
     };
   }
+  // 新鲜页复核到「未开机」：先开机，再补关机时间（Power-off after 只在 ON 时被服务器保留，
+  // 之前 OFF 态写入可能未持久化）。复核失败按 ensure-on / verify 各自回退，不改变原失败语义。
+  if (verification.acIsOn === false) {
+    await toggleAC('on', {
+      notAfterAt: automaticOnDeadlineAt,
+      requireAutomationAllowed,
+      automationRevision,
+      automationMode
+    });
+    const recoveryDeadline = Date.now() + 15000;
+    let recoveryStatus = await getCurrentACStatus();
+    while (recoveryStatus?.isOn !== true && Date.now() < recoveryDeadline) {
+      await sleep(1500);
+      recoveryStatus = await getCurrentACStatus();
+    }
+    if (recoveryStatus?.isOn !== true) {
+      return {
+        success: false,
+        failureStage: 'ensure-on',
+        error: '自动开启未确认（新鲜页复核未开机后重试开机仍未确认）',
+        value,
+        targetAt: fixedTargetAt,
+        acIsOn: false,
+        toggledOn
+      };
+    }
+    const supplement = await setPageTimer(minutes, {
+      retryOnFailure: false,
+      targetAt,
+      automaticOnDeadlineAt,
+      automationRevision,
+      automationMode,
+      shutdownRevision,
+      deferVerification: false
+    });
+    if (!supplement?.success) {
+      return {
+        success: false,
+        failureStage: 'verify',
+        error: supplement?.error || '补设关机时间失败',
+        value,
+        targetAt: fixedTargetAt,
+        acIsOn: true,
+        toggledOn
+      };
+    }
+    return {
+      success: true,
+      value,
+      targetAt: fixedTargetAt,
+      actualDelayMinutes: supplement.actualDelayMinutes || minutes,
+      verification,
+      acIsOn: true,
+      toggledOn,
+      supplemented: true
+    };
+  }
+
   if (!verification.success) {
     return {
       success: false,
