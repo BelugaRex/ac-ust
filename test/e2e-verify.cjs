@@ -1215,7 +1215,7 @@ async function run() {
       await chrome.storage.local.remove('ac_smart_weather_plan');
 
       const productionFunctionsAvailable = typeof loadScheduleFromStorage === 'function'
-        && typeof applyPreparedSmartModeDurations === 'function'
+        && typeof applySmartDurationsForBoundary === 'function'
         && typeof persistSchedule === 'function'
         && typeof planSmartRecovery === 'function'
         && typeof planPwmLifecycleRecovery === 'function';
@@ -1233,10 +1233,7 @@ async function run() {
 
       await loadScheduleFromStorage();
       const before = (await chrome.storage.local.get('ac_schedule')).ac_schedule;
-      const applied = await applyPreparedSmartModeDurations({
-        allowActiveOnPhase: true,
-        boundaryAt
-      });
+      const applied = await applySmartDurationsForBoundary(boundaryAt);
       const delayedAlarmPlan = typeof planSmartModeOnWindow === 'function'
         ? planSmartModeOnWindow(
           { onMinutes: 21 },
@@ -1295,9 +1292,9 @@ async function run() {
       const preservedShortRetryPlan = typeof planPwmLifecycleRecovery === 'function'
         ? planPwmLifecycleRecovery({
           ...recoveredSchedule,
-          pwmRetryKind: 'smart-on-safe-delay',
-          pwmRetryBoundaryAt: boundaryAt,
-          pwmRetryScheduledAt: shortRetryAt
+          smartRetryKind: 'smart-on-safe-delay',
+          smartRetryBoundaryAt: boundaryAt,
+          smartRetryScheduledAt: shortRetryAt
         }, {
           now: boundaryAt + 7 * 60_000,
           smartClockPlannedAt: boundaryAt + 7 * 60_000,
@@ -1369,7 +1366,8 @@ async function run() {
         && smartWorkerState.before?.onMinutes === 12
         && smartWorkerState.before?.offMinutes === 18,
       '真实 Worker 以智能模式旧 12/18、目标 plan 缺失作为恢复夹具');
-    assert(smartWorkerState.applied === true
+    assert(smartWorkerState.applied?.valid === true
+        && smartWorkerState.applied?.onMinutes === 21
         && smartWorkerState.persisted?.smartMode?.enabled === true
         && smartWorkerState.persisted?.onMinutes === 21
         && smartWorkerState.persisted?.offMinutes === 9,
@@ -1394,7 +1392,7 @@ async function run() {
           === smartBoundaryAt + 21 * 60 * 1000
         && smartWorkerState.preservedShortRetryPlan?.kind === 'preserve-live-alarm'
         && smartWorkerState.preservedShortRetryPlan?.smartDecisionReason
-          === 'current-cycle-action-preserved'
+          === 'current-smart-alarm-preserved'
         && smartWorkerState.skippedNearestClockPlan?.kind === 'repair-clock'
         && smartWorkerState.skippedNearestClockPlan?.reason
           === 'skipped-nearest-smart-on-boundary'
@@ -1402,7 +1400,7 @@ async function run() {
           === smartBoundaryAt + 30 * 60 * 1000
         && smartWorkerState.rejectedLateLifecyclePlan?.kind === 'preserve-live-alarm'
         && smartWorkerState.rejectedLateLifecyclePlan?.smartDecisionReason
-          === 'wait-for-smart-on-window',
+          === 'current-smart-alarm-preserved',
       '真实 Worker 生命周期门禁修复跨周期未来闹钟，同时保留本周期短重试并拒绝过迟开机');
     assert(smartPopupReady
         && smartPopupState.smartPressed
