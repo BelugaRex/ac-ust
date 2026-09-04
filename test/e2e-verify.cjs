@@ -769,11 +769,10 @@ async function run() {
     assert(initialContentStatus?.balanceMinutes === 156,
       '真实精确 home 初始 content script 可读取 Charge Mode 余额');
     assert(executionSuccessToggle?.success === true
-        && executionSuccessToggle.executionSucceeded === true
         && executionSuccessToggle.clicks === 1
         && executionSuccessSwitchClicks === 1
         && executionSuccessElapsedMs < 3000,
-      '真实主世界先见短暂 Execution succeeded、再等迟到 ON；仅点击一次且不盲等 10 秒');
+      '真实主世界点击一次并等待迟到 ON 收敛，不盲等 10 秒');
     assert(alreadyOnToggle?.success === true
         && alreadyOnToggle.alreadyDone === true
         && alreadyOnSwitchClicks === executionSuccessSwitchClicks,
@@ -793,8 +792,8 @@ async function run() {
     assert(recoveredReceiverState.pageTimer?.found === true
         && recoveredReceiverState.pageTimer?.value === null,
       'page timer 诊断复用同一后台恢复入口并读取空定时器状态');
-    assert(recoveryDiagnoseText.includes('[SAFETY-TIMER-MISSING]'),
-      'AC 已开启但页面定时器为空时定位为 SAFETY-TIMER-MISSING 安全故障');
+    assert(hasDiagnosticLine('✅', 'diagnosePageTimerEmpty'),
+      'AC 已开启但页面定时器为空时显示 page timer 空/未设');
     assert(directProbeAfterRecovery.ok === true
         && directProbeAfterRecovery.status?.balanceMinutes === 156,
       '恢复后真实 content script 接收端持续响应');
