@@ -388,9 +388,6 @@ function getPopupModeNextBoundaryAt(schedule) {
 }
 
 function getPopupModeNextAction(schedule) {
-  if (typeof schedule?.actualStatus?.isOn === 'boolean') {
-    return schedule.actualStatus.isOn ? 'off' : 'on';
-  }
   if (schedule?._nextAction === 'on' || schedule?._nextAction === 'off') {
     return schedule._nextAction;
   }
@@ -587,7 +584,7 @@ function updateCountdownDisplay(schedule, alarm, controlAudit = null) {
     idleDisplay.textContent = t('activeHoursOutside');
   }
 
-  // 优先级：页面真实状态 > 后台当前模式 _nextAction > 当前模式 phase state。
+  // 优先级：后台返回的当前模式 _nextAction > 当前模式 phase state > 页面真实状态反推。
   // fallback 加 cached 反推是为了
   // ON 路径 setPageTimer 失败的故障态：background.js 故意保持 pwmState='on' 让
   // 1 分钟后整轮幂等 ON + 重试 setPageTimer（见 background.js runPwmStep 顶部
@@ -1426,7 +1423,7 @@ btnDiagnose.addEventListener('click', async () => {
         } else if (pt?.success === false || pt?.invalidTarget === true) {
           add(false, t('diagnosePageTimerFail') + String(pt.error || '').slice(0,60));
         } else {
-          add(false, t('diagnosePageTimerEmpty'));
+          add(s.actualStatus?.isOn === true, t('diagnosePageTimerEmpty'));
         }
       } catch (e) {
         add(false, t('diagnosePageTimerFail') + (e.message||'').slice(0,60));

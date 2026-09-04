@@ -3094,6 +3094,7 @@ async function runSmartStep(alarmContext = {}) {
           const recheck = await getCurrentACStatus();
           if (recheck?.isOn === false) status = recheck;
         }
+        const statusOn = status?.isOn === true;
         if (status?.isOn !== false) {
           const safetyTimer = await setPageTimer(1, {
             retryOnFailure: false,
@@ -3101,13 +3102,15 @@ async function runSmartStep(alarmContext = {}) {
             automationMode: 'smart'
           });
           schedule.pageTimerError = safetyTimer?.success
-            ? '智能关机边界仍检测到 ON，已补设 1 分钟页面关机定时器'
-            : `智能关机边界未确认：${safetyTimer?.error || '未知错误'}`;
+            ? (statusOn
+              ? '智能关机边界仍检测到 ON，已补设 1 分钟页面关机定时器'
+              : '智能关机边界状态未确认，已补设 1 分钟页面关机定时器')
+            : `${statusOn ? '' : '智能关机边界状态未确认；'}安全关机定时器写入失败：${safetyTimer?.error || '未知错误'}`;
           await commitSmartAlarm(
             Number(safetyTimer?.targetAt) > Date.now()
               ? safetyTimer.targetAt
               : nextHalfHourBoundary(now),
-            'smart-off-safety-retry'
+            statusOn ? 'smart-off-safety-retry' : 'smart-off-status-unknown'
           );
           return;
         }

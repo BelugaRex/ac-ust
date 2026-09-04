@@ -859,32 +859,13 @@ async function runTests() {
       && popupJs.includes('countdownNumber.textContent = String(minutes);'),
     'popup.js 倒计时写入 hero 大数字与 countdownCaption，不再使用 countdownInterval');
     assertPass(popupJs.includes('function getPopupModeNextAction(schedule)')
-        && popupJs.includes("return schedule.actualStatus.isOn ? 'off' : 'on';")
       && popupJs.includes('const nextAction = getPopupModeNextAction(schedule);')
       && popupJs.includes("schedule?._effectivePwmState")
       && popupJs.includes("typeof schedule?.actualStatus?.isOn === 'boolean'")
       && popupJs.includes("schedule.actualStatus.isOn ? 'off' : 'on'")
       && popupJs.includes(': schedule.pwmState));'),
     'popup.js nextAction fallback 链含 cached actualStatus 反推档——锁住 ON setPageTimer 失败 故障态 pwmState=on 时 popup 不再误显示"分钟后自动开启"（与状态行"冷气运行中"冲突的根因修复）');
-  const popupActionStart = popupJs.indexOf('function getPopupModeNextAction(schedule)');
-  const popupActionEnd = popupJs.indexOf('\nfunction isAutomationPausedByActiveHours', popupActionStart);
-  const popupNextAction = new Function(
-    `${popupJs.slice(popupActionStart, popupActionEnd)}; return getPopupModeNextAction;`
-  )();
-  assertPass(popupNextAction({
-    smartMode: { enabled: true },
-    _nextAction: 'on',
-    smartState: 'on',
-    actualStatus: { isOn: true }
-  }) === 'off'
-      && popupNextAction({
-        smartMode: { enabled: true },
-        _nextAction: 'off',
-        smartState: 'off',
-        actualStatus: { isOn: false }
-      }) === 'on',
-    'popup nextAction 以真实 AC 状态优先，避免 ON 时误显示自动开启');
-  assertPass(popupJs.includes("add(false, t('diagnosePageTimerEmpty'))")
+  assertPass(popupJs.includes("add(s.actualStatus?.isOn === true, t('diagnosePageTimerEmpty'))")
       && zhCN.safetynetNotSet?.message.includes('自动控制仍会继续重试')
       && !zhCN.safetynetNotSet?.message.includes('PWM 循环')
       && zhCN.diagnosePwmError?.message.includes('自动控制')
@@ -1862,6 +1843,12 @@ async function runTests() {
       && smartBody.includes('const recheck = await getCurrentACStatus();')
       && smartBody.includes('if (recheck?.isOn === false) status = recheck;'),
     '9H-6: 关机边界读到 ON 时短暂重读确认，避免陈旧读回误设 1 分钟安全定时器');
+  assertPass(smartBody.includes('const statusOn = status?.isOn === true;')
+      && smartBody.includes('安全关机定时器写入失败：')
+      && !smartBody.includes('智能关机边界未确认：${safetyTimer?.error')
+      && smartBody.includes('智能关机边界状态未确认，已补设 1 分钟页面关机定时器')
+      && smartBody.includes("'smart-off-status-unknown'"),
+    '9H-7: 区分页面定时器写失败与关机未确认，未知状态仍保留安全重试');
   assertPass(!backgroundSource.includes('retryExistingTabToggle')
       && !backgroundSource.includes('async function retryToggle'),
     '9I: background 已删除四次即时消息重试路径');
