@@ -27,11 +27,11 @@ PWM AC scheduling, weather-based smart control, optional operating-hour limits, 
 
 ### 中文
 
-修复智能自动开启偶发的「输入框未接受时间（stabilize-control）」：页面重渲染（session 重登录、AC 状态切换或余额刷新）会让「Power-off after」定时器控件短暂消失或重挂载，原 750ms 稳定等待过短导致预布防失败、整轮自动开启被放弃；现对齐到 4 秒等待控件稳定后再写入关机时间。
+修复智能自动开启偶发的「输入框未接受时间（stabilize-control）」：页面重渲染（session 重登录、AC 状态切换或余额刷新）会让「Power-off after」定时器控件短暂消失或重挂载，原 750ms 稳定等待过短导致预布防失败、整轮自动开启被放弃；现延长到 5 秒等待控件稳定后再写入关机时间。
 
 ### English
 
-Fixes an occasional smart auto-on failure ("input rejected time / stabilize-control"): page re-renders (session re-login, AC status switch, or balance refresh) could briefly unmount or remount the "Power-off after" picker; the previous 750ms stabilization window was too short, failing the pre-arm step and aborting the whole auto-on cycle. The wait is now aligned to 4 seconds before writing the shutdown time.
+Fixes an occasional smart auto-on failure ("input rejected time / stabilize-control"): page re-renders (session re-login, AC status switch, or balance refresh) could briefly unmount or remount the "Power-off after" picker; the previous 750ms stabilization window was too short, failing the pre-arm step and aborting the whole auto-on cycle. The wait is now extended to 5 seconds before writing the shutdown time.
 
 ## 详细说明（中文 / zh-CN）
 

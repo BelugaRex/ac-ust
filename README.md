@@ -20,7 +20,7 @@ Chrome 扩展 — 自动控制 HKUST Smart Power Meter 冷气，支持 PWM 循�
 
 ## 0.8.6 更新要点
 
-- 修复智能自动开启偶发的「输入框未接受时间（stabilize-control）」：页面重渲染（session 重登录 / AC 状态切换 / billing 刷新）会让「Power-off after」定时器控件短暂消失或重挂载，原 750ms 稳定等待过短导致预布防失败、整轮自动开启被放弃；现对齐到 4 秒等控件稳定后再写关机时间。
+- 修复智能自动开启偶发的「输入框未接受时间（stabilize-control）」：页面重渲染（session 重登录 / AC 状态切换 / billing 刷新）会让「Power-off after」定时器控件短暂消失或重挂载，原 750ms 稳定等待过短导致预布防失败、整轮自动开启被放弃；现延长到 5 秒等控件稳定后再写关机时间。
 
 ## 0.8.5 更新要点
 

@@ -2,7 +2,7 @@
 
 ## 0.8.6
 
-- 修复智能自动开启偶发「输入框未接受时间（stabilize-control）」：页面重渲染（session 重登录 / AC 状态切换 / billing 刷新）会让「Power-off after」picker 短暂消失或重挂载，原 750ms 稳定等待太短；现对齐到 4s，等控件稳定后再写关机时间，避免预布防失败导致整轮自动开启被放弃。
+- 修复智能自动开启偶发「输入框未接受时间（stabilize-control）」：页面重渲染（session 重登录 / AC 状态切换 / billing 刷新）会让「Power-off after」picker 短暂消失或重挂载，原 750ms 稳定等待太短；现延长到 5s，等控件稳定后再写关机时间，避免预布防失败导致整轮自动开启被放弃。
 
 ## 0.8.5
 
