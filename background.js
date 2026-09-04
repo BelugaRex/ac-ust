@@ -2929,6 +2929,33 @@ async function runSmartStep(alarmContext = {}) {
         now,
         alarmScheduledAt
       });
+      // Service Worker may deliver an exact half-hour alarm late. Re-evaluate
+      // the current cycle before deferring; only proceed when the full safety
+      // runway remains, so a late wake cannot turn into an unsafe short run.
+      if (plan?.kind === 'defer'
+          && (plan.reason === 'smart-on-window-expired'
+            || plan.reason === 'smart-on-runway-too-short')) {
+        const recoveryPlan = planSmartModeOnWindow(schedule, {
+          now,
+          maxOnMinutes: SMART_MODE.ON_MAX,
+          acIsOn: false,
+          boundaryAt: boundaryAt || alarmScheduledAt,
+          triggeredBoundaryAt: boundaryAt || alarmScheduledAt,
+          recoverCurrentCycle: true
+        });
+        if (recoveryPlan?.kind === 'allow') {
+          plan = {
+            kind: 'start',
+            reason: 'smart-on-late-wake-recovery',
+            nextAction: 'off',
+            boundaryAt: recoveryPlan.boundaryAt,
+            windowEndsAt: recoveryPlan.windowEndsAt,
+            onMinutes: schedule.onMinutes,
+            targetAt: recoveryPlan.pageTimerTargetAt,
+            nextTriggerAt: recoveryPlan.pageTimerTargetAt
+          };
+        }
+      }
       if (typedRetryClock) {
         // 智能 ON 预布防失败后的非半点重试：ac-smart 一分钟后再次触发，
         // 但 alarmScheduledAt 不再是半点边界。分类器已识别 typed-retry marker，
