@@ -7,7 +7,7 @@
 | 字段 | 值 |
 | --- | --- |
 | 名称 | AC-UST |
-| 版本 | 0.8.4 |
+| 版本 | 0.8.5 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率（Productivity） |
 | 语言 | 中文（简体）、English |
@@ -23,11 +23,11 @@
 
 PWM AC scheduling, weather-based smart control, optional operating-hour limits, and cross-device phase alignment for HKUST Smart Power Meter.
 
-## 0.8.4 更新说明
+## 0.8.5 更新说明
 
 ### 中文
 
-修正 `Power-off after` 关机定时器的服务器保留时序：该定时器只有在空调已开启（ON）时才会被保留，先输入再立即刷新无效。自动开启现在先本地写入关机时间、再派发一次开机、确认空调已开启后，才通过独立新鲜页读回确认，避免在空调尚未开启时读回为空而被误判失败、导致自动开启永远无法推进；开机后验证失败会补设 1 分钟关机兜底。
+修复智能模式自动开启的可靠性：预布防失败后重试改为在原半点周期内重跑，不再直接延到下一半点；开机确认改为轮询等待页面真正变 ON 后再进入新鲜页验证。页面关机定时器写入不再用 `Enter` 键过早触发提交，session 重登录或状态切换导致「Power-off after」区块短暂消失时会短等待重定位并重试；恢复逻辑在 login/CAS 重登录期间不再强行导航回 home，避免打断 CAS 回调造成反复断口。
 
 ### English
 
@@ -148,12 +148,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.4.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.5.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP、图标和本目录资料通过验证。
-2. 上传 `releases/ac-ust-v0.8.4.zip`。
+2. 上传 `releases/ac-ust-v0.8.5.zip`。
 3. 填写商品详情、隐私声明、权限理由与审核测试说明。
 4. 选择私享（Private）、受信任测试人员和香港地区。
 5. 提交审核时选择推迟发布；审核通过后在允许期限内由作者手动发布。
