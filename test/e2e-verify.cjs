@@ -463,7 +463,7 @@ async function run() {
     assert(hasDiagnosticLine('✅', 'diagnoseTriggerTime')
         || diagnoseText.includes('[SCHED-TRIGGER-REPAIRED]'),
       'storage 绝对触发时间已恢复，并在本次发生修复时明确标记 repaired');
-    assert(hasDiagnosticLine('✅', 'diagnoseTriMatch'),
+    assert(hasDiagnosticLinePrefix(diagnoseText, '✅', 'diagnoseTriMatch'),
       '绿灯出现:live ac-pwm 与内存、storage 三方一致');
     // storage 实际被写入
     assert(finalStorage.nextTriggerAt === pwmScheduledTime,
@@ -526,9 +526,9 @@ async function run() {
         && fallbackState.text.includes('[POPUP-MAIN-FAILED]')
         && fallbackState.text.includes('synthetic popup bootstrap failure'),
       'popup.js 未执行时独立兜底捕获并显示 Popup 启动异常');
-    assert(hasLocalizedPrefix(fallbackState.text, 'diagnoseFallbackSchedule')
-        && hasLocalizedPrefix(fallbackState.text, 'diagnoseFallbackAlarms')
-        && hasLocalizedPrefix(fallbackState.text, 'diagnoseFallbackSw'),
+    assert(fallbackState.text.includes('Safe schedule snapshot')
+        && fallbackState.text.includes('ac-* alarms')
+        && fallbackState.text.includes('Service Worker snapshot'),
       '兜底报告仍包含 schedule、alarms 与 Service Worker 独立现场');
     await fallbackPage.click('#btnCopyDiag', { timeout: 5000 });
     await fallbackPage.waitForFunction(() => (
