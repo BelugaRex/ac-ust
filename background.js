@@ -4173,7 +4173,14 @@ async function armPowerOffTimerEnsuringOn(
       });
     }
     toggledOn = true;
-    const after = await getCurrentACStatus();
+    // 开机需要时间：点击后服务器/页面异步变 ON，且 BFCache 恢复重载可能刚完成。
+    // 这里轮询确认直到 ON 或超时，而不是单次读取即判失败（否则会过早放弃并刷新）。
+    const confirmDeadline = Date.now() + 15000;
+    let after = await getCurrentACStatus();
+    while (after?.isOn !== true && Date.now() < confirmDeadline) {
+      await sleep(1500);
+      after = await getCurrentACStatus();
+    }
     acIsOn = after?.isOn === true;
     if (!acIsOn) {
       return {
