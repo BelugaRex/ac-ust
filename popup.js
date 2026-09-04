@@ -1209,6 +1209,9 @@ function appendRecentDiagnosticLogLines(lines, entries, nowMs = Date.now()) {
   });
 }
 
+// 标记主诊断脚本已就绪：兜底脚本在按钮点击时据此让路，不再重复采集。
+globalThis.__AC_POPUP_DIAGNOSTICS_READY__ = true;
+
 btnDiagnose.addEventListener('click', async () => {
   diagnoseResult.style.display = 'block';
   document.getElementById('diagContent').textContent = t('diagnoseInProgress');

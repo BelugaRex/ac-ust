@@ -23,7 +23,7 @@
     "documents": [
       {
         "file": "popup.html",
-        "scripts": ["i18n.js", "billing-helpers.js", "smart-mode.js", "popup.js"]
+        "scripts": ["i18n.js", "billing-helpers.js", "smart-mode.js", "popup-diagnostic-fallback.js", "popup.js"]
       },
       {
         "file": "offscreen.html",
