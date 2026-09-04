@@ -2217,6 +2217,24 @@ async function runTests() {
       && driftSendUrls.every(url => url === 'https://w5.ab.ust.hk/njggt/app/home'),
     '9J-7: BFCache 断口且旧业务页仍 complete 时，等待精确 home 导航完成后才递归重试一次');
 
+  // 9J-8: 会话重登录瞬态 URL 识别（login/CAS 不强行导航，等自然回 home）
+  const authRedirectMatcherSource = extractSourceSection(
+    backgroundSource,
+    'function isTransientAuthRedirectUrl(',
+    'async function refreshACControlPage(',
+    'isTransientAuthRedirectUrl'
+  );
+  const loadAuthRedirectMatcher = new Function(
+    `${authRedirectMatcherSource}; return { isTransientAuthRedirectUrl };`
+  );
+  const authRedirectMatcher = loadAuthRedirectMatcher();
+  assertPass(authRedirectMatcher.isTransientAuthRedirectUrl('https://w5.ab.ust.hk/njggt/app/login?path=/home') === true
+      && authRedirectMatcher.isTransientAuthRedirectUrl('https://w5.ab.ust.hk/njggt/app/callback/cas?path=/home&ticket=ST-x') === true
+      && authRedirectMatcher.isTransientAuthRedirectUrl('https://w5.ab.ust.hk/njggt/app/home') === false
+      && authRedirectMatcher.isTransientAuthRedirectUrl('https://w5.ab.ust.hk/njggt/app/billing-cycle') === false
+      && authRedirectMatcher.isTransientAuthRedirectUrl('https://w5.ab.ust.hk/njggt/app/home?login=1') === false,
+    '9J-8: 仅 login/CAS 回调判为瞬态重登录，home/billing-cycle/带 login 查询参数均不误判');
+
   const waitForTabReadyStart = backgroundSource.indexOf('async function waitForTabReady(');
   const waitForTabReadyEnd = backgroundSource.indexOf('\nfunction isACTab(tab)', waitForTabReadyStart);
   const waitForTabReadySource = waitForTabReadyStart >= 0 && waitForTabReadyEnd > waitForTabReadyStart

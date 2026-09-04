@@ -4713,12 +4713,19 @@ async function attemptACToggleOnExactHome(tabId, action, options = {}) {
   }
 }
 
+// 判断是否处于 UST 会话重登录的瞬态 URL（login / CAS 回调）。
+// 这些 URL 会在几秒内自动跳回 home；强行 tabs.update 到 home 反而可能打断 CAS 回调，
+// 造成反复 BFCache。只有非重登录的业务漂移（billing-cycle 等）才导航回 home。
+function isTransientAuthRedirectUrl(url) {
+  return /\/(?:login|callback\/cas)(?:\?|$)/i.test(String(url || ''));
+}
+
 async function refreshACControlPage(tabId) {
   try {
     const currentTab = await chrome.tabs.get(tabId);
     if (isACHomePageTab(currentTab)) {
       await chrome.tabs.reload(tabId);
-    } else {
+    } else if (!isTransientAuthRedirectUrl(currentTab?.url)) {
       await chrome.tabs.update(tabId, { url: AC_PAGE });
     }
 
