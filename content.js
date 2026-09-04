@@ -567,9 +567,9 @@ function resolveLivePowerOffTimerControl(
 
 // AntD 确认后 React 可能短暂同时保留旧树与新树。最终值必须由同一个
 // 唯一语义 live input 连续承载 500ms，且本次新打开的 dropdown 已关闭。
-// 提交成功的硬信号是 value 与 title 同时等于期望 HH:MM：原生 value setter
-// 只写 value、不写 title；若 title 仍为空说明 AntD 的 onOk 未触发、服务器未持久化，
-// 此时本地 DOM 看似已写入，但新鲜页读回仍为空，必须在本地确认阶段就判为未提交。
+  // 严格提交的硬信号是 value 与 title 同时等于期望 HH:MM：原生 value setter
+  // 只写 value、不写 title。自动开机预布防可显式放宽为本地确认，随后必须由后台
+  // 在开机后的新鲜页面读回验证；普通页面定时器写入仍拒绝 title 缺失。
 function isPowerOffTimerConfirmationAccepted({
   input,
   rawValue,
