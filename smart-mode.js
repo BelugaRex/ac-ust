@@ -36,7 +36,6 @@
     REFERENCE_CYCLE_MINUTES: 60, // t_raw = K*Teq 的标定参考周期（保持占空比不变）
     ON_MIN: 0,                   // 开启分钟数下限
     ON_MAX: 25,                  // 开启分钟数上限（30 分钟周期至少关闭 5 分钟）
-    MIN_OFF_MINUTES: 5,          // 相邻智能 ON 周期之间的最短关闭窗口
     WEATHER_PLAN_MAX_AGE_MS: 60 * 60 * 1000,
     COMPRESSOR_DEADBAND_MIN: 1,  // 压缩机保护死区下界
     COMPRESSOR_DEADBAND_MAX: 4,  // 压缩机保护死区上界

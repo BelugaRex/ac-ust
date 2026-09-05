@@ -17,7 +17,7 @@
 | Popup | 中文启动、文档 ready、280px 布局、无横向溢出 | E2E 诊断现场 | 不同 OS 字形：Manual |
 | Popup | 英文文案、24h 字段、键盘顺序、帮助链接 | E2E 英文 locale | 读屏器语音质量：Manual |
 | 状态 | AC ON/OFF、下一动作、倒计时与 Est. | E2E 状态/余额/重启；Logic 显示矩阵 | 真实余额：Manual |
-| 自动控制 | 总开关启用先保证五分钟舒适期；停用可抢占且只走页面 timer | E2E 一次 ON 点击＋两张新鲜页＋稳定 revision；Logic 目标／重试矩阵 | 真实设备启停：Manual |
+| 自动控制 | Smart 每个半小时周期最多开启 25 分钟；停用可抢占且只走页面 timer | E2E 一次 ON 点击＋两张新鲜页＋稳定 revision；Logic 目标／重试矩阵 | 真实设备启停：Manual |
 | 运行时段 | 开关、24h 归一、非法范围、时段外暂停 | E2E 用户输入；Logic 边界/竞态矩阵 | 实时时段跨界：Manual smoke |
 | 模式 | 循环／智能互斥且始终单选 | E2E 双向点击；Logic 并发/回写 | — |
 | 循环定时 | 1+ 整数保存、0 非法原文保留、21/9 控制值 | E2E 用户输入；Logic 全分支 | 真实整周期：Manual |

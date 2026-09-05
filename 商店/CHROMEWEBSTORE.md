@@ -7,7 +7,7 @@
 | 字段 | 值 |
 | --- | --- |
 | 名称 | AC-UST |
-| 版本 | 0.8.9 |
+| 版本 | 0.8.10 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率（Productivity） |
 | 语言 | 中文（简体）、English |
@@ -23,7 +23,17 @@
 
 PWM AC scheduling, weather-based smart control, optional operating-hour limits, and cross-device phase alignment for HKUST Smart Power Meter.
 
-## 0.8.9 更新说明
+## 0.8.10 更新说明
+
+### 中文
+
+调整智能控制保护策略：移除确认关机后的额外五分钟等待；每个半小时周期最多开启 25 分钟，自动开启、重试和恢复统一使用同一绝对关机截止时间。
+
+### English
+
+Updates Smart control protection: removes the extra five-minute wait after confirmed shutdown; each 30-minute cycle is capped at 25 minutes ON, with auto-on, retry, and recovery sharing the same absolute shutdown deadline.
+
+## Previous release notes
 
 ### 中文
 
@@ -40,7 +50,7 @@ AC-UST 是一款为香港科技大学 Smart Power Meter 系统设计的自动冷
 
 主要功能：
 • PWM 循环定时：分别设置冷气开启与关闭分钟数，自动持续循环
-• 智能控制：读取香港天文台公开天气数据，在本机计算每个 30 分钟周期的开启时长，并以 0–10 共 11 档灵敏度调节
+• 智能控制：读取香港天文台公开天气数据，在本机计算每个 30 分钟周期的开启时长，并以 0–10 共 11 档灵敏度调节；每周期最多开启 25 分钟，不额外等待关机后五分钟
 • 限时运行：默认关闭即全天运行；开启后只在每天指定时段运行，范围外自动暂停并请求页面定时关机
 • 可用时刻预计：仅在页面显示 Charge Mode 时读取冷气余额并计算分钟级预计时刻；其他计费模式不显示估算，避免误导
 • 页面定时关机：通过 UST 页面自带的 Power-off after 控件执行关机；截止时间向上对齐到整分钟，页面值、新鲜页证明、扩展闹钟和倒计时使用同一个绝对时间。写入后由独立新鲜页按 10/15/20 秒退避回读，失败自动重试，绝不重复点击 OFF 开关
@@ -63,7 +73,7 @@ AC-UST is an automatic air-conditioning controller for the HKUST Smart Power Met
 
 Features:
 • PWM cycle scheduling with independently configurable ON and OFF durations
-• Smart control that reads public Hong Kong Observatory weather data and locally calculates ON time for each 30-minute cycle, adjustable across 11 sensitivity levels from 0 to 10
+• Smart control that reads public Hong Kong Observatory weather data and locally calculates ON time for each 30-minute cycle, adjustable across 11 sensitivity levels from 0 to 10; each cycle is capped at 25 minutes ON without an extra five-minute post-shutdown wait
 • Optional operating-hour limits: leave off for all-day operation, or turn on to use only a daily time window
 • Estimated availability calculated only when the portal displays Charge Mode; estimates remain hidden in other billing modes to avoid misleading results
 • Timer-based shutdown through the portal's Power-off after control. The portal value, fresh-page proof, extension alarm, and countdown share one absolute deadline rounded up to a whole minute. Persistence is independently verified after 10/15/20-second backoff windows; failures retry without repeatedly clicking OFF
@@ -148,12 +158,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.9.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.10.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP、图标和本目录资料通过验证。
-2. 上传 `releases/ac-ust-v0.8.9.zip`。
+2. 上传 `releases/ac-ust-v0.8.10.zip`。
 3. 填写商品详情、隐私声明、权限理由与审核测试说明。
 4. 选择私享（Private）、受信任测试人员和香港地区。
 5. 提交审核时选择推迟发布；审核通过后在允许期限内由作者手动发布。

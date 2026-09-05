@@ -12,7 +12,6 @@ const {
   smartWeatherTargetBoundaryAt,
   nextHalfHourBoundary,
   halfHourBoundaryAtOrBefore,
-  planComfortSmartCycle,
   smartModePageTimerTargetAt,
   nextSafePageTimerTargetAt,
   planSmartModeOnWindow,
@@ -79,38 +78,6 @@ export function runPwmPhaseCases(assertPass) {
     'nextHalfHourBoundary: 13:45 → 14:00');
   assertPass(nextHalfHourBoundary(hourTime(13, 30)) === hourTime(14, 0),
     'nextHalfHourBoundary: 半点也进到下一个半点');
-
-  const exactFiveMinuteComfortGap = planComfortSmartCycle(
-    hourTime(13, 20),
-    hourTime(13, 25)
-  );
-  const shortComfortGap = planComfortSmartCycle(
-    hourTime(13, 20),
-    hourTime(13, 25, 0, 1)
-  );
-  const exactBoundaryComfortFloor = planComfortSmartCycle(
-    hourTime(13, 25),
-    hourTime(13, 30)
-  );
-  const afterBoundaryComfortFloor = planComfortSmartCycle(
-    hourTime(13, 31),
-    hourTime(13, 36)
-  );
-  const midnightComfortFloor = planComfortSmartCycle(
-    hourTime(23, 55),
-    hourTime(24, 0)
-  );
-  assertPass(exactFiveMinuteComfortGap.boundaryAt === hourTime(13, 0)
-      && exactFiveMinuteComfortGap.rollsIntoNextBoundary === false
-      && shortComfortGap.boundaryAt === hourTime(13, 30)
-      && shortComfortGap.rollsIntoNextBoundary === true
-      && exactBoundaryComfortFloor.boundaryAt === hourTime(13, 30)
-      && exactBoundaryComfortFloor.rollsIntoNextBoundary === true
-      && afterBoundaryComfortFloor.boundaryAt === hourTime(13, 30)
-      && afterBoundaryComfortFloor.rollsIntoNextBoundary === false
-      && midnightComfortFloor.boundaryAt === hourTime(24, 0)
-      && midnightComfortFloor.rollsIntoNextBoundary === true,
-    'planComfortSmartCycle: 严格不足五分钟或 floor 到达边界才滚入新周期；恰好五分钟保留 OFF，跨小时/跨日稳定');
 
   const safeRetryException = planSmartOnRetryExceptionRecovery(
     smartSchedule(21),
@@ -221,7 +188,7 @@ export function runPwmPhaseCases(assertPass) {
       && exactFiveMinuteRemainder.pageTimerTargetAt === hourTime(13, 36)
       && shortFiveMinuteRemainder.kind === 'defer'
       && shortFiveMinuteRemainder.nextTriggerAt === hourTime(14, 0),
-    'planSmartModeOnWindow: OFF→ON→OFF 实际余量不足五分钟时零点击跳过 ON，恰好五分钟仍保留');
+    'planSmartModeOnWindow: 独立保留最短 ON 余量防抖，不足五分钟跳过，恰好五分钟保留');
 
   const exactFiveMinuteRetry = planSmartOnRetryExceptionRecovery(
     smartSchedule(6),
@@ -237,7 +204,7 @@ export function runPwmPhaseCases(assertPass) {
       && exactFiveMinuteRetry.pageTimerTargetAt === hourTime(13, 36)
       && shortFiveMinuteRetry.kind === 'defer'
       && shortFiveMinuteRetry.nextTriggerAt === hourTime(14, 0),
-    'planSmartOnRetryExceptionRecovery: typed retry 执行后不足五分钟则折叠短 ON，等于五分钟仍续试');
+    'planSmartOnRetryExceptionRecovery: typed retry 保留最短 ON 余量，且不延长原周期截止');
 
   const delayedBoundaryNow = hourTime(13, 31, 5);
   const delayedBoundaryTarget = hourTime(13, 55);
@@ -403,37 +370,9 @@ export function runPwmPhaseCases(assertPass) {
       && smartOffCommit.phasePatch.nextTriggerAt === hourTime(13, 30),
     'alignSmartModeNextTrigger: OFF 提交的下一 ON 触发对齐到半点');
 
-  const smartFiveMinuteGap = {
-    kind: 'commit',
-    nextAction: 'on',
-    nextTriggerAt: hourTime(13, 26),
-    delayMinutes: 1,
-    phasePatch: { smartState: 'on', nextTriggerAt: hourTime(13, 26) }
-  };
-  alignSmartModeNextTrigger(
-    smartFiveMinuteGap,
-    hourTime(13, 25),
-    { notBeforeAt: hourTime(13, 30) }
-  );
-  const smartShortGap = {
-    kind: 'commit',
-    nextAction: 'on',
-    nextTriggerAt: hourTime(13, 26),
-    delayMinutes: 1,
-    phasePatch: { smartState: 'on', nextTriggerAt: hourTime(13, 26) }
-  };
-  alignSmartModeNextTrigger(
-    smartShortGap,
-    hourTime(13, 25),
-    { notBeforeAt: hourTime(13, 31) }
-  );
-  assertPass(smartFiveMinuteGap.nextTriggerAt === hourTime(13, 30)
-      && smartShortGap.nextTriggerAt === hourTime(14, 0),
-    'alignSmartModeNextTrigger: 下一智能 ON 至少晚于已确认关机 5 分钟');
-
   const recoveredOverrunOffAt = hourTime(18, 56, 0, 17);
   const recoveredBoundaryAt = hourTime(19, 0);
-  const recoveredSafeRetryAt = recoveredOverrunOffAt + 5 * MINUTE_MS;
+  const recoveredSafeRetryAt = recoveredBoundaryAt;
   const recoveredOffClock = typeof planSmartOnAfterConfirmedOff === 'function'
     ? planSmartOnAfterConfirmedOff({
         enabled: true,
@@ -444,16 +383,15 @@ export function runPwmPhaseCases(assertPass) {
       }, {
         now: recoveredOverrunOffAt,
         confirmedOffAt: recoveredOverrunOffAt,
-        minOffMinutes: 5
       })
     : null;
-  assertPass(recoveredOffClock?.kind === 'smart-on-safe-delay'
-      && recoveredOffClock.nextTriggerAt === recoveredSafeRetryAt
-      && recoveredOffClock.phasePatch.nextTriggerAt === recoveredSafeRetryAt
+  assertPass(recoveredOffClock?.kind === 'smart-on-boundary'
+      && recoveredOffClock.nextTriggerAt === recoveredBoundaryAt
+      && recoveredOffClock.phasePatch.nextTriggerAt === recoveredBoundaryAt
       && recoveredOffClock.boundaryAt === recoveredBoundaryAt
       && recoveredOffClock.pageTimerTargetAt === hourTime(19, 23)
       && recoveredOffClock.nextTriggerAt < hourTime(19, 30),
-    'planSmartOnAfterConfirmedOff: 18:56 恢复关机保留 19:00 所有权，五分钟保护后 typed retry，不静默跳到 19:30');
+    'planSmartOnAfterConfirmedOff: 18:56 确认关机后直接采用 19:00 半点，不增加五分钟保护');
 
   const classifyNow = hourTime(18, 58, 57);
   const lateSmartClock = typeof classifySmartOnClock === 'function'
@@ -501,7 +439,6 @@ export function runPwmPhaseCases(assertPass) {
   }, {
     now: hourTime(18, 59),
     confirmedOffAt: hourTime(18, 59),
-    minOffMinutes: 5
   });
   const typedSafetySkipClock = classifySmartOnClock({
     enabled: true,
@@ -524,7 +461,6 @@ export function runPwmPhaseCases(assertPass) {
   }, {
     now: hourTime(22, 28),
     confirmedOffAt: hourTime(22, 28),
-    minOffMinutes: 5
   });
   const encodedZeroDurationNearBoundary = planSmartOnAfterConfirmedOff({
     enabled: true,
@@ -535,7 +471,6 @@ export function runPwmPhaseCases(assertPass) {
   }, {
     now: hourTime(22, 28),
     confirmedOffAt: hourTime(22, 28),
-    minOffMinutes: 5
   });
   const postBoundaryNormalClock = classifySmartOnClock({
     enabled: true,
@@ -565,7 +500,6 @@ export function runPwmPhaseCases(assertPass) {
   }, {
     now: hourTime(18, 50),
     confirmedOffAt: hourTime(18, 50),
-    minOffMinutes: 5
   });
   const zeroDurationSafeBoundary = planSmartOnAfterConfirmedOff({
     enabled: true,
@@ -576,7 +510,6 @@ export function runPwmPhaseCases(assertPass) {
   }, {
     now: hourTime(22, 20),
     confirmedOffAt: hourTime(22, 20),
-    minOffMinutes: 5
   });
   const invalidDurationBoundary = planSmartOnAfterConfirmedOff({
     enabled: true,
@@ -587,7 +520,6 @@ export function runPwmPhaseCases(assertPass) {
   }, {
     now: hourTime(22, 28),
     confirmedOffAt: hourTime(22, 28),
-    minOffMinutes: 5
   });
   const oneMinuteWindowExhausted = planSmartOnAfterConfirmedOff({
     enabled: true,
@@ -598,7 +530,6 @@ export function runPwmPhaseCases(assertPass) {
   }, {
     now: hourTime(18, 59, 0, 1),
     confirmedOffAt: hourTime(18, 59, 0, 1),
-    minOffMinutes: 5,
     boundaryAt: hourTime(19, 0)
   });
   const mismatchedMarkerClock = classifySmartOnClock({
@@ -649,14 +580,14 @@ export function runPwmPhaseCases(assertPass) {
       && typedSafeClock.pageTimerTargetAt === hourTime(19, 23)
       && stillLateAfterBoundary.valid === false
       && stillLateAfterBoundary.expectedAt === hourTime(19, 0)
-      && exhaustedOffClock.kind === 'smart-on-safety-skip'
-      && exhaustedOffClock.nextTriggerAt === hourTime(19, 30)
+      && exhaustedOffClock.kind === 'smart-on-boundary'
+      && exhaustedOffClock.nextTriggerAt === hourTime(19, 0)
       && typedSafetySkipClock.valid === true
       && typedSafetySkipClock.kind === 'safety-skip'
       && zeroDurationNearBoundary.kind === 'smart-on-safety-skip'
-      && zeroDurationNearBoundary.nextTriggerAt === hourTime(23, 0)
+      && zeroDurationNearBoundary.nextTriggerAt === hourTime(22, 30)
       && encodedZeroDurationNearBoundary.kind === 'smart-on-safety-skip'
-      && encodedZeroDurationNearBoundary.nextTriggerAt === hourTime(23, 0)
+      && encodedZeroDurationNearBoundary.nextTriggerAt === hourTime(22, 30)
       && postBoundaryNormalClock.valid === true
       && postBoundaryNormalClock.expectedAt === hourTime(19, 0)
       && boundaryOffCommitNextClock.valid === true
@@ -666,9 +597,9 @@ export function runPwmPhaseCases(assertPass) {
       && zeroDurationSafeBoundary.kind === 'smart-on-safety-skip'
       && zeroDurationSafeBoundary.nextTriggerAt === hourTime(22, 30)
       && invalidDurationBoundary.kind === 'smart-on-safety-skip'
-      && invalidDurationBoundary.nextTriggerAt === hourTime(23, 0)
-      && oneMinuteWindowExhausted.kind === 'smart-on-safety-skip'
-      && oneMinuteWindowExhausted.nextTriggerAt === hourTime(19, 30)
+      && invalidDurationBoundary.nextTriggerAt === hourTime(22, 30)
+      && oneMinuteWindowExhausted.kind === 'smart-on-boundary'
+      && oneMinuteWindowExhausted.nextTriggerAt === hourTime(19, 0)
       && mismatchedMarkerClock.valid === false
       && mismatchedMarkerClock.kind === 'smart-on-marker-mismatch'
       && safetyTimerClock.valid === true

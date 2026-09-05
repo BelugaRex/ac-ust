@@ -75,7 +75,7 @@ export function runRecoveryPolicyCases(assertPass) {
       && exactFiveMinuteRecovery.pageTimerTargetAt === at(17, 53)
       && shortFiveMinuteRecovery.kind === 'pass'
       && shortFiveMinuteRecovery.reason === 'wait-for-smart-on-window',
-    '智能恢复模块仅在实际 ON 余量至少五分钟时补开；不足五分钟折叠短 ON，恰好五分钟保留');
+    '智能恢复模块保留最短 ON 余量防抖，不足五分钟跳过，恰好五分钟保留');
 
   assertPass(planSmartRecovery({ ...smartSchedule, enabled: false }, {
     now,
@@ -346,5 +346,5 @@ export function runRecoveryPolicyCases(assertPass) {
       && badClockDue.expectedAt === at(19, 0)
       && badClockExpired.kind === 'repair-clock'
       && badClockExpired.expectedAt === at(19, 0),
-    '智能 ON 拒绝非半点、跳周期钟与不足五分钟的 typed retry；恰好五分钟、真实 OFF、最近边界与 1500ms 漂移可保留');
+    '智能 ON 拒绝非半点、跳周期钟与短 ON 重试；真实 OFF、最近边界与 1500ms 漂移可保留');
 }

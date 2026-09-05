@@ -1164,9 +1164,10 @@ function applySmartDurationFallback() {
     SMART_MODE.ON_MAX,
     sanitizeMinutes(schedule.onMinutes, SMART_MODE.ON_MAX)
   );
+  const minimumCycleOffMinutes = SMART_MODE.CYCLE_MINUTES - SMART_MODE.ON_MAX;
   schedule.offMinutes = Math.max(
-    SMART_MODE.MIN_OFF_MINUTES,
-    sanitizeMinutes(schedule.offMinutes, SMART_MODE.MIN_OFF_MINUTES)
+    minimumCycleOffMinutes,
+    sanitizeMinutes(schedule.offMinutes, minimumCycleOffMinutes)
   );
 }
 
@@ -3118,19 +3119,9 @@ async function runSmartStep(alarmContext = {}) {
         clearPageTimerProofState();
         schedule.smartOnBoundaryAt = 0;
         schedule.pageTimerError = '';
-        const minimumSmartOffMinutes = typeof MIN_OFF_MINUTES === 'number'
-          ? MIN_OFF_MINUTES
-          : 5;
-        const comfortPlan = planComfortSmartCycle(
-          now,
-          plan.nextTriggerAt,
-          { minimumStableMinutes: minimumSmartOffMinutes }
-        );
         const afterConfirmedOffPlan = planSmartOnAfterConfirmedOff(schedule, {
           now,
-          confirmedOffAt: now,
-          minOffMinutes: minimumSmartOffMinutes,
-          boundaryAt: comfortPlan.boundaryAt
+          confirmedOffAt: now
         });
         if (afterConfirmedOffPlan.kind === 'refuse') {
           await commitSmartAlarm(plan.nextTriggerAt, 'smart-on-boundary');
@@ -5194,9 +5185,6 @@ async function repairSmartScheduleClock(options = {}) {
       && requestedBoundaryAt > now
     ? requestedBoundaryAt
     : nextSmartHalfHourBoundary(now);
-  const minimumSmartOffMinutes = typeof MIN_OFF_MINUTES === 'number'
-    ? MIN_OFF_MINUTES
-    : 5;
   const offPlan = {
     nextAction: 'on',
     nextTriggerAt: requestedBoundary,
@@ -5204,8 +5192,7 @@ async function repairSmartScheduleClock(options = {}) {
   };
   alignSmartModeNextTrigger(
     offPlan,
-    now,
-    { notBeforeAt: now + minimumSmartOffMinutes * 60000 }
+    now
   );
   applySmartPlanState(offPlan);
   schedule.smartOnBoundaryAt = 0;

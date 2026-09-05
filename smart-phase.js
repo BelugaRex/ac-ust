@@ -14,7 +14,7 @@
 
   const MINUTE_MS = 60_000;
   const ON_WINDOW_MS = MINUTE_MS;
-  const MIN_OFF_MINUTES = 5;
+  const MIN_ON_RUNWAY_MINUTES = 5;
   const ON_MAX_MINUTES = 25;
   const ALARM_TOLERANCE_MS = 1500;
 
@@ -80,7 +80,7 @@
   function hasMinimumOnRunway(targetAt, now) {
     return Number.isFinite(Number(targetAt))
       && Number.isFinite(Number(now))
-      && Number(targetAt) - Number(now) >= MIN_OFF_MINUTES * MINUTE_MS;
+      && Number(targetAt) - Number(now) >= MIN_ON_RUNWAY_MINUTES * MINUTE_MS;
   }
 
   function planSmartStep(schedule, opts = {}) {
@@ -114,7 +114,7 @@
         reason: 'smart-off-boundary',
         nextAction: 'on',
         offAt: alarmAt,
-        nextTriggerAt: nextSmartHalfHourBoundary(Math.max(now, alarmAt + MIN_OFF_MINUTES * MINUTE_MS))
+        nextTriggerAt: nextSmartHalfHourBoundary(Math.max(now, alarmAt))
       };
     }
 
@@ -165,29 +165,6 @@
     return Number.isFinite(value) ? Math.max(0, value) : fallback;
   }
 
-  function planComfortSmartCycle(planningNow, minimumTargetAt, opts = {}) {
-    const now = Number(planningNow);
-    const minimum = Number(minimumTargetAt);
-    const requestedStableMinutes = Number(opts.minimumStableMinutes);
-    const minimumStableMinutes = Number.isFinite(requestedStableMinutes)
-      ? Math.max(0, requestedStableMinutes)
-      : MIN_OFF_MINUTES;
-    if (!Number.isFinite(now) || !Number.isFinite(minimum)) {
-      return { boundaryAt: 0, rollsIntoNextBoundary: false };
-    }
-    const nextBoundaryAt = nextSmartHalfHourBoundary(now);
-    const shortOffGapMs = nextBoundaryAt - minimum;
-    const rollsIntoNextBoundary = minimum >= nextBoundaryAt
-      || (shortOffGapMs > 0
-        && shortOffGapMs < minimumStableMinutes * MINUTE_MS);
-    return {
-      boundaryAt: rollsIntoNextBoundary
-        ? nextBoundaryAt
-        : smartHalfHourBoundaryAtOrBefore(now),
-      rollsIntoNextBoundary
-    };
-  }
-
   function nextSmartHalfHourBoundaryAtOrAfter(timestamp) {
     return isSmartHalfHourBoundary(timestamp)
       ? Number(timestamp)
@@ -205,7 +182,7 @@
     const action = Number(actionAt);
     return Number.isFinite(target)
       && Number.isFinite(action)
-      && target - action >= MIN_OFF_MINUTES * MINUTE_MS;
+      && target - action >= MIN_ON_RUNWAY_MINUTES * MINUTE_MS;
   }
 
   function planSmartModeOnWindow(schedule, opts = {}) {
@@ -355,7 +332,6 @@
   function planSmartOnAfterConfirmedOff(schedule, opts = {}) {
     const now = smartPhaseNow(opts);
     const confirmedOffAt = Number(opts?.confirmedOffAt);
-    const minOffMinutes = Number(opts?.minOffMinutes);
     const storedOnMinutes = Number(schedule?.onMinutes);
     const noRunSentinel = storedOnMinutes === 30
       && Number(schedule?.offMinutes) === 30;
@@ -367,18 +343,16 @@
         || schedule?.smartMode?.enabled !== true
         || !Number.isFinite(confirmedOffAt)
         || confirmedOffAt <= 0
-        || confirmedOffAt > now
-        || !Number.isFinite(minOffMinutes)
-        || minOffMinutes <= 0) {
+        || confirmedOffAt > now) {
       return { kind: 'refuse', reason: 'invalid-smart-off-confirmation' };
     }
 
     const requestedBoundaryAt = normalizeSmartHalfHourAlarmBoundary(opts?.boundaryAt);
-    const boundaryAt = requestedBoundaryAt > 0
-      ? requestedBoundaryAt
-      : nextSmartHalfHourBoundary(now);
     const nearestBoundaryAt = nextSmartHalfHourBoundary(now);
-    const notBeforeAt = confirmedOffAt + minOffMinutes * MINUTE_MS;
+    const boundaryAt = requestedBoundaryAt > now
+        && requestedBoundaryAt >= nearestBoundaryAt
+      ? requestedBoundaryAt
+      : nearestBoundaryAt;
     const planBoundaryEvaluation = (nextTriggerAt, reason) => {
       const markerBoundaryAt = smartHalfHourBoundaryAtOrBefore(nextTriggerAt - 1);
       return {
@@ -396,55 +370,21 @@
       };
     };
     if (!validOnDuration) {
-      return planBoundaryEvaluation(
-        nextSmartHalfHourBoundaryAtOrAfter(notBeforeAt),
-        'smart-invalid-duration-next-evaluation'
-      );
+      return planBoundaryEvaluation(boundaryAt, 'smart-invalid-duration-next-boundary');
     }
     if (onMinutes === 0) {
-      return planBoundaryEvaluation(
-        nextSmartHalfHourBoundaryAtOrAfter(notBeforeAt),
-        'smart-zero-duration-next-evaluation'
-      );
+      return planBoundaryEvaluation(boundaryAt, 'smart-zero-duration-next-boundary');
     }
-    if (boundaryAt >= notBeforeAt) {
-      if (boundaryAt === nearestBoundaryAt) {
-        return {
-          kind: 'smart-on-boundary',
-          reason: 'compressor-safe-nearest-boundary',
-          nextAction: 'on',
-          nextTriggerAt: boundaryAt,
-          boundaryAt,
-          pageTimerTargetAt: smartPageTimerTargetAt(onMinutes, boundaryAt),
-          delayMinutes: Math.max(1, (boundaryAt - now) / MINUTE_MS),
-          phasePatch: { smartState: 'on', nextTriggerAt: boundaryAt }
-        };
-      }
-      return planBoundaryEvaluation(
-        boundaryAt,
-        'compressor-safe-requested-later-boundary'
-      );
-    }
-
-    const retryPlan = planSmartOnRetryExceptionRecovery(
-      schedule,
+    return {
+      kind: 'smart-on-boundary',
+      reason: 'next-smart-half-hour-boundary',
+      nextAction: 'on',
+      nextTriggerAt: boundaryAt,
       boundaryAt,
-      { now, retryAt: notBeforeAt }
-    );
-    if (retryPlan.kind === 'retry-smart-on-exception') {
-      return {
-        ...retryPlan,
-        kind: 'smart-on-safe-delay',
-        reason: 'compressor-min-off-safe-delay',
-        delayMinutes: Math.max(1, (retryPlan.nextTriggerAt - now) / MINUTE_MS)
-      };
-    }
-
-    const nextTriggerAt = nextSmartHalfHourBoundaryAtOrAfter(notBeforeAt);
-    return planBoundaryEvaluation(
-      nextTriggerAt,
-      'compressor-min-off-window-exhausted'
-    );
+      pageTimerTargetAt: smartPageTimerTargetAt(onMinutes, boundaryAt),
+      delayMinutes: Math.max(1, (boundaryAt - now) / MINUTE_MS),
+      phasePatch: { smartState: 'on', nextTriggerAt: boundaryAt }
+    };
   }
 
   function classifySmartOnClock(schedule, candidateAt, opts = {}) {
@@ -696,8 +636,6 @@
 
   return Object.freeze({
     planSmartStep,
-    planComfortSmartCycle,
-    MIN_OFF_MINUTES,
     ON_MAX_MINUTES,
     ALARM_TOLERANCE_MS,
     smartHalfHourBoundaryAtOrBefore,

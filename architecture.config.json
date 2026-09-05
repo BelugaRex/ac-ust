@@ -133,7 +133,6 @@
           "file": "smart-phase.js",
           "symbols": [
             "planSmartStep",
-            "planComfortSmartCycle",
             "smartPageTimerTargetAt",
             "smartModePageTimerTargetAt",
             "normalizeSmartHalfHourAlarmBoundary",
@@ -156,7 +155,6 @@
             "file": "background.js",
             "symbols": [
               "planSmartStep",
-              "planComfortSmartCycle",
               "smartPageTimerTargetAt",
               "smartModePageTimerTargetAt",
               "normalizeSmartHalfHourAlarmBoundary",

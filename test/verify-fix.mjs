@@ -1811,7 +1811,6 @@ async function runTests() {
       && !smartBody.includes('for (let retry')
       && smartBody.includes('planSmartOnRetryExceptionRecovery(')
       && smartBody.includes('planSmartOnAfterConfirmedOff(')
-      && smartBody.includes('planComfortSmartCycle(')
       && smartBody.includes('classifySmartOnClock(')
       && smartBody.includes('alignSmartModeNextTrigger(')
       && smartBody.includes("createAutomationAlarmFromPlan(\n      'ac-smart'")
@@ -1838,10 +1837,9 @@ async function runTests() {
       && contentSource.includes('setPagePowerOffTimer(msg.minutes, msg.targetAt, msg.allowLocalOnly === true)'),
     '9H-2: 智能半点绝对关机截止时间由 background 透传到 content，不退化为相对分钟');
   assertPass(smartBody.includes('planSmartOnAfterConfirmedOff(')
-      && smartBody.includes('planComfortSmartCycle(')
       && smartBody.includes('alignSmartModeNextTrigger(')
-      && smartBody.includes('minOffMinutes: minimumSmartOffMinutes'),
-    '9H-3: Smart OFF 使用正式确认后恢复 API，按最短关机窗口对齐下一半点 ON');
+      && !smartBody.includes('minOffMinutes'),
+    '9H-3: Smart OFF 使用正式确认后恢复 API，直接对齐下一半点 ON');
   assertPass(smartBody.includes('if (status?.isOn === true) {')
       && smartBody.includes('const recheck = await getCurrentACStatus();')
       && smartBody.includes('if (recheck?.isOn === false) status = recheck;'),
@@ -3330,7 +3328,6 @@ return { reapplySmartSensitivityNow };`
     'isSmartHalfHourBoundary',
     'nextSmartHalfHourBoundary',
     'alignSmartModeNextTrigger',
-    'MIN_OFF_MINUTES',
     'Date',
     `let smartRuntimeRevision = 0;
     ${smartRepairBody}; return repairSmartScheduleClock;`
@@ -3455,7 +3452,6 @@ return { reapplySmartSensitivityNow };`
       smartPhase.isSmartHalfHourBoundary,
       smartPhase.nextSmartHalfHourBoundary,
       smartPhase.alignSmartModeNextTrigger,
-      smartPhase.MIN_OFF_MINUTES,
       { now: () => nowMs }
     );
     let result = null;
