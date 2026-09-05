@@ -1996,6 +1996,15 @@ async function runTests() {
     assertPass(contentSource.includes('msg.allowLocalOnly === true')
         && backgroundSource.includes('allowLocalOnly: deferVerification'),
       '9M-5: 自动开机预布防允许本地先接受输入，普通页面定时器仍由后台严格新鲜页确认');
+    const persistedTimerMatchStart = backgroundSource.indexOf('function isPersistedPageTimerMatch(');
+    const persistedTimerMatchEnd = backgroundSource.indexOf('\n\n// 关机定时器设置失败时', persistedTimerMatchStart);
+    const persistedTimerMatch = new Function(
+      `${backgroundSource.slice(persistedTimerMatchStart, persistedTimerMatchEnd)}; return isPersistedPageTimerMatch;`
+    )();
+    assertPass(persistedTimerMatch({ found: true, value: '06:22', title: '06:22' }, '06:22')
+        && !persistedTimerMatch({ found: true, value: '06:22', title: null }, '06:22')
+        && !persistedTimerMatch({ found: true, value: null, title: '06:22' }, '06:22'),
+      '9M-6: 新鲜页持久化证明必须同时匹配 value/title，不能把单一本地信号当成成功');
   }
   const verificationStartForReload = backgroundSource.indexOf('async function verifyPageTimerPersistence(');
   const verificationEndForReload = backgroundSource.indexOf('\n// 关机定时器设置失败时', verificationStartForReload);
@@ -2899,10 +2908,11 @@ async function runTests() {
       && verifyBody.includes("chrome.tabs.create({ url: AC_PAGE, active: false })"),
     '11A: 写入来源页绝不刷新/导航；每次验证均使用独立临时隐藏页');
   assertPass(verifyBody.includes("{ action: 'getPageTimer' }")
-      && verifyBody.includes('actualValue === expectedValue')
+      && verifyBody.includes('isPersistedPageTimerMatch(readback, expectedValue)')
+      && backgroundSource.includes('String(readback.title || \'\').trim() === expectedValue')
       && verifyBody.includes('lastFailure = `第 ${attempt + 1} 次新鲜页读回不匹配')
       && verifyBody.includes('await chrome.tabs.remove(verifierTabId)'),
-    '11B: 新鲜页必须读回同一 HH:MM，未匹配会记录失败并回收临时验证页');
+    '11B: 新鲜页必须同时读回 value/title 同一 HH:MM，未匹配会记录失败并回收临时验证页');
   assertPass(backgroundSource.includes('const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [10000, 15000, 20000];')
       && verifyBody.includes('await sleep(PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS[attempt]);')
       && verifyBody.includes('attempts: attempt + 1')

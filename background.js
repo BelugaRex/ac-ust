@@ -3531,7 +3531,7 @@ async function verifyPageTimerPersistence(
         { action: 'status' }
       );
       const freshAcIsOn = statusReadback?.isOn === true;
-      if (readback?.found && actualValue === expectedValue) {
+      if (isPersistedPageTimerMatch(readback, expectedValue)) {
         return { success: true, value: actualValue, acIsOn: freshAcIsOn };
       }
 
@@ -3581,6 +3581,13 @@ async function verifyPageTimerPersistence(
     acIsOn: lastAcIsOn,
     attempts: PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length
   };
+}
+
+// 新鲜页必须同时读到 value/title；仅 value 可能只是 React 本地状态，不能证明 UST 已持久化。
+function isPersistedPageTimerMatch(readback, expectedValue) {
+  return readback?.found === true
+    && String(readback.value || '').trim() === expectedValue
+    && String(readback.title || '').trim() === expectedValue;
 }
 
 // 关机定时器设置失败时，记录明确的目标分钟数并用独立闹钟持续重试。
