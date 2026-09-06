@@ -61,6 +61,7 @@
 
   const MAX_AC_SWITCH_CLICKS = 3;
   const AC_STATE_SETTLE_MS = 10000;
+  const EXECUTION_SUCCESS_TIMEOUT_MS = 15000;
   let acStateRequestInFlight = null;
   let acStateRequestTarget = null;
   let acStateRequestNotAfterAt = 0;
@@ -70,6 +71,108 @@
   window.addEventListener('__AC_EXTENSION_CANCEL_AUTOMATIC_ON__', () => {
     automaticOnCancellationRevision += 1;
   });
+
+  function isVisibleExecutionMessageElement(element) {
+    if (!element || element.nodeType !== 1) return false;
+    if (element.hasAttribute?.('hidden') || element.getAttribute?.('aria-hidden') === 'true') {
+      return false;
+    }
+    const style = typeof globalThis.getComputedStyle === 'function'
+      ? globalThis.getComputedStyle(element)
+      : null;
+    if (style && (style.display === 'none'
+        || style.visibility === 'hidden'
+        || style.opacity === '0')) {
+      return false;
+    }
+    return (element.getClientRects?.().length || 0) > 0;
+  }
+
+  function getExecutionSuccessCandidatesInPageWorld() {
+    const root = document.body || document.documentElement;
+    if (!root) return [];
+    return Array.from(root.querySelectorAll('*'))
+      .map(element => ({
+        element,
+        text: String(element.textContent || '').replace(/\s+/g, ' ').trim()
+      }))
+      .filter(({ element, text }) => text.length <= 200
+        && /execution succeeded/i.test(text)
+        && isVisibleExecutionMessageElement(element));
+  }
+
+  // 在 click 前登记 MutationObserver，保存会在确认框等待期间闪过的网页成功提示。
+  // 只接受本次新增/重新出现的可见提示，页面上遗留的成功提示不能放行本次操作。
+  function startExecutionSuccessWaitInPageWorld(
+    cancellationRevision = null,
+    timeoutMs = EXECUTION_SUCCESS_TIMEOUT_MS
+  ) {
+    const baselineNodes = new Map(getExecutionSuccessCandidatesInPageWorld()
+      .map(candidate => [candidate.element, candidate.text]));
+    const hiddenBaselineNodes = new Set();
+    const timeout = Math.max(1, Number(timeoutMs) || EXECUTION_SUCCESS_TIMEOUT_MS);
+    const startedAt = Date.now();
+    let finish;
+    const result = new Promise(resolve => {
+      let settled = false;
+      let timeoutId = 0;
+      let pollId = 0;
+      let observer = null;
+      finish = result => {
+        if (settled) return;
+        settled = true;
+        if (timeoutId) clearTimeout(timeoutId);
+        if (pollId) clearInterval(pollId);
+        observer?.disconnect();
+        resolve(result);
+      };
+      const check = () => {
+        if (Number.isSafeInteger(cancellationRevision)
+            && cancellationRevision !== automaticOnCancellationRevision) {
+          finish({ success: false, cancelled: true, error: '请求已被后台取消' });
+          return;
+        }
+        const candidates = getExecutionSuccessCandidatesInPageWorld();
+        const currentNodes = new Set(candidates.map(candidate => candidate.element));
+        for (const element of baselineNodes.keys()) {
+          if (!currentNodes.has(element)) hiddenBaselineNodes.add(element);
+        }
+        const freshCandidate = candidates.find(candidate => {
+          const previousText = baselineNodes.get(candidate.element);
+          return previousText === undefined
+            || previousText !== candidate.text
+            || hiddenBaselineNodes.has(candidate.element);
+        });
+        if (freshCandidate) {
+          finish({ success: true, via: 'page-message', text: freshCandidate.text });
+          return;
+        }
+        if (Date.now() - startedAt >= timeout) {
+          finish({ success: false, error: '等待 Execution succeeded 成功弹窗超时' });
+        }
+      };
+      if (typeof MutationObserver === 'function' && document.documentElement) {
+        observer = new MutationObserver(check);
+        observer.observe(document.documentElement, {
+          subtree: true,
+          childList: true,
+          characterData: true,
+          attributes: true,
+          attributeFilter: ['class', 'style', 'hidden', 'aria-hidden']
+        });
+      }
+      timeoutId = setTimeout(() => finish({
+        success: false,
+        error: '等待 Execution succeeded 成功弹窗超时'
+      }), timeout);
+      pollId = setInterval(check, 200);
+      check();
+    });
+    return {
+      result,
+      cancel: () => finish({ success: false, cancelled: true, error: '成功提示等待已取消' })
+    };
+  }
 
   window.addEventListener('__AC_EXTENSION_TOGGLE_AC__', async (event) => {
     const {
@@ -212,7 +315,7 @@
     }
   }
 
-  // 递归状态收敛：每轮只做「查状态 → 必要时 click 一次 → 等 10 秒 → 递归复查」。
+  // 递归状态收敛：查状态 → click 一次 → 等 Execution succeeded → 稳定后复查。
   // 所有物理开关尝试都集中在这里，content/background 不再叠加点击重试；
   // 当前生产调度仅传入 true（ON），OFF 完全由页面定时器执行。
   async function ensureACState(targetState, clickCount = 0) {
@@ -305,23 +408,43 @@
       return failureResult(beforeClick, clickCount, beforeClickCancellationError);
     }
 
-    console.log(`[AC扩展] ensureACState: 当前=${beforeClick.isOn}，目标=${targetState}，执行第 ${clickCount + 1} 次单击`);
-    if (!clickElementOnceInPageWorld(sw)) {
-      return failureResult(beforeClick, clickCount, '主世界 AC 开关 click() 调用失败');
-    }
-
-    const dialogConfirmed = await clickConfirmDialogInPageWorld(
-      5000,
-      Number(ensureACState.notAfterAt) || 0,
+    const executionWait = startExecutionSuccessWaitInPageWorld(
       Number(ensureACState.cancellationRevision)
     );
-    const afterConfirmCancellationError = getAutomaticOnCancellationError();
-    if (afterConfirmCancellationError) {
-      return failureResult(beforeClick, clickCount + 1, afterConfirmCancellationError);
+    console.log(`[AC扩展] ensureACState: 当前=${beforeClick.isOn}，目标=${targetState}，执行第 ${clickCount + 1} 次单击`);
+    let dialogConfirmed = false;
+    let executionSuccess;
+    try {
+      if (!clickElementOnceInPageWorld(sw)) {
+        return failureResult(beforeClick, clickCount, '主世界 AC 开关 click() 调用失败');
+      }
+      dialogConfirmed = await clickConfirmDialogInPageWorld(
+        5000,
+        Number(ensureACState.notAfterAt) || 0,
+        Number(ensureACState.cancellationRevision)
+      );
+      executionSuccess = await executionWait.result;
+    } finally {
+      executionWait.cancel();
+    }
+    const afterExecutionCancellationError = getAutomaticOnCancellationError();
+    if (afterExecutionCancellationError) {
+      return failureResult(beforeClick, clickCount + 1, afterExecutionCancellationError);
+    }
+    if (!executionSuccess?.success) {
+      console.warn(`[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后未等到 Execution succeeded: ${executionSuccess?.error || '未知错误'}`);
+      return {
+        ...failureResult(
+          beforeClick,
+          clickCount + 1,
+          executionSuccess?.error || '等待 Execution succeeded 成功弹窗超时'
+        ),
+        executionSuccessUnconfirmed: true
+      };
     }
     const afterClick = getACStatusInPageWorld();
     const reachedTarget = typeof afterClick.isOn === 'boolean' && afterClick.isOn === targetState;
-    const afterClickMessage = `[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(afterClick)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}`;
+    const afterClickMessage = `[AC扩展] ensureACState: 第 ${clickCount + 1} 次点击后状态=${JSON.stringify(afterClick)}，确认弹窗=${dialogConfirmed ? '已点击' : '未发现'}，Execution succeeded=${executionSuccess.via}`;
     if (reachedTarget) {
       console.log(afterClickMessage);
     } else {

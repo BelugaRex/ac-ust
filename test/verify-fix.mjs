@@ -873,11 +873,16 @@ async function runTests() {
       && !zhCN.safetynetNotSet?.message.includes('PWM 循环')
       && zhCN.diagnosePwmError?.message.includes('自动控制')
       && zhCN.diagnosePageTimerExpr?.message.includes('state=')
+      && zhCN.diagnosePageTimerExpr?.message.includes('应设')
       && !zhCN.diagnosePageTimerExpr?.message.includes('pwmState=')
       && en.safetynetNotSet?.message.includes('automatic control will retry')
       && en.diagnosePwmError?.message.includes('Automatic control')
-      && en.diagnosePageTimerExpr?.message.includes('state='),
-    'Smart/PWM 共用诊断不再误标 PWM，空 page timer 不再显示绿色成功');
+      && en.diagnosePageTimerExpr?.message.includes('expected')
+      && en.diagnosePageTimerExpr?.message.includes('state=')
+      && popupJs.includes('function getDiagnosticPageTimerExpectation(schedule, fallbackAt = 0)')
+      && popupJs.includes('smartOnBoundaryAt')
+      && popupJs.includes('formatDiagnosticPageTimerValue(expectedAt) === String(pt.value).trim()'),
+    'Smart/PWM 共用诊断使用独立应设时间，不再让可变本地目标自证，空 page timer 不再显示绿色成功');
   assertPass(popupJs.includes('function formatBuildTimeShort(buildTime)')
       && popupJs.includes('return `${month}/${day} ${hour}:${minute}`;')
       && popupJs.includes('versionInfo.textContent = `v${displayVersion} · ${formatBuildTimeShort(BUILD_TIME)}`')
@@ -1720,14 +1725,20 @@ async function runTests() {
   let disabledEnsureClickCalls = 0;
   const loadEnsure = new Function(
     'getACStatusInPageWorld', 'waitForACSwitchInPageWorld', 'clickElementOnceInPageWorld',
-    'clickConfirmDialogInPageWorld', 'sleepInPageWorld', 'MAX_AC_SWITCH_CLICKS', 'AC_STATE_SETTLE_MS',
+    'clickConfirmDialogInPageWorld', 'startExecutionSuccessWaitInPageWorld',
+    'sleepInPageWorld', 'MAX_AC_SWITCH_CLICKS', 'AC_STATE_SETTLE_MS',
     `${ensureFnSource}; return { ensureACState };`
   );
+  const successfulExecutionWait = () => ({
+    result: Promise.resolve({ success: true, via: 'test' }),
+    cancel() {}
+  });
   const { ensureACState } = loadEnsure(
     () => ({ isOn: false, disabled: true, source: 'main-world-ant-switch' }),
     async () => null,
     () => { disabledEnsureClickCalls += 1; return true; },
     async () => false,
+    successfulExecutionWait,
     async () => {},
     3,
     10000
@@ -1739,6 +1750,7 @@ async function runTests() {
     async () => ({}),
     () => { expiredWindowClickCalls += 1; return true; },
     async () => false,
+    successfulExecutionWait,
     async () => {},
     3,
     10000
@@ -1778,6 +1790,7 @@ async function runTests() {
     async () => ({}),
     () => { enabledEnsureClickCalls += 1; return true; },
     async () => false,
+    successfulExecutionWait,
     async () => {},
     3,
     10000
@@ -1842,14 +1855,20 @@ async function runTests() {
     '9H-3: Smart OFF 使用正式确认后恢复 API，直接对齐下一半点 ON');
   assertPass(smartBody.includes('if (status?.isOn === true) {')
       && smartBody.includes('const recheck = await getCurrentACStatus();')
-      && smartBody.includes('if (recheck?.isOn === false) status = recheck;'),
-    '9H-6: 关机边界读到 ON 时短暂重读确认，避免陈旧读回误设 1 分钟安全定时器');
+      && smartBody.includes('if (recheck?.isOn === false) status = recheck;')
+      && smartBody.includes('await sleep(10000);'),
+    '9H-6: 关机边界读到 ON 时等待 10 秒只复读一次，避免陈旧读回误设 1 分钟安全定时器');
   assertPass(smartBody.includes('const statusOn = status?.isOn === true;')
       && smartBody.includes('安全关机定时器写入失败：')
       && !smartBody.includes('智能关机边界未确认：${safetyTimer?.error')
       && smartBody.includes('智能关机边界状态未确认，已补设 1 分钟页面关机定时器')
       && smartBody.includes("'smart-off-status-unknown'"),
     '9H-7: 区分页面定时器写失败与关机未确认，未知状态仍保留安全重试');
+  assertPass(smartBody.includes('smartOffSafetyTimerUsed === true')
+      && smartBody.includes('smart-off-safety-exhausted')
+      && smartBody.includes('已停止继续延后页面关机时间')
+      && smartBody.includes('schedule.smartOffSafetyTimerUsed = true'),
+    '9H-8: Smart 安全补时只允许一次，二次仍未确认时停止继续推迟截止时间');
   assertPass(!backgroundSource.includes('retryExistingTabToggle')
       && !backgroundSource.includes('async function retryToggle'),
     '9I: background 已删除四次即时消息重试路径');
@@ -4415,16 +4434,17 @@ return { reapplySmartSensitivityNow };`
       && ambiguousOkHarness11J.state.okClickCount === 0
       && preVisibleDropdownResult11J.success === false
       && preVisibleDropdownResult11J.failureStage === 'select-ok'
+      && preVisibleDropdownResult11J.attempt === 1
       && preVisibleDropdownHarness11J.state.okClickCount === 0,
-    '11J-6: 多个新 dropdown、多个 enabled OK 或预先可见无关 dropdown 均首次失败且零点击');
+    '11J-6: 多个新 dropdown、多个 enabled OK 或预先可见无关 dropdown 等待后仍失败且零点击');
 
   const timeCellHarness11J = createPowerOffAfterHarness({});
   const timeCellResult11J = await timeCellHarness11J.run();
   assertPass(timeCellResult11J.success === true
-      && timeCellHarness11J.state.timeCellClicks.length >= 2
-      && timeCellHarness11J.state.timeCellClicks[0] === '12'
-      && timeCellHarness11J.state.timeCellClicks[1] === '34',
-    '11J-6A: 只读 picker 提交前在下拉层点选 12 时与 34 分单元格，确保 OK 提交正确时刻');
+      && timeCellHarness11J.state.timeCellClicks.length === 0
+      && timeCellHarness11J.state.okClickCount === 1
+      && timeCellHarness11J.getCurrentInput().value === timeCellHarness11J.expectedValue,
+    '11J-6A: 已输入目标值时不再点击时间格覆盖输入，直接等待唯一 OK 提交');
   assertPass(contentSource.includes('function closePowerOffPickerDropdowns(')
       && contentSource.includes("key: 'Escape'")
       && contentSource.includes('if (closePowerOffPickerDropdowns(input) > 0)'),
@@ -5561,6 +5581,10 @@ return { reapplySmartSensitivityNow };`
       && backgroundSource.includes("appendDiagnosticLog('error', `message-${msg?.type || 'unknown'}`, e)")
       && backgroundSource.includes("appendDiagnosticLog('error', 'toggle-refresh-recovery'"),
     '15E: 日志只进 local，并覆盖 init、PWM、消息汇聚与刷新恢复关键错误链');
+
+  assertPass(backgroundSource.includes("appendDiagnosticLog(bfcachePortClosed ? 'warn' : 'error', 'toggle-message', error)")
+      && /back\/forward cache/i.test(backgroundSource),
+    '15G: toggle-message 的 BFCache 断口降级为 warn，其它发送失败仍按 error');
 
   const recentLogStart = popupSource.indexOf('function selectRecentDiagnosticEntries(');
   const recentLogEnd = popupSource.indexOf('\nbtnDiagnose.addEventListener', recentLogStart);

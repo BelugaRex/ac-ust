@@ -51,7 +51,7 @@
   function formatFallbackTimestamp(value) {
     const timestamp = Number(value);
     return Number.isFinite(timestamp) && timestamp > 0
-      ? new Date(timestamp).toLocaleString()
+      ? new Date(timestamp).toLocaleString([], { hour12: false })
       : '∅';
   }
 
@@ -339,7 +339,7 @@
     const contentHeight = Math.round(Math.max(root.scrollHeight || 0, body?.scrollHeight || 0));
     const lines = [
       `⚠️ [POPUP-MAIN-FAILED] ${fallbackTranslate('diagnoseFallbackSummary')}`,
-      `ℹ️ ${new Date().toLocaleString()}`,
+      `ℹ️ ${new Date().toLocaleString([], { hour12: false })}`,
       `ℹ️ version=${sanitizeFallbackToken(manifest.version)}, browser=${formatFallbackBrowser(navigator.userAgent)}`,
       `ℹ️ ${fallbackTranslate(
         'diagnoseFallbackDocument',

@@ -137,7 +137,7 @@
   "diagnoseEnabledPrefix": { "message": "schedule.enabled=" },
   "diagnoseOn": { "message": "automatic control active" },
   "diagnoseOff": { "message": "automatic control inactive" },
-  "diagnosePageTimerExpr": { "message": "page timer picker=\"$1\" ← $2 (state=$3)" },
+  "diagnosePageTimerExpr": { "message": "page timer picker=\"$1\" ← expected $2 (state=$3)" },
   "diagnosePageTimerEmpty": { "message": "page timer picker empty/unset (validation pending until page timer has a value)" },
   "diagnosePageTimerFail": { "message": "page timer read failed: " },
   "diagnosePageTimerPending": { "message": "page timer validation pending until AC page is open" },

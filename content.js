@@ -957,13 +957,12 @@ async function typeOnceIntoPickerInput(
     // 此时 AC 尚未开机，提交会被服务端拒绝并触发整页刷新，导致后续点选单元格/OK
     // 被中断（表现为「输入框未接受时间」）。改为直接点选时刻单元格再点 OK 完成提交。
 
-    // 只读输入框打字不改 rc-picker 内部值，先点选时刻单元格再点 OK，
-    // 确保 OK 提交的是目标时刻而非空值（结构未知时返回 false，不影响原链路）。
-    clickPowerOffTimeCells(currentControl, operationVisibleDropdownsBefore, value);
-
-    const okResult = clickUniquePowerOffPickerOk(
+    // 输入框已经接受目标值时不要再点小时/分钟格：真实 rc-picker 会把格子点击
+    // 当成一次新的选择，可能覆盖刚输入的值。只等待唯一且已启用的 OK 提交。
+    const okResult = await clickUniquePowerOffPickerOk(
       currentControl,
-      operationVisibleDropdownsBefore
+      operationVisibleDropdownsBefore,
+      { timeoutMs: 3000, pollIntervalMs: 50 }
     );
     if (!okResult.accepted) {
       return createPowerOffTimerTypingFailure('select-ok', {
@@ -1381,6 +1380,16 @@ function resolvePowerOffPickerDropdown(control, visibleBefore) {
   }
 
   let dropdown = linked[0] || newlyVisible[0] || null;
+  const visibleExistingDropdownIsRelated = relationIds.size === 0
+    || relationIds.has(String(visible[0]?.id || ''));
+  if (!dropdown
+      && visible.length === 1
+      && visibleBefore.has(visible[0])
+      && visibleExistingDropdownIsRelated) {
+    // 真实页面可能在扩展接管前就已打开 picker，且 dropdown 没有 id/aria 关联。
+    // 只有唯一且确认是既有层时复用；多个层仍保持失败关闭。
+    dropdown = visible[0];
+  }
   if (!dropdown && visible.length > 0) {
     return { dropdown: null, openedDropdown: null, ambiguous: true, visible };
   }
@@ -1420,57 +1429,57 @@ function clickPowerOffTimeCells(control, visibleBefore, value) {
   return true;
 }
 
-function clickUniquePowerOffPickerOk(control, visibleBefore) {
-  const resolved = resolvePowerOffPickerDropdown(control, visibleBefore);
-  if (resolved.ambiguous) {
-    console.warn('[AC扩展] Power-off after 下拉层无法唯一关联，拒绝猜测 OK');
-    return {
-      accepted: false,
-      clicked: false,
-      openedDropdown: null,
-      visibleDropdownCount: resolved.visible.length
-    };
+async function clickUniquePowerOffPickerOk(
+  control,
+  visibleBefore,
+  { timeoutMs = 3000, pollIntervalMs = 50 } = {}
+) {
+  const deadline = Date.now() + Math.max(0, Number(timeoutMs) || 0);
+  let lastResolved = resolvePowerOffPickerDropdown(control, visibleBefore);
+  while (Date.now() <= deadline) {
+    lastResolved = resolvePowerOffPickerDropdown(control, visibleBefore);
+    if (!lastResolved.ambiguous && lastResolved.dropdown) {
+      const visibleEnabledButtons = lastResolved.visible.flatMap(dropdown => Array.from(
+        dropdown.querySelectorAll('.ant-picker-ok button:not([disabled])')
+      ).filter(button => button.disabled !== true));
+      const buttons = Array.from(
+        lastResolved.dropdown.querySelectorAll('.ant-picker-ok button:not([disabled])')
+      ).filter(button => button.disabled !== true);
+      if (visibleEnabledButtons.length === 1 && buttons.length === 1) {
+        buttons[0].click();
+        return {
+          accepted: true,
+          clicked: true,
+          openedDropdown: lastResolved.openedDropdown,
+          visibleDropdownCount: lastResolved.visible.length
+        };
+      }
+      if (visibleEnabledButtons.length > 1 || buttons.length > 1) {
+        console.warn('[AC扩展] Power-off after 下拉层有多个 enabled OK，拒绝猜测');
+        return {
+          accepted: false,
+          clicked: false,
+          openedDropdown: lastResolved.openedDropdown,
+          visibleDropdownCount: lastResolved.visible.length
+        };
+      }
+    } else if (!lastResolved.ambiguous && !lastResolved.dropdown) {
+      return {
+        accepted: true,
+        clicked: false,
+        openedDropdown: null,
+        visibleDropdownCount: lastResolved.visible.length
+      };
+    }
+    if (Date.now() >= deadline) break;
+    await sleep(pollIntervalMs);
   }
-  if (!resolved.dropdown) {
-    return {
-      accepted: true,
-      clicked: false,
-      openedDropdown: null,
-      visibleDropdownCount: resolved.visible.length
-    };
-  }
-
-  const visibleEnabledButtons = resolved.visible.flatMap(dropdown => Array.from(
-    dropdown.querySelectorAll('.ant-picker-ok button:not([disabled])')
-  ).filter(button => button.disabled !== true));
-  if (visibleEnabledButtons.length > 1) {
-    console.warn('[AC扩展] 可见下拉层有多个 enabled OK，拒绝猜测');
-    return {
-      accepted: false,
-      clicked: false,
-      openedDropdown: resolved.openedDropdown,
-      visibleDropdownCount: resolved.visible.length
-    };
-  }
-
-  const buttons = Array.from(
-    resolved.dropdown.querySelectorAll('.ant-picker-ok button:not([disabled])')
-  ).filter(button => button.disabled !== true);
-  if (buttons.length > 1) {
-    console.warn('[AC扩展] Power-off after 下拉层有多个 enabled OK，拒绝猜测');
-    return {
-      accepted: false,
-      clicked: false,
-      openedDropdown: resolved.openedDropdown,
-      visibleDropdownCount: resolved.visible.length
-    };
-  }
-  if (buttons.length === 1) buttons[0].click();
+  console.warn('[AC扩展] Power-off after 下拉层在等待窗口内无法唯一提交 OK');
   return {
-    accepted: true,
-    clicked: buttons.length === 1,
-    openedDropdown: resolved.openedDropdown,
-    visibleDropdownCount: resolved.visible.length
+    accepted: false,
+    clicked: false,
+    openedDropdown: lastResolved.openedDropdown,
+    visibleDropdownCount: lastResolved.visible.length
   };
 }
 

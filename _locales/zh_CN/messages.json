@@ -137,7 +137,7 @@
   "diagnoseEnabledPrefix": { "message": "schedule.enabled=", "description": "诊断：enabled 显示前缀" },
   "diagnoseOn": { "message": "自动控制已启用", "description": "诊断：全局自动控制启用文案" },
   "diagnoseOff": { "message": "自动控制未启用", "description": "诊断：全局自动控制未启用文案" },
-  "diagnosePageTimerExpr": { "message": "page timer picker=\"$1\" ← $2 (state=$3)", "description": "诊断：page timer 跨设备同步通道。$1=picker 值，$2=本地下次触发，$3=当前模式状态" },
+  "diagnosePageTimerExpr": { "message": "page timer picker=\"$1\" ← 应设 $2 (state=$3)", "description": "诊断：page timer 跨设备同步通道。$1=页面 picker 值，$2=独立计算的应设截止时间，$3=当前模式状态" },
   "diagnosePageTimerEmpty": { "message": "page timer picker 空/未设 (校验待 page timer 有值后自动生效)", "description": "诊断：page timer 为空时的提示" },
   "diagnosePageTimerFail": { "message": "page timer 读取失败: ", "description": "诊断：page timer 读取失败前缀" },
   "diagnosePageTimerPending": { "message": "page timer 校验待 AC 页面打开后生效", "description": "诊断：page timer 待 AC 页打开后校验" },

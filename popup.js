@@ -857,6 +857,41 @@ function areDiagnosticTriggersAligned(...triggerTimes) {
   return Math.max(...times) - Math.min(...times) < DIAGNOSTIC_TRIGGER_TOLERANCE_MS;
 }
 
+function getDiagnosticPageTimerExpectation(schedule, fallbackAt = 0) {
+  if (schedule?.smartMode?.enabled !== true) {
+    return { targetAt: Number(fallbackAt) || 0, source: 'local-trigger' };
+  }
+  if (schedule.smartState !== 'off') {
+    return { targetAt: 0, source: 'not-on-phase' };
+  }
+  const boundaryAt = Number(schedule.smartOnBoundaryAt);
+  const onMinutes = Number(schedule.onMinutes);
+  if (!Number.isSafeInteger(boundaryAt)
+      || boundaryAt <= 0
+      || !Number.isSafeInteger(onMinutes)
+      || onMinutes <= 0
+      || onMinutes > 25) {
+    return { targetAt: 0, source: 'smart-plan-unavailable' };
+  }
+  const boundary = new Date(boundaryAt);
+  if ((boundary.getMinutes() !== 0 && boundary.getMinutes() !== 30)
+      || boundary.getSeconds() !== 0
+      || boundary.getMilliseconds() !== 0) {
+    return { targetAt: 0, source: 'smart-plan-unavailable' };
+  }
+  return {
+    targetAt: boundaryAt + onMinutes * 60000,
+    source: 'smart-plan'
+  };
+}
+
+function formatDiagnosticPageTimerValue(timestamp) {
+  const value = Number(timestamp);
+  if (!Number.isFinite(value) || value <= 0) return '';
+  const date = new Date(value);
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
 function classifyDiagnosticRetryChannels(schedule, automationAlarm, pageTimerRetryAlarm) {
   const smartMode = schedule?.smartMode?.enabled === true;
   const automationAlarmName = smartMode ? 'ac-smart' : 'ac-pwm';
@@ -1421,8 +1456,11 @@ btnDiagnose.addEventListener('click', async () => {
       try {
         const pt = await sendDiagnosticRuntimeMessage({ type: 'getPageTimer' });
         if (pt && pt.success !== false && pt.invalidTarget !== true && pt.found && pt.value) {
-            const localNext = effectiveNextTriggerAt;
-            add(true, t('diagnosePageTimerExpr', pt.value, fmt(localNext), modeState));
+            const expectation = getDiagnosticPageTimerExpectation(s, effectiveNextTriggerAt);
+            const expectedAt = expectation.targetAt;
+            add(expectedAt > 0
+                && formatDiagnosticPageTimerValue(expectedAt) === String(pt.value).trim(),
+              t('diagnosePageTimerExpr', pt.value, fmt(expectedAt), modeState));
         } else if (pt?.success === false || pt?.invalidTarget === true) {
           add(false, t('diagnosePageTimerFail') + String(pt.error || '').slice(0,60));
         } else {

@@ -609,6 +609,7 @@ let schedule = {
   pageTimerRetryAt: 0,
   pageTimerRetryMinutes: 0,
   smartOnBoundaryAt: 0,
+  smartOffSafetyTimerUsed: false,
   smartRetryKind: '',
   smartRetryBoundaryAt: 0,
   smartRetryScheduledAt: 0,
@@ -3016,6 +3017,7 @@ async function runSmartStep(alarmContext = {}) {
           ? activeHoursDeadlineAt
           : plannedWindowEndsAt;
         schedule.smartOnBoundaryAt = onWindowPlan.boundaryAt || plan.boundaryAt;
+        schedule.smartOffSafetyTimerUsed = false;
         const timerMinutes = Math.max(
           1,
           Math.ceil((targetAt - now) / 60000)
@@ -3035,7 +3037,14 @@ async function runSmartStep(alarmContext = {}) {
 
         if (!armResult?.success) {
           if (armResult.failureStage === 'write') {
-            schedule.pageTimerError = `智能自动开启前页面关机定时器未确认：${armResult.error || '未知错误'}${armResult.pageTimerFailureStage ? `（${armResult.pageTimerFailureStage}）` : ''}`;
+            schedule.pageTimerError = `智能自动开启前页面关机定时器未确认：${formatPageTimerFailureEvidence({
+              error: armResult.error,
+              failureStage: armResult.pageTimerFailureStage,
+              expectedValue: armResult.pageTimerExpectedValue,
+              observedValue: armResult.pageTimerObservedValue,
+              observedTitle: armResult.pageTimerObservedTitle,
+              visibleDropdownCount: armResult.pageTimerVisibleDropdownCount
+            })}`;
             await commitSmartOnRetry(
               plan.boundaryAt,
               Date.now(),
@@ -3091,17 +3100,33 @@ async function runSmartStep(alarmContext = {}) {
         // 页面关机定时器刚触发时，开关可能还没刷新到 OFF（陈旧读回）。
         // 读到 ON 时短暂重读一次确认是否真的仍 ON，避免误设 1 分钟安全定时器。
         if (status?.isOn === true) {
-          await sleep(1500);
+          // 页面定时器触发后给 UST/React 足够时间刷新，再只复读一次；
+          // 过短轮询既制造趋势，也无法证明服务器状态已经落地。
+          await sleep(10000);
           const recheck = await getCurrentACStatus();
           if (recheck?.isOn === false) status = recheck;
         }
         const statusOn = status?.isOn === true;
         if (status?.isOn !== false) {
+          if (schedule.smartOffSafetyTimerUsed === true) {
+            schedule.pageTimerError = statusOn
+              ? '智能关机边界二次仍检测到 ON，已停止继续延后页面关机时间'
+              : '智能关机边界状态二次仍未确认，已停止继续延后页面关机时间';
+            await clearSmartAlarm(automationRevision);
+            setSmartNextTriggerAt(0);
+            schedule.smartOffSafetyTimerUsed = false;
+            await persistSchedule('smart-off-safety-exhausted', {
+              syncFromLiveAlarm: false
+            });
+            await updateBadge();
+            return;
+          }
           const safetyTimer = await setPageTimer(1, {
             retryOnFailure: false,
             automationRevision,
             automationMode: 'smart'
           });
+          if (safetyTimer?.success) schedule.smartOffSafetyTimerUsed = true;
           schedule.pageTimerError = safetyTimer?.success
             ? (statusOn
               ? '智能关机边界仍检测到 ON，已补设 1 分钟页面关机定时器'
@@ -3118,6 +3143,7 @@ async function runSmartStep(alarmContext = {}) {
 
         clearPageTimerProofState();
         schedule.smartOnBoundaryAt = 0;
+        schedule.smartOffSafetyTimerUsed = false;
         schedule.pageTimerError = '';
         const afterConfirmedOffPlan = planSmartOnAfterConfirmedOff(schedule, {
           now,
@@ -3714,6 +3740,21 @@ function normalizePageTimerFailure(failure, fallbackError = '') {
   return normalized;
 }
 
+  function formatPageTimerFailureEvidence(failure, fallbackError = '未知错误') {
+    const normalized = normalizePageTimerFailure(failure, fallbackError);
+    const evidence = [];
+    if (normalized.failureStage) evidence.push(`stage=${normalized.failureStage}`);
+    if (normalized.expectedValue) evidence.push(`expected=${normalized.expectedValue}`);
+    if (normalized.observedValue) evidence.push(`value=${normalized.observedValue}`);
+    if (normalized.observedTitle) evidence.push(`title=${normalized.observedTitle}`);
+    if (normalized.visibleDropdownCount > 0) {
+      evidence.push(`dropdowns=${normalized.visibleDropdownCount}`);
+    }
+    return evidence.length
+      ? `${normalized.error} [${evidence.join(', ')}]`
+      : normalized.error;
+  }
+
 function isRecoverablePageTimerTransportFailure(error) {
   return /(?:receiving end|message channel|message port|port (?:closed|disconnected)|\btimeout\b|timed out|探测超时|消息[^，。]{0,24}超时)/i
     .test(String(error || ''));
@@ -4200,8 +4241,10 @@ async function armPowerOffTimerEnsuringOn(
       failureStage: 'write',
       error: writeResult?.error || '页面关机定时器写入失败',
       pageTimerFailureStage: writeResult?.failureStage || '',
+      pageTimerExpectedValue: writeResult?.expectedValue || '',
       pageTimerObservedValue: writeResult?.observedValue || '',
       pageTimerObservedTitle: writeResult?.observedTitle || '',
+      pageTimerVisibleDropdownCount: writeResult?.visibleDropdownCount || 0,
       targetAt: Number(writeResult?.targetAt) || 0,
       automaticDeadlineExpired: writeResult?.automaticDeadlineExpired === true
     };
@@ -4816,8 +4859,12 @@ async function attemptACToggleOnExactHome(tabId, action, options = {}) {
   try {
     return await sendACToggleMessage(tabId, action, options);
   } catch (error) {
+    // BFCache 断口（页面进入 back/forward cache 导致消息通道关闭）是页面导航的预期现象，
+    // 且随后 attemptACToggleWithRecovery 会刷新页面重试自愈，故降级为 warn，
+    // 避免污染「本构建以来异常」统计；其余发送失败（注入失败、未知错误等）仍按 error 记录。
+    const bfcachePortClosed = /back\/forward cache/i.test(String(error?.message || error));
     console.error('[AC扩展] 发送消息失败:', error?.message);
-    void appendDiagnosticLog('error', 'toggle-message', error);
+    void appendDiagnosticLog(bfcachePortClosed ? 'warn' : 'error', 'toggle-message', error);
     return { success: false, tabId, error: error?.message || String(error) };
   }
 }
