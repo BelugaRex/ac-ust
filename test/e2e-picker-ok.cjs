@@ -18,7 +18,10 @@ const cases = [
   { name: '等待 OK 时输入框替换，重新绑定 live input', enableDelay: 250, replaceInput: true },
   { name: '多个无法关联的下拉层拒绝提交', overlap: true, persistentOverlap: true, failure: 'select-ok' },
   { name: 'OK 一直禁用时明确失败', neverEnable: true, failure: 'select-ok' },
-  { name: 'OK 未关闭选择器时不能伪报保存成功', stayOpen: true, failure: 'confirm-stable' }
+  { name: 'OK 未关闭选择器时不能伪报保存成功', stayOpen: true, failure: 'confirm-stable' },
+  { name: '后台每秒调度仍完成输入与 OK，动画帧暂停不阻塞', timerFloor: 1000 },
+  { name: '后台每秒调度兼容输入框重建与 OK 延迟启用', timerFloor: 1000, enableDelay: 250, replaceInput: true },
+  { name: '后台每秒调度时未关闭下拉层仍拒绝假成功', timerFloor: 1000, stayOpen: true, failure: 'confirm-stable' }
 ];
 
 async function runCase(browser, options) {
@@ -29,6 +32,14 @@ async function runCase(browser, options) {
     }));
     await page.goto(homeUrl);
     await page.evaluate(({ dropdownHtml, options }) => {
+      // 确定性模拟后台计时器，不能把此夹具当作 OS 遮挡/冻结策略的完整仿真。
+      if (options.timerFloor) {
+        const nativeSetTimeout = globalThis.setTimeout.bind(globalThis);
+        globalThis.setTimeout = (callback, delay, ...args) => nativeSetTimeout(
+          callback, Math.max(options.timerFloor, Number(delay) || 0), ...args
+        );
+        globalThis.requestAnimationFrame = () => 0;
+      }
       document.body.innerHTML = `<div class="timer-row"><small>Power-off after</small>
         <div class="ant-picker"><input readonly placeholder="Select time" value="00:51" title="00:51"></div></div>` + dropdownHtml;
       const dropdown = document.querySelector('.ant-picker-dropdown');

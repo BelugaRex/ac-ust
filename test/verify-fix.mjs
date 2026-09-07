@@ -2031,32 +2031,30 @@ async function runTests() {
   const verifySectionForReload = verificationStartForReload >= 0 && verificationEndForReload > verificationStartForReload
     ? backgroundSource.slice(verificationStartForReload, verificationEndForReload)
     : '';
-  // tabs.reload 仍只在 refreshACControlPage 一处；tabs.update 现允许四处——
-  // 导航回 home（url: AC_PAGE）在 refreshACControlPage 与 recoverStuckTransientHomeTabs，
-  // 置前/还原标签（active: true）在 activateTabForTimerWrite（写定时器前规避 Chrome 后台节流）。
+    // tabs.reload/update 只用于既有开机恢复与看门狗导航；定时器写入不得抢焦点。
   // 页面定时器验证（verifyPageTimerPersistence）仍不得 reload/update 来源页。
   assertPass(countOccurrences(backgroundSource, 'chrome.tabs.reload(') === 1
-      && countOccurrences(backgroundSource, 'chrome.tabs.update(') === 4
+      && countOccurrences(backgroundSource, 'chrome.tabs.update(') === 2
       && !backgroundSource.includes('async function restoreDiscardedACTab(tab)')
       && !verifySectionForReload.includes('chrome.tabs.reload(')
       && !verifySectionForReload.includes('chrome.tabs.update(')
       && !verifySectionForReload.includes('sourceWasAutoCreated'),
-    '9N: background 仅在开机恢复/看门狗回收/置前写定时器函数内 reload/update；页面定时器验证仍不刷新来源页');
-  assertPass(backgroundSource.includes('async function activateTabForTimerWrite(')
-      && backgroundSource.includes('chrome.windows.update(targetTab.windowId, { state: \'normal\', focused: true })')
-      && backgroundSource.includes('await activateTabForTimerWrite(tabId)')
-      && backgroundSource.includes('await restoreForeground()'),
-    '9N-1: 写定时器前短暂置前标签（取消最小化+聚焦窗口+激活），写后还原，规避 Chrome 后台节流');
+    '9N: background 仅在开机恢复/看门狗回收中 reload/update；定时器不刷新来源页');
+  assertPass(!backgroundSource.includes('activateTabForTimerWrite')
+      && !backgroundSource.includes('chrome.windows.update(')
+      && !/active:\s*true/.test(backgroundSource),
+    '9N-1: 后台执行绝不取消最小化、聚焦窗口或激活标签，失败也不置前兜底');
   assertPass(setTimerBody.includes('chrome.tabs.create({ url: AC_PAGE, active: false })')
-      && setTimerBody.includes('!candidate.discarded'),
-    '9O: 页面定时器缺少未丢弃的精确 home 时只创建隐藏 AC 页，不恢复或刷新用户页面');
-  assertPass(setTimerBody.includes('tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded)')
+      && !setTimerBody.includes('chrome.tabs.query('),
+    '9O: 页面定时器每次使用新的隐藏页，不复用用户页或长期被节流的旧页');
+  assertPass(setTimerBody.includes('const created = await createHiddenWriteTab();')
+      && !setTimerBody.includes('tabs.find(')
       && !setTimerBody.includes('tabs[0]')
       && !setTimerBody.includes('chrome.tabs.update(')
       && setTimerBody.includes('const getWritableExactHomeTab = async (tabId) =>')
       && setTimerBody.includes('urlDrift: true')
       && setTimerBody.includes('discarded: true'),
-    '9O-1: 页面定时器只复用精确 home；不存在时新建隐藏 home，绝不降级改写其他 HKUST 标签');
+    '9O-1: 隐藏写入页全程复核精确 home 与 discarded，绝不降级改写用户标签');
   assertPass(contentSource.includes('function normalizeContentLocale(raw)')
       && contentSource.includes("if (/^en(?:_|$)/i.test(normalized)) return 'en';")
       && contentSource.includes('const ui = normalizeContentLocale(chrome.i18n?.getUILanguage?.());'),
@@ -7200,29 +7198,37 @@ return { reapplySmartSensitivityNow };`
     'console',
     'AC_PAGE',
     'PAGE_TIMER_WRITE_TIMEOUT_MS',
-    'PAGE_TIMER_RECOVERY_MIN_RUNWAY_MS',
     `${sharedPredicateAtomsSource17}\n${pageTimerRecoverySource17}; return { setPageTimer };`
   );
 
   const createPageTimerRecoveryHarness17 = (
     scriptedResponses,
-    { targetOffsetMs = 10 * 60_000, verificationSuccess = true } = {}
+    { targetOffsetMs = 10 * 60_000, verificationSuccess = true,
+      initialTabs = true, onReady = null, createFails = false } = {}
   ) => {
     const now17 = 1_800_000_000_000;
+    const clock17 = { now: now17, current: true };
     const targetAt17 = now17 + targetOffsetMs;
     const exactHome17 = 'https://w5.ab.ust.hk/njggt/app/home';
-    const tabs17 = new Map([[1, {
+    const tabs17 = new Map(initialTabs ? [[1, {
       id: 1,
+      windowId: 7,
+      active: true,
+      pinned: true,
       url: exactHome17,
       status: 'complete',
       discarded: false
-    }]]);
+    }]] : []);
     const calls17 = {
       writes: [],
       injects: 0,
       creates: 0,
       verifications: 0,
-      persists: 0
+      persists: 0,
+      tabUpdates: [],
+      windowUpdates: [],
+      alarms: [],
+      cleanupBeforeReady: false
     };
     const schedule17 = {
       pageTimerMinutes: null,
@@ -7242,31 +7248,51 @@ return { reapplySmartSensitivityNow };`
         },
         async create(options) {
           calls17.creates += 1;
+          if (createFails) throw new Error('cannot create background tab');
           const tab = {
             id: 2,
+            windowId: 7,
+            active: options.active,
             url: options.url,
             status: 'complete',
             discarded: false
           };
           tabs17.set(tab.id, tab);
           return { ...tab };
+        },
+        async update(tabId, options) {
+          calls17.tabUpdates.push({ tabId, ...options });
+          return { ...tabs17.get(tabId), ...options };
+        }
+      },
+      windows: {
+        async update(windowId, options) {
+          calls17.windowUpdates.push({ windowId, ...options });
+          return { id: windowId, ...options };
         }
       },
       alarms: {
         async clear() { return true; },
-        async create() { return true; }
+        async create(name, options) {
+          calls17.alarms.push({ name, ...options });
+          return true;
+        }
       }
     };
     const runtime17 = loadPageTimerRecovery17(
       schedule17,
       chrome17,
-      { now: () => now17 },
+      { now: () => clock17.now },
       key => key,
-      () => true,
+      () => clock17.current,
       async () => {},
       async () => { calls17.persists += 1; },
       tab => tab?.url === exactHome17,
-      async () => true,
+      async tabId => {
+        calls17.cleanupBeforeReady = calls17.alarms.some(alarm => alarm.name === `ac-close-tab-${tabId}`);
+        if (onReady) onReady({ clock: clock17, tabs: tabs17, tabId });
+        return true;
+      },
       async () => { calls17.injects += 1; return true; },
       async () => true,
       async (tabId, message) => {
@@ -7288,12 +7314,12 @@ return { reapplySmartSensitivityNow };`
       },
       quietConsole,
       exactHome17,
-      30000,
-      150000
+      60000
     );
     return {
       calls: calls17,
       schedule: schedule17,
+      tabs: tabs17,
       targetAt: targetAt17,
       run: () => runtime17.setPageTimer(10, {
         retryOnFailure: false,
@@ -7318,7 +7344,6 @@ return { reapplySmartSensitivityNow };`
   };
   const fallbackRecovery17 = createPageTimerRecoveryHarness17([
     recoverableFailure17,
-    recoverableFailure17,
     ({ targetAt }) => ({
       success: true,
       value: '06:10',
@@ -7332,14 +7357,14 @@ return { reapplySmartSensitivityNow };`
   );
   assertPass(fallbackRecoveryResult17.success === true
       && fallbackRecoveryResult17.verified === true
-      && fallbackRecovery17.calls.writes.length === 3
+      && fallbackRecovery17.calls.writes.length === 2
       && fallbackRecovery17.calls.injects === 1
       && fallbackRecovery17.calls.creates === 1
       && fallbackRecovery17.calls.verifications === 1
       && fallbackTargets17.size === 1
       && fallbackTargets17.has(fallbackRecovery17.targetAt)
       && fallbackRecovery17.schedule.pageTimerTargetAt === fallbackRecovery17.targetAt,
-    '17B: 可恢复输入失败仅同页重注入重写一次，再至多一个隐藏 home；三次写入固定原 targetAt，fresh verification 后才提交 proof');
+    '17B: 专用隐藏 home 最多同页重注入一次；两次写入固定原 targetAt，fresh verification 后才提交 proof');
 
   const portRecovery17 = createPageTimerRecoveryHarness17([
     new Error('The message port closed before a response was received.'),
@@ -7354,8 +7379,8 @@ return { reapplySmartSensitivityNow };`
   assertPass(portRecoveryResult17.success === true
       && portRecovery17.calls.writes.length === 2
       && portRecovery17.calls.injects === 1
-      && portRecovery17.calls.creates === 0,
-    '17C: 业务消息端口失败只触发一次同页强制重注入重写，成功后不创建 fallback 页');
+      && portRecovery17.calls.creates === 1,
+    '17C: 隐藏页消息端口失败只触发一次同页强制重注入，不另建 fallback 页');
 
   const ambiguousFailures17 = [
     {
@@ -7383,7 +7408,7 @@ return { reapplySmartSensitivityNow };`
     result17.success === false
       && harness.calls.writes.length === 1
       && harness.calls.injects === 0
-      && harness.calls.creates === 0
+      && harness.calls.creates === 1
       && !Object.hasOwn(result17, 'unexpectedDom')
       && Object.values(result17).every(value => value === null
         || ['boolean', 'number', 'string'].includes(typeof value))
@@ -7399,11 +7424,10 @@ return { reapplySmartSensitivityNow };`
   assertPass(shortRunwayResult17.success === false
       && shortRunwayRecovery17.calls.writes.length === 2
       && shortRunwayRecovery17.calls.injects === 1
-      && shortRunwayRecovery17.calls.creates === 0,
-    '17E: targetAt 剩余不足 150 秒时只完成同页有限恢复，不新建隐藏 fallback 或延长截止');
+      && shortRunwayRecovery17.calls.creates === 1,
+    '17E: 短截止只完成专用隐藏页的有限恢复，不增加标签或延长截止');
 
   const unverifiedFallback17 = createPageTimerRecoveryHarness17([
-    recoverableFailure17,
     recoverableFailure17,
     ({ targetAt }) => ({
       success: true,
@@ -7418,6 +7442,40 @@ return { reapplySmartSensitivityNow };`
       && unverifiedFallback17.calls.verifications === 1
       && unverifiedFallback17.schedule.pageTimerTargetAt === 0,
     '17F: hidden fallback 写入成功但独立新鲜页验证失败时仍不产生 storage proof');
+
+  const success17 = ({ targetAt }) => ({ success: true, value: '06:10', targetAt });
+  const backgroundCases17 = [fallbackRecovery17, portRecovery17, shortRunwayRecovery17,
+    unverifiedFallback17, ...ambiguousResults17.map(entry => entry.harness)];
+  for (const options of [
+    {}, { initialTabs: false }, { createFails: true },
+    { onReady: ({ tabs, tabId }) => { tabs.get(tabId).url += '?redirected'; } },
+    { onReady: ({ tabs, tabId }) => { tabs.get(tabId).discarded = true; } },
+    { onReady: ({ tabs, tabId }) => { tabs.delete(tabId); } },
+    { onReady: ({ clock }) => { clock.current = false; } },
+    { onReady: ({ clock }) => { clock.now += 11 * 60_000; } }
+  ]) {
+    const harness = createPageTimerRecoveryHarness17([success17], options);
+    const result = await harness.run();
+    const shouldSucceed = !options.createFails && !options.onReady;
+    assertPass(result.success === shouldSucceed
+        && (shouldSucceed ? harness.calls.writes.length === 1 : harness.calls.writes.length === 0)
+        && (shouldSucceed || harness.schedule.pageTimerTargetAt === 0),
+      `17G: 后台写入 ${options.onReady?.toString() || JSON.stringify(options)} 正确处理且失败不写证明`);
+    backgroundCases17.push(harness);
+  }
+  assertPass(backgroundCases17.every(harness => (
+    harness.calls.windowUpdates.length === 0
+      && harness.calls.tabUpdates.length === 0
+      && harness.calls.writes.every(call => call.tabId === 2)
+      && harness.tabs.get(1)?.active !== false
+      && harness.tabs.get(2)?.active !== true
+  )), '17H: 成功/重试/歧义/失效/关页/漂移均不抢窗口或标签焦点，不向用户固定页写入');
+  assertPass(backgroundCases17.filter(harness => harness.calls.alarms.length > 0).every(harness => (
+    harness.calls.alarms.every(alarm => alarm.name === 'ac-close-tab-2')
+      && harness.calls.alarms[0].delayInMinutes > 1
+      && harness.calls.alarms.at(-1).delayInMinutes === 1
+      && harness.calls.cleanupBeforeReady
+  )), '17I: 等待页面前登记故障回收，完成/失败后缩短回收等待，绝不回收用户页');
 
   // ===== 用例 18: packaged-only 本地控制生命周期审计 =====
   console.log('\n\n=== 用例 18: packaged-only 本地控制生命周期审计 ===\n');

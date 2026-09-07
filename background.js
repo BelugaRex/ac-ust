@@ -533,7 +533,6 @@ const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [10000, 15000, 20000];
 // 3 次输入尝试 ×（5s 稳定等待 + 3s OK + 3s 确认）+ 4s 定位 ≈ 39s。
 // 若 30s 就超时，会在 content script 仍在重试时误报「探测超时」，掩盖真实失败阶段。
 const PAGE_TIMER_WRITE_TIMEOUT_MS = 60000;
-const PAGE_TIMER_RECOVERY_MIN_RUNWAY_MS = 150000;
 const STORAGE_KEY = 'ac_schedule';
 const DIAGNOSTIC_LOG_KEY = 'ac_diagnostic_log';
 const DIAGNOSTIC_LOG_MAX_ENTRIES = 50;
@@ -3795,42 +3794,6 @@ function operationDeadlineIsCurrent(operationNotAfterAt) {
     && operationNotAfterAt > Date.now();
 }
 
-function recoveryHasRunway(operationNotAfterAt) {
-  return operationDeadlineIsCurrent(operationNotAfterAt)
-    && operationNotAfterAt - Date.now() >= PAGE_TIMER_RECOVERY_MIN_RUNWAY_MS;
-}
-
-// Chrome 会节流后台标签的 timer（降至 1/s 甚至 1/min），AntD picker 的下拉开合与
-// value/title 回填依赖 React 重渲染，节流下确认等待会卡在「未确认」。写入前把目标
-// 标签短暂置为前台（必要时取消最小化并聚焦所在窗口），返回一个还原之前活动标签的函数。
-async function activateTabForTimerWrite(tabId) {
-  let previousTab = null;
-  try {
-    const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
-    previousTab = activeTabs?.[0] || null;
-    const targetTab = await chrome.tabs.get(tabId);
-    if (Number.isInteger(targetTab?.windowId)) {
-      // 仅 focused:true 不会把最小化窗口带回前台，窗口仍被判定为 occluded、标签继续被节流；
-      // 必须 state:'normal' 取消最小化。
-      await chrome.windows.update(targetTab.windowId, { state: 'normal', focused: true });
-    }
-    await chrome.tabs.update(tabId, { active: true });
-    // 给一点时间让 Chrome 解除后台节流，再让 content script 以正常频率轮询 picker。
-    await sleep(500);
-  } catch (_) {
-    // 激活失败不阻塞写入，仍继续（最多维持原有后台节流行为）。
-  }
-  return async () => {
-    if (Number.isInteger(previousTab?.id) && previousTab.id !== tabId) {
-      try {
-        await chrome.tabs.update(previousTab.id, { active: true });
-      } catch (_) {
-        // 还原失败静默忽略。
-      }
-    }
-  };
-}
-
 async function setPageTimer(
   minutes,
   {
@@ -3948,6 +3911,9 @@ async function setPageTimer(
       return { failure: { success: false, error: t('bgPageTimerNoTab') } };
     }
     autoCreatedTabIds.push(tab.id);
+    // 在任何长等待前登记 SW 被逐出时的兜底回收；给两次写入及三轮读回留足时间。
+    // 正常退出仍由 finally 改为一分钟回收，不中断服务器的异步提交。
+    await chrome.alarms.create(`ac-close-tab-${tab.id}`, { delayInMinutes: 10 });
     if (!pageTimerWriteIsCurrent()) {
       return { failure: staleWriteResult() };
     }
@@ -3989,9 +3955,6 @@ async function setPageTimer(
     if (!pageTimerWriteIsCurrent()) return staleWriteResult();
     if (!operationDeadlineIsCurrent(operationNotAfterAt)) return deadlineExpiredResult(fixedTargetAt);
 
-    // Chrome 节流后台标签会让 picker 确认卡住，写入前短暂置前、写后还原。
-    const restoreForeground = await activateTabForTimerWrite(tabId);
-
     let result;
     try {
       result = await sendSerializedPageTimerMessage(tabId, {
@@ -4001,14 +3964,12 @@ async function setPageTimer(
         allowLocalOnly: deferVerification
       }, automationRevision, PAGE_TIMER_WRITE_TIMEOUT_MS, shutdownRevision, automationMode);
     } catch (error) {
-      await restoreForeground();
       return {
         success: false,
         transportFailure: true,
         error: error?.message || String(error)
       };
     }
-    await restoreForeground();
     if (result?.automationStale || result?.shutdownStale) return result;
     const finalWritable = await getWritableExactHomeTab(tabId);
     if (finalWritable.failure) return finalWritable.failure;
@@ -4067,26 +4028,15 @@ async function setPageTimer(
       return await finishFailure(deadlineExpiredResult(fixedTargetAt), 'automatic-deadline-expired');
     }
 
-    const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-  if (!pageTimerWriteIsCurrent()) return staleWriteResult();
-    let tab = tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded) || null;
-    if (!tab?.id) {
-      const created = await createHiddenWriteTab();
-      if (created.failure) return await finishFailure(created.failure, 'no-tab');
-      tab = created.tab;
-    }
+    // 不碰用户页面的输入焦点，也不复用已长期隐藏、可能按分钟节流的旧页。
+    // 新页仍受普通后台节流；保留有界等待及真实读回，绝不靠置前兜底。
+    const created = await createHiddenWriteTab();
+    if (created.failure) return await finishFailure(created.failure, 'no-tab');
+    const tab = created.tab;
 
     let result = await writeFixedTargetOnce(tab.id);
     if (!result?.success && isRecoverablePageTimerFailure(result)) {
       result = await writeFixedTargetOnce(tab.id, true);
-    }
-    if (!result?.success
-        && isRecoverablePageTimerFailure(result)
-        && autoCreatedTabIds.length === 0
-        && recoveryHasRunway(operationNotAfterAt)) {
-      const fallback = await createHiddenWriteTab();
-      if (fallback.failure) return await finishFailure(fallback.failure, 'fallback-create-failed');
-      result = await writeFixedTargetOnce(fallback.tab.id);
     }
 
     if (result?.automationStale
@@ -5176,8 +5126,7 @@ async function repairSmartScheduleClock(options = {}) {
   if (status.isOn) {
     if (!rearmPageTimer) {
       // 只读时钟修复（诊断）：不写页面定时器、不重建运行闹钟，只把 storage 时钟对齐到
-      // 已有 live 闹钟。避免诊断触发 setPageTimer → 置前标签关闭 popup，也避免「时间已设好
-      // 仍反复重设」。
+      // 已有 live 闹钟，避免「时间已设好仍反复重设」。
       const live = await chrome.alarms.get('ac-smart');
       const syncedFromLive = getLiveAlarmEndMs(live);
       if (syncedFromLive) {
