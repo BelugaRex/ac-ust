@@ -162,7 +162,6 @@
               "isSmartHalfHourBoundary",
               "nextSmartHalfHourBoundary",
               "normalizeHalfHourAlarmBoundary",
-              "nextHalfHourBoundary",
               "planNextSmartWeatherPrefetch",
               "smartWeatherTargetBoundaryAt",
               "planSmartModeOnWindow",

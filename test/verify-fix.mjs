@@ -1856,22 +1856,19 @@ async function runTests() {
       && smartBody.includes('alignSmartModeNextTrigger(')
       && !smartBody.includes('minOffMinutes'),
     '9H-3: Smart OFF 使用正式确认后恢复 API，直接对齐下一半点 ON');
-  assertPass(smartBody.includes('if (status?.isOn === true) {')
-      && smartBody.includes('const recheck = await getCurrentACStatus();')
-      && smartBody.includes('if (recheck?.isOn === false) status = recheck;')
-      && smartBody.includes('await sleep(10000);'),
-    '9H-6: 关机边界读到 ON 时等待 10 秒只复读一次，避免陈旧读回误设 1 分钟安全定时器');
-  assertPass(smartBody.includes('const statusOn = status?.isOn === true;')
-      && smartBody.includes('安全关机定时器写入失败：')
-      && !smartBody.includes('智能关机边界未确认：${safetyTimer?.error')
-      && smartBody.includes('智能关机边界状态未确认，已补设 1 分钟页面关机定时器')
-      && smartBody.includes("'smart-off-status-unknown'"),
-    '9H-7: 区分页面定时器写失败与关机未确认，未知状态仍保留安全重试');
-  assertPass(smartBody.includes('smartOffSafetyTimerUsed === true')
-      && smartBody.includes('smart-off-safety-exhausted')
-      && smartBody.includes('已停止继续延后页面关机时间')
-      && smartBody.includes('schedule.smartOffSafetyTimerUsed = true'),
-    '9H-8: Smart 安全补时只允许一次，二次仍未确认时停止继续推迟截止时间');
+  assertPass(!smartBody.includes('if (status?.isOn === true)')
+      && !smartBody.includes('await sleep(10000)')
+      && !smartBody.includes('const recheck = await getCurrentACStatus()')
+      && smartBody.includes('clearPageTimerProofState()')
+      && smartBody.includes('planSmartOnAfterConfirmedOff('),
+    '9H-6: 关机边界不再读回 AC 状态确认，Power-off after 由学校服务器保证关机，直接规划下一半点 ON');
+  assertPass(!smartBody.includes('安全关机定时器写入失败')
+      && !smartBody.includes('智能关机边界仍检测到 ON'),
+    '9H-7: 关机边界不再补设 1 分钟安全定时器，未知状态也直接规划下一半点 ON');
+  assertPass(!smartBody.includes('smartOffSafetyTimerUsed === true')
+      && !smartBody.includes('smart-off-safety-exhausted')
+      && !smartBody.includes('已停止继续延后页面关机时间'),
+    '9H-8: 移除关机边界的二次安全补时逻辑，学校保证 Power-off after 执行');
   assertPass(!backgroundSource.includes('retryExistingTabToggle')
       && !backgroundSource.includes('async function retryToggle'),
     '9I: background 已删除四次即时消息重试路径');

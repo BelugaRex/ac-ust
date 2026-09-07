@@ -3102,56 +3102,13 @@ async function runSmartStep(alarmContext = {}) {
       }
 
       if (plan.kind === 'finish') {
-        let status = await getCurrentACStatus();
         if (await abortStaleAutomation(
           automationRevision,
-          'runSmartStep-off-status-active-hours-paused',
+          'runSmartStep-off-boundary-active-hours-paused',
           'smart'
         )) return;
-        // 页面关机定时器刚触发时，开关可能还没刷新到 OFF（陈旧读回）。
-        // 读到 ON 时短暂重读一次确认是否真的仍 ON，避免误设 1 分钟安全定时器。
-        if (status?.isOn === true) {
-          // 页面定时器触发后给 UST/React 足够时间刷新，再只复读一次；
-          // 过短轮询既制造趋势，也无法证明服务器状态已经落地。
-          await sleep(10000);
-          const recheck = await getCurrentACStatus();
-          if (recheck?.isOn === false) status = recheck;
-        }
-        const statusOn = status?.isOn === true;
-        if (status?.isOn !== false) {
-          if (schedule.smartOffSafetyTimerUsed === true) {
-            schedule.pageTimerError = statusOn
-              ? '智能关机边界二次仍检测到 ON，已停止继续延后页面关机时间'
-              : '智能关机边界状态二次仍未确认，已停止继续延后页面关机时间';
-            await clearSmartAlarm(automationRevision);
-            setSmartNextTriggerAt(0);
-            schedule.smartOffSafetyTimerUsed = false;
-            await persistSchedule('smart-off-safety-exhausted', {
-              syncFromLiveAlarm: false
-            });
-            await updateBadge();
-            return;
-          }
-          const safetyTimer = await setPageTimer(1, {
-            retryOnFailure: false,
-            automationRevision,
-            automationMode: 'smart'
-          });
-          if (safetyTimer?.success) schedule.smartOffSafetyTimerUsed = true;
-          schedule.pageTimerError = safetyTimer?.success
-            ? (statusOn
-              ? '智能关机边界仍检测到 ON，已补设 1 分钟页面关机定时器'
-              : '智能关机边界状态未确认，已补设 1 分钟页面关机定时器')
-            : `${statusOn ? '' : '智能关机边界状态未确认；'}安全关机定时器写入失败：${safetyTimer?.error || '未知错误'}`;
-          await commitSmartAlarm(
-            Number(safetyTimer?.targetAt) > Date.now()
-              ? safetyTimer.targetAt
-              : nextHalfHourBoundary(now),
-            statusOn ? 'smart-off-safety-retry' : 'smart-off-status-unknown'
-          );
-          return;
-        }
-
+        // 关机时间（Power-off after）由 UST 服务器保证执行：只要已写入关机时间，学校
+        // 一定会帮忙关机。此处无需读回 AC 状态确认、也无需补设 1 分钟安全定时器。
         clearPageTimerProofState();
         schedule.smartOnBoundaryAt = 0;
         schedule.smartOffSafetyTimerUsed = false;
