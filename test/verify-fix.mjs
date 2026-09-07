@@ -2028,13 +2028,16 @@ async function runTests() {
   const verifySectionForReload = verificationStartForReload >= 0 && verificationEndForReload > verificationStartForReload
     ? backgroundSource.slice(verificationStartForReload, verificationEndForReload)
     : '';
+  // tabs.reload 仍只在 refreshACControlPage 一处；tabs.update 现允许两处——
+  // refreshACControlPage（业务漂移恢复）与 recoverStuckTransientHomeTabs（看门狗回收卡死瞬态 URL）。
+  // 页面定时器验证（verifyPageTimerPersistence）仍不得 reload/update 来源页。
   assertPass(countOccurrences(backgroundSource, 'chrome.tabs.reload(') === 1
-      && countOccurrences(backgroundSource, 'chrome.tabs.update(') === 1
+      && countOccurrences(backgroundSource, 'chrome.tabs.update(') === 2
       && !backgroundSource.includes('async function restoreDiscardedACTab(tab)')
       && !verifySectionForReload.includes('chrome.tabs.reload(')
       && !verifySectionForReload.includes('chrome.tabs.update(')
       && !verifySectionForReload.includes('sourceWasAutoCreated'),
-    '9N: background 仅在开机恢复函数内 reload 或回到精确 home；页面定时器验证仍不刷新来源页');
+    '9N: background 仅在开机恢复/看门狗回收函数内 reload 或回到精确 home；页面定时器验证仍不刷新来源页');
   assertPass(setTimerBody.includes('chrome.tabs.create({ url: AC_PAGE, active: false })')
       && setTimerBody.includes('!candidate.discarded'),
     '9O: 页面定时器缺少未丢弃的精确 home 时只创建隐藏 AC 页，不恢复或刷新用户页面');
@@ -2286,6 +2289,43 @@ async function runTests() {
       && authRedirectMatcher.isTransientAuthRedirectUrl('https://w5.ab.ust.hk/njggt/app/billing-cycle') === false
       && authRedirectMatcher.isTransientAuthRedirectUrl('https://w5.ab.ust.hk/njggt/app/home?login=1') === false,
     '9J-8: 仅 login/CAS 回调判为瞬态重登录，home/billing-cycle/带 login 查询参数均不误判');
+
+  // 9J-9: 看门狗回收卡死瞬态 URL 标签（login/CAS 长期停留 → 导航回精确 home）
+  const stuckRecoverySource = extractSourceSection(
+    backgroundSource,
+    'async function recoverStuckTransientHomeTabs(',
+    'async function attemptACToggleWithRecovery(',
+    'recoverStuckTransientHomeTabs'
+  );
+  const stuckRecoveryUpdates = [];
+  const stuckRecoveryChrome = {
+    tabs: {
+      query: async () => ([
+        { id: 1, url: 'https://w5.ab.ust.hk/njggt/app/callback/cas?path=/home&ticket=ST-x', discarded: false },
+        { id: 2, url: 'https://w5.ab.ust.hk/njggt/app/home', discarded: false },
+        { id: 3, url: 'https://w5.ab.ust.hk/njggt/app/login?path=/home', discarded: false },
+        { id: 4, url: 'https://w5.ab.ust.hk/njggt/app/callback/cas?path=/home&ticket=ST-y', discarded: true }
+      ]),
+      update: async (id, opts) => { stuckRecoveryUpdates.push({ id, url: opts?.url }); }
+    }
+  };
+  const runStuckRecovery = new Function(
+    'chrome',
+    'AC_PAGE',
+    'isTransientAuthRedirectUrl',
+    `${stuckRecoverySource}; return recoverStuckTransientHomeTabs;`
+  )(
+    stuckRecoveryChrome,
+    'https://w5.ab.ust.hk/njggt/app/home',
+    authRedirectMatcher.isTransientAuthRedirectUrl
+  );
+  await runStuckRecovery();
+  assertPass(stuckRecoveryUpdates.length === 2
+      && stuckRecoveryUpdates.some(u => u.id === 1 && u.url === 'https://w5.ab.ust.hk/njggt/app/home')
+      && stuckRecoveryUpdates.some(u => u.id === 3 && u.url === 'https://w5.ab.ust.hk/njggt/app/home'),
+    '9J-9: 看门狗只回收非 discarded 且卡在 login/CAS 的标签，导航回精确 home');
+  assertPass(backgroundSource.includes('recoverStuckTransientHomeTabs().catch'),
+    '9J-10: ac-watchdog 在自动化允许时调用卡死瞬态 URL 回收');
 
   const waitForTabReadyStart = backgroundSource.indexOf('async function waitForTabReady(');
   const waitForTabReadyEnd = backgroundSource.indexOf('\nfunction isACTab(tab)', waitForTabReadyStart);

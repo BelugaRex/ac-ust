@@ -4508,6 +4508,7 @@ chrome.alarms.onAlarm.addListener(async (alarm) => {
       //         无 AC 页面则静默跳过；5 分钟间隔避免频繁读 DOM。
       if (isAutomationAllowed()) {
         tryAdoptPageTimer('watchdog').catch(e => /* 不阻塞闹钟流程 */ {});
+        recoverStuckTransientHomeTabs().catch(e => /* 不阻塞闹钟流程 */ {});
       }
     } catch (e) {
       console.error('[AC扩展] 看门狗执行失败:', e);
@@ -4896,6 +4897,31 @@ async function refreshACControlPage(tabId) {
     console.error('[AC扩展] 恢复 AC 控制页面失败:', error?.message);
     void appendDiagnosticLog('error', 'toggle-refresh-recovery', error);
     return null;
+  }
+}
+
+// 看门狗回收：把卡在瞬态重登录 URL（login / CAS 回调）的 UST 标签导航回精确 home。
+// 正常重登录几秒内自然回跳，只有服务端异常（如 CAS 回调 504）才会让标签长期停留；
+// 看门狗每 5 分钟运行一次，此时仍停在瞬态 URL 的标签即为「卡死」。5 分钟粒度远大于
+// 秒级回跳，导航回 home 不会打断进行中的 CAS，并可让下一轮自动开启重新读到精确 home 页。
+async function recoverStuckTransientHomeTabs() {
+  try {
+    const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
+    for (const tab of tabs) {
+      if (!Number.isInteger(tab?.id)
+          || !isTransientAuthRedirectUrl(tab.url)
+          || tab.discarded) {
+        continue;
+      }
+      try {
+        await chrome.tabs.update(tab.id, { url: AC_PAGE });
+        console.log(`[AC扩展] 看门狗：回收卡在瞬态 URL 的标签 ${tab.id} → home`);
+      } catch (_) {
+        // 标签可能已被关闭或改 URL，静默跳过。
+      }
+    }
+  } catch (_) {
+    // tabs.query 失败时静默跳过，不阻塞看门狗主流程。
   }
 }
 
