@@ -529,7 +529,10 @@ function flushControlAuditStorage() {
 
 const AC_PAGE = 'https://w5.ab.ust.hk/njggt/app/home';
 const PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS = [10000, 15000, 20000];
-const PAGE_TIMER_WRITE_TIMEOUT_MS = 30000;
+// setTimer 写入超时必须覆盖 content.js 的有界最坏完成时间：
+// 3 次输入尝试 ×（5s 稳定等待 + 3s OK + 3s 确认）+ 4s 定位 ≈ 39s。
+// 若 30s 就超时，会在 content script 仍在重试时误报「探测超时」，掩盖真实失败阶段。
+const PAGE_TIMER_WRITE_TIMEOUT_MS = 60000;
 const PAGE_TIMER_RECOVERY_MIN_RUNWAY_MS = 150000;
 const STORAGE_KEY = 'ac_schedule';
 const DIAGNOSTIC_LOG_KEY = 'ac_diagnostic_log';
