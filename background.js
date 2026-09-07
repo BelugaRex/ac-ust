@@ -2779,6 +2779,14 @@ async function updateBadge() {
     return;
   }
 
+  // 页面定时器错误同样置红，避免绿色倒计时掩盖「自动控制上次失败」。
+  if (schedule.pageTimerError) {
+    await chrome.action.setBadgeText({ text: '!' });
+    await chrome.action.setBadgeBackgroundColor({ color: '#dc2626' });
+    await chrome.action.setTitle({ title: String(schedule.pageTimerError).slice(0, 120) });
+    return;
+  }
+
   // 当前模式的 live alarm；旧 pwmState/nextTriggerAt 只用于兼容展示投影。
   const liveAlarm = await getAutomationAlarm();
   const liveAlarmEnd = getLiveAlarmEndMs(liveAlarm);
@@ -3789,7 +3797,7 @@ function deadlineExpiredResult(fixedTargetAt) {
   return {
     success: false,
     automaticDeadlineExpired: true,
-    error: '自动开启截止时间已过期',
+    error: '定时器目标时间已过期',
     targetAt: Number.isSafeInteger(fixedTargetAt) ? fixedTargetAt : 0
   };
 }

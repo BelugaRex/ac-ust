@@ -7846,6 +7846,9 @@ return { reapplySmartSensitivityNow };`
       && disabledBadgeCalls18.join(',') === 'clear'
       && badgeAuditReads18 === 1,
     '18K: 启用态审计红色 ! 置顶；禁用态先清 badge 且不读取遗留审计告警');
+  assertPass(updateBadgeSource18.includes('schedule.pageTimerError')
+      && updateBadgeSource18.includes('String(schedule.pageTimerError)'),
+    '18K-1: pageTimerError 非空时置红角标，避免绿色倒计时掩盖自动控制失败');
 
   const createPwmAlarmAuditSource18 = extractSourceSection(
     backgroundSource,
