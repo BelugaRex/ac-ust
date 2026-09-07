@@ -3815,26 +3815,28 @@ function recoveryHasRunway(operationNotAfterAt) {
 
 // Chrome 会节流后台标签的 timer（降至 1/s 甚至 1/min），AntD picker 的下拉开合与
 // value/title 回填依赖 React 重渲染，节流下确认等待会卡在「未确认」。写入前把目标
-// 标签短暂置为前台（必要时聚焦所在窗口），返回一个还原之前活动标签的函数。
+// 标签短暂置为前台（必要时取消最小化并聚焦所在窗口），返回一个还原之前活动标签的函数。
 async function activateTabForTimerWrite(tabId) {
-  let previousActiveTabId = null;
+  let previousTab = null;
   try {
-    const [activeTabs, targetTab] = await Promise.all([
-      chrome.tabs.query({ active: true, currentWindow: true }),
-      chrome.tabs.get(tabId)
-    ]);
-    if (Number.isInteger(activeTabs?.[0]?.id)) previousActiveTabId = activeTabs[0].id;
+    const activeTabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+    previousTab = activeTabs?.[0] || null;
+    const targetTab = await chrome.tabs.get(tabId);
     if (Number.isInteger(targetTab?.windowId)) {
-      await chrome.windows.update(targetTab.windowId, { focused: true });
+      // 仅 focused:true 不会把最小化窗口带回前台，窗口仍被判定为 occluded、标签继续被节流；
+      // 必须 state:'normal' 取消最小化。
+      await chrome.windows.update(targetTab.windowId, { state: 'normal', focused: true });
     }
     await chrome.tabs.update(tabId, { active: true });
+    // 给一点时间让 Chrome 解除后台节流，再让 content script 以正常频率轮询 picker。
+    await sleep(500);
   } catch (_) {
     // 激活失败不阻塞写入，仍继续（最多维持原有后台节流行为）。
   }
   return async () => {
-    if (Number.isInteger(previousActiveTabId) && previousActiveTabId !== tabId) {
+    if (Number.isInteger(previousTab?.id) && previousTab.id !== tabId) {
       try {
-        await chrome.tabs.update(previousActiveTabId, { active: true });
+        await chrome.tabs.update(previousTab.id, { active: true });
       } catch (_) {
         // 还原失败静默忽略。
       }

@@ -2040,10 +2040,10 @@ async function runTests() {
       && !verifySectionForReload.includes('sourceWasAutoCreated'),
     '9N: background 仅在开机恢复/看门狗回收/置前写定时器函数内 reload/update；页面定时器验证仍不刷新来源页');
   assertPass(backgroundSource.includes('async function activateTabForTimerWrite(')
-      && backgroundSource.includes('chrome.windows.update(targetTab.windowId, { focused: true })')
+      && backgroundSource.includes('chrome.windows.update(targetTab.windowId, { state: \'normal\', focused: true })')
       && backgroundSource.includes('await activateTabForTimerWrite(tabId)')
       && backgroundSource.includes('await restoreForeground()'),
-    '9N-1: 写定时器前短暂置前标签（聚焦窗口+激活），写后还原，规避 Chrome 后台节流');
+    '9N-1: 写定时器前短暂置前标签（取消最小化+聚焦窗口+激活），写后还原，规避 Chrome 后台节流');
   assertPass(setTimerBody.includes('chrome.tabs.create({ url: AC_PAGE, active: false })')
       && setTimerBody.includes('!candidate.discarded'),
     '9O: 页面定时器缺少未丢弃的精确 home 时只创建隐藏 AC 页，不恢复或刷新用户页面');
