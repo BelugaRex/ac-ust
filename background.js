@@ -2424,8 +2424,15 @@ async function watchdogCheck() {
     const alarm = await chrome.alarms.get('ac-smart');
     if (!isAutomationOperationCurrent(automationRevision, 'smart')) return;
     if (!alarm || alarm.scheduledTime <= Date.now() - 60000) {
-      if (alarm?.scheduledTime) {
-        await runSmartStep({ scheduledTime: alarm.scheduledTime });
+      // 与 setupAlarms.recoverSmartAlarm 同款修复：无活闹钟但 storage 里还有过期触发意图时，
+      // 交给 runSmartStep 做 late-wake recovery，而不是 repairSmartScheduleClock 直接顺延，
+      // 避免错过刚过半点的开机。
+      const storedEnd = getStoredAlarmEndMs();
+      const overdueTriggerAt = alarm?.scheduledTime
+        ? alarm.scheduledTime
+        : (storedEnd > 0 && storedEnd <= Date.now() ? storedEnd : 0);
+      if (overdueTriggerAt) {
+        await runSmartStep({ scheduledTime: overdueTriggerAt });
       } else {
         await repairSmartScheduleClock();
       }
@@ -2663,9 +2670,18 @@ async function setupAlarms(startImmediately = false) {
         }
       }
 
-      if (existingAlarm?.scheduledTime && existingAlarm.scheduledTime <= now) {
+      // 已过期（或刚被消费）的触发意图：统一交给 runSmartStep，而不是直接 repairSmartScheduleClock。
+      // repairSmartScheduleClock 看到「AC OFF」会一律按「等待下一半点开机」重建，从而在 SW 被
+      // 逐出后错过刚过半点的开机（例如 02:30 该开机、02:31 醒来却直接排到 03:00）。
+      // 这里优先用 storage 里记录的过期触发时间，让 runSmartStep 的 late-wake recovery 判断
+      // 是补开机（跑道仍够）还是顺延下一半点。
+      const overdueTriggerAt = (existingAlarm?.scheduledTime
+          && existingAlarm.scheduledTime <= now)
+        ? existingAlarm.scheduledTime
+        : (existingEnd > 0 && existingEnd <= now ? existingEnd : 0);
+      if (overdueTriggerAt) {
         if (!smartSetupIsCurrent()) return;
-        await runSmartStep({ scheduledTime: existingAlarm.scheduledTime });
+        await runSmartStep({ scheduledTime: overdueTriggerAt });
         return;
       }
 

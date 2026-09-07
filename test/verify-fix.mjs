@@ -5091,6 +5091,13 @@ return { reapplySmartSensitivityNow };`
   assertPass(setupBody13.includes('await syncStoredTriggerFromAlarm(existingAlarm')
       && setupBody13.includes('await repairScheduleClock();'),
     '13B: 启动恢复会同步 live alarm；双重缺失时会安全重建 PWM');
+  assertPass(setupBody13.includes('existingEnd > 0 && existingEnd <= now')
+      && setupBody13.includes('runSmartStep({ scheduledTime: overdueTriggerAt })')
+      && setupBody13.includes('await repairSmartScheduleClock();'),
+    '13B-1: Smart 启动恢复在 storage 触发时间已过期时交给 runSmartStep 做 late-wake recovery，而非直接 repairSmartScheduleClock 顺延（避免错过刚过半点的开机）');
+  assertPass(watchdogBody13.includes('storedEnd > 0 && storedEnd <= Date.now()')
+      && watchdogBody13.includes('runSmartStep({ scheduledTime: overdueTriggerAt })'),
+    '13C-1: Smart 看门狗在活闹钟缺失但 storage 触发时间已过期时同样交给 runSmartStep，而非 repairSmartScheduleClock 顺延');
     assertPass(watchdogBody13.includes("'watchdogCheck'")
       && watchdogBody13.includes('PWM_TRIGGER_NEXT_ONLY_OPTIONS,')
       && watchdogBody13.includes('automationRevision')
