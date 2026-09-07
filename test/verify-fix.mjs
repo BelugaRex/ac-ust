@@ -3029,6 +3029,9 @@ async function runTests() {
   assertPass(smartRepairBody.includes('isPageTimerProofFresh(schedule)')
       && smartRepairBody.includes('repair-smart-on-proof-fresh'),
     '11E-1: 证明新鲜时跳过 setPageTimer 重写，仅对齐 ac-smart 闹钟');
+  assertPass(smartRepairBody.includes('await getCurrentPageTimer()')
+      && smartRepairBody.includes('parsePageTimerValue('),
+    '11E-2: 证明缺失但页面已有定时器时也跳过重写，避免反复设置误报未确认');
   const toggleTimerIdx = toggleBody.indexOf('await setPageTimer(schedule.onMinutes');
   const toggleOffIdx = toggleBody.indexOf("schedule.pwmState = currentOn ? 'off' : 'on';");
   assertPass(toggleTimerIdx > 0
@@ -3405,6 +3408,8 @@ return { reapplySmartSensitivityNow };`
     'nextSmartHalfHourBoundary',
     'alignSmartModeNextTrigger',
     'isPageTimerProofFresh',
+    'getCurrentPageTimer',
+    'parsePageTimerValue',
     'Date',
     `let smartRuntimeRevision = 0;
     ${smartRepairBody}; return repairSmartScheduleClock;`
@@ -3531,6 +3536,8 @@ return { reapplySmartSensitivityNow };`
       smartPhase.nextSmartHalfHourBoundary,
       smartPhase.alignSmartModeNextTrigger,
       () => false,
+      async () => ({ found: false, value: null }),
+      syncHelpers.parsePageTimerValue,
       { now: () => nowMs }
     );
     let result = null;

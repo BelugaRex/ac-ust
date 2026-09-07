@@ -5182,13 +5182,23 @@ async function repairSmartScheduleClock(options = {}) {
     const freshProofTargetAt = isPageTimerProofFresh(schedule)
       ? Number(schedule.pageTimerTargetAt)
       : 0;
-    if (freshProofTargetAt > now) {
+    // 即使 storage 证明缺失（如首轮验证失败未记录证明），页面已有定时器也跳过重写，
+    // 避免把已设好的时间改来改去、误报「未确认」。
+    const pageTimer = await getCurrentPageTimer();
+    const pageTimerParsed = pageTimer?.found && pageTimer?.value
+      ? parsePageTimerValue(String(pageTimer.value).trim(), now)
+      : null;
+    const pageTimerTargetAt = pageTimerParsed?.valid ? pageTimerParsed.targetMs : 0;
+    const existingTargetAt = freshProofTargetAt > now
+      ? freshProofTargetAt
+      : (pageTimerTargetAt > now ? pageTimerTargetAt : 0);
+    if (existingTargetAt > now) {
       setSmartNextAction('off');
       schedule.pageTimerError = '';
       await clearSmartAlarm(automationRevision);
       const alarmCreated = await createAutomationAlarmFromPlan(
         'ac-smart',
-        { nextTriggerAt: freshProofTargetAt },
+        { nextTriggerAt: existingTargetAt },
         'repair-smart-on-proof-fresh',
         automationRevision
       );
