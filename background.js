@@ -3501,12 +3501,20 @@ async function verifyPageTimerPersistence(
       const verifierTarget = await getExactACHomeTab(verifierTabId);
       if (!verifierTarget) throw new Error('页面定时器验证页未停留在精确 home URL');
       if (!verificationIsCurrent()) return staleVerificationResult();
-      const readback = await sendReadMessageToExactACHome(
-        verifierTabId,
-        { action: 'getPageTimer' }
-      );
-      if (!verificationIsCurrent()) {
-        return staleVerificationResult();
+      // 新鲜页 React 组件可能还没把服务器端定时器渲染到 picker，读回空只是「没加载出来」；
+      // 轮询读回直到有值或超时，避免把加载延迟误判为「未持久化」。
+      let readback = null;
+      const readbackDeadline = Date.now() + 12000;
+      while (Date.now() < readbackDeadline) {
+        readback = await sendReadMessageToExactACHome(
+          verifierTabId,
+          { action: 'getPageTimer' }
+        );
+        if (!verificationIsCurrent()) {
+          return staleVerificationResult();
+        }
+        if (readback?.value || readback?.title) break;
+        await sleep(1000);
       }
       const actualValue = String(readback?.value || readback?.title || '').trim();
       const statusReadback = await sendReadMessageToExactACHome(

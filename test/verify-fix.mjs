@@ -2983,6 +2983,10 @@ async function runTests() {
       && verifyBody.includes('attempts: PAGE_TIMER_PERSISTENCE_VERIFY_DELAYS_MS.length')
       && verifyBody.includes('次新鲜页验证后仍未持久化'),
     '11B-1: 写入后按 10 秒、15 秒、20 秒间隔验证，避免首轮过早加载新页面，同时三次失败仍明确报告未持久化');
+  assertPass(verifyBody.includes('readbackDeadline')
+      && verifyBody.includes('readback?.value || readback?.title')
+      && verifyBody.includes('await sleep(1000)'),
+    '11B-3: 新鲜页读回空时轮询等待 React 渲染，避免把加载延迟误判为未持久化');
   assertPass(verifyBody.includes('let verifierTabId = null;')
       && verifyBody.includes('finally')
       && verifyBody.includes('await chrome.tabs.remove(verifierTabId);'),
