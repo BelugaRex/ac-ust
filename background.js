@@ -3813,6 +3813,35 @@ function recoveryHasRunway(operationNotAfterAt) {
     && operationNotAfterAt - Date.now() >= PAGE_TIMER_RECOVERY_MIN_RUNWAY_MS;
 }
 
+// Chrome 会节流后台标签的 timer（降至 1/s 甚至 1/min），AntD picker 的下拉开合与
+// value/title 回填依赖 React 重渲染，节流下确认等待会卡在「未确认」。写入前把目标
+// 标签短暂置为前台（必要时聚焦所在窗口），返回一个还原之前活动标签的函数。
+async function activateTabForTimerWrite(tabId) {
+  let previousActiveTabId = null;
+  try {
+    const [activeTabs, targetTab] = await Promise.all([
+      chrome.tabs.query({ active: true, currentWindow: true }),
+      chrome.tabs.get(tabId)
+    ]);
+    if (Number.isInteger(activeTabs?.[0]?.id)) previousActiveTabId = activeTabs[0].id;
+    if (Number.isInteger(targetTab?.windowId)) {
+      await chrome.windows.update(targetTab.windowId, { focused: true });
+    }
+    await chrome.tabs.update(tabId, { active: true });
+  } catch (_) {
+    // 激活失败不阻塞写入，仍继续（最多维持原有后台节流行为）。
+  }
+  return async () => {
+    if (Number.isInteger(previousActiveTabId) && previousActiveTabId !== tabId) {
+      try {
+        await chrome.tabs.update(previousActiveTabId, { active: true });
+      } catch (_) {
+        // 还原失败静默忽略。
+      }
+    }
+  };
+}
+
 async function setPageTimer(
   minutes,
   {
@@ -3971,6 +4000,9 @@ async function setPageTimer(
     if (!pageTimerWriteIsCurrent()) return staleWriteResult();
     if (!operationDeadlineIsCurrent(operationNotAfterAt)) return deadlineExpiredResult(fixedTargetAt);
 
+    // Chrome 节流后台标签会让 picker 确认卡住，写入前短暂置前、写后还原。
+    const restoreForeground = await activateTabForTimerWrite(tabId);
+
     let result;
     try {
       result = await sendSerializedPageTimerMessage(tabId, {
@@ -3980,12 +4012,14 @@ async function setPageTimer(
         allowLocalOnly: deferVerification
       }, automationRevision, PAGE_TIMER_WRITE_TIMEOUT_MS, shutdownRevision, automationMode);
     } catch (error) {
+      await restoreForeground();
       return {
         success: false,
         transportFailure: true,
         error: error?.message || String(error)
       };
     }
+    await restoreForeground();
     if (result?.automationStale || result?.shutdownStale) return result;
     const finalWritable = await getWritableExactHomeTab(tabId);
     if (finalWritable.failure) return finalWritable.failure;
