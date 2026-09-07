@@ -5221,16 +5221,21 @@ async function repairSmartScheduleClock(options = {}) {
     const storedBoundaryAt = normalizeSmartHalfHourAlarmBoundary(
       schedule.smartOnBoundaryAt
     );
+    // smartOnBoundaryAt 陈旧（0/非法）时退回当前半点边界：否则会把仍在 ON 窗口内的
+    // 空调误判为「窗口已过」，触发「下一分钟关机」兜底导致提前关机。
+    const effectiveBoundaryAt = storedBoundaryAt > 0
+      ? storedBoundaryAt
+      : smartHalfHourBoundaryAtOrBefore(now);
     const storedTargetAt = smartPageTimerTargetAt(
       Number(schedule.onMinutes),
       now,
-      storedBoundaryAt
+      effectiveBoundaryAt
     );
     const smartOnWindowPlan = planSmartModeOnWindow(schedule, {
       now,
       maxOnMinutes: SMART_MODE.ON_MAX,
       acIsOn: true,
-      boundaryAt: storedBoundaryAt
+      boundaryAt: effectiveBoundaryAt
     });
     const plannedTargetAt = Number(smartOnWindowPlan?.pageTimerTargetAt) || 0;
     const targetAt = plannedTargetAt > now

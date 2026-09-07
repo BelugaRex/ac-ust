@@ -3378,6 +3378,7 @@ return { reapplySmartSensitivityNow };`
     'getCurrentACStatus',
     'abortStaleAutomation',
     'normalizeSmartHalfHourAlarmBoundary',
+    'smartHalfHourBoundaryAtOrBefore',
     'smartPageTimerTargetAt',
     'planSmartModeOnWindow',
     'SMART_MODE',
@@ -3479,6 +3480,7 @@ return { reapplySmartSensitivityNow };`
       async () => repairCaseOptions.status || { isOn: true },
       async () => false,
       smartPhase.normalizeSmartHalfHourAlarmBoundary,
+      smartPhase.smartHalfHourBoundaryAtOrBefore,
       smartPhase.smartPageTimerTargetAt,
       smartPhase.planSmartModeOnWindow,
       smartMode.SMART_MODE,
@@ -3619,6 +3621,21 @@ return { reapplySmartSensitivityNow };`
       && smartReadonlyRepair.alarmPlans.length === 0
       && smartReadonlyRepair.result?.rearmSkipped === true,
     'smartRepair-readonly: 诊断只读时钟修复不写页面定时器、不重建运行闹钟');
+  const staleBoundarySmartRepair = await runSmartRepairCase({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 24,
+    offMinutes: 5,
+    nextTriggerAt: 0,
+    smartState: 'on',
+    smartNextTriggerAt: 0,
+    smartOnBoundaryAt: 0,
+    smartMode: { enabled: true, sensitivity: 5 }
+  }, new Date(2026, 7, 17, 16, 10, 0, 0).getTime());
+  assertPass(staleBoundarySmartRepair.timerCalls[0]?.minutes === 14
+      && staleBoundarySmartRepair.timerCalls[0]?.options.targetAt
+        === new Date(2026, 7, 17, 16, 24, 0, 0).getTime(),
+    'smartRepair-stale-boundary: smartOnBoundaryAt 陈旧时退回当前半点边界，不误设下一分钟关机');
   assertPass(activeSmartRepair.timerCalls[0]?.minutes === 10
       && activeSmartRepair.timerCalls[0]?.options.targetAt
         === smartRepairBoundary + 25 * 60000
