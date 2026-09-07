@@ -4347,9 +4347,10 @@ async function armPowerOffTimerEnsuringOn(
       toggledOn
     };
   }
-  // 新鲜页复核到「未开机」：先开机，再补关机时间（Power-off after 只在 ON 时被服务器保留，
-  // 之前 OFF 态写入可能未持久化）。复核失败按 ensure-on / verify 各自回退，不改变原失败语义。
-  if (verification.acIsOn === false) {
+  // 新鲜页复核到「未开机」或「定时器被清空」：确保开机后补设关机时间（Power-off after 只在
+  // ON 时被服务器保留，之前 OFF 态写入可能未持久化，开机会把 OFF 态写入的定时器清空）。
+  // 复核失败按 ensure-on / verify 各自回退，不改变原失败语义。
+  if (verification.acIsOn === false || !verification.success) {
     await toggleAC('on', {
       notAfterAt: automaticOnDeadlineAt,
       requireAutomationAllowed,
@@ -4402,19 +4403,6 @@ async function armPowerOffTimerEnsuringOn(
       acIsOn: true,
       toggledOn,
       supplemented: true
-    };
-  }
-
-  if (!verification.success) {
-    return {
-      success: false,
-      failureStage: 'verify',
-      error: verification.error || '关机定时器新鲜页面验证未确认',
-      value,
-      targetAt: fixedTargetAt,
-      acIsOn,
-      toggledOn,
-      automaticDeadlineExpired: verification.automaticDeadlineExpired === true
     };
   }
 

@@ -7139,11 +7139,11 @@ return { reapplySmartSensitivityNow };`
     'async function armPowerOffTimerEnsuringOn(',
     '// ----- 闹钟触发时执行 -----'
   );
-  assertPass(armOnBody17.includes('if (verification.acIsOn === false)')
+  assertPass(armOnBody17.includes('if (verification.acIsOn === false || !verification.success)')
       && armOnBody17.includes('supplemented: true')
       && armOnBody17.includes('deferVerification: false')
       && armOnBody17.includes('自动开启未确认（新鲜页复核未开机后重试开机仍未确认）'),
-    '17B: 新鲜页复核未开机时先开机再补关机时间，复核失败按 ensure-on/verify 回退');
+    '17B: 新鲜页复核未开机或定时器被清空时，确保开机后补设关机时间');
 
   const sharedPredicateAtomsSource17 = extractSourceSection(
     backgroundSource,
