@@ -1816,11 +1816,12 @@ async function runTests() {
   const smartPlannerIndex = smartBody.indexOf('let plan = planSmartStep(schedule, {');
   const smartWindowPlanIndex = smartBody.indexOf('const onWindowPlan = planSmartModeOnWindow(schedule, {');
   const smartArmIndex = smartBody.indexOf('const armResult = await armPowerOffTimerEnsuringOn(timerMinutes, {');
-  const smartVerifyFallbackIndex = smartBody.indexOf('await setPageTimer(1, {', smartArmIndex);
   assertPass(smartPlannerIndex >= 0
       && smartWindowPlanIndex > smartPlannerIndex
       && smartArmIndex > smartWindowPlanIndex
-      && smartVerifyFallbackIndex > smartArmIndex
+      && !smartBody.includes('await setPageTimer(1, {')
+      && smartBody.includes('smart-on-verify-failed-defer')
+      && smartBody.includes('nextSmartHalfHourBoundary(now)')
       && countOccurrences(smartBody, "armPowerOffTimerEnsuringOn(") === 1
       && countOccurrences(smartBody, "toggleAC('on', {") === 0
       && !smartBody.includes("toggleAC('off')")
@@ -4617,7 +4618,7 @@ return { reapplySmartSensitivityNow };`
     ? backgroundSource.slice(applyPwmPlanStart, applyPwmPlanEnd)
     : '';
   assertPass(applyPwmPlanBody.includes("if (plan?.proofAction === 'clear') clearPageTimerProofState();")
-      && countOccurrences(backgroundSource, 'clearPageTimerProofState();') === 5,
+      && countOccurrences(backgroundSource, 'clearPageTimerProofState();') === 6,
     '11L: planner proofAction 与 Smart/PWM 直接失效路径统一委派给 clearPageTimerProofState');
 
   const reconciliationSites = [

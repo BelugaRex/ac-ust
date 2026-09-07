@@ -3072,16 +3072,14 @@ async function runSmartStep(alarmContext = {}) {
             );
             return;
           }
-          await setPageTimer(1, {
-            retryOnFailure: false,
-            automationRevision,
-            automationMode: 'smart'
-          });
-          schedule.pageTimerError = `智能开启后关机定时器未确认：${armResult.error || '未知错误'}；已补设 1 分钟关机`;
-          await commitSmartOnRetry(
-            plan.boundaryAt,
-            Date.now(),
-            'smart-on-verify-retry'
+          // 关机定时器验证失败（新鲜页读回空）：不再补设 1 分钟安全定时器（那会让空调
+          // 每分钟开关一次、很伤压缩机），也不再立刻重试；保持空调当前状态，推迟到下一半点再试。
+          schedule.pageTimerError = `智能开启后关机定时器未确认：${armResult.error || '未知错误'}`;
+          clearPageTimerProofState();
+          schedule.smartOnBoundaryAt = 0;
+          await commitSmartAlarm(
+            nextSmartHalfHourBoundary(now),
+            'smart-on-verify-failed-defer'
           );
           return;
         }
