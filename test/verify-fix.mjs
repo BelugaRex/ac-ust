@@ -3602,6 +3602,23 @@ return { reapplySmartSensitivityNow };`
       smartOnExpectedBoundaryAt: new Date(2026, 7, 17, 14, 0, 0, 0).getTime()
     }
   });
+  const smartReadonlyRepair = await runSmartRepairCase({
+    enabled: true,
+    pwmState: 'on',
+    onMinutes: 25,
+    offMinutes: 5,
+    nextTriggerAt: 0,
+    smartState: 'on',
+    smartNextTriggerAt: 0,
+    smartOnBoundaryAt: smartRepairBoundary,
+    smartMode: { enabled: true, sensitivity: 5 }
+  }, new Date(2026, 7, 17, 13, 45, 0, 0).getTime(), {
+    invocationOptions: { rearmPageTimer: false }
+  });
+  assertPass(smartReadonlyRepair.timerCalls.length === 0
+      && smartReadonlyRepair.alarmPlans.length === 0
+      && smartReadonlyRepair.result?.rearmSkipped === true,
+    'smartRepair-readonly: 诊断只读时钟修复不写页面定时器、不重建运行闹钟');
   assertPass(activeSmartRepair.timerCalls[0]?.minutes === 10
       && activeSmartRepair.timerCalls[0]?.options.targetAt
         === smartRepairBoundary + 25 * 60000

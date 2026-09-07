@@ -5145,6 +5145,7 @@ async function getCurrentPageTimer() {
 }
 
 async function repairSmartScheduleClock(options = {}) {
+  const rearmPageTimer = options.rearmPageTimer !== false;
   await loadScheduleFromStorage();
   if (!schedule.enabled || !isAutomationAllowed() || !isSmartAutomationEnabled()) {
     return {
@@ -5196,6 +5197,25 @@ async function repairSmartScheduleClock(options = {}) {
   }
 
   if (status.isOn) {
+    if (!rearmPageTimer) {
+      // 只读时钟修复（诊断）：不写页面定时器、不重建运行闹钟，只把 storage 时钟对齐到
+      // 已有 live 闹钟。避免诊断触发 setPageTimer → 置前标签关闭 popup，也避免「时间已设好
+      // 仍反复重设」。
+      const live = await chrome.alarms.get('ac-smart');
+      const syncedFromLive = getLiveAlarmEndMs(live);
+      if (syncedFromLive) {
+        setSmartNextTriggerAt(live.scheduledTime);
+      }
+      await persistSchedule('repairSmartScheduleClock-readonly', {
+        syncFromLiveAlarm: false
+      });
+      return {
+        success: true,
+        rearmSkipped: true,
+        repairedFromLiveAlarm: syncedFromLive,
+        schedule: { ...schedule, actualStatus: status }
+      };
+    }
     const storedBoundaryAt = normalizeSmartHalfHourAlarmBoundary(
       schedule.smartOnBoundaryAt
     );
@@ -6046,7 +6066,7 @@ async function ensureDiagnosticAlarms() {
   let automationAlarm = await chrome.alarms.get(automationAlarmName);
   const automationAlarmBeforeRecovery = Number(automationAlarm?.scheduledTime) || 0;
   const clockRecovery = smartEnabled
-    ? await repairSmartScheduleClock()
+    ? await repairSmartScheduleClock({ rearmPageTimer: false })
     : await ensureScheduleClock();
   automationAlarm = await chrome.alarms.get(automationAlarmName);
   if (clockRecovery?.repairedPwmClock || clockRecovery?.repairedFromLiveAlarm) {
