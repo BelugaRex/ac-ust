@@ -864,14 +864,17 @@ function getDiagnosticPageTimerExpectation(schedule, fallbackAt = 0) {
   if (schedule.smartState !== 'off') {
     return { targetAt: 0, source: 'not-on-phase' };
   }
-  const boundaryAt = Number(schedule.smartOnBoundaryAt);
   const onMinutes = Number(schedule.onMinutes);
-  if (!Number.isSafeInteger(boundaryAt)
-      || boundaryAt <= 0
-      || !Number.isSafeInteger(onMinutes)
-      || onMinutes <= 0
-      || onMinutes > 25) {
+  if (!Number.isSafeInteger(onMinutes) || onMinutes <= 0 || onMinutes > 25) {
     return { targetAt: 0, source: 'smart-plan-unavailable' };
+  }
+  const storedBoundaryAt = Number(schedule.smartOnBoundaryAt);
+  let boundaryAt = storedBoundaryAt;
+  if (!Number.isSafeInteger(boundaryAt) || boundaryAt <= 0) {
+    // smartOnBoundaryAt 陈旧（0/非法）时退回当前半点边界，避免把正常状态误报成「应设 ∅」。
+    const nowDate = new Date();
+    nowDate.setMinutes(nowDate.getMinutes() >= 30 ? 30 : 0, 0, 0);
+    boundaryAt = nowDate.getTime();
   }
   const boundary = new Date(boundaryAt);
   if ((boundary.getMinutes() !== 0 && boundary.getMinutes() !== 30)

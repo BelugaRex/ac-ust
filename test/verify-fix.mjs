@@ -883,6 +883,9 @@ async function runTests() {
       && popupJs.includes('smartOnBoundaryAt')
       && popupJs.includes('formatDiagnosticPageTimerValue(expectedAt) === String(pt.value).trim()'),
     'Smart/PWM 共用诊断使用独立应设时间，不再让可变本地目标自证，空 page timer 不再显示绿色成功');
+  assertPass(popupJs.includes('smartOnBoundaryAt 陈旧')
+      && popupJs.includes('nowDate.getMinutes() >= 30 ? 30 : 0'),
+    'diagnose-expr-fallback: smartOnBoundaryAt 陈旧时退回当前半点边界，不误报应设 ∅');
   assertPass(popupJs.includes('function formatBuildTimeShort(buildTime)')
       && popupJs.includes('return `${month}/${day} ${hour}:${minute}`;')
       && popupJs.includes('versionInfo.textContent = `v${displayVersion} · ${formatBuildTimeShort(BUILD_TIME)}`')
