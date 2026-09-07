@@ -1461,8 +1461,9 @@ btnDiagnose.addEventListener('click', async () => {
         if (pt && pt.success !== false && pt.invalidTarget !== true && pt.found && pt.value) {
             const expectation = getDiagnosticPageTimerExpectation(s, effectiveNextTriggerAt);
             const expectedAt = expectation.targetAt;
-            add(expectedAt > 0
-                && formatDiagnosticPageTimerValue(expectedAt) === String(pt.value).trim(),
+            // 无法计算期望（如 state=on 但实际 AC 已运行、定时器已设）时，定时器已设即为正常，不判错。
+            add(expectedAt <= 0
+                || formatDiagnosticPageTimerValue(expectedAt) === String(pt.value).trim(),
               t('diagnosePageTimerExpr', pt.value, fmt(expectedAt), modeState));
         } else if (pt?.success === false || pt?.invalidTarget === true) {
           add(false, t('diagnosePageTimerFail') + String(pt.error || '').slice(0,60));

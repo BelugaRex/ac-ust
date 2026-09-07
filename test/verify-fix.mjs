@@ -886,6 +886,8 @@ async function runTests() {
   assertPass(popupJs.includes('smartOnBoundaryAt 陈旧')
       && popupJs.includes('nowDate.getMinutes() >= 30 ? 30 : 0'),
     'diagnose-expr-fallback: smartOnBoundaryAt 陈旧时退回当前半点边界，不误报应设 ∅');
+  assertPass(popupJs.includes('expectedAt <= 0'),
+    'diagnose-expr-expected-absent: 无法计算期望时定时器已设不判错');
   assertPass(popupJs.includes('function formatBuildTimeShort(buildTime)')
       && popupJs.includes('return `${month}/${day} ${hour}:${minute}`;')
       && popupJs.includes('versionInfo.textContent = `v${displayVersion} · ${formatBuildTimeShort(BUILD_TIME)}`')
