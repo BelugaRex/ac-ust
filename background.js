@@ -5177,6 +5177,31 @@ async function repairSmartScheduleClock(options = {}) {
         schedule: { ...schedule, actualStatus: status }
       };
     }
+    // 页面定时器证明仍新鲜：定时器已正确设置，无需因 onMinutes 天气变化而重写，
+    // 避免「反复设置关机时间」。只把 ac-smart 闹钟对齐到已确认的 pageTimerTargetAt。
+    const freshProofTargetAt = isPageTimerProofFresh(schedule)
+      ? Number(schedule.pageTimerTargetAt)
+      : 0;
+    if (freshProofTargetAt > now) {
+      setSmartNextAction('off');
+      schedule.pageTimerError = '';
+      await clearSmartAlarm(automationRevision);
+      const alarmCreated = await createAutomationAlarmFromPlan(
+        'ac-smart',
+        { nextTriggerAt: freshProofTargetAt },
+        'repair-smart-on-proof-fresh',
+        automationRevision
+      );
+      if (alarmCreated === false) {
+        return { success: false, reason: 'Smart 闹钟重建失败', schedule };
+      }
+      await persistSchedule('repairSmartScheduleClock-proof-fresh', {
+        syncFromLiveAlarm: false
+      });
+      await updateBadge();
+      return { success: true, schedule: { ...schedule, actualStatus: status } };
+    }
+
     const storedBoundaryAt = normalizeSmartHalfHourAlarmBoundary(
       schedule.smartOnBoundaryAt
     );

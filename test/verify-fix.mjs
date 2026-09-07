@@ -3009,8 +3009,8 @@ async function runTests() {
       && backgroundSource.includes("if (alarm.name === 'ac-page-timer-retry')"),
     '11D: 非 PWM 的关机请求失败会保存分钟数并由 ac-page-timer-retry 持续重试');
   const smartRepairTimerIdx = smartRepairBody.indexOf('const timerResult = await setPageTimer(');
-  const smartRepairStateIdx = smartRepairBody.indexOf("setSmartNextAction('off');");
-  const smartRepairAlarmIdx = smartRepairBody.indexOf("createAutomationAlarmFromPlan(\n      'ac-smart'");
+  const smartRepairStateIdx = smartRepairBody.indexOf("setSmartNextAction('off');", smartRepairTimerIdx);
+  const smartRepairAlarmIdx = smartRepairBody.indexOf("createAutomationAlarmFromPlan(\n      'ac-smart'", smartRepairStateIdx);
   const pwmRepairTimerIdx = repairBody.indexOf('await setPageTimer(schedule.onMinutes');
   const pwmRepairOffIdx = repairBody.indexOf("schedule.pwmState = currentOn ? 'off' : 'on';");
   assertPass(smartRepairTimerIdx >= 0
@@ -3024,6 +3024,9 @@ async function runTests() {
       && pwmRepairOffIdx > pwmRepairTimerIdx
       && repairBody.includes('createPwmAlarmFromPlan('),
     '11E: Smart repair 先新鲜 setPageTimer，再写 Smart 状态并建立 ac-smart；PWM repair 独立走 PWM alarm 路径');
+  assertPass(smartRepairBody.includes('isPageTimerProofFresh(schedule)')
+      && smartRepairBody.includes('repair-smart-on-proof-fresh'),
+    '11E-1: 证明新鲜时跳过 setPageTimer 重写，仅对齐 ac-smart 闹钟');
   const toggleTimerIdx = toggleBody.indexOf('await setPageTimer(schedule.onMinutes');
   const toggleOffIdx = toggleBody.indexOf("schedule.pwmState = currentOn ? 'off' : 'on';");
   assertPass(toggleTimerIdx > 0
@@ -3399,6 +3402,7 @@ return { reapplySmartSensitivityNow };`
     'isSmartHalfHourBoundary',
     'nextSmartHalfHourBoundary',
     'alignSmartModeNextTrigger',
+    'isPageTimerProofFresh',
     'Date',
     `let smartRuntimeRevision = 0;
     ${smartRepairBody}; return repairSmartScheduleClock;`
@@ -3524,6 +3528,7 @@ return { reapplySmartSensitivityNow };`
       smartPhase.isSmartHalfHourBoundary,
       smartPhase.nextSmartHalfHourBoundary,
       smartPhase.alignSmartModeNextTrigger,
+      () => false,
       { now: () => nowMs }
     );
     let result = null;
