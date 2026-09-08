@@ -62,7 +62,6 @@ async function run() {
       `--user-data-dir=${profile}`, '--remote-debugging-port=0',
       '--no-first-run', '--no-default-browser-check', '--disable-background-networking',
       '--enable-unsafe-extension-debugging',
-      `--disable-extensions-except=${extensionPath}`, `--load-extension=${extensionPath}`,
       'about:blank'
     ], { detached: true, stdio: ['ignore', 'ignore', 'pipe'] });
     let launchError = '';
@@ -76,7 +75,8 @@ async function run() {
     const [port, endpoint] = fs.readFileSync(portFile, 'utf8').trim().split('\n');
     browser = await chromium.connectOverCDP(`ws://127.0.0.1:${port}${endpoint}`, { noDefaults: true });
     context = browser.contexts()[0];
-    await context.route('**/*', async route => {
+    // Extension scripts/locales must load unchanged; only web traffic is mocked.
+    await context.route(/^https?:\/\//, async route => {
       const request = route.request();
       if (request.url() === home) {
         return route.fulfill({ contentType: 'text/html', body: homeFixture() });
@@ -89,9 +89,29 @@ async function run() {
       }
       return route.fulfill({ contentType: 'text/html', body: '<input id="work" value="keep my draft">' });
     });
-    const worker = context.serviceWorkers()[0]
-      || await context.waitForEvent('serviceworker', { timeout: 15000 });
-    await worker.evaluate(async () => { await initReady; });
+    const browserSession = await browser.newBrowserCDPSession();
+    const { id: extensionId } = await browserSession.send('Extensions.loadUnpacked', {
+      path: extensionPath
+    });
+    const isExtensionWorker = worker => worker.url()
+      === `chrome-extension://${extensionId}/background.js`;
+    const worker = context.serviceWorkers().find(isExtensionWorker)
+      || await context.waitForEvent('serviceworker', {
+        predicate: isExtensionWorker, timeout: 15000
+      });
+    const workerLog = [];
+    worker.on('console', message => workerLog.push(message.text()));
+    // CDP can discover the target before background.js has initialized its globals.
+    const initDeadline = Date.now() + 15000;
+    let initialized = false;
+    while (Date.now() < initDeadline) {
+      initialized = await worker.evaluate(() => (
+        typeof initCompletedAt === 'number' && initCompletedAt > 0
+      )).catch(() => false);
+      if (initialized) break;
+      await delay(100);
+    }
+    assert.ok(initialized, `extension Worker must finish initialization before testing: ${workerLog.join('\n')}`);
     const identity = await worker.evaluate(async () => {
       const source = await fetch(chrome.runtime.getURL('background.js')).then(r => r.text());
       const hash = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(source));
