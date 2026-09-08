@@ -5242,6 +5242,13 @@ return { reapplySmartSensitivityNow };`
       && updateResetIndex >= 0 && updatePersistIndex > updateResetIndex && updateShutdownIndex > updatePersistIndex,
     '13K: 三条停用路径统一委派 helper，且均保持 B1 先持久化再页面定时器关机');
 
+  const updateRespondIndex = updateScheduleBody.indexOf('sendResponse({ success: true, schedule, offResult })');
+  const updateSetupAlarmsIndex = updateScheduleBody.indexOf('await setupAlarms(');
+  assertPass(updateRespondIndex >= 0
+      && updateSetupAlarmsIndex > updateRespondIndex
+      && /sendResponse\(\{ success: true, schedule, offResult \}\);\s*waitUntil\(/.test(updateScheduleBody),
+    '13L: updateSchedule 先应答 popup 再用 waitUntil 跑 setupAlarms，避免模式切换被页面写入长任务卡住');
+
   const persistReconciledPwmTriggerSource = extractSourceSection(
     backgroundSource,
     'async function persistReconciledPwmTrigger(',

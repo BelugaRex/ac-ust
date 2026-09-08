@@ -6332,19 +6332,27 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
 
       await persistSchedule('updateSchedule');
-      await setupAlarms(
-        automationAllowed && (!wasAutomationAllowed || restart || smartModeChanged)
-      );
-      // 管理看门狗和每分钟 PWM 心跳闹钟
-      if (isAutomationAllowed()) {
-        await createAlarm('ac-watchdog', { periodInMinutes: 5 });
-      }
-      // active hours 边界闹钟：每次 schedule 改变都重新调度
-      rescheduleActiveBoundary();
-      // [v0.5.6] 跨设备同步：用户改设置 / toggle 是低频事件，立即推送
-      // 在 sendResponse 之前完成推送，让 popup 拿到已推送的状态（虽然异步到达对端有时延）。
-      await syncScheduleToSync('updateSchedule');
+      // 先应答 popup，再在后台执行「立即起一轮」等长任务：setupAlarms(startImmediately)
+      // 会直接 await runSmartStep/runPwmStep，其中包含页面定时器写入与新鲜页读回
+      // （最坏要等 60s 写入超时 + 重试）。放在 sendResponse 之前会让模式切换时的弹窗
+      // 看起来卡死。持久化已完成，popup 每秒轮询会补齐后续状态。
       sendResponse({ success: true, schedule, offResult });
+      waitUntil((async () => {
+        await setupAlarms(
+          automationAllowed && (!wasAutomationAllowed || restart || smartModeChanged)
+        );
+        // 管理看门狗和每分钟 PWM 心跳闹钟
+        if (isAutomationAllowed()) {
+          await createAlarm('ac-watchdog', { periodInMinutes: 5 });
+        }
+        // active hours 边界闹钟：每次 schedule 改变都重新调度
+        rescheduleActiveBoundary();
+        // [v0.5.6] 跨设备同步：用户改设置 / toggle 是低频事件，立即推送
+        await syncScheduleToSync('updateSchedule');
+      })().catch((e) => {
+        console.warn('[AC扩展] updateSchedule 后续步骤失败:', e?.message);
+        void appendDiagnosticLog('error', 'updateSchedule-followup', e);
+      }));
       return;
     }
     if (msg.type === 'reapplySmartNow') {
