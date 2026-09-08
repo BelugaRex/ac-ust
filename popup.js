@@ -1486,6 +1486,15 @@ btnDiagnose.addEventListener('click', async () => {
       add(true, t('diagnosePageTimerPending'));
     }
 
+    // 4.55 智能 ON 相位的计划三要素：onMinutes 是"当前建议"，页面定时器写入后固定；
+    // 天气刷新后两者可能不同，这里直接打出三个值，便于定位偏差来源。
+    if (s.smartMode?.enabled === true && s.smartState === 'off') {
+      add(true, t('diagnoseSmartPlan',
+        String(Number(s.onMinutes) || 0),
+        fmt(Number(s.smartOnBoundaryAt) || 0),
+        fmt(Number(s.pageTimerTargetAt) || 0)));
+    }
+
     // 4.6 当前模式的自动重试与独立 OFF 页面关机重试分别诊断。
     // Smart 使用 ac-smart/smartRetry*；PWM 使用 ac-pwm/pwmRetry*。
     const pageTimerRetryAlarm = alarms.find(a => a.name === 'ac-page-timer-retry')

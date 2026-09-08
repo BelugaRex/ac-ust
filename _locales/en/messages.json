@@ -141,6 +141,7 @@
   "diagnosePageTimerEmpty": { "message": "page timer picker empty/unset (validation pending until page timer has a value)" },
   "diagnosePageTimerFail": { "message": "page timer read failed: " },
   "diagnosePageTimerPending": { "message": "page timer validation pending until AC page is open" },
+  "diagnoseSmartPlan": { "message": "smart plan: on=$1min, boundary $2, written target $3" },
   "diagnoseI18nOK": { "message": "i18n OK (lang=$1, \"pwmSettings\"→\"$2\")" },
   "diagnoseI18nNoTrans": { "message": "i18n not loaded (lang=$1, result=\"$2\")" },
   "diagnoseHeartbeatStale": { "message": "heartbeat stalled (last write $1s ago) — SW may be suspended" },

@@ -141,6 +141,7 @@
   "diagnosePageTimerEmpty": { "message": "page timer picker 空/未设 (校验待 page timer 有值后自动生效)", "description": "诊断：page timer 为空时的提示" },
   "diagnosePageTimerFail": { "message": "page timer 读取失败: ", "description": "诊断：page timer 读取失败前缀" },
   "diagnosePageTimerPending": { "message": "page timer 校验待 AC 页面打开后生效", "description": "诊断：page timer 待 AC 页打开后校验" },
+  "diagnoseSmartPlan": { "message": "智能计划: on=$1min，边界 $2，已写入目标 $3", "description": "诊断：智能 ON 相位的时长/边界/已写入目标。$1=开启分钟数，$2=ON 边界，$3=已写入的绝对目标" },
   "diagnoseI18nOK": { "message": "i18n OK (lang=$1, \"pwmSettings\"→\"$2\")", "description": "诊断：i18n 系统正常。$1=语言，$2=测试译文" },
   "diagnoseI18nNoTrans": { "message": "i18n 未加载翻译 (lang=$1, result=\"$2\")", "description": "诊断：i18n 未加载翻译。$1=语言，$2=测试结果" },
   "diagnoseHeartbeatStale": { "message": "心跳停止 (上次写入 $1s 前) — SW 可能被冻结", "description": "诊断：心跳 stale。$1=秒数,-1=从未写入" },

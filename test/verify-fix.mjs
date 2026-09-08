@@ -5466,6 +5466,11 @@ return { reapplySmartSensitivityNow };`
   assertPass(diagOutOfRange.source === 'smart-plan',
     '14O: 越界/过期的 pageTimerTargetAt 不当作期望');
 
+  // 14P: 诊断输出智能计划三要素，便于定位 onMinutes 漂移来源
+  assertPass(!!zhCN.diagnoseSmartPlan && !!en.diagnoseSmartPlan
+      && popupSource.includes("t('diagnoseSmartPlan'"),
+    '14P: 诊断在智能 ON 相位输出 onMinutes/边界/已写入目标三要素');
+
   const diagnoseHandlerSource = popupSource.slice(
     popupSource.indexOf("btnDiagnose.addEventListener('click', async () => {")
   );
