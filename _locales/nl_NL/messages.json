@@ -527,6 +527,10 @@
     "message": "page timer 校验待 AC 页面打开后生效",
     "description": "诊断：page timer 待 AC 页打开后校验"
   },
+  "diagnoseSmartPlan": {
+    "message": "智能计划: on=$1min，边界 $2，已写入目标 $3",
+    "description": "诊断：智能 ON 相位的时长/边界/已写入目标。$1=开启分钟数，$2=ON 边界，$3=已写入的绝对目标"
+  },
   "diagnoseI18nOK": {
     "message": "i18n OK (lang=$1, \"pwmSettings\"→\"$2\")",
     "description": "诊断：i18n 系统正常。$1=语言，$2=测试译文"
