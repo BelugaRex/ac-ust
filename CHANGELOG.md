@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.12
+
+- 修复「召唤医生」误报页面关机定时器不匹配：智能 ON 相位的页面定时器写入后固定，天气刷新只会让 `onMinutes` 漂移（变成下一轮建议），不会重写本轮目标。诊断期望改为优先使用已写入的绝对目标 `pageTimerTargetAt`（仅在它落在本轮 ON 窗口内时），不再用漂移后的 `boundary + onMinutes` 把正常的 22:53 误报成「应设 22:55」。
+
 ## 0.8.11
 
 - 修复循环定时与智能控制互相切换时弹窗卡死：`updateSchedule` 在持久化后立即应答 popup，把「立即起一轮」（`setupAlarms(true)` → `runSmartStep`/`runPwmStep`，含页面定时器写入与新鲜页读回，最坏 60s 超时）移到 `waitUntil` 保活的后台任务，弹窗不再被长任务阻塞，后续状态由每秒轮询补齐。

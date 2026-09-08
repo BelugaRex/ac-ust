@@ -5426,6 +5426,46 @@ return { reapplySmartSensitivityNow };`
       && /chrome\.runtime\.getManifest\(\)\.version/.test(popupSource),
     `14M: 诊断末行 diagnoseVersion 不再直接传 APP_VERSION 硬编码,改为优先读 chrome.runtime.getManifest().version (治本 — 即便作者漏同步源码 APP_VERSION,诊断仍显示真实 manifest 版本)`);
 
+  // 14O: 诊断期望优先用已写入的页面定时器绝对目标，避免 onMinutes 漂移误报
+  const diagExpectSource = popupSource.slice(
+    popupSource.indexOf('function getDiagnosticPageTimerExpectation(schedule, fallbackAt = 0) {'),
+    popupSource.indexOf('\nfunction formatDiagnosticPageTimerValue(')
+  );
+  const getDiagnosticPageTimerExpectation = new Function(
+    'SMART_MODE',
+    `${diagExpectSource}; return getDiagnosticPageTimerExpectation;`
+  )({ ON_MAX: 25 });
+  const diagBoundaryAt = new Date('2026-09-08T22:30:00').getTime();
+  const diagDrift = getDiagnosticPageTimerExpectation({
+    smartMode: { enabled: true },
+    smartState: 'off',
+    smartOnBoundaryAt: diagBoundaryAt,
+    onMinutes: 25,
+    pageTimerTargetAt: diagBoundaryAt + 23 * 60000
+  });
+  assertPass(diagDrift.targetAt === diagBoundaryAt + 23 * 60000
+      && diagDrift.source === 'page-timer-proof',
+    '14O: onMinutes 漂移到 25 时诊断用已写入的 pageTimerTargetAt 作期望，不再把 22:53 误报成应设 22:55');
+  const diagFallback = getDiagnosticPageTimerExpectation({
+    smartMode: { enabled: true },
+    smartState: 'off',
+    smartOnBoundaryAt: diagBoundaryAt,
+    onMinutes: 23,
+    pageTimerTargetAt: 0
+  });
+  assertPass(diagFallback.targetAt === diagBoundaryAt + 23 * 60000
+      && diagFallback.source === 'smart-plan',
+    '14O: 无写入证明时回退 boundary + onMinutes');
+  const diagOutOfRange = getDiagnosticPageTimerExpectation({
+    smartMode: { enabled: true },
+    smartState: 'off',
+    smartOnBoundaryAt: diagBoundaryAt,
+    onMinutes: 23,
+    pageTimerTargetAt: diagBoundaryAt - 60000
+  });
+  assertPass(diagOutOfRange.source === 'smart-plan',
+    '14O: 越界/过期的 pageTimerTargetAt 不当作期望');
+
   const diagnoseHandlerSource = popupSource.slice(
     popupSource.indexOf("btnDiagnose.addEventListener('click', async () => {")
   );

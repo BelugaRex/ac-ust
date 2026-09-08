@@ -864,10 +864,6 @@ function getDiagnosticPageTimerExpectation(schedule, fallbackAt = 0) {
   if (schedule.smartState !== 'off') {
     return { targetAt: 0, source: 'not-on-phase' };
   }
-  const onMinutes = Number(schedule.onMinutes);
-  if (!Number.isSafeInteger(onMinutes) || onMinutes <= 0 || onMinutes > 25) {
-    return { targetAt: 0, source: 'smart-plan-unavailable' };
-  }
   const storedBoundaryAt = Number(schedule.smartOnBoundaryAt);
   let boundaryAt = storedBoundaryAt;
   if (!Number.isSafeInteger(boundaryAt) || boundaryAt <= 0) {
@@ -880,6 +876,19 @@ function getDiagnosticPageTimerExpectation(schedule, fallbackAt = 0) {
   if ((boundary.getMinutes() !== 0 && boundary.getMinutes() !== 30)
       || boundary.getSeconds() !== 0
       || boundary.getMilliseconds() !== 0) {
+    return { targetAt: 0, source: 'smart-plan-unavailable' };
+  }
+  // ON 相位的页面定时器在写入后固定：天气刷新只更新 onMinutes（下一轮建议），
+  // 不会重写本轮目标（避免反复改时间）。所以期望优先用已写入的绝对目标，
+  // 否则 boundary + 漂移后的 onMinutes 会把正常状态误报成不匹配。
+  const proofTargetAt = Number(schedule.pageTimerTargetAt);
+  if (Number.isSafeInteger(proofTargetAt)
+      && proofTargetAt >= boundaryAt
+      && proofTargetAt <= boundaryAt + SMART_MODE.ON_MAX * 60000) {
+    return { targetAt: proofTargetAt, source: 'page-timer-proof' };
+  }
+  const onMinutes = Number(schedule.onMinutes);
+  if (!Number.isSafeInteger(onMinutes) || onMinutes <= 0 || onMinutes > SMART_MODE.ON_MAX) {
     return { targetAt: 0, source: 'smart-plan-unavailable' };
   }
   return {
