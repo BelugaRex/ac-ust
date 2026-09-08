@@ -7198,6 +7198,7 @@ return { reapplySmartSensitivityNow };`
     'ensureContentScriptLoaded',
     'sendSerializedPageTimerMessage',
     'verifyPageTimerPersistence',
+    'refreshACControlPage',
     'console',
     'AC_PAGE',
     'PAGE_TIMER_WRITE_TIMEOUT_MS',
@@ -7225,6 +7226,7 @@ return { reapplySmartSensitivityNow };`
     const calls17 = {
       writes: [],
       injects: 0,
+      refreshes: 0,
       creates: 0,
       verifications: 0,
       persists: 0,
@@ -7315,6 +7317,7 @@ return { reapplySmartSensitivityNow };`
           ? { success: true, value: expectedValue, attempts: 1 }
           : { success: false, error: 'fresh proof mismatch', attempts: 3 };
       },
+      async () => { calls17.refreshes += 1; return { id: 2 }; },
       quietConsole,
       exactHome17,
       60000
@@ -7385,6 +7388,25 @@ return { reapplySmartSensitivityNow };`
       && portRecovery17.calls.injects === 1
       && portRecovery17.calls.creates === 1,
     '17C: 隐藏页消息端口失败只触发一次同页强制重注入，不另建 fallback 页');
+
+  const bfcacheRecovery17 = createPageTimerRecoveryHarness17([
+    new Error('The page keeping the extension port is moved into back/forward cache, so the message channel is closed.'),
+    ({ targetAt }) => ({
+      success: true,
+      value: '06:10',
+      actualDelayMinutes: 10,
+      targetAt
+    })
+  ]);
+  const bfcacheRecoveryResult17 = await bfcacheRecovery17.run();
+  assertPass(bfcacheRecoveryResult17.success === true
+      && bfcacheRecovery17.calls.writes.length === 2
+      && bfcacheRecovery17.calls.injects === 1
+      && bfcacheRecovery17.calls.refreshes === 1
+      && bfcacheRecovery17.calls.creates === 1
+      && bfcacheRecovery17.calls.windowUpdates.length === 0
+      && bfcacheRecovery17.calls.tabUpdates.length === 0,
+    '17K: BFCache 断口先刷新隐藏写入页再重注入重试，不抢焦点、不另建页');
 
   const ambiguousFailures17 = [
     {

@@ -2573,6 +2573,12 @@ async function init() {
     await tryAdoptPageTimer('init');
     await ensureOffscreen();
     startHeartbeat();
+    // 尽早放行消息处理：setupAlarms 会跑 runSmartStep → setPageTimer 等页面操作，
+    // 最长可达 60s（BFCache 恢复 / 新鲜页验证）。若让 initReady 等到 setupAlarms 结束，
+    // 「召唤医生」的 ensureDiagnostics 会因 await initReady 而超时。
+    // runSmartStep 内部有 isCurrentSmartStepRunning/claimSmartStepOwnership 防重入，
+    // 提前放行不会造成并发步骤冲突；initCompletedAt 仍在整段 init 结束后才标记。
+    initResolve();
     await setupAlarms();
     await updateBadge();
     if (isAutomationAllowed()) {
@@ -3753,6 +3759,13 @@ function isRecoverablePageTimerTransportFailure(error) {
     .test(String(error || ''));
 }
 
+// BFCache 断口：页面被移入 back/forward cache 后，其 content script 上下文被冻结，
+// 消息通道随之关闭。重新注入 content script 无法唤醒被冻结的旧文档，必须刷新该页
+// （隐藏写入页，非用户页）让文档重新激活后再写；与 toggle 流程的刷新自愈同模式。
+function isBfcachePortClosed(error) {
+  return /back\/forward cache/i.test(String(error || ''));
+}
+
 function isRecoverablePageTimerFailure(failure) {
   if (!failure || typeof failure !== 'object'
       || failure.automationStale === true
@@ -4041,6 +4054,15 @@ async function setPageTimer(
 
     let result = await writeFixedTargetOnce(tab.id);
     if (!result?.success && isRecoverablePageTimerFailure(result)) {
+      // BFCache 断口：写入页被移入 back/forward cache（UST 登录/CAS 重定向链所致），
+      // 重新注入无法唤醒冻结文档。先刷新该隐藏写入页让文档重新激活，再带注入重试。
+      if (isBfcachePortClosed(result.error)) {
+        try {
+          await refreshACControlPage(tab.id);
+        } catch (_) {
+          // 刷新失败仍继续原重注入重试，不吞掉原始失败。
+        }
+      }
       result = await writeFixedTargetOnce(tab.id, true);
     }
 
