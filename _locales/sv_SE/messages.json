@@ -512,8 +512,8 @@
     "description": "诊断：全局自动控制未启用文案"
   },
   "diagnosePageTimerExpr": {
-    "message": "page timer picker=\"$1\" ← $2 (state=$3)",
-    "description": "诊断：page timer 跨设备同步通道。$1=picker 值，$2=本地下次触发，$3=当前模式状态"
+    "message": "page timer picker=\"$1\" ← 应设 $2 (state=$3)",
+    "description": "诊断：page timer 跨设备同步通道。$1=页面 picker 值，$2=独立计算的应设截止时间，$3=当前模式状态"
   },
   "diagnosePageTimerEmpty": {
     "message": "page timer picker 空/未设 (校验待 page timer 有值后自动生效)",
