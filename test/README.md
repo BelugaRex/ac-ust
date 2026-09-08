@@ -112,6 +112,9 @@ node test/e2e-verify.cjs
 - `xvfb-run -a node test/e2e-background-timer.cjs`：在独立虚拟显示和临时 profile 中加载源码扩展；也可传 `dist` 验证最终构建。保留 Chrome 默认后台节流，覆盖其他活动标签、最小化和 OK 拒绝；同时核对真实 Worker 哈希、后台提交、独立页面读回、窗口/标签状态及用户输入不变。
 - Playwright 不拦截扩展新 target 的首次导航，因此测试先加载本地扩展资源再非活动导航到 home 夹具；所有 HTTP 请求在本地响应，生产代码的每次 create 必须明确 `active:false`。导航接管仅存在于测试，不能以此证明学校服务器或真实 React 实现的全部行为。
 - `verify-fix.mjs` 的 9N/9O 与 17B–17I 另外覆盖生产写入函数的焦点 API 记录、创建失败、URL 漂移、丢弃/关闭、revision/截止失效、有限重试和提前登记回收。
+- `background-arm-cases.mjs` 随主回归执行，动态验证同页 ON/状态、补设固定截止、失败与异常回收；17J 验证预布防不提前一分钟回收。后台 E2E 另含 OFF→同页 ON→服务器清空定时器→补设的完整本地模拟链。
+- Xvfb 没有窗口管理器时最小化场景会明确 SKIP，不能把其余通过项写成最小化已实测。
+- 可在扩展路径后再传 Openbox 可执行路径（如 `.test-profile/window-manager/extracted/usr/bin/openbox`），并把相邻 `usr/lib/x86_64-linux-gnu` 加入 `LD_LIBRARY_PATH`。脚本负责启动/回收这个隔离窗口管理器；指定后最小化不成功会失败而非跳过。只在独立 Xvfb 显示中使用该参数。
 - 上述结果不等于真实 Windows 遮挡策略、浏览器冻结或下一次半点空调运行已验收；真实环境仍按下列清单核对。
 
 ## 用户手动验证清单

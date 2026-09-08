@@ -17,6 +17,7 @@ import { runPwmRetryCases } from './pwm-retry-cases.mjs';
 import { runRecoveryPolicyCases } from './recovery-policy-cases.mjs';
 import { runScheduleMutationCases } from './schedule-mutation-cases.mjs';
 import { runSmartModeCases } from './smart-mode-cases.mjs';
+import { runBackgroundArmCases } from './background-arm-cases.mjs';
 
 const __dirname = path.dirname(url.fileURLToPath(import.meta.url));
 const ROOT = path.resolve(__dirname, '..');
@@ -274,6 +275,7 @@ async function runTests() {
   runRecoveryPolicyCases(assertPass);
   runScheduleMutationCases(assertPass);
   runSmartModeCases(assertPass);
+  await runBackgroundArmCases(assertPass);
 
   console.log('\n\n=== 智能控制纯决策接口 (v0.8.0) ===\n');
   // K 映射（档位 0→0.30，档位 10→1.30）
@@ -1652,7 +1654,7 @@ async function runTests() {
     ? backgroundSource.slice(adoptTimerStart, adoptTimerEnd)
     : '';
 
-  const getStatusStart = backgroundSource.indexOf('async function getCurrentACStatus()');
+  const getStatusStart = backgroundSource.indexOf('async function getCurrentACStatus(');
   const getStatusEnd = backgroundSource.indexOf('\nasync function ensureScheduleClock()', getStatusStart);
   const getStatusBody = getStatusStart >= 0 && getStatusEnd > getStatusStart
     ? backgroundSource.slice(getStatusStart, getStatusEnd)
@@ -2460,7 +2462,8 @@ async function runTests() {
   assertPass(toggleOnceBody.includes('tabs.find(tab => isACHomePageTab(tab) && !tab.discarded)')
       && !toggleOnceBody.includes('tabs[0]')
       && toggleOnceBody.includes('chrome.tabs.create({ url: AC_PAGE, active: false })')
-      && getStatusBody.includes('tabs.find(isACHomePageTab)')
+      && getStatusBody.includes('tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded)')
+      && getStatusBody.includes('[await getExactACHomeTab(controlTabId)]')
       && !getStatusBody.includes('tabs[0]')
       && adoptTimerBody.includes('tabs.find(isACHomePageTab)')
       && !adoptTimerBody.includes('tabs[0]'),
@@ -2560,7 +2563,7 @@ async function runTests() {
   );
   const statusRecoverySource = extractSourceSection(
     backgroundSource,
-    'async function getCurrentACStatus()',
+    'async function getCurrentACStatus(',
     '\nasync function ensureScheduleClock()',
     'getCurrentACStatus recovery'
   );
@@ -7321,10 +7324,11 @@ return { reapplySmartSensitivityNow };`
       schedule: schedule17,
       tabs: tabs17,
       targetAt: targetAt17,
-      run: () => runtime17.setPageTimer(10, {
+      run: (options = {}) => runtime17.setPageTimer(10, {
         retryOnFailure: false,
         targetAt: targetAt17,
-        automationRevision: 9
+        automationRevision: 9,
+        ...options
       })
     };
   };
@@ -7476,6 +7480,14 @@ return { reapplySmartSensitivityNow };`
       && harness.calls.alarms.at(-1).delayInMinutes === 1
       && harness.calls.cleanupBeforeReady
   )), '17I: 等待页面前登记故障回收，完成/失败后缩短回收等待，绝不回收用户页');
+
+  const deferred17 = createPageTimerRecoveryHarness17([success17]);
+  const deferredResult17 = await deferred17.run({ deferVerification: true });
+  assertPass(deferredResult17.success && deferredResult17.controlTabId === 2
+      && deferred17.calls.verifications === 0
+      && deferred17.calls.alarms.length === 1
+      && deferred17.calls.alarms[0].delayInMinutes === 10,
+    '17J: 预布防移交同一后台页并保留长兜底，整段开机验证结束前不得一分钟回收');
 
   // ===== 用例 18: packaged-only 本地控制生命周期审计 =====
   console.log('\n\n=== 用例 18: packaged-only 本地控制生命周期审计 ===\n');

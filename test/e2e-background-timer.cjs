@@ -14,23 +14,41 @@ const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'ac-background-timer-'));
 let context;
 let browser;
 let browserProcess;
+let windowManager;
 let storedValue = '';
 let rejectOk = false;
+let acIsOn = true;
 let pageNumber = 0;
 const submissions = [];
+const onClicks = [];
 let passed = 0;
 let skipped = 0;
 
 function homeFixture() {
   const id = ++pageNumber;
   return `<!doctype html><html><body>
-    <div><small>Air Conditioning Status</small><button class="ant-switch" role="switch" aria-checked="true">ON</button></div>
+    <div><small>Air Conditioning Status</small><button class="ant-switch" role="switch" aria-checked="${acIsOn}">${acIsOn ? 'ON' : 'OFF'}</button></div>
     <div><small>Power-off after</small><div class="ant-picker"><input readonly placeholder="Select time" value="${storedValue}" title="${storedValue}" aria-expanded="false"></div></div>
     <div class="ant-picker-dropdown" hidden><div class="ant-picker-ok"><button disabled>OK</button></div></div>
     <script>
       const input = document.querySelector('input');
       const dropdown = document.querySelector('.ant-picker-dropdown');
       const ok = document.querySelector('.ant-picker-ok button');
+      const ac = document.querySelector('.ant-switch');
+      ac.addEventListener('click', async () => {
+        if (ac.getAttribute('aria-checked') === 'true') throw new Error('OFF click forbidden');
+        if (!confirm('Turn on local fixture?')) return;
+        await fetch('/__fixture_on', { method: 'POST', body: JSON.stringify({
+          id: ${id}, hidden: document.hidden, focused: document.hasFocus()
+        }) });
+        ac.setAttribute('aria-checked', 'true');
+        ac.textContent = 'ON';
+        input.value = '';
+        input.setAttribute('title', '');
+        const message = document.createElement('div');
+        message.textContent = 'Execution succeeded';
+        document.body.appendChild(message);
+      });
       const open = () => { dropdown.hidden = false; input.setAttribute('aria-expanded', 'true'); };
       input.addEventListener('mousedown', open);
       input.addEventListener('click', open);
@@ -56,6 +74,16 @@ async function snapshot(worker) {
 
 async function run() {
   try {
+    if (process.argv[3]) {
+      const executable = path.resolve(process.argv[3]);
+      const prefix = path.resolve(path.dirname(executable), '..');
+      windowManager = spawn(executable, ['--sm-disable', '--config-file',
+        path.join(prefix, '../etc/xdg/openbox/rc.xml')], {
+        detached: true, stdio: 'ignore',
+        env: { ...process.env, XDG_DATA_DIRS: `${prefix}/share:/usr/share` }
+      });
+      windowManager.on('error', error => { console.error('Window manager:', error.message); });
+    }
     // launchPersistentContext forces focus emulation even without throttling flags.
     // A raw isolated browser + noDefaults CDP connection keeps native visibility.
     browserProcess = spawn(chromium.executablePath(), [
@@ -84,7 +112,13 @@ async function run() {
       if (request.url() === 'https://w5.ab.ust.hk/__fixture_save') {
         const data = JSON.parse(request.postData());
         submissions.push(data);
-        storedValue = data.value;
+        storedValue = acIsOn ? data.value : '';
+        return route.fulfill({ contentType: 'application/json', body: '{}' });
+      }
+      if (request.url() === 'https://w5.ab.ust.hk/__fixture_on') {
+        onClicks.push(JSON.parse(request.postData()));
+        acIsOn = true;
+        storedValue = '';
         return route.fulfill({ contentType: 'application/json', body: '{}' });
       }
       return route.fulfill({ contentType: 'text/html', body: '<input id="work" value="keep my draft">' });
@@ -151,8 +185,10 @@ async function run() {
     await work.evaluate(() => document.querySelector('#work').setSelectionRange(5, 9));
     await work.bringToFront();
 
-    for (const scenario of ['other-tab', 'minimized', 'rejected-ok']) {
+    const scenarios = ['other-tab', 'minimized', 'rejected-ok', 'off-then-arm'];
+    for (const scenario of scenarios) {
       rejectOk = scenario === 'rejected-ok';
+      acIsOn = scenario !== 'off-then-arm';
       storedValue = '';
       const firstNewPage = pageNumber + 1;
       const submitStart = submissions.length;
@@ -176,14 +212,15 @@ async function run() {
       }, scenario === 'minimized');
       const before = await snapshot(worker);
       if (scenario === 'minimized' && before.windows[0].state !== 'minimized') {
+        assert.equal(!!windowManager, false, 'requested window manager must support minimization');
         skipped += 1;
         console.log('SKIP minimized: display server did not minimize the window (window manager required)');
         continue;
       }
       const targetAt = Math.ceil((Date.now() + 10 * 60000) / 60000) * 60000;
-      const result = await worker.evaluate(targetAt => setPageTimer(10, {
-        targetAt, retryOnFailure: false
-      }), targetAt);
+      const result = await worker.evaluate(({ targetAt, scenario }) => scenario === 'off-then-arm'
+        ? armPowerOffTimerEnsuringOn(10, { targetAt, requireAutomationAllowed: false })
+        : setPageTimer(10, { targetAt, retryOnFailure: false }), { targetAt, scenario });
       const after = await snapshot(worker);
       const calls = await worker.evaluate(() => __focusCalls);
       assert.deepEqual(calls, [], 'production must not activate or restore tabs/windows');
@@ -200,23 +237,36 @@ async function run() {
         assert.equal(submissions.length, submitStart);
       } else {
         assert.equal(result.success, true, JSON.stringify(result));
-        assert.equal(result.verified, true, JSON.stringify(result));
+        assert.equal(result.verification.success, true, JSON.stringify(result));
         assert.equal(result.targetAt, targetAt);
         assert.equal(storedValue, result.value);
         assert.ok(pageNumber > firstNewPage, 'must verify in a separately loaded page');
-        assert.equal(submissions.length, submitStart + 1);
-        assert.ok(submissions.slice(submitStart).every(s => s.id === firstNewPage && s.hidden && !s.focused));
+        assert.equal(submissions.length, submitStart + (scenario === 'off-then-arm' ? 2 : 1));
+        assert.equal(submissions[submitStart].id, firstNewPage);
+        assert.ok(submissions.slice(submitStart).every(s => s.hidden && !s.focused));
+        if (scenario === 'off-then-arm') {
+          assert.equal(result.supplemented, true);
+          assert.equal(onClicks.length, 1, 'exactly one actual ON click');
+          assert.equal(onClicks[0].id, firstNewPage, 'ON must stay on the prearm page');
+          assert.ok(onClicks[0].hidden && !onClicks[0].focused);
+          assert.ok(submissions.slice(submitStart).every(s => s.value === result.value));
+        }
       }
       passed += 1;
       console.log(`PASS ${scenario}: success=${result.success}, hidden submissions=${submissions.length - submitStart}, focus calls=${calls.length}`);
     }
-    console.log(`Background timer E2E: ${passed}/${3 - skipped}; skipped=${skipped}; real extension hash verified; local fixtures only`);
+    console.log(`Background timer E2E: ${passed}/${scenarios.length - skipped}; skipped=${skipped}; real extension hash verified; local fixtures only`);
   } finally {
     if (context) await context.unrouteAll({ behavior: 'ignoreErrors' });
     if (browser) await browser.close();
     if (browserProcess?.pid && browserProcess.exitCode === null) {
       const exited = new Promise(resolve => browserProcess.once('exit', resolve));
       try { process.kill(-browserProcess.pid, 'SIGTERM'); } catch (_) { /* already exited */ }
+      await exited;
+    }
+    if (windowManager?.pid && windowManager.exitCode === null) {
+      const exited = new Promise(resolve => windowManager.once('exit', resolve));
+      try { process.kill(-windowManager.pid, 'SIGTERM'); } catch (_) { /* already exited */ }
       await exited;
     }
     fs.rmSync(profile, { recursive: true, force: true });

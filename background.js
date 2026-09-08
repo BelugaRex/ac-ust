@@ -638,6 +638,7 @@ let acToggleInFlightNotAfterAt = 0;
 let acToggleInFlightRequiresAutomation = false;
 let acToggleInFlightAutomationRevision = null;
 let acToggleInFlightAutomationMode = null;
+let acToggleInFlightControlTabId = null;
 
 function claimTimerBasedShutdown() {
   timerBasedShutdownRevision += 1;
@@ -3201,19 +3202,22 @@ async function runPwmStep() {
       automationRevision,
       automationMode: 'pwm',
       requireAutomationAllowed: true,
-      ensureOn: async (notAfterAt) => {
+      ensureOn: async (notAfterAt, controlTabId) => {
         await recordControlAuditDispatch();
         try {
           const toggleResult = await toggleAC('on', {
             requireAutomationAllowed: true,
             automationRevision,
+            controlTabId,
             ...(notAfterAt > 0 ? { notAfterAt } : {})
           });
           observations.toggleSucceeded = !!toggleResult?.success;
           observations.toggleError = toggleResult?.error || '';
+          return toggleResult;
         } catch (e) {
           observations.toggleSucceeded = false;
           observations.toggleError = e?.message || String(e);
+          return { success: false, error: observations.toggleError };
         }
       }
     });
@@ -3807,6 +3811,7 @@ async function setPageTimer(
   } = {}
 ) {
   const autoCreatedTabIds = [];
+  let retainedControlTabId = null;
   const requestedMinutes = Number.isFinite(Number(minutes)) && Number(minutes) > 0
     ? Number(minutes)
     : 1;
@@ -4068,8 +4073,11 @@ async function setPageTimer(
       }, 'empty-value');
     }
     if (deferVerification) {
+      // 把十分钟兜底及页面所有权交给整个布防流程，不能在开机仍进行时一分钟回收。
+      retainedControlTabId = tab.id;
       return {
         success: true,
+        controlTabId: tab.id,
         targetAt: fixedTargetAt,
         value: expectedValue,
         actualDelayMinutes: result.actualDelayMinutes || requestedMinutes,
@@ -4110,6 +4118,7 @@ async function setPageTimer(
     }, 'exception');
   } finally {
     for (const tabId of autoCreatedTabIds) {
+      if (tabId === retainedControlTabId) continue;
       chrome.alarms.create(`ac-close-tab-${tabId}`, { delayInMinutes: 1 });
     }
   }
@@ -4227,29 +4236,42 @@ async function armPowerOffTimerEnsuringOn(
   }
   const value = String(writeResult.value || '').trim();
   const fixedTargetAt = Number(writeResult.targetAt);
+  const controlTabId = writeResult.controlTabId;
+  const notAfterAt = automaticOnDeadlineAt > 0
+    ? Math.min(fixedTargetAt, automaticOnDeadlineAt)
+    : fixedTargetAt;
 
-  const before = await getCurrentACStatus();
+  try {
+  if (!Number.isInteger(controlTabId)) {
+    return { success: false, failureStage: 'ensure-on', error: '后台控制页缺失', targetAt: fixedTargetAt };
+  }
+  const before = await getCurrentACStatus(controlTabId);
   let acIsOn = before?.isOn === true;
   let toggledOn = false;
   if (!acIsOn) {
+    let toggleResult;
     if (typeof ensureOn === 'function') {
-      await ensureOn(automaticOnDeadlineAt);
+      toggleResult = await ensureOn(notAfterAt, controlTabId);
     } else {
-      await toggleAC('on', {
-        notAfterAt: automaticOnDeadlineAt,
+      toggleResult = await toggleAC('on', {
+        notAfterAt,
+        controlTabId,
         requireAutomationAllowed,
         automationRevision,
         automationMode
       });
     }
     toggledOn = true;
+    if (!toggleResult?.success) {
+      return { success: false, failureStage: 'ensure-on', error: toggleResult?.error || '自动开启未确认', value, targetAt: fixedTargetAt, acIsOn: false, toggledOn };
+    }
     // 开机需要时间：点击后服务器/页面异步变 ON，且 BFCache 恢复重载可能刚完成。
     // 这里轮询确认直到 ON 或超时，而不是单次读取即判失败（否则会过早放弃并刷新）。
     const confirmDeadline = Date.now() + 15000;
-    let after = await getCurrentACStatus();
+    let after = await getCurrentACStatus(controlTabId);
     while (after?.isOn !== true && Date.now() < confirmDeadline) {
       await sleep(1500);
-      after = await getCurrentACStatus();
+      after = await getCurrentACStatus(controlTabId);
     }
     acIsOn = after?.isOn === true;
     if (!acIsOn) {
@@ -4269,7 +4291,7 @@ async function armPowerOffTimerEnsuringOn(
     automationRevision,
     automationMode,
     shutdownRevision,
-    notAfterAt: automaticOnDeadlineAt
+    notAfterAt
   });
   if (verification.automationStale || verification.shutdownStale) {
     return {
@@ -4288,19 +4310,20 @@ async function armPowerOffTimerEnsuringOn(
   // ON 时被服务器保留，之前 OFF 态写入可能未持久化，开机会把 OFF 态写入的定时器清空）。
   // 复核失败按 ensure-on / verify 各自回退，不改变原失败语义。
   if (verification.acIsOn === false || !verification.success) {
-    await toggleAC('on', {
-      notAfterAt: automaticOnDeadlineAt,
+    const recoveryToggle = await toggleAC('on', {
+      notAfterAt,
+      controlTabId,
       requireAutomationAllowed,
       automationRevision,
       automationMode
     });
     const recoveryDeadline = Date.now() + 15000;
-    let recoveryStatus = await getCurrentACStatus();
-    while (recoveryStatus?.isOn !== true && Date.now() < recoveryDeadline) {
+    let recoveryStatus = await getCurrentACStatus(controlTabId);
+    while (recoveryToggle?.success && recoveryStatus?.isOn !== true && Date.now() < recoveryDeadline) {
       await sleep(1500);
-      recoveryStatus = await getCurrentACStatus();
+      recoveryStatus = await getCurrentACStatus(controlTabId);
     }
-    if (recoveryStatus?.isOn !== true) {
+    if (!recoveryToggle?.success || recoveryStatus?.isOn !== true) {
       return {
         success: false,
         failureStage: 'ensure-on',
@@ -4313,7 +4336,7 @@ async function armPowerOffTimerEnsuringOn(
     }
     const supplement = await setPageTimer(minutes, {
       retryOnFailure: false,
-      targetAt,
+      targetAt: fixedTargetAt,
       automaticOnDeadlineAt,
       automationRevision,
       automationMode,
@@ -4336,7 +4359,7 @@ async function armPowerOffTimerEnsuringOn(
       value,
       targetAt: fixedTargetAt,
       actualDelayMinutes: supplement.actualDelayMinutes || minutes,
-      verification,
+      verification: supplement.verification,
       acIsOn: true,
       toggledOn,
       supplemented: true
@@ -4352,6 +4375,11 @@ async function armPowerOffTimerEnsuringOn(
     acIsOn,
     toggledOn
   };
+  } finally {
+    if (Number.isInteger(controlTabId)) {
+      await chrome.alarms.create(`ac-close-tab-${controlTabId}`, { delayInMinutes: 1 });
+    }
+  }
 }
 
 // ----- 闹钟触发时执行 -----
@@ -4711,7 +4739,8 @@ async function toggleAC(
     notAfterAt = 0,
     requireAutomationAllowed = false,
     automationRevision = null,
-    automationMode = 'pwm'
+    automationMode = 'pwm',
+    controlTabId = null
   } = {}
 ) {
   const requestedNotAfterAt = notAfterAt === 0
@@ -4735,7 +4764,8 @@ async function toggleAC(
         && acToggleInFlightNotAfterAt === requestedNotAfterAt
       && acToggleInFlightRequiresAutomation === requestedRequiresAutomation
         && acToggleInFlightAutomationRevision === requestedAutomationRevision
-        && acToggleInFlightAutomationMode === automationMode) {
+        && acToggleInFlightAutomationMode === automationMode
+        && acToggleInFlightControlTabId === controlTabId) {
       console.log(`[AC扩展] 合并重复的 toggleAC(${action}) 请求`);
       return acToggleInFlight;
     }
@@ -4751,11 +4781,13 @@ async function toggleAC(
   acToggleInFlightRequiresAutomation = requestedRequiresAutomation;
   acToggleInFlightAutomationRevision = requestedAutomationRevision;
   acToggleInFlightAutomationMode = automationMode;
+  acToggleInFlightControlTabId = controlTabId;
   acToggleInFlight = toggleACOnce(action, {
     notAfterAt: requestedNotAfterAt,
     requireAutomationAllowed: requestedRequiresAutomation,
     automationRevision: requestedAutomationRevision,
-    automationMode
+    automationMode,
+    controlTabId
   });
   try {
     return await acToggleInFlight;
@@ -4766,10 +4798,19 @@ async function toggleAC(
     acToggleInFlightRequiresAutomation = false;
     acToggleInFlightAutomationRevision = null;
     acToggleInFlightAutomationMode = null;
+    acToggleInFlightControlTabId = null;
   }
 }
 
 async function toggleACOnce(action, options = {}) {
+  // 自动布防必须沿用自己的后台页；消失/漂移/丢弃均失败，不换到用户页。
+  if (options.controlTabId !== null && options.controlTabId !== undefined) {
+    const controlTab = await getExactACHomeTab(options.controlTabId);
+    if (!controlTab || controlTab.discarded) {
+      return { success: false, invalidTarget: true, error: '后台控制页已不可用' };
+    }
+    return waitUntil(_toggleOnExistingTab(controlTab, action, options));
+  }
   // A1: 顶层幂等预检 — 先查当前 AC 真实状态，已是目标则跳过，避免多余开关噪音
   const needOn = action === 'on';
   try {
@@ -5045,9 +5086,11 @@ function isACHomePageTab(tab) {
 
 function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-async function getCurrentACStatus() {
-  const tabs = await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' });
-  const tab = tabs.find(isACHomePageTab);
+async function getCurrentACStatus(controlTabId = null) {
+  const tabs = controlTabId === null
+    ? await chrome.tabs.query({ url: 'https://w5.ab.ust.hk/njggt/app/*' })
+    : [await getExactACHomeTab(controlTabId)];
+  const tab = tabs.find(candidate => isACHomePageTab(candidate) && !candidate.discarded);
   if (!tab?.id) {
     return { isOn: null, error: '精确 AC home 页面未打开' };
   }
