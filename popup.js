@@ -279,7 +279,9 @@ async function updateSmartReadout() {
       sensitivity: currentSmartMode.sensitivity,
       temperature: weather.temperature,
       observations: Array.isArray(weather.history) ? weather.history : [],
-      nowMs: Date.now()
+      nowMs: Date.now(),
+      dewPointC: weather.dewPoint,
+      windSpeedMs: weather.windSpeedMs
     });
     renderSmartReadout(suggested, weather);
   } catch (e) {
