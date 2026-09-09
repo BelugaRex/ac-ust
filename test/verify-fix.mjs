@@ -328,9 +328,9 @@ async function runTests() {
     sensitivity: 5, temperature: 30,
     observations: [{ t: rtNight, c: 30 }], nowMs: rtNight
   });
-  assertPass(smartDefault.valid === true && smartDefault.runThrough === true
-      && smartDefault.onMinutes === 30 && smartDefault.offMinutes === 0,
-    'smart: 默认场景 T_in=30 ≥ 热夜线 27°C → 直开 30/0（中间不休息）');
+  assertPass(smartDefault.valid === true && smartDefault.runThrough !== true
+      && smartDefault.onMinutes === 21 && smartDefault.offMinutes === 9,
+    'smart: 默认场景 T_in=30 → 体感 35.8 → 需求 20.6 → 21/9（未过连转阈值）');
 
   const smartPrecise = smartMode.computeSmartOnMinutes({
     sensitivity: 10,
@@ -339,10 +339,10 @@ async function runTests() {
     nowMs: rtNight
   });
   assertPass(smartPrecise.valid === true
-      && Math.abs(smartPrecise.tRaw - 24.74) < 0.02
+      && Math.abs(smartPrecise.tRaw - 24.3) < 0.02
       && !Number.isInteger(smartPrecise.tRaw)
-      && smartPrecise.onMinutes === 25
-      && smartPrecise.offMinutes === 5,
+      && smartPrecise.onMinutes === 24
+      && smartPrecise.offMinutes === 6,
     'smart: K/T_in/tRaw 保留浮点，仅最终 onMinutes 量化供显示与控制');
 
   const legacyPrecipitationOverrides = [
@@ -430,25 +430,24 @@ async function runTests() {
     sensitivity: 10, temperature: 30.4, observations: rtObservations, nowMs: rtNight
   });
   assertPass(smartRunThroughEwma.runThrough === true
-      && Math.abs(smartRunThroughEwma.tRaw - 41.83) < 0.05
+      && Math.abs(smartRunThroughEwma.tRaw - 35.68) < 0.05
       && smartRunThroughEwma.onMinutes === 30 && smartRunThroughEwma.offMinutes === 0,
-    'runThrough: EWMA 序列 + 满灵敏度需求 41.8 → 整周期连转');
+    'runThrough: EWMA 序列 + 满灵敏度需求 35.7 → 整周期连转');
 
   // 湿度阶梯：同温同档，露点决定是否连轴转
   const hotHumidS7 = smartMode.computeSmartOnMinutes({
     sensitivity: 7, temperature: 28,
     observations: [{ t: rtNight, c: 28 }], nowMs: rtNight, dewPointC: 26
   });
-  assertPass(hotHumidS7.runThrough === true
-      && hotHumidS7.onMinutes === 30 && hotHumidS7.offMinutes === 0,
-    'hotNight: 湿热（露点 26）28°C ≥ 热夜线 → 连轴转 30/0');
+  assertPass(hotHumidS7.valid === true && hotHumidS7.runThrough !== true
+      && hotHumidS7.onMinutes === 24 && hotHumidS7.offMinutes === 6,
+    'hotNight: 湿热（露点 26）28°C 7 档 → 24/6');
   const hotDryS7 = smartMode.computeSmartOnMinutes({
     sensitivity: 7, temperature: 28,
     observations: [{ t: rtNight, c: 28 }], nowMs: rtNight, dewPointC: 18
   });
-  assertPass(hotDryS7.runThrough === true
-      && hotDryS7.onMinutes === 30 && hotDryS7.offMinutes === 0,
-    'hotNight: 干热（露点 18）28°C ≥ 热夜线 → 直开 30/0（判定不看露点）');
+  assertPass(hotDryS7.onMinutes === 16 && hotDryS7.offMinutes === 14,
+    'hotNight: 干热（露点 18）28°C 7 档 → 16/14（湿度降低需求）');
   // 热夜线以下：湿度仍影响时长（同温不同露点）
   const belowLineHumid = smartMode.computeSmartOnMinutes({
     sensitivity: 5, temperature: 26.5,
@@ -459,9 +458,9 @@ async function runTests() {
     observations: [{ t: rtNight, c: 26.5 }], nowMs: rtNight, dewPointC: 18
   });
   assertPass(belowLineHumid.runThrough !== true
-      && belowLineHumid.onMinutes === 18 && belowLineHumid.offMinutes === 12
-      && belowLineDry.onMinutes === 8 && belowLineDry.offMinutes === 22,
-    'hotNight: 线下 26.5°C 按体感需求给量（湿热 18/12，干热 8/22）');
+      && belowLineHumid.onMinutes === 17 && belowLineHumid.offMinutes === 13
+      && belowLineDry.onMinutes === 10 && belowLineDry.offMinutes === 20,
+    'hotNight: 线下 26.5°C 按体感需求给量（湿热 17/13，干热 10/20）');
 
   // 正午太阳项抬升 T_in：同观测 30°C，正午 T_in = 32.5
   const smartSolarNoon = smartMode.computeSmartOnMinutes({

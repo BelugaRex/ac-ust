@@ -49,9 +49,9 @@ export function runSmartModeCases(assertPass) {
     sensitivity: 5, temperature: 30,
     observations: [{ t: rtNight, c: 30 }], nowMs: rtNight
   });
-  assertPass(smartDefault.valid === true && smartDefault.runThrough === true
-      && smartDefault.onMinutes === 30 && smartDefault.offMinutes === 0,
-    'smart: 默认场景 T_in=30 ≥ 热夜线 27°C → 直开 30/0（中间不休息）');
+  assertPass(smartDefault.valid === true && smartDefault.runThrough !== true
+      && smartDefault.onMinutes === 21 && smartDefault.offMinutes === 9,
+    'smart: 默认场景 T_in=30 → 体感 35.8 → 需求 20.6 → 21/9（未过连转阈值）');
 
   const smartPrecise = smartMode.computeSmartOnMinutes({
     sensitivity: 10,
@@ -60,30 +60,29 @@ export function runSmartModeCases(assertPass) {
     nowMs: rtNight
   });
   assertPass(smartPrecise.valid === true
-      && Math.abs(smartPrecise.tRaw - 24.74) < 0.02
+      && Math.abs(smartPrecise.tRaw - 24.3) < 0.02
       && !Number.isInteger(smartPrecise.tRaw)
-      && smartPrecise.onMinutes === 25
-      && smartPrecise.offMinutes === 5,
+      && smartPrecise.onMinutes === 24
+      && smartPrecise.offMinutes === 6,
     'smart: K/T_in/tRaw 保留浮点，仅最终 onMinutes 量化供显示与控制');
 
-  // 热夜直开线：T_in ≥ 27°C 整周期连转，中间不休息（判定不看湿度与档位）
+  // 热夜 27°C：线性映射按比例给量（中档 16/14、低档 6/24，无直开线）
   const hotLineMid = smartMode.computeSmartOnMinutes({
     sensitivity: 5, temperature: 27,
     observations: [{ t: rtNight, c: 27 }], nowMs: rtNight
   });
-  assertPass(hotLineMid.runThrough === true
-      && hotLineMid.onMinutes === 30 && hotLineMid.offMinutes === 0,
-    'smart: 热夜线 27°C 中档 → 直开 30/0，中间不休息');
+  assertPass(hotLineMid.valid === true && hotLineMid.runThrough !== true
+      && hotLineMid.onMinutes === 16 && hotLineMid.offMinutes === 14,
+    'smart: 热夜 27°C 中档 → 16/14（线性映射按比例给量）');
 
   const hotLineLow = smartMode.computeSmartOnMinutes({
     sensitivity: 0, temperature: 27,
     observations: [{ t: rtNight, c: 27 }], nowMs: rtNight
   });
-  assertPass(hotLineLow.runThrough === true
-      && hotLineLow.onMinutes === 30 && hotLineLow.offMinutes === 0,
-    'smart: 热夜线判定不依赖档位（低档 27°C → 30/0）');
+  assertPass(hotLineLow.onMinutes === 6 && hotLineLow.offMinutes === 24,
+    'smart: 热夜低档按比例少开（0.3×2×9.8 → 6/24）');
 
-  // 热夜线以下：湿度仍影响时长（同温不同露点）
+  // 湿度进入决策：热夜线以下同温不同露点给出不同时长（Steadman 水汽压项）
   const humidSubLine = smartMode.computeSmartOnMinutes({
     sensitivity: 5, temperature: 26.5,
     observations: [{ t: rtNight, c: 26.5 }], nowMs: rtNight, dewPointC: 26
@@ -93,9 +92,9 @@ export function runSmartModeCases(assertPass) {
     observations: [{ t: rtNight, c: 26.5 }], nowMs: rtNight, dewPointC: 18
   });
   assertPass(humidSubLine.runThrough !== true
-      && humidSubLine.onMinutes === 18 && humidSubLine.offMinutes === 12
-      && drySubLine.onMinutes === 8 && drySubLine.offMinutes === 22,
-    'smart: 线下湿度仍影响时长（露点 26 → 18/12，露点 18 → 8/22）');
+      && humidSubLine.onMinutes === 17 && humidSubLine.offMinutes === 13
+      && drySubLine.onMinutes === 10 && drySubLine.offMinutes === 20,
+    'smart: 线下湿度仍影响时长（露点 26 → 17/13，露点 18 → 10/20）');
 
   const legacyPrecipitationOverrides = [
     { rainMm: -1 },

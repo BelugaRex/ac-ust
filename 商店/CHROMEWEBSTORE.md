@@ -7,7 +7,7 @@
 | 字段 | 值 |
 | --- | --- |
 | 名称 | AC-UST |
-| 版本 | 0.9.5 |
+| 版本 | 0.9.6 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率（Productivity） |
 | 语言 | 中文（简体）、English |
@@ -23,15 +23,15 @@
 
 PWM AC scheduling, weather-based smart control, optional operating-hour limits, and cross-device phase alignment for HKUST Smart Power Meter.
 
-## 0.9.5 更新说明
+## 0.9.6 更新说明
 
 ### 中文
 
-热夜直开语义：室内估计温度 ≥27°C 时，每个 30 分钟周期整周期连转（30/0、中间不休息），判定不依赖湿度与灵敏度档位；湿度影响保留在热夜线以下的时长调节。
+决策公式采纳用户提案精简为「开 = K × 2 × (体感 − 23)」：斜率 2、体感零点 23；热夜直开线移除（满档自然连转门槛 ≈ 室内 27°C，与原热夜线重合）；湿度经体感仍影响时长。热夜中档出力较上一版温和（干夜约 21/9），满档热夜仍连转。
 
 ### English
 
-Hot-night semantic: once the indoor estimate reaches 27°C, every 30-minute cycle runs continuously (30/0, no break in between), regardless of humidity or the sensitivity slider. The humidity effect remains in the duration tuning below the hot-night line.
+The decision formula is simplified per user proposal: run minutes = K × 2 × (apparent temp − 23), removing the hot-night override line (the natural full-sensitivity run-through threshold lands at ≈27°C indoor, matching the old line). Humidity still shapes durations through the apparent temperature. Hot-night mid-slider output is milder than the previous release (~21/9 on dry nights); full slider still runs continuously on hot nights.
 
 ## Previous release notes
 
@@ -174,12 +174,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.9.5.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.9.6.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP、图标和本目录资料通过验证。
-2. 上传 `releases/ac-ust-v0.9.5.zip`。
+2. 上传 `releases/ac-ust-v0.9.6.zip`。
 3. 填写商品详情、隐私声明、权限理由与审核测试说明。
 4. 选择私享（Private）、受信任测试人员和香港地区。
 5. 提交审核时选择推迟发布；审核通过后在允许期限内由作者手动发布。
