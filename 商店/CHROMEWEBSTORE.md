@@ -7,7 +7,7 @@
 | 字段 | 值 |
 | --- | --- |
 | 名称 | AC-UST |
-| 版本 | 0.9.0 |
+| 版本 | 0.9.1 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率（Productivity） |
 | 语言 | 中文（简体）、English |
@@ -23,7 +23,17 @@
 
 PWM AC scheduling, weather-based smart control, optional operating-hour limits, and cross-device phase alignment for HKUST Smart Power Meter.
 
-## 0.9.0 更新说明
+## 0.9.1 更新说明
+
+### 中文
+
+实测满档仍偏热：负载增益由 3 提高到 4.5 分钟/°C，舒适目标由 24°C 降至 23°C。满档下室温约 28.3°C 即触发整周期连转，30°C 的夜间约占空比 25/30；中低灵敏度档位同比例加强制冷力度。
+
+### English
+
+Field testing showed full-power cooling was still too warm: the load gain is raised from 3 to 4.5 minutes per °C and the comfort target lowered from 24°C to 23°C. At full sensitivity the full-cycle run-through now triggers near 28.3°C indoor, giving roughly a 25/30 duty cycle on 30°C nights; lower sensitivity levels get a proportionally stronger cooling push.
+
+## Previous release notes
 
 ### 中文
 
@@ -32,16 +42,6 @@ PWM AC scheduling, weather-based smart control, optional operating-hour limits, 
 ### English
 
 The smart control model now estimates indoor temperature from a slow weighted average of outdoor readings plus daytime solar gain, and converts it into run minutes. When the suggestion exceeds 25 minutes, the AC runs the full cycle and re-evaluates at the next half-hour boundary. The page-refresh readiness window is also extended (30s → 45s) to reduce false failures when the school server responds slowly.
-
-## Previous release notes
-
-### 中文
-
-「召唤医生」在智能开启相位新增计划三要素（建议开启分钟数、ON 边界、已写入目标），便于定位建议值漂移来源；并修复误报页面关机定时器不匹配的问题。
-
-### English
-
-The doctor check shows the smart plan triad during the ON phase (suggested minutes, ON boundary, written target) and no longer false-alarms on the page power-off timer.
 
 ## 详细说明（中文 / zh-CN）
 
@@ -158,12 +158,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.9.0.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.9.1.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP、图标和本目录资料通过验证。
-2. 上传 `releases/ac-ust-v0.9.0.zip`。
+2. 上传 `releases/ac-ust-v0.9.1.zip`。
 3. 填写商品详情、隐私声明、权限理由与审核测试说明。
 4. 选择私享（Private）、受信任测试人员和香港地区。
 5. 提交审核时选择推迟发布；审核通过后在允许期限内由作者手动发布。

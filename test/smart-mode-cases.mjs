@@ -49,20 +49,21 @@ export function runSmartModeCases(assertPass) {
     sensitivity: 5, temperature: 30,
     observations: [{ t: rtNight, c: 30 }], nowMs: rtNight
   });
-  assertPass(smartDefault.valid === true && smartDefault.onMinutes === 14 && smartDefault.offMinutes === 16,
-    'smart: 默认场景 on=14/off=16（30 分钟周期开关互补）');
+  assertPass(smartDefault.valid === true && smartDefault.runThrough !== true
+      && smartDefault.onMinutes === 25 && smartDefault.offMinutes === 5,
+    'smart: 默认场景 T_in=30 → 需求 25.2 → 25/5（未过连转阈值）');
 
   const smartPrecise = smartMode.computeSmartOnMinutes({
     sensitivity: 10,
-    temperature: 30.5,
-    observations: [{ t: rtNight, c: 30.5 }],
+    temperature: 26.5,
+    observations: [{ t: rtNight, c: 26.5 }],
     nowMs: rtNight
   });
   assertPass(smartPrecise.valid === true
-      && Math.abs(smartPrecise.tRaw - 25.35) < 0.02
+      && Math.abs(smartPrecise.tRaw - 20.475) < 0.02
       && !Number.isInteger(smartPrecise.tRaw)
-      && smartPrecise.onMinutes === 25
-      && smartPrecise.offMinutes === 5,
+      && smartPrecise.onMinutes === 20
+      && smartPrecise.offMinutes === 10,
     'smart: K/T_in/tRaw 保留浮点，仅最终 onMinutes 量化供显示与控制');
 
   const legacyPrecipitationOverrides = [
@@ -172,7 +173,7 @@ export function runSmartModeCases(assertPass) {
   const preparedBoundary = new Date(2026, 7, 24, 16, 30, 0, 0).getTime();
   const preparedWeather = {
     fetchedAt: preparedBoundary - 20 * 60_000,
-    temperature: 32.6,
+    temperature: 27.5,
     relativeHumidity: 67,
     dewPoint: 25.8,
     windSpeedMs: 16 / 3.6,

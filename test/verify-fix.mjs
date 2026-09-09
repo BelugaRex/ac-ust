@@ -328,20 +328,21 @@ async function runTests() {
     sensitivity: 5, temperature: 30,
     observations: [{ t: rtNight, c: 30 }], nowMs: rtNight
   });
-  assertPass(smartDefault.valid === true && smartDefault.onMinutes === 14 && smartDefault.offMinutes === 16,
-    'smart: 默认场景 on=14/off=16（30 分钟周期开关互补）');
+  assertPass(smartDefault.valid === true && smartDefault.runThrough !== true
+      && smartDefault.onMinutes === 25 && smartDefault.offMinutes === 5,
+    'smart: 默认场景 T_in=30 → 需求 25.2 → 25/5（未过连转阈值）');
 
   const smartPrecise = smartMode.computeSmartOnMinutes({
     sensitivity: 10,
-    temperature: 30.5,
-    observations: [{ t: rtNight, c: 30.5 }],
+    temperature: 26.5,
+    observations: [{ t: rtNight, c: 26.5 }],
     nowMs: rtNight
   });
   assertPass(smartPrecise.valid === true
-      && Math.abs(smartPrecise.tRaw - 25.35) < 0.02
+      && Math.abs(smartPrecise.tRaw - 20.475) < 0.02
       && !Number.isInteger(smartPrecise.tRaw)
-      && smartPrecise.onMinutes === 25
-      && smartPrecise.offMinutes === 5,
+      && smartPrecise.onMinutes === 20
+      && smartPrecise.offMinutes === 10,
     'smart: K/T_in/tRaw 保留浮点，仅最终 onMinutes 量化供显示与控制');
 
   const legacyPrecipitationOverrides = [
@@ -415,10 +416,10 @@ async function runTests() {
       && smartHot.onMinutes === 30 && smartHot.offMinutes === 0,
     'smart: 极热满灵敏度 → 连轴转 30/0，顺延到下一半点重估');
 
-  // tRaw 落在 [24.5, 25.5) → 仍 25/5，不误入连轴转（T_in = 30.4 → tRaw 24.96）
+  // tRaw 落在 [24.5, 25.5) → 仍 25/5，不误入连轴转（T_in = 27.3 → tRaw 25.155）
   const smartHotEdge = smartMode.computeSmartOnMinutes({
-    sensitivity: 10, temperature: 30.4,
-    observations: [{ t: rtNight, c: 30.4 }], nowMs: rtNight
+    sensitivity: 10, temperature: 27.3,
+    observations: [{ t: rtNight, c: 27.3 }], nowMs: rtNight
   });
   assertPass(smartHotEdge.runThrough !== true
       && smartHotEdge.onMinutes === 25 && smartHotEdge.offMinutes === 5,
@@ -429,9 +430,9 @@ async function runTests() {
     sensitivity: 10, temperature: 30.4, observations: rtObservations, nowMs: rtNight
   });
   assertPass(smartRunThroughEwma.runThrough === true
-      && Math.abs(smartRunThroughEwma.tRaw - 26.83) < 0.05
+      && Math.abs(smartRunThroughEwma.tRaw - 46.12) < 0.05
       && smartRunThroughEwma.onMinutes === 30 && smartRunThroughEwma.offMinutes === 0,
-    'runThrough: EWMA 序列 + 满灵敏度需求 26.8 → 整周期连转');
+    'runThrough: EWMA 序列 + 满灵敏度需求 40.2 → 整周期连转');
 
   // 正午太阳项抬升 T_in：同观测 30°C，正午 T_in = 32.5
   const smartSolarNoon = smartMode.computeSmartOnMinutes({
@@ -549,7 +550,7 @@ async function runTests() {
   const preparedBoundary = new Date(2026, 7, 24, 16, 30, 0, 0).getTime();
   const preparedWeather = {
     fetchedAt: preparedBoundary - 20 * 60_000,
-    temperature: 32.6,
+    temperature: 27.5,
     relativeHumidity: 67,
     dewPoint: 25.8,
     windSpeedMs: 16 / 3.6,

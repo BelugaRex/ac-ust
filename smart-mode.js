@@ -49,8 +49,8 @@
     SOLAR_PEAK_C: 2.5,                    // 白日太阳得热峰值（等效室温抬升）
     SOLAR_PEAK_HOUR: 13,                  // 峰值时刻 13:00（窗口直射 + 传导合成）
     SOLAR_HALF_WIDTH_H: 7.5,              // 半幅宽 7.5h → 5:30 前与 20:30 后归零
-    LOAD_GAIN_MIN_PER_C: 3.0,             // 负载增益：每 °C 温差对应的开启分钟数
-    T_COMFORT_C: 24                       // 舒适目标温度（人员 + 设备热已折算其中）
+    LOAD_GAIN_MIN_PER_C: 4.5,             // 负载增益：每 °C 温差对应的开启分钟数（0.9.1 实测体感偏热后 3 → 4.5）
+    T_COMFORT_C: 23                       // 舒适目标温度（人员 + 设备热已折算其中；0.9.1 实测 24 偏热 → 23）
   });
 
   function clamp(value, min, max) {
