@@ -1278,7 +1278,9 @@ async function reapplySmartSensitivityNow() {
     sensitivity: schedule.smartMode.sensitivity,
     temperature: weather.temperature,
     observations: Array.isArray(weather.history) ? weather.history : [],
-    nowMs: Date.now()
+    nowMs: Date.now(),
+    dewPointC: weather.dewPoint,
+    windSpeedMs: weather.windSpeedMs
   });
 
   if (!suggested.valid) return;  // 天气不可用 → 保持当前周期不变

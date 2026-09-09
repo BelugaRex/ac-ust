@@ -7,7 +7,7 @@
 | 字段 | 值 |
 | --- | --- |
 | 名称 | AC-UST |
-| 版本 | 0.9.2 |
+| 版本 | 0.9.3 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率（Productivity） |
 | 语言 | 中文（简体）、English |
@@ -23,7 +23,17 @@
 
 PWM AC scheduling, weather-based smart control, optional operating-hour limits, and cross-device phase alignment for HKUST Smart Power Meter.
 
-## 0.9.2 更新说明
+## 0.9.3 更新说明
+
+### 中文
+
+决策公式精简并恢复湿度影响：开启时长现在由「体感温度」驱动——在室外温度估计之上叠加湿度与风的 Steadman 修正，同温度下湿热夜明显多开、干热夜按比例少开；热夜专用下限不再需要，可调参数从 4 个精简为 2 个。
+
+### English
+
+The decision formula is simplified and humidity-aware again: run minutes are driven by a Steadman apparent temperature (the outdoor estimate plus moisture and wind corrections). Humid nights now get meaningfully more cooling at the same temperature, the hot-night floor is no longer needed, and the number of tunable constants drops from four to two.
+
+## Previous release notes
 
 ### 中文
 
@@ -32,8 +42,6 @@ PWM AC scheduling, weather-based smart control, optional operating-hour limits, 
 ### English
 
 Field feedback showed hot nights were under-cooled: once the indoor estimate reaches 28°C (the Observatory's hot-night line), each 30-minute cycle guarantees a minimum run time proportional to the sensitivity slider (K × 25 minutes; from about level 8 the AC runs the full cycle). Slider semantics are unchanged and mild nights are unaffected.
-
-## Previous release notes
 
 ### 中文
 
@@ -166,12 +174,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.9.2.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.9.3.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP、图标和本目录资料通过验证。
-2. 上传 `releases/ac-ust-v0.9.2.zip`。
+2. 上传 `releases/ac-ust-v0.9.3.zip`。
 3. 填写商品详情、隐私声明、权限理由与审核测试说明。
 4. 选择私享（Private）、受信任测试人员和香港地区。
 5. 提交审核时选择推迟发布；审核通过后在允许期限内由作者手动发布。

@@ -40,20 +40,22 @@
     WEATHER_PLAN_MAX_AGE_MS: 60 * 60 * 1000,
     COMPRESSOR_DEADBAND_MIN: 1,  // 压缩机保护死区下界
     COMPRESSOR_DEADBAND_MAX: 4,  // 压缩机保护死区上界
-    // 室内温度估计（0.9.0 起取代 Steadman 体感公式）：
+    // 室内体感估计（0.9.3 恢复 Steadman 湿度/风修正）：
     //   T_in = EWMA_τ(T_out 观测序列) + Δ_solar(时刻)
-    //   on = clamp(K · LOAD_GAIN_MIN_PER_C · (T_in − T_COMFORT_C), 0, ON_MAX)
-    // 热夜（T_in ≥ HOT_NIGHT_C）时 on 以 K · HOT_NIGHT_FLOOR_MINUTES 抬底。
+    //   AT_in = T_in + 0.33·e − 0.70·w − 4（当前露点/风，缺露点回退 24°C）
+    //   on = clamp(K · LOAD_GAIN_MIN_PER_C · (AT_in − T_COMFORT_C), 0, ON_MAX)
     // 需求 > ON_MAX 时整周期连转（30/0，见 computeSmartOnMinutes 的 runThrough）。
     EWMA_TAU_MS: 3 * 60 * 60 * 1000,      // 建筑热惯性时间常数 τ = 3h
     EWMA_MAX_AGE_MS: 12 * 60 * 60 * 1000, // 超龄观测直接出局
     SOLAR_PEAK_C: 2.5,                    // 白日太阳得热峰值（等效室温抬升）
     SOLAR_PEAK_HOUR: 13,                  // 峰值时刻 13:00（窗口直射 + 传导合成）
     SOLAR_HALF_WIDTH_H: 7.5,              // 半幅宽 7.5h → 5:30 前与 20:30 后归零
-    LOAD_GAIN_MIN_PER_C: 4.5,             // 负载增益：每 °C 温差对应的开启分钟数（0.9.1 实测体感偏热后 3 → 4.5）
-    T_COMFORT_C: 23,                      // 舒适目标温度（人员 + 设备热已折算其中；0.9.1 实测 24 偏热 → 23）
-    HOT_NIGHT_C: 28,                      // 热夜线（对齐天文台热夜定义）：室内估计 ≥28°C 启用开启下限
-    HOT_NIGHT_FLOOR_MINUTES: 25           // 热夜下限基数：on ≥ K×25；K×25 > 25（约 8 档起）转入整周期连转
+    LOAD_GAIN_MIN_PER_C: 3,               // 负载增益：每 °C 体感温差对应的开启分钟数（0.9.3 作用于体感温差）
+    T_COMFORT_C: 26,                      // 体感目标温度（Steadman 体感尺度；26°C 约对应中档热夜 24/6）
+    VAPOR_COEF: 0.33,                     // Steadman 水汽压系数（e 为 hPa）
+    WIND_COEF: 0.7,                       // Steadman 风速系数（w 为 m/s）
+    TEQ_OFFSET: -4,                       // Steadman 常数项
+    DEW_POINT_FALLBACK_C: 24              // 露点缺失时的夏季典型回退值（fail-open）
   });
 
   function clamp(value, min, max) {
@@ -208,13 +210,22 @@
     };
   }
 
-  // 主入口：由室内温度估计 + 灵敏度系数计算建议开启分钟数。
+  // 主入口：由室内体感估计 + 灵敏度系数计算建议开启分钟数。
   // observations: [{t: ms, c: °C}] 室外观测历史（顺序不限，按衰减权重处理）。
   // nowMs: 决策时刻（太阳项与衰减基准）；缺省时不加太阳项（等效深夜）。
+  // dewPointC/windSpeedMs: 当前时刻湿度与风的 Steadman 修正输入；露点缺失
+  // 回退 DEW_POINT_FALLBACK_C，风缺失按静风处理（fail-open）。
   // 无有效历史时退化为当前单点气温估计（冷启动可用）。
-  // 返回 { valid, k, tIn, tRaw, runThrough?, onMinutes, offMinutes, reason }。
+  // 返回 { valid, k, tIn, atIn, tRaw, runThrough?, onMinutes, offMinutes, reason }。
   //   valid=false 表示天气数据非法，调用方应退化为手动时长。
-  function computeSmartOnMinutes({ sensitivity, temperature, observations, nowMs } = {}) {
+  function computeSmartOnMinutes({
+    sensitivity,
+    temperature,
+    observations,
+    nowMs,
+    dewPointC,
+    windSpeedMs
+  } = {}) {
     const k = sensitivityToK(sensitivity);
     const estimate = estimateIndoorTemperature(observations, nowMs);
     let tIn;
@@ -234,17 +245,22 @@
       }
       tIn = t;
     }
+    // Steadman 体感修正：湿度（水汽压）抬升、风折减，直接作用在室内估计上；
+    // 湿热夜自动多开、干热夜按比例少开，热夜不再需要专门下限。
+    const dew = finiteNumber(dewPointC);
+    const dewSafe = dew === null ? SMART_MODE.DEW_POINT_FALLBACK_C : dew;
+    const vaporPressure = vaporPressureFromDewPoint(dewSafe);
+    const wind = finiteNumber(windSpeedMs);
+    const atIn = vaporPressure === null
+      ? tIn
+      : tIn
+        + SMART_MODE.VAPOR_COEF * vaporPressure
+        - SMART_MODE.WIND_COEF * (wind === null ? 0 : wind)
+        + SMART_MODE.TEQ_OFFSET;
     const tRaw = k
       * SMART_MODE.LOAD_GAIN_MIN_PER_C
-      * (tIn - SMART_MODE.T_COMFORT_C);
-    // 热夜地板：室内估计达到热夜线（对齐天文台热夜定义 28°C）时，需求按
-    // K × HOT_NIGHT_FLOOR_MINUTES 抬底——档位越高下限越大，滑块语义不变；
-    // 抬底后超过单周期上限同样转入整周期连转，冷启动单点估计同样适用。
-    let demandRaw = tRaw;
-    if (tIn >= SMART_MODE.HOT_NIGHT_C) {
-      demandRaw = Math.max(demandRaw, k * SMART_MODE.HOT_NIGHT_FLOOR_MINUTES);
-    }
-    const rounded = Math.round(demandRaw);
+      * (atIn - SMART_MODE.T_COMFORT_C);
+    const rounded = Math.round(tRaw);
     if (rounded > SMART_MODE.ON_MAX) {
       // 连轴转：需求超过 25 分钟时整周期开启（30/0），下一半点边界再重新评估。
       // 退出连转时的关闭窗 = 30 − on* ≥ 5 分钟，天然满足压缩机最短停机时间；
@@ -253,17 +269,19 @@
         valid: true,
         k,
         tIn,
+        atIn,
         tRaw,
         runThrough: true,
         onMinutes: SMART_MODE.CYCLE_MINUTES,
         offMinutes: 0
       };
     }
-    const onMinutes = clampAndRoundOnMinutes(demandRaw);
+    const onMinutes = clampAndRoundOnMinutes(tRaw);
     return {
       valid: true,
       k,
       tIn,
+      atIn,
       tRaw,
       onMinutes,
       offMinutes: SMART_MODE.CYCLE_MINUTES - onMinutes
@@ -312,7 +330,9 @@
       sensitivity: normalizedSensitivity,
       temperature: observation.temperature,
       observations,
-      nowMs: boundary
+      nowMs: boundary,
+      dewPointC: observation.dewPoint,
+      windSpeedMs: observation.windSpeedMs
     });
     if (!decision.valid) return null;
 
@@ -328,6 +348,7 @@
       offMinutes: decision.offMinutes,
       k: decision.k,
       tIn: decision.tIn,
+      atIn: decision.atIn,
       tRaw: decision.tRaw,
       runThrough: decision.runThrough === true
     };
@@ -356,7 +377,9 @@
       sensitivity: normalizedSensitivity,
       temperature: plan.weather.temperature,
       observations: Array.isArray(plan.observations) ? plan.observations : [],
-      nowMs: boundaryAt
+      nowMs: boundaryAt,
+      dewPointC: plan.weather.dewPoint,
+      windSpeedMs: plan.weather.windSpeedMs
     });
     if (!decision.valid) return null;
     return {
@@ -389,7 +412,9 @@
       sensitivity: normalizeSmartSensitivity(sensitivity),
       temperature: weather.temperature,
       observations: Array.isArray(weather.history) ? weather.history : [],
-      nowMs: boundaryAt
+      nowMs: boundaryAt,
+      dewPointC: weather.dewPoint,
+      windSpeedMs: weather.windSpeedMs
     });
     if (!decision.valid) return null;
     return {

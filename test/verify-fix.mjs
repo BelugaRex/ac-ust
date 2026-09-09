@@ -329,8 +329,8 @@ async function runTests() {
     observations: [{ t: rtNight, c: 30 }], nowMs: rtNight
   });
   assertPass(smartDefault.valid === true && smartDefault.runThrough !== true
-      && smartDefault.onMinutes === 25 && smartDefault.offMinutes === 5,
-    'smart: 默认场景 T_in=30 → 需求 25.2 → 25/5（未过连转阈值）');
+      && smartDefault.onMinutes === 24 && smartDefault.offMinutes === 6,
+    'smart: 默认场景 T_in=30 → 体感 35.8 → 需求 23.6 → 24/6（未过连转阈值）');
 
   const smartPrecise = smartMode.computeSmartOnMinutes({
     sensitivity: 10,
@@ -339,10 +339,10 @@ async function runTests() {
     nowMs: rtNight
   });
   assertPass(smartPrecise.valid === true
-      && Math.abs(smartPrecise.tRaw - 20.475) < 0.02
+      && Math.abs(smartPrecise.tRaw - 24.74) < 0.02
       && !Number.isInteger(smartPrecise.tRaw)
-      && smartPrecise.onMinutes === 20
-      && smartPrecise.offMinutes === 10,
+      && smartPrecise.onMinutes === 25
+      && smartPrecise.offMinutes === 5,
     'smart: K/T_in/tRaw 保留浮点，仅最终 onMinutes 量化供显示与控制');
 
   const legacyPrecipitationOverrides = [
@@ -416,10 +416,10 @@ async function runTests() {
       && smartHot.onMinutes === 30 && smartHot.offMinutes === 0,
     'smart: 极热满灵敏度 → 连轴转 30/0，顺延到下一半点重估');
 
-  // tRaw 落在 [24.5, 25.5) → 仍 25/5，不误入连轴转（T_in = 27.3 → tRaw 25.155）
+  // tRaw 落在 [24.5, 25.5) → 仍 25/5，不误入连轴转（T_in = 26.6 → tRaw 25.13）
   const smartHotEdge = smartMode.computeSmartOnMinutes({
-    sensitivity: 10, temperature: 27.3,
-    observations: [{ t: rtNight, c: 27.3 }], nowMs: rtNight
+    sensitivity: 10, temperature: 26.6,
+    observations: [{ t: rtNight, c: 26.6 }], nowMs: rtNight
   });
   assertPass(smartHotEdge.runThrough !== true
       && smartHotEdge.onMinutes === 25 && smartHotEdge.offMinutes === 5,
@@ -430,25 +430,25 @@ async function runTests() {
     sensitivity: 10, temperature: 30.4, observations: rtObservations, nowMs: rtNight
   });
   assertPass(smartRunThroughEwma.runThrough === true
-      && Math.abs(smartRunThroughEwma.tRaw - 46.12) < 0.05
+      && Math.abs(smartRunThroughEwma.tRaw - 41.83) < 0.05
       && smartRunThroughEwma.onMinutes === 30 && smartRunThroughEwma.offMinutes === 0,
-    'runThrough: EWMA 序列 + 满灵敏度需求 40.2 → 整周期连转');
+    'runThrough: EWMA 序列 + 满灵敏度需求 41.8 → 整周期连转');
 
-  // 热夜地板阶梯：28°C 线上按 K 抬底；K×25 > 25（约 8 档起）→ 整周期连转
-  const hotNightS7 = smartMode.computeSmartOnMinutes({
+  // 湿度阶梯：同温同档，露点决定是否连轴转
+  const hotHumidS7 = smartMode.computeSmartOnMinutes({
     sensitivity: 7, temperature: 28,
-    observations: [{ t: rtNight, c: 28 }], nowMs: rtNight
+    observations: [{ t: rtNight, c: 28 }], nowMs: rtNight, dewPointC: 26
   });
-  assertPass(hotNightS7.runThrough !== true
-      && hotNightS7.onMinutes === 25 && hotNightS7.offMinutes === 5,
-    'hotNightFloor: 热夜 7 档 → 地板 K×25 = 25 → 25/5 不连转');
-  const hotNightS8 = smartMode.computeSmartOnMinutes({
-    sensitivity: 8, temperature: 28,
-    observations: [{ t: rtNight, c: 28 }], nowMs: rtNight
+  assertPass(hotHumidS7.runThrough === true
+      && hotHumidS7.onMinutes === 30 && hotHumidS7.offMinutes === 0,
+    'hotHumid: 湿热（露点 26）7 档 → 连轴转 30/0');
+  const hotDryS7 = smartMode.computeSmartOnMinutes({
+    sensitivity: 7, temperature: 28,
+    observations: [{ t: rtNight, c: 28 }], nowMs: rtNight, dewPointC: 18
   });
-  assertPass(hotNightS8.runThrough === true
-      && hotNightS8.onMinutes === 30 && hotNightS8.offMinutes === 0,
-    'hotNightFloor: 热夜 8 档 → K×25 = 27.5 超上限 → 连轴转 30/0');
+  assertPass(hotDryS7.runThrough !== true
+      && hotDryS7.onMinutes === 14 && hotDryS7.offMinutes === 16,
+    'hotHumid: 干热（露点 18）7 档 → 14/16，湿度降低需求');
 
   // 正午太阳项抬升 T_in：同观测 30°C，正午 T_in = 32.5
   const smartSolarNoon = smartMode.computeSmartOnMinutes({
@@ -456,7 +456,8 @@ async function runTests() {
     observations: [{ t: rtNoon, c: 30 }], nowMs: rtNoon
   });
   assertPass(smartSolarNoon.runThrough === true
-      && Math.abs(smartSolarNoon.tIn - 32.5) < 0.01,
+      && Math.abs(smartSolarNoon.tIn - 32.5) < 0.01
+      && Math.abs(smartSolarNoon.atIn - 38.34) < 0.01,
     'runThrough: 正午太阳项 +2.5°C 抬升 T_in = 32.5，触发连轴转');
 
   // 连轴转三态机（smart-phase）：30/0 状态机 + 离格补开锚点

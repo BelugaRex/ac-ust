@@ -50,8 +50,8 @@ export function runSmartModeCases(assertPass) {
     observations: [{ t: rtNight, c: 30 }], nowMs: rtNight
   });
   assertPass(smartDefault.valid === true && smartDefault.runThrough !== true
-      && smartDefault.onMinutes === 25 && smartDefault.offMinutes === 5,
-    'smart: 默认场景 T_in=30 → 需求 25.2 → 25/5（未过连转阈值）');
+      && smartDefault.onMinutes === 24 && smartDefault.offMinutes === 6,
+    'smart: 默认场景 T_in=30 → 体感 35.8 → 需求 23.6 → 24/6（未过连转阈值）');
 
   const smartPrecise = smartMode.computeSmartOnMinutes({
     sensitivity: 10,
@@ -60,34 +60,42 @@ export function runSmartModeCases(assertPass) {
     nowMs: rtNight
   });
   assertPass(smartPrecise.valid === true
-      && Math.abs(smartPrecise.tRaw - 20.475) < 0.02
+      && Math.abs(smartPrecise.tRaw - 24.74) < 0.02
       && !Number.isInteger(smartPrecise.tRaw)
-      && smartPrecise.onMinutes === 20
-      && smartPrecise.offMinutes === 10,
+      && smartPrecise.onMinutes === 25
+      && smartPrecise.offMinutes === 5,
     'smart: K/T_in/tRaw 保留浮点，仅最终 onMinutes 量化供显示与控制');
 
-  // 热夜地板：T_in ≥ 28°C（天文台热夜线）时开启时长下限 = K × 25 分钟
-  const hotNightMid = smartMode.computeSmartOnMinutes({
+  // 湿度进入决策：同温不同露点给出不同时长（Steadman 水汽压项）
+  const humidNight = smartMode.computeSmartOnMinutes({
     sensitivity: 5, temperature: 28,
-    observations: [{ t: rtNight, c: 28 }], nowMs: rtNight
+    observations: [{ t: rtNight, c: 28 }], nowMs: rtNight, dewPointC: 26
   });
-  assertPass(hotNightMid.valid === true && hotNightMid.runThrough !== true
-      && hotNightMid.onMinutes === 20 && hotNightMid.offMinutes === 10,
-    'smart: 热夜 28°C 中档 → 地板 K×25 = 20 → 20/10');
+  assertPass(humidNight.valid === true && humidNight.runThrough !== true
+      && humidNight.onMinutes === 22 && humidNight.offMinutes === 8,
+    'smart: 湿热夜（露点 26）28°C 中档 → 22/8');
 
-  const hotNightLow = smartMode.computeSmartOnMinutes({
+  const dryNight = smartMode.computeSmartOnMinutes({
+    sensitivity: 5, temperature: 28,
+    observations: [{ t: rtNight, c: 28 }], nowMs: rtNight, dewPointC: 18
+  });
+  assertPass(dryNight.onMinutes === 12 && dryNight.offMinutes === 18
+      && dryNight.onMinutes < humidNight.onMinutes,
+    'smart: 干热夜（露点 18）同温 → 12/18，湿度抬升湿热需求');
+
+  const lowSliderNight = smartMode.computeSmartOnMinutes({
     sensitivity: 0, temperature: 28,
     observations: [{ t: rtNight, c: 28 }], nowMs: rtNight
   });
-  assertPass(hotNightLow.onMinutes === 8 && hotNightLow.offMinutes === 22,
-    'smart: 热夜低档仍按 K 比例抬底（0.3×25 → 8/22），不越权拉满');
+  assertPass(lowSliderNight.onMinutes === 7 && lowSliderNight.offMinutes === 23,
+    'smart: 低档热夜按比例少开（0.3×3×7.8 → 7/23）');
 
-  const belowHotNight = smartMode.computeSmartOnMinutes({
+  const midBandNight = smartMode.computeSmartOnMinutes({
     sensitivity: 5, temperature: 27.6,
     observations: [{ t: rtNight, c: 27.6 }], nowMs: rtNight
   });
-  assertPass(belowHotNight.onMinutes === 17 && belowHotNight.offMinutes === 13,
-    'smart: 27.6°C 未达热夜线 → 不启用地板（17/13）');
+  assertPass(midBandNight.onMinutes === 18 && midBandNight.offMinutes === 12,
+    'smart: 27.6°C 中档 → 18/12');
 
   const legacyPrecipitationOverrides = [
     { rainMm: -1 },
@@ -262,7 +270,7 @@ export function runSmartModeCases(assertPass) {
     ? consumeStoredWeather({
       fetchedAt: preparedBoundary - 10 * 60_000,
       temperature: 32.3,
-      dewPoint: 10,
+      dewPoint: 20,
       windSpeedMs: 0,
       stale: false,
       error: ''
@@ -280,7 +288,7 @@ export function runSmartModeCases(assertPass) {
     ? consumeStoredWeather({
       fetchedAt: preparedBoundary - 10 * 60_000,
       temperature: 32.3,
-      dewPoint: 10,
+      dewPoint: 20,
       windSpeedMs: 0,
       rainMm: 999,
       rainfall: 999,
