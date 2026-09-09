@@ -140,8 +140,8 @@
     "description": "建议开启分钟数行的标签"
   },
   "smartModeTeq": {
-    "message": "等效室外温度",
-    "description": "等效室外温度行的标签"
+    "message": "预估室内温度",
+    "description": "预估室内温度行的标签（EWMA + 白日太阳得热）"
   },
   "smartModeUpdated": {
     "message": "数据更新",
