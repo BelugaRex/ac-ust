@@ -7,7 +7,7 @@
 | 字段 | 值 |
 | --- | --- |
 | 名称 | AC-UST |
-| 版本 | 0.9.4 |
+| 版本 | 0.9.5 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率（Productivity） |
 | 语言 | 中文（简体）、English |
@@ -23,15 +23,15 @@
 
 PWM AC scheduling, weather-based smart control, optional operating-hour limits, and cross-device phase alignment for HKUST Smart Power Meter.
 
-## 0.9.4 更新说明
+## 0.9.5 更新说明
 
 ### 中文
 
-修复 popup 建议读数与实际执行不一致的问题：建议开启分钟数现在使用与边界执行完全相同的露点/风速数据计算，展示值不再偏离真实执行结果。
+热夜直开语义：室内估计温度 ≥27°C 时，每个 30 分钟周期整周期连转（30/0、中间不休息），判定不依赖湿度与灵敏度档位；湿度影响保留在热夜线以下的时长调节。
 
 ### English
 
-Fixed a popup inconsistency where the suggested run minutes were computed with a fallback dew point instead of the live one. The popup now uses the exact same dew point, wind and observation data as the scheduled execution, so what you see is what runs.
+Hot-night semantic: once the indoor estimate reaches 27°C, every 30-minute cycle runs continuously (30/0, no break in between), regardless of humidity or the sensitivity slider. The humidity effect remains in the duration tuning below the hot-night line.
 
 ## Previous release notes
 
@@ -174,12 +174,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.9.4.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.9.5.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP、图标和本目录资料通过验证。
-2. 上传 `releases/ac-ust-v0.9.4.zip`。
+2. 上传 `releases/ac-ust-v0.9.5.zip`。
 3. 填写商品详情、隐私声明、权限理由与审核测试说明。
 4. 选择私享（Private）、受信任测试人员和香港地区。
 5. 提交审核时选择推迟发布；审核通过后在允许期限内由作者手动发布。

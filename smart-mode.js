@@ -44,6 +44,7 @@
     //   T_in = EWMA_τ(T_out 观测序列) + Δ_solar(时刻)
     //   AT_in = T_in + 0.33·e − 0.70·w − 4（当前露点/风，缺露点回退 24°C）
     //   on = clamp(K · LOAD_GAIN_MIN_PER_C · (AT_in − T_COMFORT_C), 0, ON_MAX)
+    // 热夜直开：T_in ≥ HOT_NIGHT_C（27°C）时整周期连转（30/0），中间不休息。
     // 需求 > ON_MAX 时整周期连转（30/0，见 computeSmartOnMinutes 的 runThrough）。
     EWMA_TAU_MS: 3 * 60 * 60 * 1000,      // 建筑热惯性时间常数 τ = 3h
     EWMA_MAX_AGE_MS: 12 * 60 * 60 * 1000, // 超龄观测直接出局
@@ -52,6 +53,7 @@
     SOLAR_HALF_WIDTH_H: 7.5,              // 半幅宽 7.5h → 5:30 前与 20:30 后归零
     LOAD_GAIN_MIN_PER_C: 3,               // 负载增益：每 °C 体感温差对应的开启分钟数（0.9.3 作用于体感温差）
     T_COMFORT_C: 26,                      // 体感目标温度（Steadman 体感尺度；26°C 约对应中档热夜 24/6）
+    HOT_NIGHT_C: 27,                      // 热夜直开线：室内估计 ≥27°C 整周期连转（30/0，中间不休息）
     VAPOR_COEF: 0.33,                     // Steadman 水汽压系数（e 为 hPa）
     WIND_COEF: 0.7,                       // Steadman 风速系数（w 为 m/s）
     TEQ_OFFSET: -4,                       // Steadman 常数项
@@ -260,6 +262,20 @@
     const tRaw = k
       * SMART_MODE.LOAD_GAIN_MIN_PER_C
       * (atIn - SMART_MODE.T_COMFORT_C);
+    // 热夜直开：室内估计达到热夜线（27°C）时整周期连转（30/0），中间不休息；
+    // 判定只看室内估计，不依赖湿度与灵敏度档位。
+    if (tIn >= SMART_MODE.HOT_NIGHT_C) {
+      return {
+        valid: true,
+        k,
+        tIn,
+        atIn,
+        tRaw,
+        runThrough: true,
+        onMinutes: SMART_MODE.CYCLE_MINUTES,
+        offMinutes: 0
+      };
+    }
     const rounded = Math.round(tRaw);
     if (rounded > SMART_MODE.ON_MAX) {
       // 连轴转：需求超过 25 分钟时整周期开启（30/0），下一半点边界再重新评估。

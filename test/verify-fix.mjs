@@ -328,9 +328,9 @@ async function runTests() {
     sensitivity: 5, temperature: 30,
     observations: [{ t: rtNight, c: 30 }], nowMs: rtNight
   });
-  assertPass(smartDefault.valid === true && smartDefault.runThrough !== true
-      && smartDefault.onMinutes === 24 && smartDefault.offMinutes === 6,
-    'smart: 默认场景 T_in=30 → 体感 35.8 → 需求 23.6 → 24/6（未过连转阈值）');
+  assertPass(smartDefault.valid === true && smartDefault.runThrough === true
+      && smartDefault.onMinutes === 30 && smartDefault.offMinutes === 0,
+    'smart: 默认场景 T_in=30 ≥ 热夜线 27°C → 直开 30/0（中间不休息）');
 
   const smartPrecise = smartMode.computeSmartOnMinutes({
     sensitivity: 10,
@@ -441,14 +441,27 @@ async function runTests() {
   });
   assertPass(hotHumidS7.runThrough === true
       && hotHumidS7.onMinutes === 30 && hotHumidS7.offMinutes === 0,
-    'hotHumid: 湿热（露点 26）7 档 → 连轴转 30/0');
+    'hotNight: 湿热（露点 26）28°C ≥ 热夜线 → 连轴转 30/0');
   const hotDryS7 = smartMode.computeSmartOnMinutes({
     sensitivity: 7, temperature: 28,
     observations: [{ t: rtNight, c: 28 }], nowMs: rtNight, dewPointC: 18
   });
-  assertPass(hotDryS7.runThrough !== true
-      && hotDryS7.onMinutes === 14 && hotDryS7.offMinutes === 16,
-    'hotHumid: 干热（露点 18）7 档 → 14/16，湿度降低需求');
+  assertPass(hotDryS7.runThrough === true
+      && hotDryS7.onMinutes === 30 && hotDryS7.offMinutes === 0,
+    'hotNight: 干热（露点 18）28°C ≥ 热夜线 → 直开 30/0（判定不看露点）');
+  // 热夜线以下：湿度仍影响时长（同温不同露点）
+  const belowLineHumid = smartMode.computeSmartOnMinutes({
+    sensitivity: 5, temperature: 26.5,
+    observations: [{ t: rtNight, c: 26.5 }], nowMs: rtNight, dewPointC: 26
+  });
+  const belowLineDry = smartMode.computeSmartOnMinutes({
+    sensitivity: 5, temperature: 26.5,
+    observations: [{ t: rtNight, c: 26.5 }], nowMs: rtNight, dewPointC: 18
+  });
+  assertPass(belowLineHumid.runThrough !== true
+      && belowLineHumid.onMinutes === 18 && belowLineHumid.offMinutes === 12
+      && belowLineDry.onMinutes === 8 && belowLineDry.offMinutes === 22,
+    'hotNight: 线下 26.5°C 按体感需求给量（湿热 18/12，干热 8/22）');
 
   // 正午太阳项抬升 T_in：同观测 30°C，正午 T_in = 32.5
   const smartSolarNoon = smartMode.computeSmartOnMinutes({
@@ -567,7 +580,7 @@ async function runTests() {
   const preparedBoundary = new Date(2026, 7, 24, 16, 30, 0, 0).getTime();
   const preparedWeather = {
     fetchedAt: preparedBoundary - 20 * 60_000,
-    temperature: 27.5,
+    temperature: 26.5,
     relativeHumidity: 67,
     dewPoint: 25.8,
     windSpeedMs: 16 / 3.6,
