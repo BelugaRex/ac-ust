@@ -226,9 +226,9 @@ function renderSmartReadout(suggested, weather) {
     smartSuggested.textContent = '--';
     smartSuggested.classList.add('is-empty');
   }
-  // 等效室外温度
+  // 预估室内温度（EWMA + 白日太阳得热）
   if (hasData) {
-    smartTeq.textContent = `${suggested.teq.toFixed(1)} °C`;
+    smartTeq.textContent = `${suggested.tIn.toFixed(1)} °C`;
     smartTeq.classList.remove('is-empty');
   } else {
     smartTeq.textContent = '--';
@@ -260,8 +260,8 @@ async function updateSmartReadout() {
     renderSmartReadout(computeSmartOnMinutes({
       sensitivity: currentSmartMode.sensitivity,
       temperature: 30,
-      dewPoint: 24,
-      windSpeedMs: 1.5
+      observations: [{ t: Date.now(), c: 30 }],
+      nowMs: Date.now()
     }), { fetchedAt: Date.now(), stale: false });
     return;
   }
@@ -278,8 +278,8 @@ async function updateSmartReadout() {
     const suggested = computeSmartOnMinutes({
       sensitivity: currentSmartMode.sensitivity,
       temperature: weather.temperature,
-      dewPoint: weather.dewPoint,
-      windSpeedMs: weather.windSpeedMs
+      observations: Array.isArray(weather.history) ? weather.history : [],
+      nowMs: Date.now()
     });
     renderSmartReadout(suggested, weather);
   } catch (e) {

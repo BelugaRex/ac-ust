@@ -2,12 +2,13 @@
 // smart-mode.js — 智能模式纯决策（无 chrome.* / DOM / 隐式浏览器状态）
 // ============================================================
 //
-// 依据 HKUST 宿舍定频空调智能控制算法（严格实现）：
+// 依据 HKUST 宿舍定频空调智能控制算法（0.9.0 室内估计版）：
 //   1) 灵敏度系数 K = K_MIN + (档位 / 10) * (K_MAX - K_MIN)
 //      → 档位 0 对应 K=0.30，档位 10 对应 K=1.30（共 11 档线性映射）
-//   2) 水汽压 e (hPa) = 6.112 * exp((17.67 * Td) / (Td + 243.5))
-//   3) 等效室外温度 Teq = T + 0.33*e - 0.70*Wind - 4.00
-//   4) 原始开启分钟数 t_raw = K * Teq
+//   2) 室内温度估计 T_in = EWMA_τ(T_out 序列) + Δ_solar(t)，τ = 3h
+//      （建筑热惯性滤波 + 白日太阳得热；人员/设备热折入舒适目标常数）
+//   3) 原始开启分钟数 t_raw = K · 3 min/°C · (T_in − 24°C)
+//   4) 需求 > 25 分钟 → 整周期连转（30/0），下一半点边界重新评估
 //   5) 限幅到 [0, 25] 并四舍五入取整（30 分钟周期至少保留 5 分钟关闭窗口）
 //   6) 压缩机保护：结果落在 1~4 分钟时强制设为 0（避免频繁启停）
 //
@@ -39,10 +40,17 @@
     WEATHER_PLAN_MAX_AGE_MS: 60 * 60 * 1000,
     COMPRESSOR_DEADBAND_MIN: 1,  // 压缩机保护死区下界
     COMPRESSOR_DEADBAND_MAX: 4,  // 压缩机保护死区上界
-    // Teq = T + VAPOR_COEF*e - WIND_COEF*Wind + TEQ_OFFSET
-    VAPOR_COEF: 0.33,
-    WIND_COEF: 0.70,
-    TEQ_OFFSET: -4.00
+    // 室内温度估计（0.9.0 起取代 Steadman 体感公式）：
+    //   T_in = EWMA_τ(T_out 观测序列) + Δ_solar(时刻)
+    //   on = clamp(K · LOAD_GAIN_MIN_PER_C · (T_in − T_COMFORT_C), 0, ON_MAX)
+    // 需求 > ON_MAX 时整周期连转（30/0，见 computeSmartOnMinutes 的 runThrough）。
+    EWMA_TAU_MS: 3 * 60 * 60 * 1000,      // 建筑热惯性时间常数 τ = 3h
+    EWMA_MAX_AGE_MS: 12 * 60 * 60 * 1000, // 超龄观测直接出局
+    SOLAR_PEAK_C: 2.5,                    // 白日太阳得热峰值（等效室温抬升）
+    SOLAR_PEAK_HOUR: 13,                  // 峰值时刻 13:00（窗口直射 + 传导合成）
+    SOLAR_HALF_WIDTH_H: 7.5,              // 半幅宽 7.5h → 5:30 前与 20:30 后归零
+    LOAD_GAIN_MIN_PER_C: 3.0,             // 负载增益：每 °C 温差对应的开启分钟数
+    T_COMFORT_C: 24                       // 舒适目标温度（人员 + 设备热已折算其中）
   });
 
   function clamp(value, min, max) {
@@ -94,23 +102,47 @@
     return (243.5 * ln) / (17.67 - ln);
   }
 
-  // 等效室外温度 Teq = T + 0.33*e - 0.70*Wind - 4.00。
-  // windSpeedMs 为 m/s；返回 null 表示温度或露点非法。
-  function equivalentTemperature(temperatureC, dewPointC, windSpeedMs) {
-    const t = finiteNumber(temperatureC);
-    if (t === null) return null;
-    const wind = finiteNumber(windSpeedMs);
-    const windSafe = wind === null ? 0 : wind;
-    const e = vaporPressureFromDewPoint(dewPointC);
-    if (e === null) return null;
-    return t + SMART_MODE.VAPOR_COEF * e - SMART_MODE.WIND_COEF * windSafe + SMART_MODE.TEQ_OFFSET;
+  // 白日太阳得热近似（无需辐射数据）：以当地时间 13:00 为峰值的余弦窗，
+  // 5:30 前与 20:30 后为 0。h = 当地小时（含分钟小数）。
+  function solarBumpC(nowMs) {
+    const now = Number(nowMs);
+    if (!Number.isFinite(now)) return 0;
+    const date = new Date(now);
+    const h = date.getHours() + date.getMinutes() / 60;
+    const wave = Math.cos(
+      (Math.PI * (h - SMART_MODE.SOLAR_PEAK_HOUR)) / SMART_MODE.SOLAR_HALF_WIDTH_H
+    );
+    return SMART_MODE.SOLAR_PEAK_C * Math.max(0, wave);
   }
 
-  // 原始开启分钟数 t_raw = K * Teq。
-  // t_raw 按 60 分钟参考周期标定；实际周期为 CYCLE_MINUTES 时按比例缩放，
-  // 保持相同占空比（on/(on+off)），仅缩短单次开/关时长以减小温度摆幅。
-  function rawOnMinutes(k, teq) {
-    return k * teq * (SMART_MODE.CYCLE_MINUTES / SMART_MODE.REFERENCE_CYCLE_MINUTES);
+  // 室内温度估计：室外观测序列的指数衰减加权平均（τ = EWMA_TAU_MS）+ 白日太阳得热。
+  // observations: [{t: ms, c: °C}]；非法或超龄（> EWMA_MAX_AGE_MS）观测出局，
+  // 无有效观测则 valid=false（调用方退化为当前单点，不加太阳项）。
+  function estimateIndoorTemperature(observations, nowMs) {
+    const now = Number(nowMs);
+    if (!Number.isFinite(now)) {
+      return { valid: false, tOutEwma: null, tIn: null };
+    }
+    const list = Array.isArray(observations) ? observations : [];
+    let weightSum = 0;
+    let weightedSum = 0;
+    for (const obs of list) {
+      const t = Number(obs?.t);
+      const c = Number(obs?.c);
+      if (!Number.isFinite(t) || !Number.isFinite(c) || t > now
+          || now - t > SMART_MODE.EWMA_MAX_AGE_MS) {
+        continue;
+      }
+      const weight = Math.exp(-(now - t) / SMART_MODE.EWMA_TAU_MS);
+      weightSum += weight;
+      weightedSum += weight * c;
+    }
+    if (weightSum <= 0) {
+      return { valid: false, tOutEwma: null, tIn: null };
+    }
+    const tOutEwma = weightedSum / weightSum;
+    const bump = solarBumpC(now);
+    return { valid: true, tOutEwma, solarBumpC: bump, tIn: tOutEwma + bump };
   }
 
   // 限幅到 [0, 25] → 四舍五入 → 压缩机保护（1~4 → 0）。
@@ -173,23 +205,35 @@
     };
   }
 
-  // 主入口：由天气观测 + 灵敏度计算建议开启分钟数。
-  // weather: { temperature, dewPoint, windSpeedMs }（气温/露点 °C，风速 m/s）
-  // 返回 { valid, onMinutes, offMinutes, k, teq, tRaw, reason }。
+  // 主入口：由室内温度估计 + 灵敏度系数计算建议开启分钟数。
+  // observations: [{t: ms, c: °C}] 室外观测历史（顺序不限，按衰减权重处理）。
+  // nowMs: 决策时刻（太阳项与衰减基准）；缺省时不加太阳项（等效深夜）。
+  // 无有效历史时退化为当前单点气温估计（冷启动可用）。
+  // 返回 { valid, k, tIn, tRaw, runThrough?, onMinutes, offMinutes, reason }。
   //   valid=false 表示天气数据非法，调用方应退化为手动时长。
-  function computeSmartOnMinutes({ sensitivity, temperature, dewPoint, windSpeedMs } = {}) {
+  function computeSmartOnMinutes({ sensitivity, temperature, observations, nowMs } = {}) {
     const k = sensitivityToK(sensitivity);
-    const teq = equivalentTemperature(temperature, dewPoint, windSpeedMs);
-    if (teq === null) {
-      return {
-        valid: false,
-        reason: 'invalid-weather',
-        k,
-        onMinutes: 0,
-        offMinutes: SMART_MODE.CYCLE_MINUTES
-      };
+    const estimate = estimateIndoorTemperature(observations, nowMs);
+    let tIn;
+    if (estimate.valid) {
+      tIn = estimate.tIn;
+    } else {
+      // 冷启动/历史缺失：退化为当前观测单点，不加太阳项。
+      const t = finiteNumber(temperature);
+      if (t === null) {
+        return {
+          valid: false,
+          reason: 'invalid-weather',
+          k,
+          onMinutes: 0,
+          offMinutes: SMART_MODE.CYCLE_MINUTES
+        };
+      }
+      tIn = t;
     }
-    const tRaw = rawOnMinutes(k, teq);
+    const tRaw = k
+      * SMART_MODE.LOAD_GAIN_MIN_PER_C
+      * (tIn - SMART_MODE.T_COMFORT_C);
     const rounded = Math.round(tRaw);
     if (rounded > SMART_MODE.ON_MAX) {
       // 连轴转：需求超过 25 分钟时整周期开启（30/0），下一半点边界再重新评估。
@@ -198,7 +242,7 @@
       return {
         valid: true,
         k,
-        teq,
+        tIn,
         tRaw,
         runThrough: true,
         onMinutes: SMART_MODE.CYCLE_MINUTES,
@@ -209,7 +253,7 @@
     return {
       valid: true,
       k,
-      teq,
+      tIn,
       tRaw,
       onMinutes,
       offMinutes: SMART_MODE.CYCLE_MINUTES - onMinutes
@@ -253,9 +297,12 @@
       dewPoint: finiteNumber(weather?.dewPoint),
       windSpeedMs: finiteNumber(weather?.windSpeedMs)
     };
+    const observations = Array.isArray(weather?.history) ? weather.history : [];
     const decision = computeSmartOnMinutes({
       sensitivity: normalizedSensitivity,
-      ...observation
+      temperature: observation.temperature,
+      observations,
+      nowMs: boundary
     });
     if (!decision.valid) return null;
 
@@ -266,11 +313,13 @@
       fetchedAt,
       sensitivity: normalizedSensitivity,
       weather: observation,
+      observations,
       onMinutes: decision.onMinutes,
       offMinutes: decision.offMinutes,
       k: decision.k,
-      teq: decision.teq,
-      tRaw: decision.tRaw
+      tIn: decision.tIn,
+      tRaw: decision.tRaw,
+      runThrough: decision.runThrough === true
     };
   }
 
@@ -296,8 +345,8 @@
     const decision = computeSmartOnMinutes({
       sensitivity: normalizedSensitivity,
       temperature: plan.weather.temperature,
-      dewPoint: plan.weather.dewPoint,
-      windSpeedMs: plan.weather.windSpeedMs
+      observations: Array.isArray(plan.observations) ? plan.observations : [],
+      nowMs: boundaryAt
     });
     if (!decision.valid) return null;
     return {
@@ -329,8 +378,8 @@
     const decision = computeSmartOnMinutes({
       sensitivity: normalizeSmartSensitivity(sensitivity),
       temperature: weather.temperature,
-      dewPoint: weather.dewPoint,
-      windSpeedMs: weather.windSpeedMs
+      observations: Array.isArray(weather.history) ? weather.history : [],
+      nowMs: boundaryAt
     });
     if (!decision.valid) return null;
     return {
@@ -347,8 +396,8 @@
     sensitivityToK,
     vaporPressureFromDewPoint,
     deriveDewPoint,
-    equivalentTemperature,
-    rawOnMinutes,
+    solarBumpC,
+    estimateIndoorTemperature,
     clampAndRoundOnMinutes,
     computeSmartOnMinutes,
     prepareSmartWeatherDecision,

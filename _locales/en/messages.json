@@ -36,7 +36,7 @@
   "smartModeStrong": { "message": "Drier & cooler" },
   "smartModeSensitivityLabel": { "message": "Smart mode sensitivity" },
   "smartModeSuggested": { "message": "Suggested ON" },
-  "smartModeTeq": { "message": "Equivalent temp" },
+  "smartModeTeq": { "message": "Est. indoor temp" },
   "smartModeUpdated": { "message": "Updated" },
   "smartModeWeatherUnavailable": { "message": "Weather unavailable" },
   "smartModeWeatherStale": { "message": "cached" },

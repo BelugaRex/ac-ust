@@ -7,7 +7,7 @@
 | 字段 | 值 |
 | --- | --- |
 | 名称 | AC-UST |
-| 版本 | 0.8.15 |
+| 版本 | 0.9.0 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率（Productivity） |
 | 语言 | 中文（简体）、English |
@@ -23,15 +23,15 @@
 
 PWM AC scheduling, weather-based smart control, optional operating-hour limits, and cross-device phase alignment for HKUST Smart Power Meter.
 
-## 0.8.15 更新说明
+## 0.9.0 更新说明
 
 ### 中文
 
-智能控制建议开启超过 25 分钟时整周期连转并在下一半点重估，避免湿热天频繁启停带来的体感不适；同时放宽页面刷新恢复的就绪等待（30 秒 → 45 秒），学校服务器慢响应时减少误报与无谓重试。
+智能控制模型升级为「室内温度估计」：以室外气温的慢速加权平均加白日太阳得热推算室内温度，再换算开启时长；建议超过 25 分钟时整周期连转，下一半点自动重估。湿热傍晚不再过早停机，舒适度与连续运转的压缩机保护兼得。
 
 ### English
 
-When the smart suggestion exceeds 25 minutes, the AC runs the full cycle and re-evaluates at the next half-hour boundary, avoiding discomfort from frequent stop-start cycling on hot humid days. The page-refresh readiness window is extended (30s → 45s) to reduce false failures when the school server responds slowly.
+The smart control model now estimates indoor temperature from a slow weighted average of outdoor readings plus daytime solar gain, and converts it into run minutes. When the suggestion exceeds 25 minutes, the AC runs the full cycle and re-evaluates at the next half-hour boundary. The page-refresh readiness window is also extended (30s → 45s) to reduce false failures when the school server responds slowly.
 
 ## Previous release notes
 
@@ -42,10 +42,6 @@ When the smart suggestion exceeds 25 minutes, the AC runs the full cycle and re-
 ### English
 
 The doctor check shows the smart plan triad during the ON phase (suggested minutes, ON boundary, written target) and no longer false-alarms on the page power-off timer.
-
-### English
-
-The doctor check now shows the smart plan triad during the ON phase (suggested minutes, ON boundary, written target) to help locate suggestion drift.
 
 ## 详细说明（中文 / zh-CN）
 
@@ -162,12 +158,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.15.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.9.0.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP、图标和本目录资料通过验证。
-2. 上传 `releases/ac-ust-v0.8.15.zip`。
+2. 上传 `releases/ac-ust-v0.9.0.zip`。
 3. 填写商品详情、隐私声明、权限理由与审核测试说明。
 4. 选择私享（Private）、受信任测试人员和香港地区。
 5. 提交审核时选择推迟发布；审核通过后在允许期限内由作者手动发布。

@@ -1105,6 +1105,12 @@ async function getSmartWeather({ force = false } = {}) {
   smartWeatherInFlight = (async () => {
     try {
       const weather = await fetchSmartWeather();
+      const previous = (await chrome.storage.local.get(SMART_WEATHER_KEY))[SMART_WEATHER_KEY];
+      const history = Array.isArray(previous?.history) ? previous.history : [];
+      if (Number.isFinite(weather.temperature)) {
+        history.push({ t: weather.fetchedAt, c: weather.temperature });
+      }
+      weather.history = history.slice(-24);
       await chrome.storage.local.set({ [SMART_WEATHER_KEY]: weather });
       return { ...weather, stale: false, error: '' };
     } catch (e) {
@@ -1230,7 +1236,7 @@ async function applyPreparedSmartModeDurations() {
 
   console.log(
     `[AC扩展] 智能模式预计算: boundary=${new Date(boundaryAt).toLocaleTimeString()}`
-    + ` K=${suggested.k.toFixed(3)} Teq=${suggested.teq.toFixed(1)}°C`
+    + ` K=${suggested.k.toFixed(3)} Tin=${suggested.tIn.toFixed(1)}°C`
     + ` t_raw=${suggested.tRaw.toFixed(1)}`
     + ` → on=${suggested.onMinutes}min / off=${schedule.offMinutes}min`
   );
@@ -1271,8 +1277,8 @@ async function reapplySmartSensitivityNow() {
   const suggested = computeSmartOnMinutes({
     sensitivity: schedule.smartMode.sensitivity,
     temperature: weather.temperature,
-    dewPoint: weather.dewPoint,
-    windSpeedMs: weather.windSpeedMs
+    observations: Array.isArray(weather.history) ? weather.history : [],
+    nowMs: Date.now()
   });
 
   if (!suggested.valid) return;  // 天气不可用 → 保持当前周期不变

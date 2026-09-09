@@ -29,29 +29,41 @@ export function runSmartModeCases(assertPass) {
   assertPass(Math.abs(smartMode.vaporPressureFromDewPoint(25) - 31.67) < 0.5,
     'smart: 露点 25°C → 水汽压 ≈31.7 hPa');
 
-  // 等效室外温度 Teq
-  const smartTeq = smartMode.equivalentTemperature(30, 24, 1.5);
-  assertPass(Math.abs(smartTeq - 34.79) < 0.5, 'smart: Teq = T + 0.33e - 0.70Wind - 4');
+  // 室内温度估计（EWMA + 太阳得热）
+  const rtNight = new Date(2026, 8, 9, 22, 30, 0, 0).getTime();
+  const rtNoon = new Date(2026, 8, 9, 13, 0, 0, 0).getTime();
+  assertPass(Math.abs(smartMode.solarBumpC(rtNoon) - 2.5) < 1e-9
+      && smartMode.solarBumpC(rtNight) === 0,
+    'smart: 太阳得热余弦窗峰值 13:00 = 2.5°C，夜间归零');
+  const rtEstimate = smartMode.estimateIndoorTemperature([
+    { t: rtNight - 10 * 60000, c: 30.4 },
+    { t: rtNight - 70 * 60000, c: 30.8 },
+    { t: rtNight - 130 * 60000, c: 31.2 },
+    { t: rtNight - 190 * 60000, c: 31.9 }
+  ], rtNight);
+  assertPass(rtEstimate.valid && Math.abs(rtEstimate.tIn - 30.88) < 0.05,
+    'smart: EWMA τ=3h 序列估计 T_in ≈ 30.88（夜间无太阳项）');
 
   // 主入口：默认场景
   const smartDefault = smartMode.computeSmartOnMinutes({
-    sensitivity: 5, temperature: 30, dewPoint: 24, windSpeedMs: 1.5
+    sensitivity: 5, temperature: 30,
+    observations: [{ t: rtNight, c: 30 }], nowMs: rtNight
   });
   assertPass(smartDefault.valid === true && smartDefault.onMinutes === 14 && smartDefault.offMinutes === 16,
     'smart: 默认场景 on=14/off=16（30 分钟周期开关互补）');
 
   const smartPrecise = smartMode.computeSmartOnMinutes({
     sensitivity: 10,
-    temperature: 32.3,
-    dewPoint: 10,
-    windSpeedMs: 0
+    temperature: 30.5,
+    observations: [{ t: rtNight, c: 30.5 }],
+    nowMs: rtNight
   });
   assertPass(smartPrecise.valid === true
-      && Math.abs(smartPrecise.tRaw - 21.03) < 0.02
+      && Math.abs(smartPrecise.tRaw - 25.35) < 0.02
       && !Number.isInteger(smartPrecise.tRaw)
-      && smartPrecise.onMinutes === 21
-      && smartPrecise.offMinutes === 9,
-    'smart: K/天气/Teq/tRaw 保留浮点，仅最终 onMinutes 量化供显示与控制');
+      && smartPrecise.onMinutes === 25
+      && smartPrecise.offMinutes === 5,
+    'smart: K/T_in/tRaw 保留浮点，仅最终 onMinutes 量化供显示与控制');
 
   const legacyPrecipitationOverrides = [
     { rainMm: -1 },
@@ -67,14 +79,14 @@ export function runSmartModeCases(assertPass) {
   const legacyRainDecisions = legacyPrecipitationOverrides.map(override => smartMode.computeSmartOnMinutes({
     sensitivity: 5,
     temperature: 30,
-    dewPoint: 24,
-    windSpeedMs: 1.5,
+    observations: [{ t: rtNight, c: 30 }],
+    nowMs: rtNight,
     ...override
   }));
   assertPass(legacyRainDecisions.every(decision => (
-    ['valid', 'onMinutes', 'offMinutes', 'k', 'teq', 'tRaw', 'reason']
+    ['valid', 'onMinutes', 'offMinutes', 'k', 'tIn', 'tRaw', 'reason']
       .every(key => Object.is(decision[key], smartDefault[key]))
-  )), 'smart: 旧对象携带任意 rain/rainfall/precipitation 字段也不改变温湿度/风速决策与 reason');
+  )), 'smart: 旧对象携带任意 rain/rainfall/precipitation 字段也不改变决策与 reason');
   assertPass(['rainOnTimeFactor', 'applyRainOnTimeAdjustment', 'finalizeRainAdjustedOnMinutes']
     .every(name => typeof smartMode[name] === 'undefined'),
   'smart: 雨量修正函数不再属于纯决策接口');
@@ -87,8 +99,8 @@ export function runSmartModeCases(assertPass) {
   const smartHotLegacyRain = smartMode.computeSmartOnMinutes({
     sensitivity: 10,
     temperature: 33,
-    dewPoint: 26,
-    windSpeedMs: 0,
+    observations: [{ t: rtNight, c: 33 }],
+    nowMs: rtNight,
     rainMm: Number.MAX_VALUE
   });
   assertPass(smartHotLegacyRain.runThrough === true
@@ -107,16 +119,18 @@ export function runSmartModeCases(assertPass) {
     'smart: 开启上限截断 25，30 分钟周期至少保留 5 分钟关闭窗口');
   assertPass(smartMode.clampAndRoundOnMinutes(-5) === 0, 'smart: 下限截断 0');
 
-  // 冷天 → Teq 低 → 开启分钟数减少
+  // 冷天 → T_in 低于舒适目标 → 需求为负，不开启
   const smartCold = smartMode.computeSmartOnMinutes({
-    sensitivity: 5, temperature: 18, dewPoint: 10, windSpeedMs: 3
+    sensitivity: 5, temperature: 18,
+    observations: [{ t: rtNight, c: 18 }], nowMs: rtNight
   });
-  assertPass(smartCold.valid === true && smartCold.onMinutes === 6,
-    'smart: 冷天 Teq 低 → on=6');
+  assertPass(smartCold.valid === true && smartCold.onMinutes === 0,
+    'smart: 冷天 T_in < 舒适目标 → 需求为负，不开启');
 
-  // 极热 + 满灵敏度 → 25/5（30 分钟周期）
+  // 极热 + 满灵敏度 → 连轴转 30/0（30 分钟周期）
   const smartHot = smartMode.computeSmartOnMinutes({
-    sensitivity: 10, temperature: 33, dewPoint: 26, windSpeedMs: 0
+    sensitivity: 10, temperature: 33,
+    observations: [{ t: rtNight, c: 33 }], nowMs: rtNight
   });
   assertPass(smartHot.runThrough === true
       && smartHot.onMinutes === 30 && smartHot.offMinutes === 0,
@@ -232,10 +246,11 @@ export function runSmartModeCases(assertPass) {
     : null;
   assertPass(consumeStoredWeather !== null
       && cachedWeatherDecision?.valid === true
-      && cachedWeatherDecision.onMinutes === 21
-      && cachedWeatherDecision.offMinutes === 9
+      && cachedWeatherDecision.runThrough === true
+      && cachedWeatherDecision.onMinutes === 30
+      && cachedWeatherDecision.offMinutes === 0
       && cachedWeatherDecision.boundaryAt === preparedBoundary,
-    'smart-plan: 目标 plan 丢失时可用边界前的新鲜本地天气重算 21/30，不沿用旧 12 分钟');
+    'smart-plan: 目标 plan 丢失时可用边界前的新鲜本地天气重算（32.3°C 夜外单点 → 连轴转 30/0）');
 
   const cachedLegacyRainDecision = consumeStoredWeather
     ? consumeStoredWeather({

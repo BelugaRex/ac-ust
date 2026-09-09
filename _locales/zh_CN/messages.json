@@ -36,7 +36,7 @@
   "smartModeStrong": { "message": "更干冷", "description": "灵敏度滑块右端标签" },
   "smartModeSensitivityLabel": { "message": "智能模式灵敏度", "description": "灵敏度滑块的无障碍标签" },
   "smartModeSuggested": { "message": "建议开启", "description": "建议开启分钟数行的标签" },
-  "smartModeTeq": { "message": "等效室外温度", "description": "等效室外温度行的标签" },
+  "smartModeTeq": { "message": "预估室内温度", "description": "预估室内温度行的标签（EWMA + 白日太阳得热）" },
   "smartModeUpdated": { "message": "数据更新", "description": "天气数据更新时间行的标签" },
   "smartModeWeatherUnavailable": { "message": "天气数据不可用", "description": "天气数据不可用时的占位文字" },
   "smartModeWeatherStale": { "message": "已缓存", "description": "天气数据为旧缓存时的后缀" },

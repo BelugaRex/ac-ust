@@ -264,7 +264,6 @@
           "prepareSmartWeatherDecision",
           "consumeSmartWeatherDecision",
           "sensitivityToK",
-          "equivalentTemperature",
           "parseTseungKwanOWeather"
         ]
       },
