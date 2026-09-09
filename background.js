@@ -3163,7 +3163,10 @@ async function runSmartStep(alarmContext = {}) {
         const runThroughCycle = schedule.onMinutes === SMART_MODE.CYCLE_MINUTES
           && Number(schedule.offMinutes) === 0;
         const fuseTargetAt = Number(schedule.pageTimerTargetAt) || 0;
-        if (runThroughCycle && fuseTargetAt > now + 30000) {
+        // 保险丝改写最坏耗时约 39s（content 有界链路）+ SW 冷启动，延展窗口
+        // 必须覆盖整个写入超时，否则旧保险丝可能在改写中途引爆。
+        if (runThroughCycle
+            && fuseTargetAt - now >= PAGE_TIMER_WRITE_TIMEOUT_MS) {
           const nextBoundaryAt = plan.nextTriggerAt;
           const nextDecision =
             await applySmartDurationsForBoundary(nextBoundaryAt);
@@ -3218,13 +3221,10 @@ async function runSmartStep(alarmContext = {}) {
               { now, confirmedOffAt: now, plannedOnAt }
             );
             if (afterConfirmedOffPlan.kind !== 'refuse') {
-              alignSmartModeNextTrigger(
-                afterConfirmedOffPlan,
-                now,
-                { notBeforeAt: plan.nextTriggerAt }
-              );
+              // 离格补开：不 align 回半点网格，闹钟与分类器都认 smartPlannedOnAt。
               applySmartPlanState(afterConfirmedOffPlan);
               schedule.smartPlannedOnAt = plannedOnAt;
+              schedule.smartClockPlannedAt = plannedOnAt;
               schedule.smartOnBoundaryAt = 0;
               clearPageTimerProofState();
               replaceSmartRetryState();

@@ -533,6 +533,26 @@
       };
     }
 
+    // 连轴转退出：补开锚点可以离开半点网格（schedule.smartPlannedOnAt），
+    // 按锚点本身校验闹钟，不再强制拉回半点边界。
+    const plannedOnAnchorAt = Number(schedule?.smartPlannedOnAt) || 0;
+    const validPlannedStart = hasDurablePlannedAt
+      && schedule?.smartState === 'on'
+      && plannedOnAnchorAt === requestedPlannedAt
+      && !isSmartHalfHourBoundary(plannedOnAnchorAt)
+      && Math.abs(candidate - plannedOnAnchorAt) <= toleranceMs;
+    if (validPlannedStart) {
+      return {
+        applicable: true,
+        valid: true,
+        kind: 'planned-start',
+        candidateAt: candidate,
+        expectedAt: plannedOnAnchorAt,
+        boundaryAt: plannedOnAnchorAt,
+        pageTimerTargetAt: plannedOnAnchorAt + onMinutes * MINUTE_MS
+      };
+    }
+
     if (retryDescriptor) {
       return {
         applicable: true,

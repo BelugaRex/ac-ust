@@ -458,6 +458,25 @@ async function runTests() {
   assertPass(rtWindowPlan.kind === 'allow'
       && rtWindowPlan.pageTimerTargetAt === rtBoundary + 30 * 60000,
     'runThrough: 窗口规划放行 30/0 整周期');
+  const rtClock = smartPhase.classifySmartOnClock({
+    enabled: true,
+    smartMode: { enabled: true },
+    smartState: 'on',
+    onMinutes: 20,
+    offMinutes: 10,
+    smartPlannedOnAt: rtPlannedOnAt,
+    smartClockPlannedAt: rtPlannedOnAt
+  }, rtPlannedOnAt, {
+    now: rtPlannedOnAt,
+    plannedAt: rtPlannedOnAt,
+    nextAction: 'on',
+    toleranceMs: 1500,
+    allowDue: true,
+    requirePlannedAt: true
+  });
+  assertPass(rtClock.applicable && rtClock.valid && rtClock.kind === 'planned-start'
+      && rtClock.pageTimerTargetAt === rtPlannedOnAt + 20 * 60000,
+    'runThrough: classify 认可离格计划启动，不拉回半点网格');
 
   // 非法天气 → valid=false（调用方退化为手动时长）
   const smartBad = smartMode.computeSmartOnMinutes({
