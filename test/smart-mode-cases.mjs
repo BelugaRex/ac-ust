@@ -91,8 +91,9 @@ export function runSmartModeCases(assertPass) {
     windSpeedMs: 0,
     rainMm: Number.MAX_VALUE
   });
-  assertPass(smartHotLegacyRain.onMinutes === 25 && smartHotLegacyRain.offMinutes === 5,
-    'smart: 极端旧雨量字段也不能缩短 25/5 的高温决策');
+  assertPass(smartHotLegacyRain.runThrough === true
+      && smartHotLegacyRain.onMinutes === 30 && smartHotLegacyRain.offMinutes === 0,
+    'smart: 极端旧雨量字段也不能改变高温连轴转决策（30/0）');
 
   // 压缩机保护：1~4 分钟 → 强制 0
   assertPass(smartMode.clampAndRoundOnMinutes(1.0) === 0, 'smart: 压缩机保护 1 → 0');
@@ -117,8 +118,9 @@ export function runSmartModeCases(assertPass) {
   const smartHot = smartMode.computeSmartOnMinutes({
     sensitivity: 10, temperature: 33, dewPoint: 26, windSpeedMs: 0
   });
-  assertPass(smartHot.onMinutes === 25 && smartHot.offMinutes === 5,
-    'smart: 极热满灵敏度 on=25/off=5，避免短时间关机后重启');
+  assertPass(smartHot.runThrough === true
+      && smartHot.onMinutes === 30 && smartHot.offMinutes === 0,
+    'smart: 极热满灵敏度 → 连轴转 30/0，顺延到下一半点重估');
 
   // 非法天气 → valid=false（调用方退化为手动时长）
   const smartBad = smartMode.computeSmartOnMinutes({

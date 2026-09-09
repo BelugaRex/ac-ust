@@ -368,8 +368,9 @@ async function runTests() {
     windSpeedMs: 0,
     rainMm: Number.MAX_VALUE
   });
-  assertPass(smartHotLegacyRain.onMinutes === 25 && smartHotLegacyRain.offMinutes === 5,
-    'smart: 极端旧雨量字段也不能缩短 25/5 的高温决策');
+  assertPass(smartHotLegacyRain.runThrough === true
+      && smartHotLegacyRain.onMinutes === 30 && smartHotLegacyRain.offMinutes === 0,
+    'smart: 极端旧雨量字段也不能改变高温连轴转决策（30/0）');
 
   // 压缩机保护：1~4 分钟 → 强制 0
   assertPass(smartMode.clampAndRoundOnMinutes(1.0) === 0, 'smart: 压缩机保护 1 → 0');
@@ -390,12 +391,73 @@ async function runTests() {
   assertPass(smartCold.valid === true && smartCold.onMinutes === 6,
     'smart: 冷天 Teq 低 → on=6');
 
-  // 极热 + 满灵敏度 → 25/5（30 分钟周期）
+  // 极热 + 满灵敏度 → 连轴转 30/0（建议超 25 分钟则整周期开启）
   const smartHot = smartMode.computeSmartOnMinutes({
     sensitivity: 10, temperature: 33, dewPoint: 26, windSpeedMs: 0
   });
-  assertPass(smartHot.onMinutes === 25 && smartHot.offMinutes === 5,
-    'smart: 极热满灵敏度 on=25/off=5，避免短时间关机后重启');
+  assertPass(smartHot.runThrough === true
+      && smartHot.onMinutes === 30 && smartHot.offMinutes === 0,
+    'smart: 极热满灵敏度 → 连轴转 30/0，顺延到下一半点重估');
+
+  // tRaw 落在 [24.5, 25.5) → 仍 25/5，不误入连轴转
+  const smartHotEdge = smartMode.computeSmartOnMinutes({
+    sensitivity: 10, temperature: 33, dewPoint: 26, windSpeedMs: 1.5
+  });
+  assertPass(smartHotEdge.runThrough !== true
+      && smartHotEdge.onMinutes === 25 && smartHotEdge.offMinutes === 5,
+    'smart: tRaw<25.5 仍 25/5，不误入连轴转');
+
+  // 连轴转三态机（smart-phase）：30/0 状态机 + 离格补开锚点
+  const rtBoundary = new Date(2026, 8, 9, 22, 30, 0, 0).getTime();
+  assertPass(smartPhase.smartPageTimerTargetAt(30, rtBoundary) === rtBoundary + 30 * 60000,
+    'runThrough: 页面定时器 30 分钟 = 下一半点边界保险丝');
+  assertPass(smartPhase.smartPageTimerTargetAt(26, rtBoundary) === 0,
+    'runThrough: 仅整周期 30 放行，26~29 分钟仍拒绝');
+  const rtPlannedOnAt = rtBoundary + 10 * 60000;
+  const rtStartPlan = smartPhase.planSmartStep({
+    enabled: true,
+    smartMode: { enabled: true },
+    smartState: 'on',
+    onMinutes: 20,
+    offMinutes: 10,
+    smartPlannedOnAt: rtPlannedOnAt
+  }, {
+    now: rtPlannedOnAt,
+    alarmScheduledAt: rtPlannedOnAt
+  });
+  assertPass(rtStartPlan.kind === 'start'
+      && rtStartPlan.reason === 'smart-on-planned-start'
+      && rtStartPlan.targetAt === rtPlannedOnAt + 20 * 60000,
+    'runThrough: 退出补开按离格锚点启动，目标 = 锚点 + on*');
+  const rtExitPlan = smartPhase.planSmartOnAfterConfirmedOff({
+    enabled: true,
+    smartMode: { enabled: true },
+    onMinutes: 20,
+    offMinutes: 10
+  }, {
+    now: rtBoundary + 30 * 60000,
+    confirmedOffAt: rtBoundary + 30 * 60000,
+    plannedOnAt: rtBoundary + 40 * 60000
+  });
+  assertPass(rtExitPlan.kind === 'smart-on-boundary'
+      && rtExitPlan.nextTriggerAt === rtBoundary + 40 * 60000
+      && rtExitPlan.pageTimerTargetAt === rtBoundary + 60 * 60000,
+    'runThrough: 退出补开 nextTrigger = plannedOnAt，页定 = 锚点 + on*');
+  const rtWindowPlan = smartPhase.planSmartModeOnWindow({
+    enabled: true,
+    smartMode: { enabled: true },
+    smartState: 'on',
+    onMinutes: 30,
+    offMinutes: 0
+  }, {
+    now: rtBoundary,
+    acIsOn: false,
+    boundaryAt: rtBoundary,
+    triggeredBoundaryAt: rtBoundary
+  });
+  assertPass(rtWindowPlan.kind === 'allow'
+      && rtWindowPlan.pageTimerTargetAt === rtBoundary + 30 * 60000,
+    'runThrough: 窗口规划放行 30/0 整周期');
 
   // 非法天气 → valid=false（调用方退化为手动时长）
   const smartBad = smartMode.computeSmartOnMinutes({
@@ -1818,15 +1880,16 @@ async function runTests() {
       && !pwmBody.includes('ac-smart'),
     '9H: 每个 PWM 开机步骤只调用一次 toggleAC(on)，无外围点击重试循环');
   const smartPlannerIndex = smartBody.indexOf('let plan = planSmartStep(schedule, {');
-  const smartWindowPlanIndex = smartBody.indexOf('const onWindowPlan = planSmartModeOnWindow(schedule, {');
+  const smartWindowPlanIndex = smartBody.indexOf('const onWindowPlan = plannedStart');
   const smartArmIndex = smartBody.indexOf('const armResult = await armPowerOffTimerEnsuringOn(timerMinutes, {');
   assertPass(smartPlannerIndex >= 0
       && smartWindowPlanIndex > smartPlannerIndex
       && smartArmIndex > smartWindowPlanIndex
+      && smartBody.includes('planSmartModeOnWindow(schedule, {')
       && !smartBody.includes('await setPageTimer(1, {')
       && smartBody.includes('smart-on-verify-failed-defer')
       && smartBody.includes('nextSmartHalfHourBoundary(now)')
-      && countOccurrences(smartBody, "armPowerOffTimerEnsuringOn(") === 1
+      && countOccurrences(smartBody, "armPowerOffTimerEnsuringOn(") === 2
       && countOccurrences(smartBody, "toggleAC('on', {") === 0
       && !smartBody.includes("toggleAC('off')")
       && !smartBody.includes('for (let retry')
@@ -2028,6 +2091,15 @@ async function runTests() {
         && !persistedTimerMatch({ found: true, value: null, title: '06:22' }, '06:22'),
       '9M-6: 新鲜页持久化证明必须同时匹配 value/title，不能把单一本地信号当成成功');
   }
+  assertPass(backgroundSource.includes('continuedTargetAt - 60000')
+      && backgroundSource.includes("'smart-runthrough-continue'"),
+    'runThrough: 连轴转延续在保险丝引爆前 1 分钟重排 ac-smart');
+  assertPass(backgroundSource.includes('schedule.smartPlannedOnAt = plannedOnAt'),
+    'runThrough: 退出补开锚点写入 schedule.smartPlannedOnAt');
+  assertPass(backgroundSource.includes('const offAlarmAt = schedule.offMinutes === 0'),
+    'runThrough: ON 启动按 off=0 把评估闹钟布在保险丝前 1 分钟');
+  assertPass(backgroundSource.includes("if (decision.runThrough === true)"),
+    'runThrough: 天气决策落地时 30/0 不再被 Math.max(1,·) 钳成 30/1');
   const verificationStartForReload = backgroundSource.indexOf('async function verifyPageTimerPersistence(');
   const verificationEndForReload = backgroundSource.indexOf('\n// 关机定时器设置失败时', verificationStartForReload);
   const verifySectionForReload = verificationStartForReload >= 0 && verificationEndForReload > verificationStartForReload
@@ -4637,7 +4709,7 @@ return { reapplySmartSensitivityNow };`
     ? backgroundSource.slice(applyPwmPlanStart, applyPwmPlanEnd)
     : '';
   assertPass(applyPwmPlanBody.includes("if (plan?.proofAction === 'clear') clearPageTimerProofState();")
-      && countOccurrences(backgroundSource, 'clearPageTimerProofState();') === 6,
+      && countOccurrences(backgroundSource, 'clearPageTimerProofState();') === 7,
     '11L: planner proofAction 与 Smart/PWM 直接失效路径统一委派给 clearPageTimerProofState');
 
   const reconciliationSites = [

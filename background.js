@@ -603,7 +603,8 @@ let schedule = {
   smartState: 'on',       // Smart 分子自己的下一动作
   smartNextTriggerAt: 0,  // Smart 分子绑定的 ac-smart 绝对触发时间
   smartClockPlannedAt: 0,
-  alarmCreatedAt: 0,      // 闹钟创建时的时间戳 (ms) — 时钟模式不使用
+  smartPlannedOnAt: 0,  // 连轴转退出后的补开锚点（可离开半点网格）
+  alarmCreatedAt: 0,    // 闹钟创建时的时间戳 (ms) — 时钟模式不使用
   alarmDelayMinutes: 0,   // 闹钟设定的延迟 (分钟) — 时钟模式不使用
   pageTimerMinutes: null,
   pageTimerTargetAt: 0,
@@ -1154,6 +1155,12 @@ function currentSmartControlBoundary(now = Date.now()) {
 }
 
 function applySmartDurationDecision(decision) {
+  if (decision.runThrough === true) {
+    // 连轴转：整周期开启，off=0 是有意取值（区别于 30/30 零时长哨兵）。
+    schedule.onMinutes = SMART_MODE.CYCLE_MINUTES;
+    schedule.offMinutes = 0;
+    return;
+  }
   if (decision.onMinutes === 0) {
     schedule.onMinutes = SMART_MODE.CYCLE_MINUTES;
     schedule.offMinutes = SMART_MODE.CYCLE_MINUTES;
@@ -1271,10 +1278,15 @@ async function reapplySmartSensitivityNow() {
   if (!suggested.valid) return;  // 天气不可用 → 保持当前周期不变
 
   // 落地派生 on/off（on=0 用占位，语义与 applySmartModeDurations 保持一致）
-  schedule.onMinutes = suggested.onMinutes === 0
-    ? SMART_MODE.CYCLE_MINUTES
-    : suggested.onMinutes;
-  schedule.offMinutes = Math.max(1, suggested.offMinutes);
+  if (suggested.runThrough === true) {
+    schedule.onMinutes = SMART_MODE.CYCLE_MINUTES;
+    schedule.offMinutes = 0;
+  } else {
+    schedule.onMinutes = suggested.onMinutes === 0
+      ? SMART_MODE.CYCLE_MINUTES
+      : suggested.onMinutes;
+    schedule.offMinutes = Math.max(1, suggested.offMinutes);
+  }
 
   if (!wasOnPhase) {
     await persistSchedule('reapply-smart-sensitivity-off-phase');
@@ -3023,13 +3035,24 @@ async function runSmartStep(alarmContext = {}) {
       }
 
       if (plan.kind === 'start') {
-        const onWindowPlan = planSmartModeOnWindow(schedule, {
-          now,
-          maxOnMinutes: SMART_MODE.ON_MAX,
-          acIsOn: false,
-          boundaryAt: plan.boundaryAt,
-          triggeredBoundaryAt: plan.boundaryAt
-        });
+        // 连轴转退出后的补开启动：锚点已由 planSmartOnAfterConfirmedOff 规划，
+        // 跳过半点网格窗口校验（planSmartModeOnWindow），直接采用绝对目标。
+        const plannedStart = plan.reason === 'smart-on-planned-start';
+        const onWindowPlan = plannedStart
+          ? {
+              kind: 'allow',
+              reason: plan.reason,
+              boundaryAt: plan.boundaryAt,
+              pageTimerTargetAt: plan.targetAt,
+              windowEndsAt: plan.windowEndsAt
+            }
+          : planSmartModeOnWindow(schedule, {
+              now,
+              maxOnMinutes: SMART_MODE.ON_MAX,
+              acIsOn: false,
+              boundaryAt: plan.boundaryAt,
+              triggeredBoundaryAt: plan.boundaryAt
+            });
         if (onWindowPlan.kind !== 'allow') {
           await commitSmartOnRetry(
             plan.boundaryAt,
@@ -3117,7 +3140,14 @@ async function runSmartStep(alarmContext = {}) {
         });
 
         setSmartNextAction('off');
-        await commitSmartAlarm(targetAt, 'smart-off-boundary');
+        schedule.smartPlannedOnAt = 0;
+        // 连轴转周期：ac-smart 闹钟放在页面关机保险丝引爆前 1 分钟，
+        // 届时评估下一周期需求——继续连转则推前保险丝，压缩机不停机。
+        const offAlarmAt = schedule.offMinutes === 0
+          && schedule.onMinutes === SMART_MODE.CYCLE_MINUTES
+          ? Math.max(now + 60000, targetAt - 60000)
+          : targetAt;
+        await commitSmartAlarm(offAlarmAt, 'smart-off-boundary');
         return;
       }
 
@@ -3127,6 +3157,86 @@ async function runSmartStep(alarmContext = {}) {
           'runSmartStep-off-boundary-active-hours-paused',
           'smart'
         )) return;
+        // 连轴转：ac-smart 在保险丝引爆前 1 分钟触发。先消费下一边界天气决策，
+        // 仍超 25 分钟则把保险丝推到下一边界（压缩机不停机）；需求回落则让
+        // 保险丝照常引爆（服务器关机），再按新时长在离格锚点补开，占空比无损。
+        const runThroughCycle = schedule.onMinutes === SMART_MODE.CYCLE_MINUTES
+          && Number(schedule.offMinutes) === 0;
+        const fuseTargetAt = Number(schedule.pageTimerTargetAt) || 0;
+        if (runThroughCycle && fuseTargetAt > now + 30000) {
+          const nextBoundaryAt = plan.nextTriggerAt;
+          const nextDecision =
+            await applySmartDurationsForBoundary(nextBoundaryAt);
+          if (await abortStaleAutomation(
+            automationRevision,
+            'runSmartStep-runthrough-extend-active-hours-paused',
+            'smart'
+          )) return;
+          if (nextDecision?.runThrough === true) {
+            const continuedTargetAt =
+              nextBoundaryAt + SMART_MODE.CYCLE_MINUTES * 60000;
+            const timerMinutes = Math.max(
+              1,
+              Math.ceil((continuedTargetAt - now) / 60000)
+            );
+            const armResult = await armPowerOffTimerEnsuringOn(timerMinutes, {
+              targetAt: continuedTargetAt,
+              automationRevision,
+              automationMode: 'smart',
+              requireAutomationAllowed: true
+            });
+            if (armResult?.success) {
+              schedule.pageTimerMinutes =
+                armResult.actualDelayMinutes || timerMinutes;
+              schedule.pageTimerTargetAt = armResult.targetAt;
+              schedule.pageTimerError = '';
+              schedule.pageTimerRetryAt = 0;
+              schedule.pageTimerRetryMinutes = 0;
+              schedule.smartOnBoundaryAt = nextBoundaryAt;
+              schedule.smartPlannedOnAt = 0;
+              await chrome.alarms.clear('ac-page-timer-retry');
+              await persistSchedule('smart-runthrough-continue', {
+                syncFromLiveAlarm: false
+              });
+              setSmartNextAction('off');
+              await commitSmartAlarm(
+                continuedTargetAt - 60000,
+                'smart-runthrough-continue'
+              );
+              return;
+            }
+            // 保险丝改写失败：原保险丝照常引爆（服务器关机），落入常规退出路径。
+          } else if (
+            nextDecision?.valid === true
+            && Number(nextDecision.onMinutes) > 0
+          ) {
+            const plannedOnAt = nextBoundaryAt
+              + (SMART_MODE.CYCLE_MINUTES - Number(nextDecision.onMinutes))
+              * 60000;
+            const afterConfirmedOffPlan = planSmartOnAfterConfirmedOff(
+              schedule,
+              { now, confirmedOffAt: now, plannedOnAt }
+            );
+            if (afterConfirmedOffPlan.kind !== 'refuse') {
+              alignSmartModeNextTrigger(
+                afterConfirmedOffPlan,
+                now,
+                { notBeforeAt: plan.nextTriggerAt }
+              );
+              applySmartPlanState(afterConfirmedOffPlan);
+              schedule.smartPlannedOnAt = plannedOnAt;
+              schedule.smartOnBoundaryAt = 0;
+              clearPageTimerProofState();
+              replaceSmartRetryState();
+              await commitSmartAlarm(
+                afterConfirmedOffPlan.nextTriggerAt,
+                'smart-on-boundary'
+              );
+              return;
+            }
+          }
+          schedule.smartPlannedOnAt = 0;
+        }
         // 关机时间（Power-off after）由 UST 服务器保证执行：只要已写入关机时间，学校
         // 一定会帮忙关机。此处无需读回 AC 状态确认、也无需补设 1 分钟安全定时器。
         clearPageTimerProofState();

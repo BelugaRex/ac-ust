@@ -190,6 +190,21 @@
       };
     }
     const tRaw = rawOnMinutes(k, teq);
+    const rounded = Math.round(tRaw);
+    if (rounded > SMART_MODE.ON_MAX) {
+      // 连轴转：需求超过 25 分钟时整周期开启（30/0），下一半点边界再重新评估。
+      // 退出连转时的关闭窗 = 30 − on* ≥ 5 分钟，天然满足压缩机最短停机时间；
+      // 频繁启停（short cycling）才是压缩机磨损主因，连续运转无需强制休息。
+      return {
+        valid: true,
+        k,
+        teq,
+        tRaw,
+        runThrough: true,
+        onMinutes: SMART_MODE.CYCLE_MINUTES,
+        offMinutes: 0
+      };
+    }
     const onMinutes = clampAndRoundOnMinutes(tRaw);
     return {
       valid: true,

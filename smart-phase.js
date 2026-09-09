@@ -16,6 +16,7 @@
   const ON_WINDOW_MS = MINUTE_MS;
   const MIN_ON_RUNWAY_MINUTES = 5;
   const ON_MAX_MINUTES = 25;
+  const FULL_CYCLE_MINUTES = 30;
   const ALARM_TOLERANCE_MS = 1500;
 
   function smartPhaseNow(opts = {}) {
@@ -68,9 +69,10 @@
     const boundary = boundaryAt === undefined
       ? smartHalfHourBoundaryAtOrBefore(now)
       : Number(boundaryAt);
+    // 连轴转周期（30/0）的页面关机定时器=下一半点边界，作为保险丝仍然照写。
     if (!Number.isInteger(duration)
         || duration <= 0
-        || duration > ON_MAX_MINUTES
+        || (duration > ON_MAX_MINUTES && duration !== FULL_CYCLE_MINUTES)
         || !isSmartHalfHourBoundary(boundary)) {
       return 0;
     }
@@ -98,8 +100,15 @@
     const alarmAt = Number(opts.alarmScheduledAt);
     const boundaryAt = normalizeSmartHalfHourAlarmBoundary(alarmAt);
     const nextBoundaryAt = nextSmartHalfHourBoundary(now);
-    const nextAction = schedule.smartState === 'off' ? 'off' : 'on';
-
+    const nextAction = schedule.smartState === 'off' ? 'off' : 'on';    // 连轴转退出后的补开锚点：ON 相位起点允许离开半点网格（smartPlannedOnAt），
+    // 占空比按 30 分钟周期保持不变，仅相位整体顺延。
+    const plannedOnAt = nextAction === 'on'
+      ? (Number(schedule.smartPlannedOnAt) || 0)
+      : 0;
+    const plannedStartDue = plannedOnAt > 0
+      && Number.isFinite(alarmAt)
+      && alarmAt > 0
+      && Math.abs(alarmAt - plannedOnAt) <= ALARM_TOLERANCE_MS;
     if (nextAction === 'off') {
       if (!Number.isFinite(alarmAt) || alarmAt <= 0 || alarmAt > now + ALARM_TOLERANCE_MS) {
         return {
@@ -118,7 +127,7 @@
       };
     }
 
-    if (!boundaryAt || boundaryAt > now + ALARM_TOLERANCE_MS) {
+    if ((!boundaryAt || boundaryAt > now + ALARM_TOLERANCE_MS) && !plannedStartDue) {
       return {
         kind: 'defer',
         reason: 'smart-on-requires-half-hour-alarm',
@@ -127,15 +136,18 @@
       };
     }
 
-    const windowEndsAt = boundaryAt + ON_WINDOW_MS;
-    const targetAt = smartPageTimerTargetAt(onMinutes, boundaryAt);
+    const startBoundaryAt = plannedStartDue ? plannedOnAt : boundaryAt;
+    const windowEndsAt = startBoundaryAt + ON_WINDOW_MS;
+    const targetAt = plannedStartDue
+      ? startBoundaryAt + onMinutes * MINUTE_MS
+      : smartPageTimerTargetAt(onMinutes, startBoundaryAt);
     if (onMinutes <= 0) {
       return {
         kind: 'skip',
         reason: 'smart-zero-duration',
         nextAction: 'on',
-        boundaryAt,
-        nextTriggerAt: nextSmartHalfHourBoundary(boundaryAt)
+        boundaryAt: startBoundaryAt,
+        nextTriggerAt: nextSmartHalfHourBoundary(startBoundaryAt)
       };
     }
     if (now >= windowEndsAt || !hasMinimumOnRunway(targetAt, now)) {
@@ -151,9 +163,9 @@
 
     return {
       kind: 'start',
-      reason: 'smart-on-half-hour',
+      reason: plannedStartDue ? 'smart-on-planned-start' : 'smart-on-half-hour',
       nextAction: 'off',
-      boundaryAt,
+      boundaryAt: startBoundaryAt,
       windowEndsAt,
       onMinutes,
       targetAt,
@@ -192,9 +204,13 @@
       ? ON_MAX_MINUTES
       : Number(opts.maxOnMinutes);
     const maxOnMinutes = Math.min(requestedMaxOnMinutes, ON_MAX_MINUTES);
+    // 连轴转周期（30/0）允许整周期时长；其余仍限幅 ON_MAX。
+    const fullCycleRunThrough = onMinutes === FULL_CYCLE_MINUTES
+      && Number(schedule?.offMinutes) === 0;
+    const durationCap = fullCycleRunThrough ? FULL_CYCLE_MINUTES : maxOnMinutes;
     if (!Number.isInteger(onMinutes) || onMinutes <= 0
-        || !Number.isFinite(maxOnMinutes) || maxOnMinutes <= 0
-        || onMinutes > maxOnMinutes) {
+        || !Number.isFinite(durationCap) || durationCap <= 0
+        || onMinutes > durationCap) {
       return { kind: 'refuse', reason: 'invalid-smart-on-duration' };
     }
 
@@ -374,6 +390,21 @@
     }
     if (onMinutes === 0) {
       return planBoundaryEvaluation(boundaryAt, 'smart-zero-duration-next-boundary');
+    }
+    if (Number(opts?.plannedOnAt) > now && onMinutes > 0) {
+      // 连轴转退出：ON 锚点离开半点网格，但周期仍为 30 分钟，页面关机定时器
+      // 锚回网格（plannedOnAt + on* 恰为下一半点）。
+      const plannedOnAt = Number(opts.plannedOnAt);
+      return {
+        kind: 'smart-on-boundary',
+        reason: 'smart-on-planned-after-run-through',
+        nextAction: 'on',
+        nextTriggerAt: plannedOnAt,
+        boundaryAt: plannedOnAt,
+        pageTimerTargetAt: plannedOnAt + onMinutes * MINUTE_MS,
+        delayMinutes: Math.max(1, (plannedOnAt - now) / MINUTE_MS),
+        phasePatch: { smartState: 'on', nextTriggerAt: plannedOnAt }
+      };
     }
     return {
       kind: 'smart-on-boundary',

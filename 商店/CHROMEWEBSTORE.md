@@ -7,7 +7,7 @@
 | 字段 | 值 |
 | --- | --- |
 | 名称 | AC-UST |
-| 版本 | 0.8.13 |
+| 版本 | 0.8.14 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率（Productivity） |
 | 语言 | 中文（简体）、English |
@@ -23,7 +23,17 @@
 
 PWM AC scheduling, weather-based smart control, optional operating-hour limits, and cross-device phase alignment for HKUST Smart Power Meter.
 
-## 0.8.13 更新说明
+## 0.8.14 更新说明
+
+### 中文
+
+智能控制建议开启超过 25 分钟时整周期连转并在下一半点重估，避免湿热天频繁启停带来的体感不适。
+
+### English
+
+When the smart suggestion exceeds 25 minutes, the AC now runs the full cycle and re-evaluates at the next half-hour boundary, avoiding discomfort from frequent stop-start cycling on hot humid days.
+
+## Previous release notes
 
 ### 中文
 
@@ -32,16 +42,6 @@ PWM AC scheduling, weather-based smart control, optional operating-hour limits, 
 ### English
 
 The doctor check now shows the smart plan triad during the ON phase (suggested minutes, ON boundary, written target) to help locate suggestion drift.
-
-## Previous release notes
-
-### 中文
-
-修复「召唤医生」误报页面关机定时器不匹配的问题。
-
-### English
-
-Fixes a false alarm in the doctor check where the page power-off timer was reported as mismatched.
 
 ## 详细说明（中文 / zh-CN）
 
@@ -158,12 +158,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.13.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.14.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP、图标和本目录资料通过验证。
-2. 上传 `releases/ac-ust-v0.8.13.zip`。
+2. 上传 `releases/ac-ust-v0.8.14.zip`。
 3. 填写商品详情、隐私声明、权限理由与审核测试说明。
 4. 选择私享（Private）、受信任测试人员和香港地区。
 5. 提交审核时选择推迟发布；审核通过后在允许期限内由作者手动发布。
