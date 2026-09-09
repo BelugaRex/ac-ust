@@ -5023,8 +5023,10 @@ async function refreshACControlPage(tabId) {
       await chrome.tabs.update(tabId, { url: AC_PAGE });
     }
 
-    const pageReady = await waitForTabReady(tabId, 30000, isACHomePageTab);
-    if (!pageReady) throw new Error('刷新后的 AC home 未在 30 秒内就绪');
+    // 就绪窗 45s：学校服务器偶发慢响应时给刷新恢复留足时间，
+    // 不至于在写入已落页、仅验证未完成时把整轮 arm 判失败。
+    const pageReady = await waitForTabReady(tabId, 45000, isACHomePageTab);
+    if (!pageReady) throw new Error('刷新后的 AC home 未在 45 秒内就绪');
     const readyTab = await getExactACHomeTab(tabId);
     if (!readyTab) {
       throw new Error('刷新后目标标签未停留在精确 AC home');

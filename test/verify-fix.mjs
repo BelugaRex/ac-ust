@@ -1965,7 +1965,7 @@ async function runTests() {
       && existingTabBody.includes('refreshesRemaining - 1')
       && existingTabBody.includes('await chrome.tabs.reload(tabId)')
       && existingTabBody.includes('await chrome.tabs.update(tabId, { url: AC_PAGE })')
-      && existingTabBody.includes('await waitForTabReady(tabId, 30000, isACHomePageTab)')
+      && existingTabBody.includes('await waitForTabReady(tabId, 45000, isACHomePageTab)')
       && existingTabBody.includes('recoveredByPageRefresh: true'),
     '9J: 开机恢复收束为有限递归函数，等待控制页精确回到 home 后最多重试一次');
   assertPass(!contentSource.includes('function dispatchUserClick(')

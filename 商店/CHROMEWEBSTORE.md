@@ -7,7 +7,7 @@
 | 字段 | 值 |
 | --- | --- |
 | 名称 | AC-UST |
-| 版本 | 0.8.14 |
+| 版本 | 0.8.15 |
 | 清单 | Manifest V3 |
 | 类别 | 工作效率（Productivity） |
 | 语言 | 中文（简体）、English |
@@ -23,21 +23,25 @@
 
 PWM AC scheduling, weather-based smart control, optional operating-hour limits, and cross-device phase alignment for HKUST Smart Power Meter.
 
-## 0.8.14 更新说明
+## 0.8.15 更新说明
 
 ### 中文
 
-智能控制建议开启超过 25 分钟时整周期连转并在下一半点重估，避免湿热天频繁启停带来的体感不适。
+智能控制建议开启超过 25 分钟时整周期连转并在下一半点重估，避免湿热天频繁启停带来的体感不适；同时放宽页面刷新恢复的就绪等待（30 秒 → 45 秒），学校服务器慢响应时减少误报与无谓重试。
 
 ### English
 
-When the smart suggestion exceeds 25 minutes, the AC now runs the full cycle and re-evaluates at the next half-hour boundary, avoiding discomfort from frequent stop-start cycling on hot humid days.
+When the smart suggestion exceeds 25 minutes, the AC runs the full cycle and re-evaluates at the next half-hour boundary, avoiding discomfort from frequent stop-start cycling on hot humid days. The page-refresh readiness window is extended (30s → 45s) to reduce false failures when the school server responds slowly.
 
 ## Previous release notes
 
 ### 中文
 
-「召唤医生」在智能开启相位新增计划三要素（建议开启分钟数、ON 边界、已写入目标），便于定位建议值漂移来源。
+「召唤医生」在智能开启相位新增计划三要素（建议开启分钟数、ON 边界、已写入目标），便于定位建议值漂移来源；并修复误报页面关机定时器不匹配的问题。
+
+### English
+
+The doctor check shows the smart plan triad during the ON phase (suggested minutes, ON boundary, written target) and no longer false-alarms on the page power-off timer.
 
 ### English
 
@@ -158,12 +162,12 @@ Open source: https://github.com/BelugaRex/ac-ust
 
 ## ZIP 上传
 
-运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.14.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
+运行 `bash ./build.sh` 后，上传 `releases/ac-ust-v0.8.15.zip`。ZIP 内直接包含 `manifest.json`，没有额外的 `dist/` 外层目录。
 
 ## 发布流程
 
 1. 运行构建与自动化测试，确认版本、ZIP、图标和本目录资料通过验证。
-2. 上传 `releases/ac-ust-v0.8.14.zip`。
+2. 上传 `releases/ac-ust-v0.8.15.zip`。
 3. 填写商品详情、隐私声明、权限理由与审核测试说明。
 4. 选择私享（Private）、受信任测试人员和香港地区。
 5. 提交审核时选择推迟发布；审核通过后在允许期限内由作者手动发布。
