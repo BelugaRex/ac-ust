@@ -2948,7 +2948,10 @@ async function runSmartStep(alarmContext = {}) {
         || Number(liveAlarm?.scheduledTime)
         || 0;
       const boundaryAt = normalizeHalfHourAlarmBoundary(alarmScheduledAt);
-      if (schedule.smartState === 'on' && boundaryAt > 0 && boundaryAt <= now + 1500) {
+      // 无条件应用新鲜决策（0.9.7）：旧门槛（仅 smartState==='on'）导致重载后
+      // 首个边界沿用陈旧 schedule.onMinutes，连转计划不落地。apply 内部已按
+      // 快照校验边界与时效，重复应用幂等。
+      if (boundaryAt > 0 && boundaryAt <= now + 1500) {
         await applySmartDurationsForBoundary(boundaryAt);
         if (await abortStaleAutomation(
           automationRevision,
