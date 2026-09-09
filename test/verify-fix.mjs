@@ -434,6 +434,22 @@ async function runTests() {
       && smartRunThroughEwma.onMinutes === 30 && smartRunThroughEwma.offMinutes === 0,
     'runThrough: EWMA 序列 + 满灵敏度需求 40.2 → 整周期连转');
 
+  // 热夜地板阶梯：28°C 线上按 K 抬底；K×25 > 25（约 8 档起）→ 整周期连转
+  const hotNightS7 = smartMode.computeSmartOnMinutes({
+    sensitivity: 7, temperature: 28,
+    observations: [{ t: rtNight, c: 28 }], nowMs: rtNight
+  });
+  assertPass(hotNightS7.runThrough !== true
+      && hotNightS7.onMinutes === 25 && hotNightS7.offMinutes === 5,
+    'hotNightFloor: 热夜 7 档 → 地板 K×25 = 25 → 25/5 不连转');
+  const hotNightS8 = smartMode.computeSmartOnMinutes({
+    sensitivity: 8, temperature: 28,
+    observations: [{ t: rtNight, c: 28 }], nowMs: rtNight
+  });
+  assertPass(hotNightS8.runThrough === true
+      && hotNightS8.onMinutes === 30 && hotNightS8.offMinutes === 0,
+    'hotNightFloor: 热夜 8 档 → K×25 = 27.5 超上限 → 连轴转 30/0');
+
   // 正午太阳项抬升 T_in：同观测 30°C，正午 T_in = 32.5
   const smartSolarNoon = smartMode.computeSmartOnMinutes({
     sensitivity: 10, temperature: 30,

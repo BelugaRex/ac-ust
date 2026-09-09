@@ -66,6 +66,29 @@ export function runSmartModeCases(assertPass) {
       && smartPrecise.offMinutes === 10,
     'smart: K/T_in/tRaw 保留浮点，仅最终 onMinutes 量化供显示与控制');
 
+  // 热夜地板：T_in ≥ 28°C（天文台热夜线）时开启时长下限 = K × 25 分钟
+  const hotNightMid = smartMode.computeSmartOnMinutes({
+    sensitivity: 5, temperature: 28,
+    observations: [{ t: rtNight, c: 28 }], nowMs: rtNight
+  });
+  assertPass(hotNightMid.valid === true && hotNightMid.runThrough !== true
+      && hotNightMid.onMinutes === 20 && hotNightMid.offMinutes === 10,
+    'smart: 热夜 28°C 中档 → 地板 K×25 = 20 → 20/10');
+
+  const hotNightLow = smartMode.computeSmartOnMinutes({
+    sensitivity: 0, temperature: 28,
+    observations: [{ t: rtNight, c: 28 }], nowMs: rtNight
+  });
+  assertPass(hotNightLow.onMinutes === 8 && hotNightLow.offMinutes === 22,
+    'smart: 热夜低档仍按 K 比例抬底（0.3×25 → 8/22），不越权拉满');
+
+  const belowHotNight = smartMode.computeSmartOnMinutes({
+    sensitivity: 5, temperature: 27.6,
+    observations: [{ t: rtNight, c: 27.6 }], nowMs: rtNight
+  });
+  assertPass(belowHotNight.onMinutes === 17 && belowHotNight.offMinutes === 13,
+    'smart: 27.6°C 未达热夜线 → 不启用地板（17/13）');
+
   const legacyPrecipitationOverrides = [
     { rainMm: -1 },
     { rainMm: 0 },

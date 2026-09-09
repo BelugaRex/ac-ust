@@ -43,6 +43,7 @@
     // 室内温度估计（0.9.0 起取代 Steadman 体感公式）：
     //   T_in = EWMA_τ(T_out 观测序列) + Δ_solar(时刻)
     //   on = clamp(K · LOAD_GAIN_MIN_PER_C · (T_in − T_COMFORT_C), 0, ON_MAX)
+    // 热夜（T_in ≥ HOT_NIGHT_C）时 on 以 K · HOT_NIGHT_FLOOR_MINUTES 抬底。
     // 需求 > ON_MAX 时整周期连转（30/0，见 computeSmartOnMinutes 的 runThrough）。
     EWMA_TAU_MS: 3 * 60 * 60 * 1000,      // 建筑热惯性时间常数 τ = 3h
     EWMA_MAX_AGE_MS: 12 * 60 * 60 * 1000, // 超龄观测直接出局
@@ -50,7 +51,9 @@
     SOLAR_PEAK_HOUR: 13,                  // 峰值时刻 13:00（窗口直射 + 传导合成）
     SOLAR_HALF_WIDTH_H: 7.5,              // 半幅宽 7.5h → 5:30 前与 20:30 后归零
     LOAD_GAIN_MIN_PER_C: 4.5,             // 负载增益：每 °C 温差对应的开启分钟数（0.9.1 实测体感偏热后 3 → 4.5）
-    T_COMFORT_C: 23                       // 舒适目标温度（人员 + 设备热已折算其中；0.9.1 实测 24 偏热 → 23）
+    T_COMFORT_C: 23,                      // 舒适目标温度（人员 + 设备热已折算其中；0.9.1 实测 24 偏热 → 23）
+    HOT_NIGHT_C: 28,                      // 热夜线（对齐天文台热夜定义）：室内估计 ≥28°C 启用开启下限
+    HOT_NIGHT_FLOOR_MINUTES: 25           // 热夜下限基数：on ≥ K×25；K×25 > 25（约 8 档起）转入整周期连转
   });
 
   function clamp(value, min, max) {
@@ -234,7 +237,14 @@
     const tRaw = k
       * SMART_MODE.LOAD_GAIN_MIN_PER_C
       * (tIn - SMART_MODE.T_COMFORT_C);
-    const rounded = Math.round(tRaw);
+    // 热夜地板：室内估计达到热夜线（对齐天文台热夜定义 28°C）时，需求按
+    // K × HOT_NIGHT_FLOOR_MINUTES 抬底——档位越高下限越大，滑块语义不变；
+    // 抬底后超过单周期上限同样转入整周期连转，冷启动单点估计同样适用。
+    let demandRaw = tRaw;
+    if (tIn >= SMART_MODE.HOT_NIGHT_C) {
+      demandRaw = Math.max(demandRaw, k * SMART_MODE.HOT_NIGHT_FLOOR_MINUTES);
+    }
+    const rounded = Math.round(demandRaw);
     if (rounded > SMART_MODE.ON_MAX) {
       // 连轴转：需求超过 25 分钟时整周期开启（30/0），下一半点边界再重新评估。
       // 退出连转时的关闭窗 = 30 − on* ≥ 5 分钟，天然满足压缩机最短停机时间；
@@ -249,7 +259,7 @@
         offMinutes: 0
       };
     }
-    const onMinutes = clampAndRoundOnMinutes(tRaw);
+    const onMinutes = clampAndRoundOnMinutes(demandRaw);
     return {
       valid: true,
       k,
