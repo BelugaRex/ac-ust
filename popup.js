@@ -226,9 +226,9 @@ function renderSmartReadout(suggested, weather) {
     smartSuggested.textContent = '--';
     smartSuggested.classList.add('is-empty');
   }
-  // 预估室内温度（EWMA + 白日太阳得热）
+  // 预估体感温度（EWMA + 太阳 + Steadman 湿度/风修正）——与决策公式同源
   if (hasData) {
-    smartTeq.textContent = `${suggested.tIn.toFixed(1)} °C`;
+    smartTeq.textContent = `${suggested.atIn.toFixed(1)} °C`;
     smartTeq.classList.remove('is-empty');
   } else {
     smartTeq.textContent = '--';
